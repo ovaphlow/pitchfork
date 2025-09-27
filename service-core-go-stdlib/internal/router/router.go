@@ -115,6 +115,11 @@ func RegisterRoutes(logger *zap.SugaredLogger) http.Handler {
 		settingHandler.List(w, r)
 	})
 
+	// id route - generate ids
+	mux.HandleFunc("GET /pitchfork-api-core/id", func(w http.ResponseWriter, r *http.Request) {
+		settingHandler.ID(w, r)
+	})
+
 	// wrap with security headers middleware then logging middleware
 	handler := LoggingMiddleware(logger)(SecurityHeadersMiddleware()(mux))
 	return handler
