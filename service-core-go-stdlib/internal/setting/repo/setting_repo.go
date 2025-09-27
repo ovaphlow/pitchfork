@@ -33,9 +33,11 @@ func (r *Repo) EnsureTable(ctx context.Context) error {
 		// Table does not exist, create it.
 		createTable := `CREATE TABLE settings (
 			id varchar(32) PRIMARY KEY,
-			data_state jsonb,
-			category varchar(32),
-			detail jsonb
+			parent_id varchar(32) DEFAULT '',
+			root_id varchar(32) DEFAULT '',
+			record_meta jsonb DEFAULT '{}'::jsonb,
+			category varchar(32) DEFAULT '',
+			metadata jsonb DEFAULT '{}'::jsonb
 		)`
 		if _, err := r.db.ExecContext(ctx, createTable); err != nil {
 			return err
@@ -50,6 +52,30 @@ func (r *Repo) EnsureTable(ctx context.Context) error {
 	}
 	if !idxName.Valid {
 		createIndex := `CREATE INDEX idx_settings_category ON settings (category)`
+		if _, err := r.db.ExecContext(ctx, createIndex); err != nil {
+			return err
+		}
+	}
+
+	// Create index for parent_id
+	err = r.db.QueryRowContext(ctx, "SELECT to_regclass('public.idx_settings_parent_id')").Scan(&idxName)
+	if err != nil {
+		return err
+	}
+	if !idxName.Valid {
+		createIndex := `CREATE INDEX idx_settings_parent_id ON settings (parent_id)`
+		if _, err := r.db.ExecContext(ctx, createIndex); err != nil {
+			return err
+		}
+	}
+
+	// Create index for root_id
+	err = r.db.QueryRowContext(ctx, "SELECT to_regclass('public.idx_settings_root_id')").Scan(&idxName)
+	if err != nil {
+		return err
+	}
+	if !idxName.Valid {
+		createIndex := `CREATE INDEX idx_settings_root_id ON settings (root_id)`
 		if _, err := r.db.ExecContext(ctx, createIndex); err != nil {
 			return err
 		}

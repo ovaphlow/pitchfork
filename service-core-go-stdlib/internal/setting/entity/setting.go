@@ -4,34 +4,16 @@ import "encoding/json"
 
 // Setting represents a configuration or reserved data record.
 type Setting struct {
-	ID        string          `json:"id"`
-	DataState json.RawMessage `json:"data_state,omitempty"`
-	Category  string          `json:"category,omitempty"`
-	Detail    json.RawMessage `json:"detail,omitempty"`
+	ID         string          `json:"id"`
+	ParentID   string          `json:"parent_id,omitempty"`
+	RootID     string          `json:"root_id,omitempty"`
+	RecordMeta json.RawMessage `json:"record_meta,omitempty"`
+	Category   string          `json:"category,omitempty"`
+	Metadata   json.RawMessage `json:"metadata,omitempty"`
 }
 
-// NewSetting creates a new Setting with the provided fields. DataState and Detail
-// may be provided as JSON bytes (json.RawMessage) or nil.
-func NewSetting(id string, category string, dataState json.RawMessage, detail json.RawMessage) *Setting {
-	return &Setting{ID: id, Category: category, DataState: dataState, Detail: detail}
-}
-
-// FromMap helps create a Setting from generic maps by marshaling them to JSON.
-func FromMap(id string, category string, dataState any, detail any) (*Setting, error) {
-	var ds json.RawMessage
-	var dt json.RawMessage
-	var err error
-	if dataState != nil {
-		ds, err = json.Marshal(dataState)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if detail != nil {
-		dt, err = json.Marshal(detail)
-		if err != nil {
-			return nil, err
-		}
-	}
-	return &Setting{ID: id, Category: category, DataState: ds, Detail: dt}, nil
+// NewSettingWithAncestry creates a new Setting
+// for representing multi-level hierarchies.
+func NewSetting(id string, parentID string, rootID string, category string, recordMeta json.RawMessage, metadata json.RawMessage) *Setting {
+	return &Setting{ID: id, ParentID: parentID, RootID: rootID, Category: category, RecordMeta: recordMeta, Metadata: metadata}
 }
