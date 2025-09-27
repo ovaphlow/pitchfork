@@ -1,8 +1,12 @@
 package utilities
 
 import (
+	"fmt"
 	"os"
+	"path/filepath"
+	"time"
 
+	rotatelogs "github.com/lestrrat-go/file-rotatelogs"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -52,7 +56,49 @@ func Init(cfg Config) (*zap.Logger, error) {
 
 	encoderCfg := zap.NewProductionEncoderConfig()
 	encoderCfg.EncodeTime = zapcore.ISO8601TimeEncoder
-	core := zapcore.NewCore(zapcore.NewJSONEncoder(encoderCfg), zapcore.AddSync(os.Stdout), lvl)
+
+	// Default WriteSyncer to stdout
+	// We'll build two cores: one console (human-friendly) to stdout, and one JSON to rotating file.
+	consoleEncoderCfg := zap.NewDevelopmentEncoderConfig()
+	consoleEncoderCfg.EncodeTime = zapcore.ISO8601TimeEncoder
+	consoleEncoder := zapcore.NewConsoleEncoder(consoleEncoderCfg)
+
+	jsonEncoder := zapcore.NewJSONEncoder(encoderCfg)
+
+	consoleWS := zapcore.AddSync(os.Stdout)
+
+	// Try to create ./logs directory and use a rotatelogs writer for daily files
+	logsDir := "./logs"
+	if err := os.MkdirAll(logsDir, 0o755); err == nil {
+		// pattern like ./logs/app-%Y%m%d.log
+		pattern := filepath.Join(logsDir, "app-%Y%m%d.log")
+		// Create rotatelogs writer which rotates every 24h and keeps logs for 7 days
+		rl, err := rotatelogs.New(
+			pattern,
+			rotatelogs.WithRotationTime(24*time.Hour),
+			rotatelogs.WithLinkName(filepath.Join(logsDir, "app.log")),
+			rotatelogs.WithMaxAge(7*24*time.Hour),
+		)
+		if err == nil {
+			// keep rotatelogs writer
+			fileWS := zapcore.AddSync(rl)
+
+			// create two cores: console -> stdout (text), file -> json
+			consoleCore := zapcore.NewCore(consoleEncoder, consoleWS, lvl)
+			fileCore := zapcore.NewCore(jsonEncoder, fileWS, lvl)
+
+			core := zapcore.NewTee(consoleCore, fileCore)
+			opts := []zap.Option{zap.AddCaller(), zap.AddStacktrace(zapcore.ErrorLevel)}
+			return zap.New(core, opts...), nil
+		} else {
+			_, _ = fmt.Fprintf(os.Stderr, "warning: failed to create rotatelogs writer: %v, using stdout only\n", err)
+		}
+	} else {
+		_, _ = os.Stderr.WriteString("warning: failed to create ./logs directory, using stdout only\n")
+	}
+
+	// fallback: no rotatelogs available; log to stdout using console encoder
+	core := zapcore.NewCore(consoleEncoder, consoleWS, lvl)
 	opts := []zap.Option{zap.AddCaller(), zap.AddStacktrace(zapcore.ErrorLevel)}
 	return zap.New(core, opts...), nil
 }
