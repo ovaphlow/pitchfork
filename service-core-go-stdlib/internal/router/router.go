@@ -4,9 +4,11 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/jmoiron/sqlx"
 	"go.uber.org/zap"
 
 	"github.com/ovaphlow/pitchfork/service-core-go-stdlib/internal/setting"
+	"github.com/ovaphlow/pitchfork/service-core-go-stdlib/internal/user"
 )
 
 // loggingResponseWriter wraps http.ResponseWriter to capture status and size.
@@ -92,7 +94,7 @@ func SecurityHeadersMiddleware() func(http.Handler) http.Handler {
 
 // RegisterRoutes mounts HTTP handlers using the standard library's http.ServeMux.
 // This keeps the project stdlib-only while keeping wiring simple and testable.
-func RegisterRoutes(logger *zap.SugaredLogger) http.Handler {
+func RegisterRoutes(logger *zap.SugaredLogger, db *sqlx.DB) http.Handler {
 	mux := http.NewServeMux()
 
 	// health
@@ -118,6 +120,23 @@ func RegisterRoutes(logger *zap.SugaredLogger) http.Handler {
 	// id route - generate ids
 	mux.HandleFunc("GET /pitchfork-api-core/id", func(w http.ResponseWriter, r *http.Request) {
 		settingHandler.ID(w, r)
+	})
+
+	// user routes (signup / login)
+	userHandler := user.NewHandler(db, logger)
+	mux.HandleFunc("POST /pitchfork-api-core/signup", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		userHandler.Signup(w, r)
+	})
+	mux.HandleFunc("POST /pitchfork-api-core/login", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		userHandler.Login(w, r)
 	})
 
 	// wrap with security headers middleware then logging middleware

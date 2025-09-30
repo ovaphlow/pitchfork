@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jmoiron/sqlx"
 	"github.com/joho/godotenv"
 	"github.com/ovaphlow/pitchfork/service-core-go-stdlib/internal/router"
 	"github.com/ovaphlow/pitchfork/service-core-go-stdlib/pkg/database"
@@ -39,6 +40,10 @@ func main() {
 	}
 	defer sqlDB.Close()
 
+	// wrap with sqlx for convenience in repos/services
+	sqlxDB := sqlx.NewDb(sqlDB, "postgres")
+	defer sqlxDB.Close()
+
 	// graceful shutdown
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -46,7 +51,7 @@ func main() {
 	sugar.Info("service is running; press Ctrl+C to stop")
 
 	// mount http server
-	handler := router.RegisterRoutes(sugar)
+	handler := router.RegisterRoutes(sugar, sqlxDB)
 	srv := &http.Server{
 		Addr:    "0.0.0.0:8080",
 		Handler: handler,
