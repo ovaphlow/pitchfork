@@ -1,0 +1,18 @@
+http:
+  routers:
+    core:
+      rule: "PathPrefix(`/core`)"
+      entryPoints: ["web"]
+      service: core-service
+      middlewares: [core-strip]
+
+  middlewares:
+    core-strip:
+      stripPrefix:
+        prefixes: ["/core"]
+
+  services:
+    core-service:
+      loadBalancer:
+        servers:
+          - url: "http://svc-core:8080"

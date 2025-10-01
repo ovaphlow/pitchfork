@@ -1,0 +1,108 @@
+version: '3.9'
+
+# 使用 Consul + Traefik 统一治理三个子服务 (Go stdlib / FastAPI / Axum)
+# 说明:
+# 1. Consul 负责服务发现与可视化 (8500 UI)
+# 2. (已改造) 使用 Consul Connect (内置服务网格 / mTLS) 替代 Registrator 自动注册
+# 3. Traefik 仍可通过 Consul Catalog Provider 获取服务 (注意: 若仅网内互访也可不暴露到 Traefik)
+# 4. 示例采用 PathPrefix 路由: /core /aux /infra; 也可切换 Host 规则
+# 5. Connect 模式下每个服务可带 sidecar proxy (Envoy) 实现 mTLS 与意图 (Intentions) 访问控制
+# 6. 去掉 Registrator，改用静态 service definition 文件 or API 注册 (此处 dev 模式下直接通过 Connect 注册)
+
+services:
+  consul:
+    build:
+      context: .
+      dockerfile: service-consul-image/Dockerfile
+    # dev 模式 + connect + 加载本地 service definitions (挂载 ./consul.d)
+    command: >-
+      agent -dev -client=0.0.0.0 -ui -bootstrap -log-level=INFO
+      -enable-script-checks -enable-local-script-checks
+      -config-dir=/consul/config
+      -hcl='connect { enabled = true }'
+    ports:
+      - "8500:8500"
+      - "8600:8600/udp"
+    environment:
+      CONSUL_BIND_INTERFACE: eth0
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8500/v1/status/leader"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  traefik:
+    build:
+      context: .
+      dockerfile: service-traefik-image/Dockerfile
+    # 现在直接使用 Docker Provider (不再依赖 Consul Catalog 映射 HTTP 暴露)
+    command:
+      - --api.dashboard=true
+      - --api.insecure=true
+      - --entrypoints.web.address=:80
+      - --providers.consulcatalog=true
+      - --providers.consulcatalog.endpoint.address=consul:8500
+      - --providers.consulcatalog.exposedByDefault=false
+      - --providers.file.filename=/etc/traefik/dynamic.yml
+      - --providers.file.watch=true
+      - --accesslog=true
+      - --log.level=INFO
+    ports:
+      - "8080:80"    # 统一使用 8080 暴露 HTTP (兼容 rootless Podman, 避免 <1024)
+      - "8081:8080"  # Dashboard 改为 8081
+    # dynamic config baked into image to avoid permission issues under rootless Podman
+    networks:
+      - backend
+    depends_on:
+      - service-core-go-stdlib
+    restart: unless-stopped
+
+  # Registrator 已移除; 通过 Connect / service definition 进行注册
+
+  # Core 服务 + Connect sidecar (通过方式: sidecar_service; 这里仍使用 Traefik 暴露 HTTP)
+  service-core-go-stdlib:
+    build:
+      context: ./service-core-go-stdlib
+      dockerfile: Dockerfile
+    container_name: svc-core
+    expose:
+      - "8080"
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.core.rule: PathPrefix(`/core`)
+      traefik.http.routers.core.entrypoints: web
+      traefik.http.services.core.loadbalancer.server.port: "8080"
+    env_file:
+      - ./service-core-go-stdlib/.env
+    networks:
+      - backend
+    depends_on:
+      - consul
+      - postgres
+    restart: unless-stopped
+
+  # 数据库服务 (开发用途) - 生产请使用持久卷与更安全的凭证管理
+  postgres:
+    image: docker.1ms.run/library/postgres:17-alpine
+    environment:
+      POSTGRES_USER: ovaphlow
+      POSTGRES_PASSWORD: 'dsdfJk#1123'
+      POSTGRES_DB: ovaphlow
+    ports:
+      - "55432:5432" # 主机端口改为 55432 避免与本地已占用 5432 冲突
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - backend
+    restart: unless-stopped
+
+networks:
+  backend:
+    driver: bridge
+
+volumes:
+  pgdata: {}
+

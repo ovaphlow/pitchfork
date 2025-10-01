@@ -1,6 +1,7 @@
 package router
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -97,19 +98,34 @@ func SecurityHeadersMiddleware() func(http.Handler) http.Handler {
 func RegisterRoutes(logger *zap.SugaredLogger, db *sqlx.DB) http.Handler {
 	mux := http.NewServeMux()
 
-	// health
-	mux.HandleFunc("GET /pitchfork-api-core/health", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
+	// Liveness: root level /health for Consul sidecar HTTP check
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
 
+	// Legacy / namespaced health (retain existing path for any clients already using it)
+	mux.HandleFunc("GET /pitchfork-api/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+
+	// Readiness: attempts a lightweight DB ping (with short timeout)
+	mux.HandleFunc("GET /ready", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
+		defer cancel()
+		if err := db.DB.PingContext(ctx); err != nil {
+			logger.Warnw("readiness ping failed", "error", err)
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ready"))
+	})
+
 	// setting routes
 	settingHandler := setting.NewHandler(logger)
-	mux.HandleFunc("GET /pitchfork-api-core/settings", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /pitchfork-api/settings", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -118,20 +134,20 @@ func RegisterRoutes(logger *zap.SugaredLogger, db *sqlx.DB) http.Handler {
 	})
 
 	// id route - generate ids
-	mux.HandleFunc("GET /pitchfork-api-core/id", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /pitchfork-api/id", func(w http.ResponseWriter, r *http.Request) {
 		settingHandler.ID(w, r)
 	})
 
 	// user routes (signup / login)
 	userHandler := user.NewHandler(db, logger)
-	mux.HandleFunc("POST /pitchfork-api-core/signup", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /pitchfork-api/signup", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 		userHandler.Signup(w, r)
 	})
-	mux.HandleFunc("POST /pitchfork-api-core/login", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /pitchfork-api/login", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
