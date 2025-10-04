@@ -203,6 +203,11 @@ func (s *UserService) BumpVersionAndRevoke(ctx context.Context, userID int64) (i
 	return v.Version, nil
 }
 
+// GetMinimalAuthView retrieves the minimal projection for a user by ID.
+func (s *UserService) GetMinimalAuthView(ctx context.Context, id int64) (*entity.MinimalAuthView, error) {
+	return s.repo.GetMinimalAuthView(ctx, id)
+}
+
 // ConstantTimeCompare helper (exposed if later we store API keys etc.)
 func ConstantTimeCompare(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1

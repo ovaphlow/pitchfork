@@ -8,6 +8,7 @@ import (
 	"github.com/jmoiron/sqlx"
 	"go.uber.org/zap"
 
+	"github.com/ovaphlow/pitchfork/service-core-go-stdlib/internal/oidc"
 	"github.com/ovaphlow/pitchfork/service-core-go-stdlib/internal/setting"
 	"github.com/ovaphlow/pitchfork/service-core-go-stdlib/internal/user"
 )
@@ -133,6 +134,42 @@ func RegisterRoutes(logger *zap.SugaredLogger, db *sqlx.DB) http.Handler {
 		settingHandler.List(w, r)
 	})
 
+	// GET single setting by id (path suffix)
+	mux.HandleFunc("GET /pitchfork-api/settings/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		settingHandler.Get(w, r)
+	})
+
+	// Create setting
+	mux.HandleFunc("POST /pitchfork-api/settings", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		settingHandler.Create(w, r)
+	})
+
+	// Update setting
+	mux.HandleFunc("PUT /pitchfork-api/settings/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		settingHandler.Update(w, r)
+	})
+
+	// Delete setting
+	mux.HandleFunc("DELETE /pitchfork-api/settings/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		settingHandler.Delete(w, r)
+	})
+
 	// id route - generate ids
 	mux.HandleFunc("GET /pitchfork-api/id", func(w http.ResponseWriter, r *http.Request) {
 		settingHandler.ID(w, r)
@@ -154,6 +191,33 @@ func RegisterRoutes(logger *zap.SugaredLogger, db *sqlx.DB) http.Handler {
 		}
 		userHandler.Login(w, r)
 	})
+
+	// OIDC endpoints
+	oidcHandler, err := oidc.NewHandler(db, "http://localhost:8431")
+	if err == nil {
+		mux.HandleFunc("GET /.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+			oidcHandler.Discovery(w, r)
+		})
+		mux.HandleFunc("GET /jwks.json", func(w http.ResponseWriter, r *http.Request) {
+			oidcHandler.JWKS(w, r)
+		})
+		mux.HandleFunc("POST /token", func(w http.ResponseWriter, r *http.Request) {
+			oidcHandler.Token(w, r)
+		})
+		// OAuth2 token revocation - RFC 7009
+		mux.HandleFunc("POST /revoke", func(w http.ResponseWriter, r *http.Request) {
+			oidcHandler.Revoke(w, r)
+		})
+		// OAuth2 token introspection - RFC 7662
+		mux.HandleFunc("POST /introspect", func(w http.ResponseWriter, r *http.Request) {
+			oidcHandler.Introspect(w, r)
+		})
+		mux.HandleFunc("GET /userinfo", func(w http.ResponseWriter, r *http.Request) {
+			oidcHandler.Userinfo(w, r)
+		})
+	} else {
+		logger.Warnw("failed to initialize oidc handler", "err", err)
+	}
 
 	// wrap with security headers middleware then logging middleware
 	handler := LoggingMiddleware(logger)(SecurityHeadersMiddleware()(mux))
