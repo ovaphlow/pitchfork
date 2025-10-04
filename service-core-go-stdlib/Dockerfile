@@ -34,7 +34,7 @@ WORKDIR /app
 COPY --from=build /out/service-core /app/service-core
 
 # Expose internal port noted in main.go
-EXPOSE 8080
+EXPOSE 8431
 
 # Non-root user from distroless static base is numeric 65532
 USER nonroot:nonroot

@@ -18,7 +18,7 @@ podman compose up -d --build
 - 控制台 Dashboard 改为 `8081:8080`。
 
 访问：
-- 入口路由: http://localhost:8080/core/health
+- 入口路由: http://localhost:8431/core/health
 - Dashboard: http://localhost:8081
 - Consul UI: http://localhost:8500
 

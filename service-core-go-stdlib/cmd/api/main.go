@@ -53,7 +53,7 @@ func main() {
 	// mount http server
 	handler := router.RegisterRoutes(sugar, sqlxDB)
 	srv := &http.Server{
-		Addr:    "0.0.0.0:8080",
+		Addr:    "0.0.0.0:8431",
 		Handler: handler,
 	}
 

@@ -69,14 +69,38 @@ services:
       dockerfile: Dockerfile
     container_name: svc-core
     expose:
-      - "8080"
+      - "8431"
     labels:
       traefik.enable: "true"
       traefik.http.routers.core.rule: PathPrefix(`/core`)
       traefik.http.routers.core.entrypoints: web
-      traefik.http.services.core.loadbalancer.server.port: "8080"
+      traefik.http.services.core.loadbalancer.server.port: "8431"
     env_file:
       - ./service-core-go-stdlib/.env
+    networks:
+      - backend
+    depends_on:
+      - consul
+      - postgres
+    restart: unless-stopped
+
+  # Auxiliary FastAPI file service (internal use)
+  service-aux-fastapi:
+    build:
+      context: ./service-aux-fastapi
+      dockerfile: Dockerfile
+    container_name: svc-aux-fastapi
+    expose:
+      - "8432"
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.aux.rule: PathPrefix(`/aux`)
+      traefik.http.routers.aux.entrypoints: web
+      traefik.http.services.aux.loadbalancer.server.port: "8432"
+    env_file:
+      - ./service-aux-fastapi/.env
+    volumes:
+      - aux_storage:/app/storage
     networks:
       - backend
     depends_on:
@@ -105,4 +129,5 @@ networks:
 
 volumes:
   pgdata: {}
+  aux_storage: {}
 

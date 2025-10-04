@@ -1,0 +1,42 @@
+[project]
+name = "aux-fastapi"
+version = "0.1.0"
+description = ""
+readme = "README.md"
+requires-python = ">=3.13,<4.0"
+
+dependencies = [
+    "fastapi==0.118.0",
+    "uvicorn[standard]==0.37.0",
+    "python-multipart==0.0.20",
+    "sqlmodel==0.0.25",
+    "aiofiles==24.1.0",
+    "python-dotenv==1.1.1",
+    "psycopg2-binary==2.9.10",
+    "loguru==0.7.3",
+    "annotated-types==0.7.0",
+    "anyio==4.11.0",
+    "click==8.3.0",
+    "colorama==0.4.6 ; sys_platform == 'win32'",
+    "greenlet==3.2.4 ; (python_full_version < '3.14' and platform_machine == 'AMD64') or (python_full_version < '3.14' and platform_machine == 'WIN32') or (python_full_version < '3.14' and platform_machine == 'aarch64') or (python_full_version < '3.14' and platform_machine == 'amd64') or (python_full_version < '3.14' and platform_machine == 'ppc64le') or (python_full_version < '3.14' and platform_machine == 'win32') or (python_full_version < '3.14' and platform_machine == 'x86_64')",
+    "h11==0.16.0",
+    "httptools==0.6.4",
+    "idna==3.10",
+    "pydantic==2.11.9",
+    "pydantic-core==2.33.2",
+    "pydantic-settings>=2.0.0",
+    "pyyaml==6.0.3",
+    "sniffio==1.3.1",
+    "sqlalchemy==2.0.43",
+    "starlette==0.48.0",
+    "typing-extensions==4.15.0",
+    "typing-inspection==0.4.2",
+    "uvloop==0.21.0 ; platform_python_implementation != 'PyPy' and sys_platform != 'cygwin' and sys_platform != 'win32'",
+    "watchfiles==1.1.0",
+    "websockets==15.0.1",
+    "win32-setctime==1.2.0 ; sys_platform == 'win32'",
+]
+
+[tool.uv]
+# Leave default settings. Run `uv sync` to create the project environment and
+# `uv lock` to generate `uv.lock` (commit the lockfile to VCS).

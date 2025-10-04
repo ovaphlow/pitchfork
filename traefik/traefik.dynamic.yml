@@ -5,14 +5,26 @@ http:
       entryPoints: ["web"]
       service: core-service
       middlewares: [core-strip]
+    aux:
+      rule: "PathPrefix(`/aux`)"
+      entryPoints: ["web"]
+      service: aux-service
+      middlewares: [aux-strip]
 
   middlewares:
     core-strip:
       stripPrefix:
         prefixes: ["/core"]
+    aux-strip:
+      stripPrefix:
+        prefixes: ["/aux"]
 
   services:
     core-service:
       loadBalancer:
         servers:
-          - url: "http://svc-core:8080"
+          - url: "http://svc-core:8431"
+    aux-service:
+      loadBalancer:
+        servers:
+          - url: "http://svc-aux-fastapi:8432"
