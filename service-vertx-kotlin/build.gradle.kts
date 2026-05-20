@@ -10,9 +10,11 @@ allprojects {
 }
 
 subprojects {
-    apply(plugin = "kotlin")
+    apply(plugin = "org.jetbrains.kotlin.jvm")
 
-    kotlin {
-        jvmToolchain(21)
+    configure<JavaPluginExtension> {
+        toolchain {
+            languageVersion.set(JavaLanguageVersion.of(25))
+        }
     }
 }
