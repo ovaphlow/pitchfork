@@ -1,9 +1,9 @@
-package com.example.service
+package com.ovaphlow.crate.service
 
-import com.example.auth.AuthRoutes
-import com.example.database.DatabaseConfig
-import com.example.files.FileRoutes
-import com.example.settings.SettingsRoutes
+import com.ovaphlow.crate.auth.AuthRoutes
+import com.ovaphlow.crate.database.DatabaseConfig
+import com.ovaphlow.crate.files.FileRoutes
+import com.ovaphlow.crate.settings.SettingsRoutes
 import io.vertx.config.ConfigRetriever
 import io.vertx.config.ConfigRetrieverOptions
 import io.vertx.config.ConfigStoreOptions
@@ -12,7 +12,7 @@ import io.vertx.core.json.JsonObject
 import io.vertx.ext.web.Router
 import org.slf4j.LoggerFactory
 
-private val log = LoggerFactory.getLogger("com.example.service.MainKt")
+private val log = LoggerFactory.getLogger("com.ovaphlow.crate.service.MainKt")
 
 fun main() {
     val vertx = Vertx.vertx()
@@ -21,12 +21,17 @@ fun main() {
         ConfigRetrieverOptions().addStore(
             ConfigStoreOptions()
                 .setType("file")
-                .setFormat("hocon")
+                .setFormat("json")
                 .setConfig(JsonObject().put("path", "config.json"))
         )
     )
 
     val config = retriever.getConfig().toCompletionStage().toCompletableFuture().get()
+
+    val consoleLevel = config.getString("console-level", "DEBUG")
+    val ctx = LoggerFactory.getILoggerFactory() as ch.qos.logback.classic.LoggerContext
+    ctx.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME).level = ch.qos.logback.classic.Level.toLevel(consoleLevel)
+
     val dbConfig = config.getJsonObject("database", JsonObject())
     val pool = DatabaseConfig.createPool(vertx, dbConfig)
     val dsl = DatabaseConfig.createDSL()

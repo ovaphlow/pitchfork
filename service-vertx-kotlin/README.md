@@ -24,23 +24,6 @@ service-vertx-kotlin/
 │   └── files/            # 文件 — /files/*
 ```
 
-## Endpoints
-
-| Method | Path                 | 模块       | 说明         |
-|--------|----------------------|------------|-------------|
-| GET    | `/health`            | service    | 全局健康检查  |
-| GET    | `/auth/health`       | auth       | 服务健康检查  |
-| POST   | `/auth/login`        | auth       | 登录         |
-| POST   | `/auth/register`     | auth       | 注册         |
-| GET    | `/auth/verify`       | auth       | Token 校验   |
-| GET    | `/settings/health`   | settings   | 服务健康检查  |
-| GET    | `/settings/profile`  | settings   | 获取个人设置  |
-| PUT    | `/settings/profile`  | settings   | 更新个人设置  |
-| GET    | `/files/health`      | files      | 服务健康检查  |
-| POST   | `/files/upload`      | files      | 上传文件     |
-| GET    | `/files/:fileId`     | files      | 获取文件信息  |
-| DELETE | `/files/:fileId`     | files      | 删除文件     |
-
 ## 启动
 
 ```bash

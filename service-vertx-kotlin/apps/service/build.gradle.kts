@@ -9,11 +9,11 @@ dependencies {
     implementation(project(":libs:database"))
     implementation(libs.vertx.web)
     implementation(libs.vertx.config)
-    implementation(libs.vertx.config.hocon)
     implementation(libs.slf4j.api)
     implementation(libs.logback.classic)
+    implementation(libs.logstash.logback.encoder)
 }
 
 application {
-    mainClass.set("com.example.service.MainKt")
+    mainClass.set("com.ovaphlow.crate.service.MainKt")
 }

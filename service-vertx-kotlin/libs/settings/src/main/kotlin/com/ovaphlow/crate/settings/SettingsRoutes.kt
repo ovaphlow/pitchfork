@@ -1,4 +1,4 @@
-package com.example.settings
+package com.ovaphlow.crate.settings
 
 import io.vertx.core.Vertx
 import io.vertx.core.json.JsonObject

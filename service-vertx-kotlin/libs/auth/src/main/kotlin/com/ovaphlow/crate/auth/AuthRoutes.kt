@@ -1,4 +1,4 @@
-package com.example.auth
+package com.ovaphlow.crate.auth
 
 import io.vertx.core.Vertx
 import io.vertx.core.json.JsonObject

@@ -1,14 +1,14 @@
-// Database connection configuration
-database {
-  host = localhost
-  port = 5432
-  database = "ovaphlow"
-  user = "ovaphlow"
-  password = "dsdfJk#1123"
-  pool-size = 10
-}
-
-// HTTP server configuration
-server {
-  port = 8080
+{
+  "database": {
+    "host": "localhost",
+    "port": 5432,
+    "database": "ovaphlow",
+    "user": "ovaphlow",
+    "password": "dsdfJk#1123",
+    "pool-size": 10
+  },
+  "console-level": "DEBUG",
+  "server": {
+    "port": 8080
+  }
 }

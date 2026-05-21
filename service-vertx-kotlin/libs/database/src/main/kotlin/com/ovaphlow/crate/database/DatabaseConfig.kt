@@ -1,4 +1,4 @@
-package com.example.database
+package com.ovaphlow.crate.database
 
 import io.vertx.core.Vertx
 import io.vertx.core.json.JsonObject
