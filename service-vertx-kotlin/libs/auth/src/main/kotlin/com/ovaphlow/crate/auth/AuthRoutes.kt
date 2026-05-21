@@ -1,5 +1,6 @@
 package com.ovaphlow.crate.auth
 
+import com.ovaphlow.crate.common.Ulid
 import io.vertx.core.Vertx
 import io.vertx.core.json.JsonObject
 import io.vertx.ext.auth.JWTOptions
@@ -9,7 +10,6 @@ import io.vertx.ext.auth.jwt.JWTAuthOptions
 import io.vertx.ext.web.Router
 import io.vertx.ext.web.handler.BodyHandler
 import io.vertx.sqlclient.Pool
-import org.jooq.DSLContext
 import org.slf4j.LoggerFactory
 import java.time.OffsetDateTime
 
@@ -17,7 +17,7 @@ object AuthRoutes {
 
     private val log = LoggerFactory.getLogger(AuthRoutes::class.java)
 
-    fun create(vertx: Vertx, pool: Pool, dsl: DSLContext, authConfig: JsonObject = JsonObject()): Router {
+    fun create(vertx: Vertx, pool: Pool, authConfig: JsonObject = JsonObject()): Router {
         val router = Router.router(vertx)
         val jwtSecret = authConfig.getString("jwt-secret", "crate-default-secret")
         val jwtAuth = JWTAuth.create(vertx, JWTAuthOptions()
@@ -60,8 +60,7 @@ object AuthRoutes {
                     }
 
                     val userId = row.getValue("id") as String
-                    val activityRaw = row.getValue("activity_info")?.toString()
-                    val activityJson = if (activityRaw != null) JsonObject(activityRaw) else JsonObject()
+                    val activityJson = row.getValue("activity_info") as? JsonObject ?: JsonObject()
                     val loginCount = activityJson.getInteger("login_count", 0) + 1
 
                     val newActivity = JsonObject()
@@ -71,7 +70,7 @@ object AuthRoutes {
                         .put("last_password_change", activityJson.getValue("last_password_change"))
 
                     pool.preparedQuery("UPDATE users SET activity_info = \$1::jsonb, updated_at = now() WHERE id = \$2")
-                        .execute(io.vertx.sqlclient.Tuple.of(newActivity.encode(), userId))
+                        .execute(io.vertx.sqlclient.Tuple.of(newActivity, userId))
                         .onSuccess {
                             val token = jwtAuth.generateToken(JsonObject().put("sub", userId).put("email", email))
                             ctx.json(JsonObject()
@@ -110,7 +109,7 @@ object AuthRoutes {
 
                     val hash = at.favre.lib.crypto.bcrypt.BCrypt.withDefaults().hashToString(12, password.toCharArray())
                     val now = OffsetDateTime.now()
-                    val id = java.util.UUID.randomUUID().toString().replace("-", "")
+                    val id = Ulid.generate()
 
                     val insertSql = "INSERT INTO users (id, email, username, phone, password_hash, user_type, status, created_at, updated_at) VALUES (\$1, \$2, '', '', \$3, 'regular', 'pending', \$4, \$4) RETURNING id"
                     pool.preparedQuery(insertSql)
@@ -167,10 +166,10 @@ object AuthRoutes {
             .put("phone", row.getValue("phone")?.toString())
             .put("user_type", row.getValue("user_type")?.toString())
             .put("status", row.getValue("status")?.toString())
-            .put("security_info", row.getValue("security_info")?.let { JsonObject(it.toString()) })
-            .put("verification_info", row.getValue("verification_info")?.let { JsonObject(it.toString()) })
-            .put("password_reset_info", row.getValue("password_reset_info")?.let { JsonObject(it.toString()) })
-            .put("activity_info", row.getValue("activity_info")?.let { JsonObject(it.toString()) })
+            .put("security_info", row.getValue("security_info") as? JsonObject)
+            .put("verification_info", row.getValue("verification_info") as? JsonObject)
+            .put("password_reset_info", row.getValue("password_reset_info") as? JsonObject)
+            .put("activity_info", row.getValue("activity_info") as? JsonObject)
             .put("created_at", row.getValue("created_at")?.toString())
             .put("updated_at", row.getValue("updated_at")?.toString())
     }

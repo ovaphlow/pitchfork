@@ -35,13 +35,12 @@ fun main() {
     val dbConfig = config.getJsonObject("database", JsonObject())
     DatabaseConfig.migrate(dbConfig)
     val pool = DatabaseConfig.createPool(vertx, dbConfig)
-    val dsl = DatabaseConfig.createDSL()
 
     val mainRouter = Router.router(vertx)
 
     val apiRouter = Router.router(vertx)
     val authConfig = config.getJsonObject("auth", JsonObject())
-    apiRouter.route("/auth/v1/*").subRouter(AuthRoutes.create(vertx, pool, dsl, authConfig))
+    apiRouter.route("/auth/v1/*").subRouter(AuthRoutes.create(vertx, pool, authConfig))
     apiRouter.route("/settings/v1/*").subRouter(SettingsRoutes.create(vertx))
     apiRouter.route("/files/v1/*").subRouter(FileRoutes.create(vertx))
     mainRouter.route("/crate-api/*").subRouter(apiRouter)

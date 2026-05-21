@@ -5,6 +5,7 @@ include(
     "libs:settings",
     "libs:files",
     "libs:database",
+    "libs:common",
     "apps:service"
 )
 
