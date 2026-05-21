@@ -17,3 +17,7 @@ dependencies {
 application {
     mainClass.set("com.ovaphlow.crate.service.MainKt")
 }
+
+tasks.withType<JavaExec> {
+    systemProperty("LOG_DIR", rootProject.projectDir.resolve("logs").absolutePath)
+}

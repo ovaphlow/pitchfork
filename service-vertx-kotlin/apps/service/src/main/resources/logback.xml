@@ -6,9 +6,9 @@
     </appender>
 
     <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
-        <file>./logs/app.jsonl</file>
+        <file>${LOG_DIR:-logs}/app.jsonl</file>
         <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
-            <fileNamePattern>./logs/app.%d{yyyy-MM-dd}.jsonl</fileNamePattern>
+            <fileNamePattern>${LOG_DIR:-logs}/app.%d{yyyy-MM-dd}.jsonl</fileNamePattern>
             <maxHistory>30</maxHistory>
         </rollingPolicy>
         <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
