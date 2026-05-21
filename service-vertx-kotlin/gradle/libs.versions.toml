@@ -10,6 +10,8 @@ logback = "1.5.15"
 vertx-core = { module = "io.vertx:vertx-core", version.ref = "vertx" }
 vertx-web = { module = "io.vertx:vertx-web", version.ref = "vertx" }
 vertx-pg-client = { module = "io.vertx:vertx-pg-client", version.ref = "vertx" }
+vertx-config = { module = "io.vertx:vertx-config", version.ref = "vertx" }
+vertx-config-hocon = { module = "io.vertx:vertx-config-hocon", version.ref = "vertx" }
 jooq = { module = "org.jooq:jooq", version.ref = "jooq" }
 postgresql = { module = "org.postgresql:postgresql", version.ref = "postgresql" }
 slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }

@@ -4,6 +4,7 @@ include(
     "libs:auth",
     "libs:settings",
     "libs:files",
+    "libs:database",
     "apps:service"
 )
 
