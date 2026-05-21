@@ -1,12 +1,16 @@
 package com.ovaphlow.crate.auth
 
 import com.ovaphlow.crate.common.Ulid
+import com.ovaphlow.crate.database.DatabaseConfig
+import com.ovaphlow.crate.database.gen.public_.tables.Users
 import io.vertx.core.Future
 import io.vertx.core.json.JsonObject
 import io.vertx.ext.auth.jwt.JWTAuth
 import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.Tuple
+import org.jooq.DSLContext
+import org.jooq.JSONB
 import org.slf4j.LoggerFactory
 import java.time.OffsetDateTime
 
@@ -14,13 +18,15 @@ data class LoginResult(val token: String, val user: JsonObject)
 data class SignUpResult(val id: String, val userJson: JsonObject)
 data class VerifyResult(val sub: String)
 
-class AuthService(private val pool: Pool, private val jwtAuth: JWTAuth) {
+class AuthService(private val pool: Pool, private val jwtAuth: JWTAuth, private val ctx: DSLContext = DatabaseConfig.createDSL()) {
 
     private val log = LoggerFactory.getLogger(AuthService::class.java)
+    private val u = Users.USERS
 
     fun login(email: String, password: String, loginIp: String = ""): Future<LoginResult> {
-        return pool.preparedQuery("SELECT * FROM users WHERE email = \$1")
-            .execute(Tuple.of(email))
+        val query = ctx.selectFrom(u).where(u.EMAIL.eq(email))
+        return pool.preparedQuery(query.getSQL())
+            .execute(toTuple(query))
             .flatMap { rows ->
                 if (rows.size() == 0) {
                     return@flatMap Future.failedFuture(InvalidCredentialsException())
@@ -43,8 +49,13 @@ class AuthService(private val pool: Pool, private val jwtAuth: JWTAuth) {
                     .put("last_login_ip", loginIp)
                     .put("last_password_change", activityJson.getValue("last_password_change"))
 
-                pool.preparedQuery("UPDATE users SET activity_info = \$1::jsonb, updated_at = now() WHERE id = \$2")
-                    .execute(Tuple.of(newActivity, userId))
+                val updateQuery = ctx.update(u)
+                    .set(u.ACTIVITY_INFO, JSONB.valueOf(newActivity.encode()))
+                    .set(u.UPDATED_AT, OffsetDateTime.now())
+                    .where(u.ID.eq(userId))
+
+                pool.preparedQuery(updateQuery.getSQL())
+                    .execute(toTuple(updateQuery))
                     .map {
                         val token = jwtAuth.generateToken(JsonObject().put("sub", userId).put("email", email))
                         LoginResult(token = token, user = toUserJson(row))
@@ -53,8 +64,9 @@ class AuthService(private val pool: Pool, private val jwtAuth: JWTAuth) {
     }
 
     fun signUp(email: String, password: String): Future<SignUpResult> {
-        return pool.preparedQuery("SELECT count(*) FROM users WHERE email = \$1")
-            .execute(Tuple.of(email))
+        val countQuery = ctx.selectCount().from(u).where(u.EMAIL.eq(email))
+        return pool.preparedQuery(countQuery.getSQL())
+            .execute(toTuple(countQuery))
             .flatMap { rows ->
                 if (rows.iterator().next().getLong(0) > 0) {
                     return@flatMap Future.failedFuture(EmailAlreadyRegisteredException())
@@ -64,12 +76,17 @@ class AuthService(private val pool: Pool, private val jwtAuth: JWTAuth) {
                 val now = OffsetDateTime.now()
                 val id = Ulid.generate()
 
-                val insertSql = "INSERT INTO users (id, email, username, phone, password_hash, user_type, status, created_at, updated_at) VALUES (\$1, \$2, '', '', \$3, 'regular', 'pending', \$4, \$4) RETURNING id"
-                pool.preparedQuery(insertSql)
-                    .execute(Tuple.of(id, email, hash, now))
+                val insertQuery = ctx.insertInto(
+                    u, u.ID, u.EMAIL, u.USERNAME, u.PHONE, u.PASSWORD_HASH, u.USER_TYPE, u.STATUS, u.CREATED_AT, u.UPDATED_AT
+                ).values(id, email, "", "", hash, "regular", "pending", now, now)
+                    .returning(u.ID)
+
+                pool.preparedQuery(insertQuery.getSQL())
+                    .execute(toTuple(insertQuery))
                     .flatMap {
-                        pool.preparedQuery("SELECT * FROM users WHERE id = \$1")
-                            .execute(Tuple.of(id))
+                        val getQuery = ctx.selectFrom(u).where(u.ID.eq(id))
+                        pool.preparedQuery(getQuery.getSQL())
+                            .execute(toTuple(getQuery))
                     }
                     .map { userRows ->
                         val row = userRows.iterator().next()
@@ -83,6 +100,17 @@ class AuthService(private val pool: Pool, private val jwtAuth: JWTAuth) {
             .map { user ->
                 VerifyResult(sub = user.principal().getString("sub"))
             }
+    }
+
+    private fun toTuple(query: org.jooq.Query): Tuple {
+        val tuple = Tuple.tuple()
+        query.getBindValues().forEach { v ->
+            when (v) {
+                is JSONB -> tuple.addValue(JsonObject(v.data()))
+                else -> tuple.addValue(v)
+            }
+        }
+        return tuple
     }
 
     companion object {

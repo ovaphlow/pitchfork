@@ -7,6 +7,7 @@ include(
     "libs:permission",
     "libs:database",
     "libs:common",
+    "libs:messages",
     "apps:service"
 )
 

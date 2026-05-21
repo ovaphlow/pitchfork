@@ -3,6 +3,7 @@ package com.ovaphlow.crate.service
 import com.ovaphlow.crate.auth.AuthRoutes
 import com.ovaphlow.crate.database.DatabaseConfig
 import com.ovaphlow.crate.files.FileRoutes
+import com.ovaphlow.crate.messages.MessagesRoutes
 import com.ovaphlow.crate.permission.PermissionRoutes
 import com.ovaphlow.crate.settings.SettingsRoutes
 import io.vertx.config.ConfigRetriever
@@ -57,6 +58,7 @@ fun main() {
     apiRouter.route("/settings/v1/*").subRouter(SettingsRoutes.create(vertx))
     apiRouter.route("/files/v1/*").subRouter(FileRoutes.create(vertx))
     apiRouter.route("/permission/v1/*").subRouter(PermissionRoutes.create(vertx, pool, jwtAuth))
+    apiRouter.route("/messages/v1/*").subRouter(MessagesRoutes.create(vertx, pool))
     mainRouter.route("/crate-api/*").subRouter(apiRouter)
 
     mainRouter.route("/health").handler { ctx ->
