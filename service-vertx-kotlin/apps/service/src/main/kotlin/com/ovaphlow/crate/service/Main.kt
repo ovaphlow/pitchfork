@@ -40,7 +40,8 @@ fun main() {
     val mainRouter = Router.router(vertx)
 
     val apiRouter = Router.router(vertx)
-    apiRouter.route("/auth/v1/*").subRouter(AuthRoutes.create(vertx))
+    val authConfig = config.getJsonObject("auth", JsonObject())
+    apiRouter.route("/auth/v1/*").subRouter(AuthRoutes.create(vertx, pool, dsl, authConfig))
     apiRouter.route("/settings/v1/*").subRouter(SettingsRoutes.create(vertx))
     apiRouter.route("/files/v1/*").subRouter(FileRoutes.create(vertx))
     mainRouter.route("/crate-api/*").subRouter(apiRouter)
@@ -49,7 +50,7 @@ fun main() {
         ctx.json(JsonObject().put("status", "ok").put("app", "service-vertx-kotlin"))
     }
 
-    val port = config.getInteger("server.port", 8080)
+    val port = config.getJsonObject("server", JsonObject()).getInteger("port", 8080)
     val server = vertx.createHttpServer()
         .requestHandler(mainRouter)
         .listen(port)

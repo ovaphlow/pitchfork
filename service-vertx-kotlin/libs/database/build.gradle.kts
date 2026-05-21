@@ -11,6 +11,7 @@ dependencies {
     implementation(libs.slf4j.api)
     implementation(libs.flyway.core)
     implementation(libs.flyway.database.postgresql)
+    implementation(libs.scram.client)
     jooqCodegen(libs.jooq.codegen)
     jooqCodegen(libs.jooq.meta)
     jooqCodegen(libs.postgresql)

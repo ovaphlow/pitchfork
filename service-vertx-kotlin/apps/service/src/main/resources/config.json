@@ -8,7 +8,10 @@
     "pool-size": 10
   },
   "console-level": "DEBUG",
+  "auth": {
+    "jwt-secret": "la estatua"
+  },
   "server": {
-    "port": 8080
+    "port": 8421
   }
 }

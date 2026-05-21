@@ -13,7 +13,7 @@
         </database>
         <target>
             <packageName>com.ovaphlow.crate.database.gen</packageName>
-            <directory>src/main/kotlin/com/ovaphlow/crate/database/gen</directory>
+            <directory>src/main/java/com/ovaphlow/crate/database/gen</directory>
         </target>
     </generator>
 </configuration>
