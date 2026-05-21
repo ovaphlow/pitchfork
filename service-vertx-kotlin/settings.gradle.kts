@@ -4,6 +4,7 @@ include(
     "libs:auth",
     "libs:settings",
     "libs:files",
+    "libs:permission",
     "libs:database",
     "libs:common",
     "apps:service"

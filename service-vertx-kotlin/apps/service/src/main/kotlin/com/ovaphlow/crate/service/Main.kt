@@ -3,12 +3,17 @@ package com.ovaphlow.crate.service
 import com.ovaphlow.crate.auth.AuthRoutes
 import com.ovaphlow.crate.database.DatabaseConfig
 import com.ovaphlow.crate.files.FileRoutes
+import com.ovaphlow.crate.permission.PermissionRoutes
 import com.ovaphlow.crate.settings.SettingsRoutes
 import io.vertx.config.ConfigRetriever
 import io.vertx.config.ConfigRetrieverOptions
 import io.vertx.config.ConfigStoreOptions
 import io.vertx.core.Vertx
 import io.vertx.core.json.JsonObject
+import io.vertx.ext.auth.JWTOptions
+import io.vertx.ext.auth.PubSecKeyOptions
+import io.vertx.ext.auth.jwt.JWTAuth
+import io.vertx.ext.auth.jwt.JWTAuthOptions
 import io.vertx.ext.web.Router
 import org.slf4j.LoggerFactory
 
@@ -38,11 +43,20 @@ fun main() {
 
     val mainRouter = Router.router(vertx)
 
+    val jwtSecret = config.getJsonObject("auth", JsonObject()).getString("jwt-secret", "crate-default-secret")
+    val jwtAuth = JWTAuth.create(vertx, JWTAuthOptions()
+        .addPubSecKey(PubSecKeyOptions()
+            .setAlgorithm("HS256")
+            .setBuffer(jwtSecret)
+            .setSymmetric(true))
+        .setJWTOptions(JWTOptions().setExpiresInSeconds(86400)))
+
     val apiRouter = Router.router(vertx)
     val authConfig = config.getJsonObject("auth", JsonObject())
     apiRouter.route("/auth/v1/*").subRouter(AuthRoutes.create(vertx, pool, authConfig))
     apiRouter.route("/settings/v1/*").subRouter(SettingsRoutes.create(vertx))
     apiRouter.route("/files/v1/*").subRouter(FileRoutes.create(vertx))
+    apiRouter.route("/permission/v1/*").subRouter(PermissionRoutes.create(vertx, pool, jwtAuth))
     mainRouter.route("/crate-api/*").subRouter(apiRouter)
 
     mainRouter.route("/health").handler { ctx ->
