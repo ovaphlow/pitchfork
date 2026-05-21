@@ -1,6 +1,5 @@
 package com.ovaphlow.crate.auth
 
-import com.ovaphlow.crate.common.Ulid
 import io.vertx.core.Vertx
 import io.vertx.core.json.JsonObject
 import io.vertx.ext.auth.JWTOptions
@@ -11,7 +10,6 @@ import io.vertx.ext.web.Router
 import io.vertx.ext.web.handler.BodyHandler
 import io.vertx.sqlclient.Pool
 import org.slf4j.LoggerFactory
-import java.time.OffsetDateTime
 
 object AuthRoutes {
 
@@ -26,6 +24,7 @@ object AuthRoutes {
                 .setBuffer(jwtSecret)
                 .setSymmetric(true))
             .setJWTOptions(JWTOptions().setExpiresInSeconds(86400)))
+        val service = AuthService(pool, jwtAuth)
 
         router.route().handler(BodyHandler.create())
 
@@ -39,49 +38,29 @@ object AuthRoutes {
             val password = body.getString("password", "")
 
             if (email.isBlank() || password.isBlank()) {
-                ctx.response().setStatusCode(400).end(JsonObject().put("error", "email and password required").encode())
+                ctx.response().setStatusCode(400)
+                    .end(JsonObject().put("error", "email and password required").encode())
                 return@handler
             }
 
-            pool.preparedQuery("SELECT * FROM users WHERE email = \$1")
-                .execute(io.vertx.sqlclient.Tuple.of(email))
-                .onSuccess { rows ->
-                    if (rows.size() == 0) {
-                        ctx.response().setStatusCode(401).end(JsonObject().put("error", "invalid credentials").encode())
-                        return@onSuccess
-                    }
-                    val row = rows.iterator().next()
-                    val hash = row.getValue("password_hash") as String
-
-                    val bcrypt = at.favre.lib.crypto.bcrypt.BCrypt.verifyer()
-                    if (!bcrypt.verify(password.toCharArray(), hash).verified) {
-                        ctx.response().setStatusCode(401).end(JsonObject().put("error", "invalid credentials").encode())
-                        return@onSuccess
-                    }
-
-                    val userId = row.getValue("id") as String
-                    val activityJson = row.getValue("activity_info") as? JsonObject ?: JsonObject()
-                    val loginCount = activityJson.getInteger("login_count", 0) + 1
-
-                    val newActivity = JsonObject()
-                        .put("login_count", loginCount)
-                        .put("last_login_at", OffsetDateTime.now().toString())
-                        .put("last_login_ip", ctx.request().remoteAddress().toString())
-                        .put("last_password_change", activityJson.getValue("last_password_change"))
-
-                    pool.preparedQuery("UPDATE users SET activity_info = \$1::jsonb, updated_at = now() WHERE id = \$2")
-                        .execute(io.vertx.sqlclient.Tuple.of(newActivity, userId))
-                        .onSuccess {
-                            val token = jwtAuth.generateToken(JsonObject().put("sub", userId).put("email", email))
-                            ctx.json(JsonObject()
-                                .put("token", token)
-                                .put("type", "Bearer")
-                                .put("user", toUserJson(row)))
-                        }
+            service.login(email, password, ctx.request().remoteAddress().toString())
+                .onSuccess { result ->
+                    ctx.json(JsonObject()
+                        .put("token", result.token)
+                        .put("type", "Bearer")
+                        .put("user", result.user))
                 }
                 .onFailure { err ->
-                    log.error("Login failed", err)
-                    ctx.response().setStatusCode(500).end(JsonObject().put("error", "internal error").encode())
+                    when (err) {
+                        is InvalidCredentialsException ->
+                            ctx.response().setStatusCode(401)
+                                .end(JsonObject().put("error", err.message).encode())
+                        else -> {
+                            log.error("Login failed", err)
+                            ctx.response().setStatusCode(500)
+                                .end(JsonObject().put("error", "internal error").encode())
+                        }
+                    }
                 }
         }
 
@@ -91,86 +70,54 @@ object AuthRoutes {
             val password = body.getString("password", "")
 
             if (email.isBlank() || password.isBlank()) {
-                ctx.response().setStatusCode(400).end(JsonObject().put("error", "email and password required").encode())
+                ctx.response().setStatusCode(400)
+                    .end(JsonObject().put("error", "email and password required").encode())
                 return@handler
             }
             if (password.length < 6) {
-                ctx.response().setStatusCode(400).end(JsonObject().put("error", "password must be at least 6 characters").encode())
+                ctx.response().setStatusCode(400)
+                    .end(JsonObject().put("error", "password must be at least 6 characters").encode())
                 return@handler
             }
 
-            pool.preparedQuery("SELECT count(*) FROM users WHERE email = \$1")
-                .execute(io.vertx.sqlclient.Tuple.of(email))
-                .onSuccess { rows ->
-                    if (rows.iterator().next().getLong(0) > 0) {
-                        ctx.response().setStatusCode(409).end(JsonObject().put("error", "email already registered").encode())
-                        return@onSuccess
-                    }
-
-                    val hash = at.favre.lib.crypto.bcrypt.BCrypt.withDefaults().hashToString(12, password.toCharArray())
-                    val now = OffsetDateTime.now()
-                    val id = Ulid.generate()
-
-                    val insertSql = "INSERT INTO users (id, email, username, phone, password_hash, user_type, status, created_at, updated_at) VALUES (\$1, \$2, '', '', \$3, 'regular', 'pending', \$4, \$4) RETURNING id"
-                    pool.preparedQuery(insertSql)
-                        .execute(io.vertx.sqlclient.Tuple.of(id, email, hash, now))
-                        .onSuccess { insertResult ->
-                            val newId = insertResult.iterator().next().getValue("id").toString()
-                            pool.preparedQuery("SELECT * FROM users WHERE id = \$1")
-                                .execute(io.vertx.sqlclient.Tuple.of(newId))
-                                .onSuccess { userRows ->
-                                    ctx.response().setStatusCode(201).end(JsonObject()
-                                        .put("status", "created")
-                                        .put("user", toUserJson(userRows.iterator().next())).encode())
-                                }
-                                .onFailure { err ->
-                                    log.error("Failed to fetch new user", err)
-                                    ctx.response().setStatusCode(500).end(JsonObject().put("error", "internal error").encode())
-                                }
-                        }
-                        .onFailure { err ->
-                            log.error("Insert failed", err)
-                            ctx.response().setStatusCode(500).end(JsonObject().put("error", "internal error").encode())
-                        }
+            service.signUp(email, password)
+                .onSuccess {
+                    ctx.response().setStatusCode(201)
+                        .end(JsonObject().put("status", "created").put("user", it.userJson).encode())
                 }
                 .onFailure { err ->
-                    log.error("Sign-up failed", err)
-                    ctx.response().setStatusCode(500).end(JsonObject().put("error", "internal error").encode())
+                    when (err) {
+                        is EmailAlreadyRegisteredException ->
+                            ctx.response().setStatusCode(409)
+                                .end(JsonObject().put("error", err.message).encode())
+                        else -> {
+                            log.error("Sign-up failed", err)
+                            ctx.response().setStatusCode(500)
+                                .end(JsonObject().put("error", "internal error").encode())
+                        }
+                    }
                 }
         }
 
         router.get("/verify").handler { ctx ->
             val authHeader = ctx.request().getHeader("Authorization")
             if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-                ctx.response().setStatusCode(401).end(JsonObject().put("error", "missing or invalid token").encode())
+                ctx.response().setStatusCode(401)
+                    .end(JsonObject().put("error", "missing or invalid token").encode())
                 return@handler
             }
             val token = authHeader.removePrefix("Bearer ")
-            jwtAuth.authenticate(JsonObject().put("token", token))
-                .onSuccess { user ->
-                    ctx.json(JsonObject().put("valid", true).put("sub", user.principal().getString("sub")))
+
+            service.verify(token)
+                .onSuccess { result ->
+                    ctx.json(JsonObject().put("valid", true).put("sub", result.sub))
                 }
                 .onFailure {
-                    ctx.response().setStatusCode(401).end(JsonObject().put("error", "invalid token").encode())
+                    ctx.response().setStatusCode(401)
+                        .end(JsonObject().put("error", "invalid token").encode())
                 }
         }
 
         return router
-    }
-
-    private fun toUserJson(row: io.vertx.sqlclient.Row): JsonObject {
-        return JsonObject()
-            .put("id", row.getValue("id")?.toString())
-            .put("email", row.getValue("email")?.toString())
-            .put("username", row.getValue("username")?.toString())
-            .put("phone", row.getValue("phone")?.toString())
-            .put("user_type", row.getValue("user_type")?.toString())
-            .put("status", row.getValue("status")?.toString())
-            .put("security_info", row.getValue("security_info") as? JsonObject)
-            .put("verification_info", row.getValue("verification_info") as? JsonObject)
-            .put("password_reset_info", row.getValue("password_reset_info") as? JsonObject)
-            .put("activity_info", row.getValue("activity_info") as? JsonObject)
-            .put("created_at", row.getValue("created_at")?.toString())
-            .put("updated_at", row.getValue("updated_at")?.toString())
     }
 }
