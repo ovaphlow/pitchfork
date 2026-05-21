@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<configuration>
+    <jdbc>
+        <driver>org.postgresql.Driver</driver>
+        <url>jdbc:postgresql://localhost:5432/ovaphlow</url>
+        <user>ovaphlow</user>
+        <password>dsdfJk#1123</password>
+    </jdbc>
+    <generator>
+        <database>
+            <name>org.jooq.meta.postgres.PostgresDatabase</name>
+            <includes>users|settings|messages|files|behaviors</includes>
+        </database>
+        <target>
+            <packageName>com.ovaphlow.crate.database.gen</packageName>
+            <directory>src/main/kotlin/com/ovaphlow/crate/database/gen</directory>
+        </target>
+    </generator>
+</configuration>

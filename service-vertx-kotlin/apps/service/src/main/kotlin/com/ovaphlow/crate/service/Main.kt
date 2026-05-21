@@ -33,6 +33,7 @@ fun main() {
     ctx.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME).level = ch.qos.logback.classic.Level.toLevel(consoleLevel)
 
     val dbConfig = config.getJsonObject("database", JsonObject())
+    DatabaseConfig.migrate(dbConfig)
     val pool = DatabaseConfig.createPool(vertx, dbConfig)
     val dsl = DatabaseConfig.createDSL()
 
