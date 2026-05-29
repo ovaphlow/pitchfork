@@ -1,0 +1,10 @@
+---
+import AuthLayout from "../layouts/AuthLayout.astro";
+import AuthCard from "../components/AuthCard.tsx";
+---
+
+<AuthLayout title="注册">
+  <div class="w-full max-w-md">
+    <AuthCard mode="register" client:load />
+  </div>
+</AuthLayout>

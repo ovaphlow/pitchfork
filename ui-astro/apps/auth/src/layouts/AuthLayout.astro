@@ -1,0 +1,55 @@
+---
+import "../styles/global.css";
+
+interface Props {
+  title: string;
+}
+
+const { title } = Astro.props;
+---
+
+<!doctype html>
+<html lang="zh-CN" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{title} — Pitchfork</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  </head>
+  <body class="min-h-screen bg-gray-950 text-gray-100 antialiased">
+    <div class="flex min-h-screen flex-col lg:flex-row">
+      <!-- left: branding -->
+      <div class="flex flex-1 flex-col items-center justify-center px-8 py-16 lg:px-16">
+        <div class="max-w-md text-center lg:text-left">
+          <div class="mb-6 flex items-center justify-center lg:justify-start gap-3">
+            <span class="text-4xl">🌀</span>
+            <h1 class="text-4xl font-bold tracking-tight text-white">Pitchfork</h1>
+          </div>
+          <p class="text-lg text-gray-400 leading-relaxed">
+            开源协作平台 — 安全、高效、可扩展
+          </p>
+          <div class="mt-10 hidden lg:block">
+            <ul class="space-y-4 text-sm text-gray-500">
+              <li class="flex items-start gap-3">
+                <span class="mt-0.5 text-indigo-400">✓</span>
+                端到端加密通信
+              </li>
+              <li class="flex items-start gap-3">
+                <span class="mt-0.5 text-indigo-400">✓</span>
+                细粒度权限控制
+              </li>
+              <li class="flex items-start gap-3">
+                <span class="mt-0.5 text-indigo-400">✓</span>
+                开放 API，易于集成
+              </li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <!-- right: auth form -->
+      <div class="flex flex-1 items-center justify-center px-4 py-12 lg:px-8">
+        <slot />
+      </div>
+    </div>
+  </body>
+</html>

@@ -1,1 +1,27 @@
+# build output
+dist/
+.netlify/
+
+# generated types
+.astro/
+
+# dependencies
 node_modules/
+
+# pnpm local store & cache
+.pnpm-store/
+.pnpm-state/
+.pnpm-cache/
+
+# env files
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

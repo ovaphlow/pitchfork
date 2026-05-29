@@ -8,7 +8,6 @@ import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
 import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
-import io.vertx.sqlclient.Tuple
 import org.jooq.Condition
 import org.jooq.DSLContext
 import org.jooq.JSONB
@@ -25,8 +24,8 @@ class MessagesService(private val pool: Pool, private val ctx: DSLContext = Data
         val query = ctx.insertInto(m, m.ID, m.MESSAGE_TYPE, m.SENDER_ID, m.SENDER_TYPE, m.RECEIVER_ID, m.RECEIVER_TYPE, m.PAYLOAD)
             .values(id, messageType, senderId, senderType, receiverId, receiverType, JSONB.valueOf(payload.encode()))
             .returning(m)
-        return pool.preparedQuery(query.getSQL())
-            .execute(toTuple(query))
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
             .map { toMessageJson(it.iterator().next()) }
     }
 
@@ -45,15 +44,15 @@ class MessagesService(private val pool: Pool, private val ctx: DSLContext = Data
             .limit(limit)
             .offset(offset)
 
-        return pool.preparedQuery(query.getSQL())
-            .execute(toTuple(query))
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
             .map { rows -> val a = JsonArray(); rows.forEach { a.add(toMessageJson(it)) }; a }
     }
 
     fun get(id: String): Future<JsonObject> {
         val query = ctx.selectFrom(m).where(m.ID.eq(id))
-        return pool.preparedQuery(query.getSQL())
-            .execute(toTuple(query))
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
             .flatMap { rows ->
                 if (rows.size() == 0) Future.failedFuture(NotFoundException("message not found"))
                 else Future.succeededFuture(toMessageJson(rows.iterator().next()))
@@ -68,8 +67,8 @@ class MessagesService(private val pool: Pool, private val ctx: DSLContext = Data
         val q3 = if (payload != null) q2.set(m.PAYLOAD, JSONB.valueOf(payload.encode())) else q2
         val query = q3.where(m.ID.eq(id)).returning(m)
 
-        return pool.preparedQuery(query.getSQL())
-            .execute(toTuple(query))
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
             .flatMap { rows ->
                 if (rows.size() == 0) Future.failedFuture(NotFoundException("message not found"))
                 else Future.succeededFuture(toMessageJson(rows.iterator().next()))
@@ -83,8 +82,8 @@ class MessagesService(private val pool: Pool, private val ctx: DSLContext = Data
             .where(m.ID.eq(id))
             .returning(m)
 
-        return pool.preparedQuery(query.getSQL())
-            .execute(toTuple(query))
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
             .flatMap { rows ->
                 if (rows.size() == 0) Future.failedFuture(NotFoundException("message not found"))
                 else Future.succeededFuture(toMessageJson(rows.iterator().next()))
@@ -93,20 +92,9 @@ class MessagesService(private val pool: Pool, private val ctx: DSLContext = Data
 
     fun delete(id: String): Future<Void> {
         val query = ctx.deleteFrom(m).where(m.ID.eq(id))
-        return pool.preparedQuery(query.getSQL())
-            .execute(toTuple(query))
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
             .map { null }
-    }
-
-    private fun toTuple(query: org.jooq.Query): Tuple {
-        val tuple = Tuple.tuple()
-        query.getBindValues().forEach { v ->
-            when (v) {
-                is JSONB -> tuple.addValue(JsonObject(v.data()))
-                else -> tuple.addValue(v)
-            }
-        }
-        return tuple
     }
 
     companion object {

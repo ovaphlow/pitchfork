@@ -1,0 +1,9 @@
+{
+  "name": "ui-astro",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm --filter @pitchfork/auth dev",
+    "build": "pnpm -r build",
+    "preview": "pnpm --filter @pitchfork/auth preview"
+  }
+}

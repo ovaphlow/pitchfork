@@ -8,7 +8,6 @@ import io.vertx.core.json.JsonObject
 import io.vertx.ext.auth.jwt.JWTAuth
 import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
-import io.vertx.sqlclient.Tuple
 import org.jooq.DSLContext
 import org.jooq.JSONB
 import org.slf4j.LoggerFactory
@@ -25,8 +24,8 @@ class AuthService(private val pool: Pool, private val jwtAuth: JWTAuth, private 
 
     fun login(email: String, password: String, loginIp: String = ""): Future<LoginResult> {
         val query = ctx.selectFrom(u).where(u.EMAIL.eq(email))
-        return pool.preparedQuery(query.getSQL())
-            .execute(toTuple(query))
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
             .flatMap { rows ->
                 if (rows.size() == 0) {
                     return@flatMap Future.failedFuture(InvalidCredentialsException())
@@ -54,8 +53,8 @@ class AuthService(private val pool: Pool, private val jwtAuth: JWTAuth, private 
                     .set(u.UPDATED_AT, OffsetDateTime.now())
                     .where(u.ID.eq(userId))
 
-                pool.preparedQuery(updateQuery.getSQL())
-                    .execute(toTuple(updateQuery))
+                pool.preparedQuery(DatabaseConfig.sql(updateQuery))
+                    .execute(DatabaseConfig.tuple(updateQuery))
                     .map {
                         val token = jwtAuth.generateToken(JsonObject().put("sub", userId).put("email", email))
                         LoginResult(token = token, user = toUserJson(row))
@@ -65,8 +64,10 @@ class AuthService(private val pool: Pool, private val jwtAuth: JWTAuth, private 
 
     fun signUp(email: String, password: String): Future<SignUpResult> {
         val countQuery = ctx.selectCount().from(u).where(u.EMAIL.eq(email))
-        return pool.preparedQuery(countQuery.getSQL())
-            .execute(toTuple(countQuery))
+        System.err.println("=== COUNT SQL: ${DatabaseConfig.sql(countQuery)}")
+        System.err.println("=== COUNT BIND: ${countQuery.getBindValues()}")
+        return pool.preparedQuery(DatabaseConfig.sql(countQuery))
+            .execute(DatabaseConfig.tuple(countQuery))
             .flatMap { rows ->
                 if (rows.iterator().next().getLong(0) > 0) {
                     return@flatMap Future.failedFuture(EmailAlreadyRegisteredException())
@@ -80,13 +81,15 @@ class AuthService(private val pool: Pool, private val jwtAuth: JWTAuth, private 
                     u, u.ID, u.EMAIL, u.USERNAME, u.PHONE, u.PASSWORD_HASH, u.USER_TYPE, u.STATUS, u.CREATED_AT, u.UPDATED_AT
                 ).values(id, email, "", "", hash, "regular", "pending", now, now)
                     .returning(u.ID)
+                System.err.println("=== INSERT SQL: ${DatabaseConfig.sql(insertQuery)}")
+                System.err.println("=== INSERT BIND values: ${insertQuery.getBindValues()}")
 
-                pool.preparedQuery(insertQuery.getSQL())
-                    .execute(toTuple(insertQuery))
+                pool.preparedQuery(DatabaseConfig.sql(insertQuery))
+                    .execute(DatabaseConfig.tuple(insertQuery))
                     .flatMap {
                         val getQuery = ctx.selectFrom(u).where(u.ID.eq(id))
-                        pool.preparedQuery(getQuery.getSQL())
-                            .execute(toTuple(getQuery))
+                        pool.preparedQuery(DatabaseConfig.sql(getQuery))
+                            .execute(DatabaseConfig.tuple(getQuery))
                     }
                     .map { userRows ->
                         val row = userRows.iterator().next()
@@ -100,17 +103,6 @@ class AuthService(private val pool: Pool, private val jwtAuth: JWTAuth, private 
             .map { user ->
                 VerifyResult(sub = user.principal().getString("sub"))
             }
-    }
-
-    private fun toTuple(query: org.jooq.Query): Tuple {
-        val tuple = Tuple.tuple()
-        query.getBindValues().forEach { v ->
-            when (v) {
-                is JSONB -> tuple.addValue(JsonObject(v.data()))
-                else -> tuple.addValue(v)
-            }
-        }
-        return tuple
     }
 
     companion object {

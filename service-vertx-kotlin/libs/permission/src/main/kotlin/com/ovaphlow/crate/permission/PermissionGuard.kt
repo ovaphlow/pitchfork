@@ -58,7 +58,8 @@ class PermissionGuard(private val vertx: Vertx, private val pool: Pool, private 
                                 .end(JsonObject().put("error", "internal error").encode())
                         }
                 }
-                .onFailure {
+                .onFailure { err ->
+                    log.error("authentication failed", err)
                     ctx.response().setStatusCode(401)
                         .end(JsonObject().put("error", "invalid token").encode())
                 }

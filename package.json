@@ -1,0 +1,9 @@
+{
+  "name": "pitchfork",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm --filter ui-astro dev",
+    "build": "pnpm --filter ui-astro build",
+    "preview": "pnpm --filter ui-astro preview"
+  }
+}

@@ -15,7 +15,9 @@ import io.vertx.ext.auth.JWTOptions
 import io.vertx.ext.auth.PubSecKeyOptions
 import io.vertx.ext.auth.jwt.JWTAuth
 import io.vertx.ext.auth.jwt.JWTAuthOptions
+import io.vertx.core.http.HttpMethod
 import io.vertx.ext.web.Router
+import io.vertx.ext.web.handler.CorsHandler
 import org.slf4j.LoggerFactory
 
 private val log = LoggerFactory.getLogger("com.ovaphlow.crate.service.MainKt")
@@ -44,6 +46,20 @@ fun main() {
 
     val mainRouter = Router.router(vertx)
 
+    // --- CORS ---
+    mainRouter.route().handler(
+        CorsHandler.create()
+            .addOrigin("*")
+            .allowedMethod(HttpMethod.GET)
+            .allowedMethod(HttpMethod.POST)
+            .allowedMethod(HttpMethod.PUT)
+            .allowedMethod(HttpMethod.PATCH)
+            .allowedMethod(HttpMethod.DELETE)
+            .allowedMethod(HttpMethod.OPTIONS)
+            .allowedHeader("Content-Type")
+            .allowedHeader("Authorization")
+    )
+
     val jwtSecret = config.getJsonObject("auth", JsonObject()).getString("jwt-secret", "crate-default-secret")
     val jwtAuth = JWTAuth.create(vertx, JWTAuthOptions()
         .addPubSecKey(PubSecKeyOptions()
@@ -63,6 +79,17 @@ fun main() {
 
     mainRouter.route("/health").handler { ctx ->
         ctx.json(JsonObject().put("status", "ok").put("app", "service-vertx-kotlin"))
+    }
+
+    mainRouter.route().failureHandler { ctx ->
+        val statusCode = ctx.statusCode() ?: 500
+        val err = ctx.failure()
+        log.error("request exception: {} {} -> {}: {}", ctx.request().method(), ctx.request().path(),
+            statusCode, err?.message ?: "unknown", err)
+        if (!ctx.response().ended()) {
+            ctx.response().setStatusCode(statusCode).end(JsonObject()
+                .put("error", if (statusCode == 500) "internal error" else (err?.message ?: "unknown")).encode())
+        }
     }
 
     val port = config.getJsonObject("server", JsonObject()).getInteger("port", 8080)

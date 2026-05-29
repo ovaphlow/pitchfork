@@ -1,0 +1,28 @@
+---
+import AuthLayout from "../layouts/AuthLayout.astro";
+---
+
+<AuthLayout title="首页">
+  <div class="w-full max-w-md rounded-2xl border border-gray-800 bg-gray-900/80 p-8 shadow-2xl backdrop-blur text-center">
+    <h2 class="text-xl font-semibold text-white mb-4">欢迎使用 Pitchfork</h2>
+    <p class="text-sm text-gray-400 mb-8">
+      请登录或注册以开始使用
+    </p>
+    <div class="flex gap-4">
+      <a
+        href="/login"
+        class="flex-1 rounded-lg bg-indigo-600 px-4 py-2.5 text-center text-sm font-semibold text-white
+               transition-all hover:bg-indigo-500 cursor-pointer"
+      >
+        登录
+      </a>
+      <a
+        href="/register"
+        class="flex-1 rounded-lg border border-gray-700 bg-gray-800 px-4 py-2.5 text-center text-sm font-semibold text-gray-300
+               transition-all hover:bg-gray-700 cursor-pointer"
+      >
+        注册
+      </a>
+    </div>
+  </div>
+</AuthLayout>
