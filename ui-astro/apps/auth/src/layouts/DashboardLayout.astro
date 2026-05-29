@@ -1,0 +1,195 @@
+---
+import "../styles/global.css";
+
+interface Props {
+  title: string;
+  /** 当前激活的导航项标识，用于高亮 active */
+  active?: "dashboard" | "data" | "users" | "settings" | "audit";
+}
+
+const { title, active } = Astro.props;
+
+function isActive(name: string) {
+  return active === name;
+}
+---
+
+<!doctype html>
+<html lang="zh-CN" class="dark h-full">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{title} — 政务一体化管理平台</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  </head>
+  <body class="h-full bg-bg text-fg antialiased overflow-hidden font-body">
+    <div class="flex h-full" id="app-shell">
+      <!-- ====== Sidebar ====== -->
+      <aside
+        id="sidebar"
+        class="flex flex-col bg-surface border-r border-border overflow-hidden z-10 transition-all duration-250 ease-in-out"
+        style="width: var(--sidebar-w); min-width: var(--sidebar-w)"
+      >
+        <!-- Header -->
+        <div class="flex items-center gap-3 h-[var(--topbar-h)] px-4 border-b border-border shrink-0">
+          <div class="w-8 h-8 shrink-0 rounded-sm flex items-center justify-center"
+               style="background: linear-gradient(135deg, var(--color-accent), oklch(52% 0.14 210))">
+            <svg class="w-[18px] h-[18px] text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
+            </svg>
+          </div>
+          <span class="text-sm font-semibold text-fg-emphasis whitespace-nowrap overflow-hidden sidebar-label">政务管理平台</span>
+        </div>
+
+        <!-- Nav -->
+        <nav class="flex-1 overflow-y-auto p-3 flex flex-col gap-0.5">
+          <div class="text-xs font-semibold text-fg-dimmed uppercase tracking-widest px-3 py-3 pb-1 whitespace-nowrap overflow-hidden sidebar-section">主菜单</div>
+
+          <!-- 工作台 -->
+          <a href="/dashboard" class={"flex items-center gap-3 h-10 px-3 rounded-md text-sm no-underline cursor-pointer whitespace-nowrap overflow-hidden transition-all duration-150 " + (isActive("dashboard") ? "bg-accent-subtle text-accent font-medium" : "text-fg-muted hover:bg-surface-alt hover:text-fg")}>
+            <svg class="w-[18px] h-[18px] shrink-0 opacity-70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>
+            </svg>
+            <span class="overflow-hidden sidebar-label">工作台</span>
+          </a>
+
+          <!-- 数据管理 -->
+          <a href="/data" class={"flex items-center gap-3 h-10 px-3 rounded-md text-sm no-underline cursor-pointer whitespace-nowrap overflow-hidden transition-all duration-150 " + (isActive("data") ? "bg-accent-subtle text-accent font-medium" : "text-fg-muted hover:bg-surface-alt hover:text-fg")}>
+            <svg class="w-[18px] h-[18px] shrink-0 opacity-70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>
+            </svg>
+            <span class="overflow-hidden sidebar-label">数据管理</span>
+          </a>
+
+          <!-- 用户管理 -->
+          <a href="/users" class={"flex items-center gap-3 h-10 px-3 rounded-md text-sm no-underline cursor-pointer whitespace-nowrap overflow-hidden transition-all duration-150 " + (isActive("users") ? "bg-accent-subtle text-accent font-medium" : "text-fg-muted hover:bg-surface-alt hover:text-fg")}>
+            <svg class="w-[18px] h-[18px] shrink-0 opacity-70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+            </svg>
+            <span class="overflow-hidden sidebar-label">用户管理</span>
+          </a>
+
+          <div class="text-xs font-semibold text-fg-dimmed uppercase tracking-widest px-3 py-3 pb-1 whitespace-nowrap overflow-hidden sidebar-section">系统设置</div>
+
+          <!-- 系统设置 -->
+          <a href="/settings" class={"flex items-center gap-3 h-10 px-3 rounded-md text-sm no-underline cursor-pointer whitespace-nowrap overflow-hidden transition-all duration-150 " + (isActive("settings") ? "bg-accent-subtle text-accent font-medium" : "text-fg-muted hover:bg-surface-alt hover:text-fg")}>
+            <svg class="w-[18px] h-[18px] shrink-0 opacity-70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
+            <span class="overflow-hidden sidebar-label">系统设置</span>
+          </a>
+
+          <!-- 安全审计 -->
+          <a href="/audit" class={"flex items-center gap-3 h-10 px-3 rounded-md text-sm no-underline cursor-pointer whitespace-nowrap overflow-hidden transition-all duration-150 " + (isActive("audit") ? "bg-accent-subtle text-accent font-medium" : "text-fg-muted hover:bg-surface-alt hover:text-fg")}>
+            <svg class="w-[18px] h-[18px] shrink-0 opacity-70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+            </svg>
+            <span class="overflow-hidden sidebar-label">安全审计</span>
+          </a>
+        </nav>
+
+        <!-- Footer -->
+        <div class="border-t border-border p-3 shrink-0">
+          <a href="/login" class="flex items-center gap-3 h-10 px-3 rounded-md text-sm no-underline cursor-pointer whitespace-nowrap overflow-hidden transition-all duration-150 text-fg-dimmed hover:bg-surface-alt hover:text-fg">
+            <svg class="w-[18px] h-[18px] shrink-0 opacity-70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>
+            </svg>
+            <span class="overflow-hidden sidebar-label">退出登录</span>
+          </a>
+        </div>
+      </aside>
+
+      <!-- ====== Main ====== -->
+      <main class="flex-1 flex flex-col overflow-hidden min-w-0">
+        <!-- Topbar -->
+        <header class="flex items-center justify-between h-[var(--topbar-h)] px-6 bg-surface border-b border-border shrink-0">
+          <div class="flex items-center gap-3">
+            <button id="sidebar-toggle" class="w-9 h-9 flex items-center justify-center bg-transparent border border-border rounded-sm text-fg-muted hover:bg-surface-alt hover:text-fg cursor-pointer transition-all duration-150">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="15" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+              </svg>
+            </button>
+            <div class="flex items-center gap-2 text-sm text-fg-muted">
+              <span>首页</span>
+              <span class="text-fg-dimmed">/</span>
+              <span class="text-fg font-medium">{title}</span>
+            </div>
+          </div>
+
+          <div class="flex items-center gap-4">
+            <!-- 通知 -->
+            <button class="w-9 h-9 flex items-center justify-center bg-transparent border-none rounded-sm text-fg-muted hover:bg-surface-alt hover:text-fg cursor-pointer transition-all duration-150 relative">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+              </svg>
+              <span class="absolute top-1 right-1 w-2 h-2 bg-danger rounded-full"></span>
+            </button>
+
+            <!-- 用户 -->
+            <div class="relative" id="user-menu-wrap">
+              <button id="user-menu-btn" class="w-[34px] h-[34px] rounded-full bg-accent text-white flex items-center justify-center text-sm font-semibold cursor-pointer relative border-none">
+                张
+              </button>
+              <div id="user-dropdown" class="hidden absolute top-full right-0 mt-1.5 w-48 bg-surface-overlay border border-border rounded-lg shadow-overlay p-2 z-50">
+                <div class="flex items-center gap-2 h-9 px-3 rounded-sm text-sm text-fg font-medium pointer-events-none">张建国</div>
+                <div class="flex items-center gap-2 h-7 px-3 rounded-sm text-xs text-fg-dimmed pointer-events-none">系统管理员</div>
+                <div class="h-px bg-border my-2"></div>
+                <button class="flex items-center gap-2 h-9 px-3 rounded-sm text-sm text-fg-muted hover:bg-surface-alt hover:text-fg cursor-pointer border-none w-full text-left transition-all duration-150">个人设置</button>
+                <a href="/login" class="flex items-center gap-2 h-9 px-3 rounded-sm text-sm text-fg-muted hover:bg-surface-alt hover:text-fg cursor-pointer border-none w-full text-left no-underline transition-all duration-150">退出登录</a>
+              </div>
+            </div>
+          </div>
+        </header>
+
+        <!-- Content -->
+        <div class="flex-1 overflow-y-auto p-6">
+          <slot />
+        </div>
+      </main>
+    </div>
+
+    <script>
+      // ---- Sidebar toggle ----
+      const sidebar = document.getElementById("sidebar");
+      const toggleBtn = document.getElementById("sidebar-toggle");
+      const sidebarW = 260;
+      const sidebarCollapsed = 64;
+
+      if (sidebar && toggleBtn) {
+        // 从 localStorage 恢复状态
+        const saved = localStorage.getItem("sidebar_collapsed");
+        if (saved === "true") {
+          sidebar.style.width = sidebarCollapsed + "px";
+          sidebar.style.minWidth = sidebarCollapsed + "px";
+        }
+
+        toggleBtn.addEventListener("click", () => {
+          const isCollapsed = sidebar.style.width === sidebarCollapsed + "px" || sidebar.style.minWidth === sidebarCollapsed + "px";
+          if (isCollapsed) {
+            sidebar.style.width = sidebarW + "px";
+            sidebar.style.minWidth = sidebarW + "px";
+            localStorage.setItem("sidebar_collapsed", "false");
+          } else {
+            sidebar.style.width = sidebarCollapsed + "px";
+            sidebar.style.minWidth = sidebarCollapsed + "px";
+            localStorage.setItem("sidebar_collapsed", "true");
+          }
+        });
+      }
+
+      // ---- User dropdown ----
+      const userBtn = document.getElementById("user-menu-btn");
+      const userDropdown = document.getElementById("user-dropdown");
+      if (userBtn && userDropdown) {
+        userBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          userDropdown.classList.toggle("hidden");
+        });
+        document.addEventListener("click", () => {
+          userDropdown.classList.add("hidden");
+        });
+        userDropdown.addEventListener("click", (e) => e.stopPropagation());
+      }
+    </script>
+  </body>
+</html>

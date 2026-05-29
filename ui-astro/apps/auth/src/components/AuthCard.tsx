@@ -16,7 +16,7 @@ export default function AuthCard({ mode }: Props) {
 		setSuccess(true);
 		// 跳转到主应用首页（可根据需要改路径）
 		setTimeout(() => {
-			window.location.href = "/";
+			window.location.href = "/dashboard";
 		}, 800);
 	}
 
