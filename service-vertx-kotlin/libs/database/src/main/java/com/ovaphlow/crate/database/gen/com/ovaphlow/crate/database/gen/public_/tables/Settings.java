@@ -4,15 +4,19 @@
 package com.ovaphlow.crate.database.gen.public_.tables;
 
 
+import com.ovaphlow.crate.database.gen.public_.Indexes;
 import com.ovaphlow.crate.database.gen.public_.Keys;
 import com.ovaphlow.crate.database.gen.public_.Public;
 import com.ovaphlow.crate.database.gen.public_.tables.records.SettingsRecord;
 
 import java.time.LocalDateTime;
+import java.util.Arrays;
 import java.util.Collection;
+import java.util.List;
 
 import org.jooq.Condition;
 import org.jooq.Field;
+import org.jooq.Index;
 import org.jooq.JSONB;
 import org.jooq.Name;
 import org.jooq.PlainSQL;
@@ -123,6 +127,11 @@ public class Settings extends TableImpl<SettingsRecord> {
     @Override
     public Schema getSchema() {
         return aliased() ? null : Public.PUBLIC;
+    }
+
+    @Override
+    public List<Index> getIndexes() {
+        return Arrays.asList(Indexes.IDX_SETTINGS_CATEGORY, Indexes.IDX_SETTINGS_CATEGORY_CODE);
     }
 
     @Override

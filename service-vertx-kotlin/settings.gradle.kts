@@ -8,6 +8,7 @@ include(
     "libs:database",
     "libs:common",
     "libs:messages",
+    "libs:users",
     "apps:service"
 )
 

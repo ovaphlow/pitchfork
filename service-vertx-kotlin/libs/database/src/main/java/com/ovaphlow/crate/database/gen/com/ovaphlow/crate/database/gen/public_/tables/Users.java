@@ -120,6 +120,11 @@ public class Users extends TableImpl<UsersRecord> {
      */
     public final TableField<UsersRecord, OffsetDateTime> UPDATED_AT = createField(DSL.name("updated_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6).defaultValue(DSL.field(DSL.raw("CURRENT_TIMESTAMP"), SQLDataType.TIMESTAMPWITHTIMEZONE)), this, "");
 
+    /**
+     * The column <code>public.users.dept_id</code>.
+     */
+    public final TableField<UsersRecord, String> DEPT_ID = createField(DSL.name("dept_id"), SQLDataType.VARCHAR(32).defaultValue(DSL.field(DSL.raw("''::character varying"), SQLDataType.VARCHAR)), this, "");
+
     private Users(Name alias, Table<UsersRecord> aliased) {
         this(alias, aliased, (Field<?>[]) null, null);
     }

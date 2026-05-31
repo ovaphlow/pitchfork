@@ -1,0 +1,8 @@
+---
+import DashboardLayout from "../../layouts/DashboardLayout.astro";
+import DepartmentsManagement from "../../components/DepartmentsManagement.tsx";
+---
+
+<DashboardLayout title="部门管理" active="settings-departments">
+  <DepartmentsManagement client:load />
+</DashboardLayout>

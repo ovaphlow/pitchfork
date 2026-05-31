@@ -1,0 +1,8 @@
+---
+import DashboardLayout from "../layouts/DashboardLayout.astro";
+import UsersManagement from "../components/UsersManagement.tsx";
+---
+
+<DashboardLayout title="用户管理" active="users">
+  <UsersManagement client:load />
+</DashboardLayout>

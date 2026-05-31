@@ -203,6 +203,20 @@ public class UsersRecord extends UpdatableRecordImpl<UsersRecord> {
         return (OffsetDateTime) get(12);
     }
 
+    /**
+     * Setter for <code>public.users.dept_id</code>.
+     */
+    public void setDeptId(String value) {
+        set(13, value);
+    }
+
+    /**
+     * Getter for <code>public.users.dept_id</code>.
+     */
+    public String getDeptId() {
+        return (String) get(13);
+    }
+
     // -------------------------------------------------------------------------
     // Primary key information
     // -------------------------------------------------------------------------
@@ -226,7 +240,7 @@ public class UsersRecord extends UpdatableRecordImpl<UsersRecord> {
     /**
      * Create a detached, initialised UsersRecord
      */
-    public UsersRecord(String id, String email, String username, String phone, String passwordHash, String userType, String status, JSONB securityInfo, JSONB verificationInfo, JSONB passwordResetInfo, JSONB activityInfo, OffsetDateTime createdAt, OffsetDateTime updatedAt) {
+    public UsersRecord(String id, String email, String username, String phone, String passwordHash, String userType, String status, JSONB securityInfo, JSONB verificationInfo, JSONB passwordResetInfo, JSONB activityInfo, OffsetDateTime createdAt, OffsetDateTime updatedAt, String deptId) {
         super(Users.USERS);
 
         setId(id);
@@ -242,6 +256,7 @@ public class UsersRecord extends UpdatableRecordImpl<UsersRecord> {
         setActivityInfo(activityInfo);
         setCreatedAt(createdAt);
         setUpdatedAt(updatedAt);
+        setDeptId(deptId);
         resetChangedOnNotNull();
     }
 }

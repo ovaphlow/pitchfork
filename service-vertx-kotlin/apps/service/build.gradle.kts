@@ -8,6 +8,7 @@ dependencies {
     implementation(project(":libs:files"))
     implementation(project(":libs:permission"))
     implementation(project(":libs:messages"))
+    implementation(project(":libs:users"))
     implementation(project(":libs:database"))
     implementation(libs.vertx.web)
     implementation(libs.vertx.config)

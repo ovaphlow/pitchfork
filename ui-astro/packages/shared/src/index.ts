@@ -173,3 +173,67 @@ export async function verify(
 		headers: { Authorization: `Bearer ${token}` },
 	});
 }
+
+// ---- Departments ----
+
+export async function listDepartments(): Promise<unknown[]> {
+	return request("/settings/v1/departments");
+}
+
+export async function createDepartment(data: {
+	name: string;
+	code: string;
+	parent_code?: string;
+	description?: string;
+}): Promise<unknown> {
+	return request("/settings/v1/departments", {
+		method: "POST",
+		body: JSON.stringify(data),
+	});
+}
+
+export async function updateDepartment(
+	id: string,
+	data: {
+		name?: string;
+		code?: string;
+		parent_code?: string;
+		description?: string;
+	},
+): Promise<unknown> {
+	return request(`/settings/v1/departments/${id}`, {
+		method: "PUT",
+		body: JSON.stringify(data),
+	});
+}
+
+export async function deleteDepartment(id: string): Promise<void> {
+	await request(`/settings/v1/departments/${id}`, { method: "DELETE" });
+}
+
+// ---- Users ----
+
+export async function listUsers(params?: {
+	search?: string;
+	status?: string;
+	limit?: number;
+	offset?: number;
+}): Promise<unknown[]> {
+	const q = new URLSearchParams();
+	if (params?.search) q.set("search", params.search);
+	if (params?.status) q.set("status", params.status);
+	if (params?.limit) q.set("limit", String(params.limit));
+	if (params?.offset) q.set("offset", String(params.offset));
+	const qs = q.toString();
+	return request(`/users/v1/users${qs ? "?" + qs : ""}`);
+}
+
+export async function updateUserStatus(
+	id: string,
+	status: string,
+): Promise<unknown> {
+	return request(`/users/v1/users/${id}/status`, {
+		method: "PATCH",
+		body: JSON.stringify({ status }),
+	});
+}

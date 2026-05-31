@@ -4,6 +4,7 @@
 package com.ovaphlow.crate.database.gen.public_;
 
 
+import com.ovaphlow.crate.database.gen.public_.tables.Settings;
 import com.ovaphlow.crate.database.gen.public_.tables.Users;
 
 import org.jooq.Index;
@@ -22,6 +23,8 @@ public class Indexes {
     // INDEX definitions
     // -------------------------------------------------------------------------
 
+    public static final Index IDX_SETTINGS_CATEGORY = Internal.createIndex(DSL.name("idx_settings_category"), Settings.SETTINGS, new OrderField[] { Settings.SETTINGS.CATEGORY }, false);
+    public static final Index IDX_SETTINGS_CATEGORY_CODE = Internal.createIndex(DSL.name("idx_settings_category_code"), Settings.SETTINGS, new OrderField[] { Settings.SETTINGS.CATEGORY, Settings.SETTINGS.CODE }, false);
     public static final Index IDX_USERS_EMAIL = Internal.createIndex(DSL.name("idx_users_email"), Users.USERS, new OrderField[] { Users.USERS.EMAIL }, false);
     public static final Index IDX_USERS_PHONE = Internal.createIndex(DSL.name("idx_users_phone"), Users.USERS, new OrderField[] { Users.USERS.PHONE }, false);
     public static final Index IDX_USERS_USERNAME = Internal.createIndex(DSL.name("idx_users_username"), Users.USERS, new OrderField[] { Users.USERS.USERNAME }, false);
