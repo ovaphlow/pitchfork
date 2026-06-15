@@ -134,7 +134,7 @@ export default function EmployeeList() {
       </Badge>
     )},
     { key: "actions", header: "操作", render: (row) => (
-      <Button variant="ghost" size="sm" className="text-accent" onClick={() => openAssign(row)}>分配角色</Button>
+      <Button variant="ghost" size="sm" className="text-accent" onClick={() => openAssign(row)}>设置</Button>
     )},
   ];
 

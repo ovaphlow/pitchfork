@@ -19,7 +19,12 @@ class SettingsService(private val pool: Pool, private val ctx: DSLContext = Data
     private val s = Settings.SETTINGS
 
     fun listByCategory(category: String): Future<JsonArray> {
-        val query = ctx.selectFrom(s)
+        val query = ctx.select(
+                s.ID, s.CATEGORY, s.CODE, s.PARENT_CODE, s.PAYLOAD,
+                org.jooq.impl.DSL.field("created_at"),
+                org.jooq.impl.DSL.field("updated_at")
+            )
+            .from(s)
             .where(s.CATEGORY.eq(category))
             .orderBy(s.CODE.asc())
         return pool.preparedQuery(DatabaseConfig.sql(query))
@@ -68,7 +73,12 @@ class SettingsService(private val pool: Pool, private val ctx: DSLContext = Data
     }
 
     fun listDepartments(): Future<JsonArray> {
-        val query = ctx.selectFrom(s)
+        val query = ctx.select(
+                s.ID, s.CATEGORY, s.CODE, s.PARENT_CODE, s.PAYLOAD,
+                org.jooq.impl.DSL.field("created_at"),
+                org.jooq.impl.DSL.field("updated_at")
+            )
+            .from(s)
             .where(s.CATEGORY.eq("department"))
             .orderBy(org.jooq.impl.DSL.field("created_at").asc())
         return pool.preparedQuery(DatabaseConfig.sql(query))
@@ -138,7 +148,12 @@ class SettingsService(private val pool: Pool, private val ctx: DSLContext = Data
     }
 
     private fun getDepartment(id: String): Future<JsonObject> {
-        val query = ctx.selectFrom(s).where(s.ID.eq(id)).and(s.CATEGORY.eq("department"))
+        val query = ctx.select(
+                s.ID, s.CATEGORY, s.CODE, s.PARENT_CODE, s.PAYLOAD,
+                org.jooq.impl.DSL.field("created_at"),
+                org.jooq.impl.DSL.field("updated_at")
+            )
+            .from(s).where(s.ID.eq(id)).and(s.CATEGORY.eq("department"))
         return pool.preparedQuery(DatabaseConfig.sql(query))
             .execute(DatabaseConfig.tuple(query))
             .flatMap { rows ->
@@ -168,7 +183,6 @@ class SettingsService(private val pool: Pool, private val ctx: DSLContext = Data
             .put("category", row.getValue("category")?.toString())
             .put("code", row.getValue("code")?.toString())
             .put("parent_code", row.getValue("parent_code")?.toString() ?: "")
-            .put("root_code", row.getValue("root_code")?.toString() ?: "")
             .put("payload", row.getValue("payload") as? JsonObject ?: JsonObject())
             .put("created_at", row.getValue("created_at")?.toString())
             .put("updated_at", row.getValue("updated_at")?.toString())
