@@ -277,6 +277,29 @@ export async function updateUserStatus(
 	});
 }
 
+// ---- Roles & Permissions ----
+
+export async function listRoles(): Promise<{ id: string; name: string; code: string; description?: string }[]> {
+	return request("/permission/v1/roles");
+}
+
+export async function assignRole(userId: string, roleId: string): Promise<unknown> {
+	return request("/permission/v1/assignments", {
+		method: "POST",
+		body: JSON.stringify({ user_id: userId, role_id: roleId }),
+	});
+}
+
+export async function unassignRole(userId: string, roleId: string): Promise<unknown> {
+	return request(`/permission/v1/assignments?user_id=${encodeURIComponent(userId)}&role_id=${encodeURIComponent(roleId)}`, {
+		method: "DELETE",
+	});
+}
+
+export async function getUserAssignments(userId: string): Promise<{ role_id: string; role_name: string; scope_type: string; scope_id: string }[]> {
+	return request(`/permission/v1/users/${userId}/assignments`);
+}
+
 // ═══════════════════════════════════════════
 // Knowledge API
 // ═══════════════════════════════════════════
