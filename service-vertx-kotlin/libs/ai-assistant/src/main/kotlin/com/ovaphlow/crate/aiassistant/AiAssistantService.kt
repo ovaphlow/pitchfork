@@ -166,7 +166,7 @@ class AiAssistantService(private val pool: Pool, private val ctx: DSLContext = D
                 when (p) {
                     is String -> tuple.addString(p)
                     is Boolean -> tuple.addBoolean(p)
-                    is OffsetDateTime -> tuple.addString(p.toString())
+                    is OffsetDateTime -> tuple.addOffsetDateTime(p)
                     is Array<*> -> tuple.addValue(p)
                     else -> tuple.addValue(p)
                 }
@@ -297,7 +297,7 @@ class AiAssistantService(private val pool: Pool, private val ctx: DSLContext = D
                     is String -> tuple.addString(p)
                     is Boolean -> tuple.addBoolean(p)
                     is Double -> tuple.addDouble(p)
-                    is OffsetDateTime -> tuple.addString(p.toString())
+                    is OffsetDateTime -> tuple.addOffsetDateTime(p)
                     is Array<*> -> tuple.addValue(p)
                     else -> tuple.addValue(p)
                 }

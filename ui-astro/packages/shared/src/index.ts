@@ -174,7 +174,46 @@ export async function verify(
 	});
 }
 
-// ---- Departments ----
+// ---- Settings API (knowledge categories & tags) ----
+
+export async function listKnowledgeCategorySettings(): Promise<{ code: string; name: string }[]> {
+  const res: { records: { code: string; payload: { name: string } }[] } = await request("/settings/v1/knowledge-categories");
+  return res.records.map((r) => ({ code: r.code, name: r.payload?.name ?? r.code }));
+}
+
+export async function createKnowledgeCategorySetting(data: { code: string; name: string }): Promise<unknown> {
+  return request("/settings/v1/knowledge-categories", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateKnowledgeCategorySetting(code: string, data: { name: string }): Promise<unknown> {
+  return request(`/settings/v1/knowledge-categories/${code}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteKnowledgeCategorySetting(code: string): Promise<void> {
+  await request(`/settings/v1/knowledge-categories/${code}`, { method: "DELETE" });
+}
+
+export async function listKnowledgeTagSettings(): Promise<string[]> {
+  const res: { records: { code: string; payload: { name: string } }[] } = await request("/settings/v1/knowledge-tags");
+  return res.records.map((r) => r.payload?.name ?? r.code);
+}
+
+export async function createKnowledgeTagSetting(data: { code: string; name: string }): Promise<unknown> {
+  return request("/settings/v1/knowledge-tags", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteKnowledgeTagSetting(code: string): Promise<void> {
+  await request(`/settings/v1/knowledge-tags/${code}`, { method: "DELETE" });
+}
 
 export async function listDepartments(): Promise<unknown[]> {
 	return request("/settings/v1/departments");
@@ -248,10 +287,12 @@ export interface KnowledgeEntry {
 	content?: string;
 	type?: string;
 	status?: string;
+	category_ids?: string[];
 	category_id?: string;
 	category_name?: string;
 	tags?: string[];
 	version?: number;
+	version_number?: number;
 	author?: string;
 	created_at?: string;
 	updated_at?: string;
@@ -313,6 +354,10 @@ export async function createKnowledgeEntry(data: Partial<KnowledgeEntry>): Promi
 	});
 }
 
+export async function getKnowledgeEntry(id: string): Promise<KnowledgeEntry> {
+	return request(`/knowledge/v1/entries/${id}`);
+}
+
 export async function updateKnowledgeEntry(id: string, data: Partial<KnowledgeEntry>): Promise<KnowledgeEntry> {
 	return request(`/knowledge/v1/entries/${id}`, {
 		method: "PUT",
@@ -329,7 +374,7 @@ export async function listKnowledgeVersions(entryId: string): Promise<KnowledgeV
 	return res.records;
 }
 
-export async function createKnowledgeVersion(entryId: string, data: { content: string; comment?: string }): Promise<KnowledgeVersion> {
+export async function createKnowledgeVersion(entryId: string, data: { content: string; change_note?: string }): Promise<KnowledgeVersion> {
 	return request(`/knowledge/v1/entries/${entryId}/versions`, {
 		method: "POST",
 		body: JSON.stringify(data),

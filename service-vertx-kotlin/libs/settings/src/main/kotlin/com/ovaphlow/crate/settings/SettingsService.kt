@@ -18,6 +18,55 @@ class SettingsService(private val pool: Pool, private val ctx: DSLContext = Data
     private val log = LoggerFactory.getLogger(SettingsService::class.java)
     private val s = Settings.SETTINGS
 
+    fun listByCategory(category: String): Future<JsonArray> {
+        val query = ctx.selectFrom(s)
+            .where(s.CATEGORY.eq(category))
+            .orderBy(s.CODE.asc())
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
+            .map { rows -> val a = JsonArray(); rows.forEach { a.add(toSettingJson(it)) }; a }
+    }
+
+    fun createSetting(category: String, code: String, name: String): Future<JsonObject> {
+        val checkQuery = ctx.selectOne().from(s).where(s.CATEGORY.eq(category)).and(s.CODE.eq(code))
+        return pool.preparedQuery(DatabaseConfig.sql(checkQuery))
+            .execute(DatabaseConfig.tuple(checkQuery))
+            .flatMap { rows ->
+                if (rows.iterator().hasNext()) {
+                    Future.failedFuture(IllegalArgumentException("code '$code' already exists"))
+                } else {
+                    val id = Ulid.generate()
+                    val payload = JsonObject().put("name", name)
+                    val query = ctx.insertInto(s, s.ID, s.CATEGORY, s.CODE, s.PAYLOAD)
+                        .values(id, category, code, JSONB.valueOf(payload.encode()))
+                    pool.preparedQuery(DatabaseConfig.sql(query))
+                        .execute(DatabaseConfig.tuple(query))
+                        .map { payload.put("id", id).put("code", code) }
+                }
+            }
+    }
+
+    fun updateSetting(category: String, code: String, name: String): Future<JsonObject> {
+        val payload = JsonObject().put("name", name)
+        val query = ctx.update(s)
+            .set(s.PAYLOAD, JSONB.valueOf(payload.encode()))
+            .set(s.UPDATE_TIME, LocalDateTime.now())
+            .where(s.CATEGORY.eq(category)).and(s.CODE.eq(code))
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
+            .flatMap { rows ->
+                if (rows.size() == 0) Future.failedFuture(NotFoundException("setting not found"))
+                else Future.succeededFuture(payload.put("code", code))
+            }
+    }
+
+    fun deleteSetting(category: String, code: String): Future<Void> {
+        val query = ctx.deleteFrom(s).where(s.CATEGORY.eq(category)).and(s.CODE.eq(code))
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
+            .map { null }
+    }
+
     fun listDepartments(): Future<JsonArray> {
         val query = ctx.selectFrom(s)
             .where(s.CATEGORY.eq("department"))
@@ -106,6 +155,14 @@ class SettingsService(private val pool: Pool, private val ctx: DSLContext = Data
     }
 
     companion object {
+        fun toSettingJson(row: Row) = JsonObject()
+            .put("id", row.getValue("id")?.toString())
+            .put("category", row.getValue("category")?.toString())
+            .put("code", row.getValue("code")?.toString())
+            .put("payload", row.getValue("payload") as? JsonObject ?: JsonObject())
+            .put("create_time", row.getValue("create_time")?.toString())
+            .put("update_time", row.getValue("update_time")?.toString())
+
         fun toDeptJson(row: Row) = JsonObject()
             .put("id", row.getValue("id")?.toString())
             .put("category", row.getValue("category")?.toString())

@@ -66,13 +66,16 @@ class KnowledgeService(private val pool: Pool, private val ctx: DSLContext = Dat
 
     fun createCategory(name: String, parentId: String? = null, sortOrder: Int = 0, description: String? = null): Future<JsonObject> {
         val id = Ulid.generate()
-        val sql = """INSERT INTO knowledge_categories (id, name, parent_id, sort_order, description)
-                     VALUES (${'$'}1, ${'$'}2, ${'$'}3, ${'$'}4, ${'$'}5)
-                     RETURNING id, name, parent_id, sort_order, description""".trimIndent()
-        val tuple = Tuple.of(id, name, parentId ?: "", sortOrder, description ?: "")
-        return pool.preparedQuery(sql)
-            .execute(tuple)
-            .map { rows: RowSet<Row> -> categoryToJson(rows.iterator().next()) }
+        val query = ctx.insertInto(kc)
+            .set(kc.ID, id)
+            .set(kc.NAME, name)
+            .set(kc.PARENT_ID, parentId ?: "")
+            .set(kc.SORT_ORDER, sortOrder.toShort())
+            .set(kc.DESCRIPTION, description ?: "")
+            .returning(kc.ID, kc.NAME, kc.PARENT_ID, kc.SORT_ORDER, kc.DESCRIPTION)
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
+            .map { rows -> categoryToJson(rows.iterator().next()) }
     }
 
     fun updateCategory(id: String, name: String? = null, parentId: String? = null, sortOrder: Int? = null, description: String? = null): Future<JsonObject> {
@@ -217,7 +220,7 @@ class KnowledgeService(private val pool: Pool, private val ctx: DSLContext = Dat
                 ke.ID, ke.TITLE, ke.TYPE, ke.STATUS, ke.CURRENT_VERSION_ID,
                 ke.CATEGORY_IDS, ke.DEVICE_IDS, ke.POSITION_IDS, ke.TAGS,
                 ke.EXTRA, ke.CREATED_BY, ke.UPDATED_BY, ke.CREATED_AT, ke.UPDATED_AT,
-                kv.CONTENT, kv.CONTENT_BLOCKS, kv.ATTACHMENT_FILES, kv.VERSION_NUMBER
+                kv.CONTENT, kv.CONTENT_BLOCKS, kv.ATTACHMENT_FILES, kv.CHANGE_NOTE, kv.VERSION_NUMBER
             )
             .from(ke)
             .leftJoin(kv).on(kv.ID.eq(ke.CURRENT_VERSION_ID))
@@ -243,44 +246,27 @@ class KnowledgeService(private val pool: Pool, private val ctx: DSLContext = Dat
         updatedBy: String = ""
     ): Future<JsonObject> {
         return getEntryRaw(id).flatMap { existing: JsonObject ->
-            val setClauses = mutableListOf<String>()
-            val params = mutableListOf<Any?>()
-            var idx = 1
+            val now = OffsetDateTime.now()
+            var step = ctx.update(ke).set(ke.UPDATED_AT, now)
+            var hasChanges = false
 
-            if (title != null) { setClauses.add("title = \${'$'}${idx}"); params.add(title); idx++ }
-            if (type != null) { setClauses.add("type = \${'$'}${idx}"); params.add(type); idx++ }
-            if (categoryIds != null) { setClauses.add("category_ids = \${'$'}${idx}"); params.add(categoryIds.toTypedArray()); idx++ }
-            if (deviceIds != null) { setClauses.add("device_ids = \${'$'}${idx}"); params.add(deviceIds.toTypedArray()); idx++ }
-            if (positionIds != null) { setClauses.add("position_ids = \${'$'}${idx}"); params.add(positionIds.toTypedArray()); idx++ }
-            if (tags != null) { setClauses.add("tags = \${'$'}${idx}"); params.add(tags.toTypedArray()); idx++ }
-            if (extra != null) { setClauses.add("extra = \${'$'}${idx}::jsonb"); params.add(extra.encode()); idx++ }
+            if (title != null) { step = step.set(ke.TITLE, title); hasChanges = true }
+            if (type != null) { step = step.set(ke.TYPE, type); hasChanges = true }
+            if (categoryIds != null) { step = step.set(ke.CATEGORY_IDS, categoryIds.toTypedArray()); hasChanges = true }
+            if (deviceIds != null) { step = step.set(ke.DEVICE_IDS, deviceIds.toTypedArray()); hasChanges = true }
+            if (positionIds != null) { step = step.set(ke.POSITION_IDS, positionIds.toTypedArray()); hasChanges = true }
+            if (tags != null) { step = step.set(ke.TAGS, tags.toTypedArray()); hasChanges = true }
+            if (extra != null) { step = step.set(ke.EXTRA, JSONB.valueOf(extra.encode())); hasChanges = true }
+            if (updatedBy.isNotBlank()) { step = step.set(ke.UPDATED_BY, updatedBy); hasChanges = true }
 
-            if (setClauses.isEmpty()) return@flatMap Future.succeededFuture(existing)
+            if (!hasChanges) return@flatMap Future.succeededFuture(existing)
 
-            setClauses.add("updated_by = \${'$'}${idx}"); params.add(updatedBy); idx++
-            setClauses.add("updated_at = \${'$'}${idx}"); params.add(OffsetDateTime.now()); idx++
+            val q = step
+                .where(ke.ID.eq(id))
+                .returning(ke.ID, ke.TITLE, ke.TYPE, ke.STATUS, ke.CURRENT_VERSION_ID, ke.CATEGORY_IDS, ke.DEVICE_IDS, ke.POSITION_IDS, ke.TAGS, ke.EXTRA, ke.CREATED_BY, ke.UPDATED_BY, ke.CREATED_AT, ke.UPDATED_AT)
 
-            val sql = """UPDATE knowledge_entries
-                         SET ${setClauses.joinToString(", ")}
-                         WHERE id = \${'$'}${idx}
-                         RETURNING id, title, type, status, current_version_id, category_ids, device_ids, position_ids, tags, extra, created_by, updated_by, created_at, updated_at""".trimIndent()
-            params.add(id)
-
-            val tuple = Tuple.tuple()
-            @Suppress("UNCHECKED_CAST")
-            for (p in params) {
-                when (p) {
-                    is String -> tuple.addString(p)
-                    is Int -> tuple.addInteger(p)
-                    is Short -> tuple.addInteger(p.toInt())
-                    is OffsetDateTime -> tuple.addString(p.toString())
-                    is Array<*> -> tuple.addValue(p)
-                    else -> tuple.addValue(p)
-                }
-            }
-
-            pool.preparedQuery(sql)
-                .execute(tuple)
+            pool.preparedQuery(DatabaseConfig.sql(q))
+                .execute(DatabaseConfig.tuple(q))
                 .flatMap { rows: RowSet<Row> ->
                     if (rows.size() == 0) Future.failedFuture(NotFoundException("entry not found"))
                     else Future.succeededFuture(entryToJson(rows.iterator().next()))
@@ -389,23 +375,30 @@ class KnowledgeService(private val pool: Pool, private val ctx: DSLContext = Dat
                     val now = OffsetDateTime.now()
                     val vn = versionNumber ?: 1
 
-                    val sql = """INSERT INTO knowledge_versions (id, entry_id, version_number, content, content_blocks, attachment_files, change_note, status, created_by, created_at)
-                                 VALUES (${'$'}1, ${'$'}2, ${'$'}3, ${'$'}4, ${'$'}5::jsonb, ${'$'}6::jsonb, ${'$'}7, ${'$'}8, ${'$'}9, ${'$'}10)
-                                 RETURNING id, entry_id, version_number, content, content_blocks, attachment_files, change_note, status, approved_by, approved_at, created_by, created_at""".trimIndent()
-                    val tuple = Tuple.of(id, entryId, vn, content, contentBlocks.encode(), attachmentFiles.encode(), changeNote, "草稿", createdBy, now)
+                    val insertQuery = ctx.insertInto(kv)
+                        .set(kv.ID, id)
+                        .set(kv.ENTRY_ID, entryId)
+                        .set(kv.VERSION_NUMBER, vn.toString())
+                        .set(kv.CONTENT, content)
+                        .set(kv.CONTENT_BLOCKS, JSONB.valueOf(contentBlocks.encode()))
+                        .set(kv.ATTACHMENT_FILES, JSONB.valueOf(attachmentFiles.encode()))
+                        .set(kv.CHANGE_NOTE, changeNote)
+                        .set(kv.STATUS, "草稿")
+                        .set(kv.CREATED_BY, createdBy)
+                        .set(kv.CREATED_AT, now)
+                        .returning(kv.ID, kv.ENTRY_ID, kv.VERSION_NUMBER, kv.CONTENT, kv.CONTENT_BLOCKS, kv.ATTACHMENT_FILES, kv.CHANGE_NOTE, kv.STATUS, kv.APPROVED_BY, kv.APPROVED_AT, kv.CREATED_BY, kv.CREATED_AT)
 
-                    pool.preparedQuery(sql)
-                        .execute(tuple)
+                    pool.preparedQuery(DatabaseConfig.sql(insertQuery))
+                        .execute(DatabaseConfig.tuple(insertQuery))
                         .flatMap { insertRows: RowSet<Row> ->
                             val version = versionToJson(insertRows.iterator().next())
                             // Update entry's current_version_id
-                            val updateSql = """UPDATE knowledge_entries
-                                               SET current_version_id = ${'$'}1,
-                                                   updated_at = ${'$'}2
-                                               WHERE id = ${'$'}3""".trimIndent()
-                            val updateTuple = Tuple.of(id, now, entryId)
-                            pool.preparedQuery(updateSql)
-                                .execute(updateTuple)
+                            val updateQuery = ctx.update(ke)
+                                .set(ke.CURRENT_VERSION_ID, id)
+                                .set(ke.UPDATED_AT, now)
+                                .where(ke.ID.eq(entryId))
+                            pool.preparedQuery(DatabaseConfig.sql(updateQuery))
+                                .execute(DatabaseConfig.tuple(updateQuery))
                                 .map { version }
                         }
                 }
@@ -586,7 +579,8 @@ class KnowledgeService(private val pool: Pool, private val ctx: DSLContext = Dat
             base.put("content", row.getValue("content")?.toString() ?: "")
             base.put("content_blocks", row.getValue("content_blocks") as? JsonObject ?: JsonObject())
             base.put("attachment_files", row.getValue("attachment_files") as? JsonObject ?: JsonObject())
-            base.put("version_number", row.getValue("version_number") as? Int ?: 0)
+            base.put("version_number", row.getValue("version_number")?.toString()?.toIntOrNull() ?: 0)
+            base.put("change_note", row.getValue("change_note")?.toString() ?: "")
             return base
         }
 
@@ -594,7 +588,7 @@ class KnowledgeService(private val pool: Pool, private val ctx: DSLContext = Dat
             return JsonObject()
                 .put("id", row.getValue("id")?.toString())
                 .put("entry_id", row.getValue("entry_id")?.toString())
-                .put("version_number", row.getValue("version_number") as? Int ?: 0)
+                .put("version_number", row.getValue("version_number")?.toString()?.toIntOrNull() ?: 0)
                 .put("content", row.getValue("content")?.toString() ?: "")
                 .put("content_blocks", row.getValue("content_blocks") as? JsonObject ?: JsonObject())
                 .put("attachment_files", row.getValue("attachment_files") as? JsonObject ?: JsonObject())

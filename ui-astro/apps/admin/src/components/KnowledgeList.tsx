@@ -49,7 +49,10 @@ export default function KnowledgeList() {
     )},
     { key: "version", header: "版本" },
     { key: "author", header: "作者" },
-    { key: "updated_at", header: "更新时间" },
+    { key: "updated_at", header: "更新时间", render: (row) => {
+      const d = row.updated_at ? new Date(row.updated_at) : null;
+      return d ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}` : "—";
+    } },
     { key: "actions", header: "操作", render: (row) => (
       <div className="flex gap-2">
         <a href={`/knowledge/editor?id=${row.id}`} className="no-underline">

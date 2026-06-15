@@ -59,6 +59,70 @@ object SettingsRoutes {
                 .onFailure { respondError(ctx, it) }
         }
 
+        // ---- Knowledge Categories ----
+
+        router.get("/knowledge-categories").handler { ctx ->
+            service.listByCategory("knowledge-category")
+                .onSuccess { ctx.json(JsonObject().put("records", it)) }
+                .onFailure { respondError(ctx, it) }
+        }
+
+        router.post("/knowledge-categories").handler { ctx ->
+            val b = body(ctx)
+            val code = b.getString("code", "")
+            val name = b.getString("name", "")
+            if (code.isBlank() || name.isBlank()) {
+                respond(ctx, 400, "code and name required"); return@handler
+            }
+            service.createSetting("knowledge-category", code, name)
+                .onSuccess { ctx.json(it) }
+                .onFailure { if (it is IllegalArgumentException) respond(ctx, 400, it.message) else respondError(ctx, it) }
+        }
+
+        router.put("/knowledge-categories/:code").handler { ctx ->
+            val code = ctx.pathParam("code") ?: return@handler respond(ctx, 400, "code required")
+            val b = body(ctx)
+            val name = b.getString("name", "")
+            if (name.isBlank()) { respond(ctx, 400, "name required"); return@handler }
+            service.updateSetting("knowledge-category", code, name)
+                .onSuccess { ctx.json(it) }
+                .onFailure { if (it is NotFoundException) respond(ctx, 404, it.message) else respondError(ctx, it) }
+        }
+
+        router.delete("/knowledge-categories/:code").handler { ctx ->
+            val code = ctx.pathParam("code") ?: return@handler respond(ctx, 400, "code required")
+            service.deleteSetting("knowledge-category", code)
+                .onSuccess { ctx.response().setStatusCode(204).end() }
+                .onFailure { respondError(ctx, it) }
+        }
+
+        // ---- Knowledge Tags ----
+
+        router.get("/knowledge-tags").handler { ctx ->
+            service.listByCategory("knowledge-tag")
+                .onSuccess { ctx.json(JsonObject().put("records", it)) }
+                .onFailure { respondError(ctx, it) }
+        }
+
+        router.post("/knowledge-tags").handler { ctx ->
+            val b = body(ctx)
+            val code = b.getString("code", "")
+            val name = b.getString("name", "")
+            if (code.isBlank() || name.isBlank()) {
+                respond(ctx, 400, "code and name required"); return@handler
+            }
+            service.createSetting("knowledge-tag", code, name)
+                .onSuccess { ctx.json(it) }
+                .onFailure { if (it is IllegalArgumentException) respond(ctx, 400, it.message) else respondError(ctx, it) }
+        }
+
+        router.delete("/knowledge-tags/:code").handler { ctx ->
+            val code = ctx.pathParam("code") ?: return@handler respond(ctx, 400, "code required")
+            service.deleteSetting("knowledge-tag", code)
+                .onSuccess { ctx.response().setStatusCode(204).end() }
+                .onFailure { respondError(ctx, it) }
+        }
+
         return router
     }
 

@@ -274,7 +274,7 @@ class OnsiteService(private val pool: Pool, private val ctx: DSLContext = Databa
                 when (p) {
                     is String -> tuple.addString(p)
                     is Int -> tuple.addInteger(p)
-                    is OffsetDateTime -> tuple.addString(p.toString())
+                    is OffsetDateTime -> tuple.addOffsetDateTime(p)
                     is Array<*> -> tuple.addValue(p)
                     else -> tuple.addValue(p)
                 }
