@@ -50,7 +50,7 @@ class SettingsService(private val pool: Pool, private val ctx: DSLContext = Data
         val payload = JsonObject().put("name", name)
         val query = ctx.update(s)
             .set(s.PAYLOAD, JSONB.valueOf(payload.encode()))
-            .set(s.UPDATE_TIME, LocalDateTime.now())
+            .set(org.jooq.impl.DSL.field("updated_at"), LocalDateTime.now())
             .where(s.CATEGORY.eq(category)).and(s.CODE.eq(code))
         return pool.preparedQuery(DatabaseConfig.sql(query))
             .execute(DatabaseConfig.tuple(query))
@@ -70,7 +70,7 @@ class SettingsService(private val pool: Pool, private val ctx: DSLContext = Data
     fun listDepartments(): Future<JsonArray> {
         val query = ctx.selectFrom(s)
             .where(s.CATEGORY.eq("department"))
-            .orderBy(s.CREATE_TIME.asc())
+            .orderBy(org.jooq.impl.DSL.field("created_at").asc())
         return pool.preparedQuery(DatabaseConfig.sql(query))
             .execute(DatabaseConfig.tuple(query))
             .map { rows -> val a = JsonArray(); rows.forEach { a.add(toDeptJson(it)) }; a }
@@ -101,8 +101,8 @@ class SettingsService(private val pool: Pool, private val ctx: DSLContext = Data
                                 .put("parent_code", parentCode)
                                 .put("root_code", "")
                                 .put("payload", payload)
-                                .put("create_time", now)
-                                .put("update_time", now)
+                                .put("created_at", now)
+                                .put("updated_at", now)
                         }
                 }
             }
@@ -119,7 +119,7 @@ class SettingsService(private val pool: Pool, private val ctx: DSLContext = Data
             val newCode = code ?: existing.getString("code", "")
             val newParentCode = parentCode ?: existing.getString("parent_code", "")
 
-            val q1 = ctx.update(s).set(s.UPDATE_TIME, LocalDateTime.now())
+            val q1 = ctx.update(s).set(org.jooq.impl.DSL.field("updated_at"), LocalDateTime.now())
                 .set(s.PAYLOAD, JSONB.valueOf(mergedPayload.encode()))
             val q2 = if (code != null) q1.set(s.CODE, code) else q1
             val q3 = if (parentCode != null) q2.set(s.PARENT_CODE, parentCode) else q2
@@ -132,7 +132,7 @@ class SettingsService(private val pool: Pool, private val ctx: DSLContext = Data
                         .put("code", newCode)
                         .put("parent_code", newParentCode)
                         .put("payload", mergedPayload)
-                        .put("update_time", LocalDateTime.now().toString())
+                        .put("updated_at", LocalDateTime.now().toString())
                 }
         }
     }
@@ -160,8 +160,8 @@ class SettingsService(private val pool: Pool, private val ctx: DSLContext = Data
             .put("category", row.getValue("category")?.toString())
             .put("code", row.getValue("code")?.toString())
             .put("payload", row.getValue("payload") as? JsonObject ?: JsonObject())
-            .put("create_time", row.getValue("create_time")?.toString())
-            .put("update_time", row.getValue("update_time")?.toString())
+            .put("created_at", row.getValue("created_at")?.toString())
+            .put("updated_at", row.getValue("updated_at")?.toString())
 
         fun toDeptJson(row: Row) = JsonObject()
             .put("id", row.getValue("id")?.toString())
@@ -170,8 +170,8 @@ class SettingsService(private val pool: Pool, private val ctx: DSLContext = Data
             .put("parent_code", row.getValue("parent_code")?.toString() ?: "")
             .put("root_code", row.getValue("root_code")?.toString() ?: "")
             .put("payload", row.getValue("payload") as? JsonObject ?: JsonObject())
-            .put("create_time", row.getValue("create_time")?.toString())
-            .put("update_time", row.getValue("update_time")?.toString())
+            .put("created_at", row.getValue("created_at")?.toString())
+            .put("updated_at", row.getValue("updated_at")?.toString())
     }
 }
 
