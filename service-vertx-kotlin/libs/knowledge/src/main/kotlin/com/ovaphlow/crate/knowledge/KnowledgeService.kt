@@ -167,7 +167,7 @@ class KnowledgeService(private val pool: Pool, private val ctx: DSLContext = Dat
         val dataQuery = ctx.select(
                 ke.ID, ke.TITLE, ke.TYPE, ke.STATUS, ke.CURRENT_VERSION_ID,
                 ke.CATEGORY_IDS, ke.DEVICE_IDS, ke.POSITION_IDS, ke.TAGS,
-                ke.EXTRA, ke.CREATED_BY, ke.UPDATED_BY, ke.CREATED_AT, ke.UPDATED_AT
+                org.jooq.impl.DSL.field("metadata", org.jooq.impl.SQLDataType.JSONB), ke.CREATED_BY, ke.UPDATED_BY, ke.CREATED_AT, ke.UPDATED_AT
             )
             .from(ke)
             .where(conditions)
@@ -206,9 +206,9 @@ class KnowledgeService(private val pool: Pool, private val ctx: DSLContext = Dat
         val id = Ulid.generate()
         val now = OffsetDateTime.now()
         val query = ctx.insertInto(ke)
-            .columns(ke.ID, ke.TITLE, ke.TYPE, ke.STATUS, ke.CATEGORY_IDS, ke.DEVICE_IDS, ke.POSITION_IDS, ke.TAGS, ke.EXTRA, ke.CREATED_BY, ke.UPDATED_BY, ke.CREATED_AT, ke.UPDATED_AT)
+            .columns(ke.ID, ke.TITLE, ke.TYPE, ke.STATUS, ke.CATEGORY_IDS, ke.DEVICE_IDS, ke.POSITION_IDS, ke.TAGS, org.jooq.impl.DSL.field("metadata", org.jooq.impl.SQLDataType.JSONB), ke.CREATED_BY, ke.UPDATED_BY, ke.CREATED_AT, ke.UPDATED_AT)
             .values(id, title, type, "草稿", categoryIds.toTypedArray(), deviceIds.toTypedArray(), positionIds.toTypedArray(), tags.toTypedArray(), JSONB.valueOf(extra.encode()), createdBy, updatedBy, now, now)
-            .returning(ke.ID, ke.TITLE, ke.TYPE, ke.STATUS, ke.CURRENT_VERSION_ID, ke.CATEGORY_IDS, ke.DEVICE_IDS, ke.POSITION_IDS, ke.TAGS, ke.EXTRA, ke.CREATED_BY, ke.UPDATED_BY, ke.CREATED_AT, ke.UPDATED_AT)
+            .returning(ke.ID, ke.TITLE, ke.TYPE, ke.STATUS, ke.CURRENT_VERSION_ID, ke.CATEGORY_IDS, ke.DEVICE_IDS, ke.POSITION_IDS, ke.TAGS, org.jooq.impl.DSL.field("metadata", org.jooq.impl.SQLDataType.JSONB), ke.CREATED_BY, ke.UPDATED_BY, ke.CREATED_AT, ke.UPDATED_AT)
 
         return pool.preparedQuery(DatabaseConfig.sql(query))
             .execute(DatabaseConfig.tuple(query))
@@ -219,7 +219,7 @@ class KnowledgeService(private val pool: Pool, private val ctx: DSLContext = Dat
         val query = ctx.select(
                 ke.ID, ke.TITLE, ke.TYPE, ke.STATUS, ke.CURRENT_VERSION_ID,
                 ke.CATEGORY_IDS, ke.DEVICE_IDS, ke.POSITION_IDS, ke.TAGS,
-                ke.EXTRA, ke.CREATED_BY, ke.UPDATED_BY, ke.CREATED_AT, ke.UPDATED_AT,
+                org.jooq.impl.DSL.field("metadata", org.jooq.impl.SQLDataType.JSONB), ke.CREATED_BY, ke.UPDATED_BY, ke.CREATED_AT, ke.UPDATED_AT,
                 kv.CONTENT, kv.CONTENT_BLOCKS, kv.ATTACHMENT_FILES, kv.CHANGE_NOTE, kv.VERSION_NUMBER
             )
             .from(ke)
@@ -256,14 +256,14 @@ class KnowledgeService(private val pool: Pool, private val ctx: DSLContext = Dat
             if (deviceIds != null) { step = step.set(ke.DEVICE_IDS, deviceIds.toTypedArray()); hasChanges = true }
             if (positionIds != null) { step = step.set(ke.POSITION_IDS, positionIds.toTypedArray()); hasChanges = true }
             if (tags != null) { step = step.set(ke.TAGS, tags.toTypedArray()); hasChanges = true }
-            if (extra != null) { step = step.set(ke.EXTRA, JSONB.valueOf(extra.encode())); hasChanges = true }
+            if (extra != null) { step = step.set(org.jooq.impl.DSL.field("metadata", org.jooq.impl.SQLDataType.JSONB), JSONB.valueOf(extra.encode())); hasChanges = true }
             if (updatedBy.isNotBlank()) { step = step.set(ke.UPDATED_BY, updatedBy); hasChanges = true }
 
             if (!hasChanges) return@flatMap Future.succeededFuture(existing)
 
             val q = step
                 .where(ke.ID.eq(id))
-                .returning(ke.ID, ke.TITLE, ke.TYPE, ke.STATUS, ke.CURRENT_VERSION_ID, ke.CATEGORY_IDS, ke.DEVICE_IDS, ke.POSITION_IDS, ke.TAGS, ke.EXTRA, ke.CREATED_BY, ke.UPDATED_BY, ke.CREATED_AT, ke.UPDATED_AT)
+                .returning(ke.ID, ke.TITLE, ke.TYPE, ke.STATUS, ke.CURRENT_VERSION_ID, ke.CATEGORY_IDS, ke.DEVICE_IDS, ke.POSITION_IDS, ke.TAGS, org.jooq.impl.DSL.field("metadata", org.jooq.impl.SQLDataType.JSONB), ke.CREATED_BY, ke.UPDATED_BY, ke.CREATED_AT, ke.UPDATED_AT)
 
             pool.preparedQuery(DatabaseConfig.sql(q))
                 .execute(DatabaseConfig.tuple(q))
@@ -284,7 +284,7 @@ class KnowledgeService(private val pool: Pool, private val ctx: DSLContext = Dat
             .set(ke.STATUS, status)
             .set(ke.UPDATED_AT, now)
             .where(ke.ID.eq(id))
-            .returning(ke.ID, ke.TITLE, ke.TYPE, ke.STATUS, ke.CURRENT_VERSION_ID, ke.CATEGORY_IDS, ke.DEVICE_IDS, ke.POSITION_IDS, ke.TAGS, ke.EXTRA, ke.CREATED_BY, ke.UPDATED_BY, ke.CREATED_AT, ke.UPDATED_AT)
+            .returning(ke.ID, ke.TITLE, ke.TYPE, ke.STATUS, ke.CURRENT_VERSION_ID, ke.CATEGORY_IDS, ke.DEVICE_IDS, ke.POSITION_IDS, ke.TAGS, org.jooq.impl.DSL.field("metadata", org.jooq.impl.SQLDataType.JSONB), ke.CREATED_BY, ke.UPDATED_BY, ke.CREATED_AT, ke.UPDATED_AT)
 
         return pool.preparedQuery(DatabaseConfig.sql(query))
             .execute(DatabaseConfig.tuple(query))
@@ -311,7 +311,7 @@ class KnowledgeService(private val pool: Pool, private val ctx: DSLContext = Dat
         val query = ctx.select(
                 ke.ID, ke.TITLE, ke.TYPE, ke.STATUS, ke.CURRENT_VERSION_ID,
                 ke.CATEGORY_IDS, ke.DEVICE_IDS, ke.POSITION_IDS, ke.TAGS,
-                ke.EXTRA, ke.CREATED_BY, ke.UPDATED_BY, ke.CREATED_AT, ke.UPDATED_AT
+                org.jooq.impl.DSL.field("metadata", org.jooq.impl.SQLDataType.JSONB), ke.CREATED_BY, ke.UPDATED_BY, ke.CREATED_AT, ke.UPDATED_AT
             )
             .from(ke)
             .where(ke.ID.eq(id))
@@ -567,7 +567,7 @@ class KnowledgeService(private val pool: Pool, private val ctx: DSLContext = Dat
                 .put("device_ids", arrayToJsonArray(row.getValue("device_ids")))
                 .put("position_ids", arrayToJsonArray(row.getValue("position_ids")))
                 .put("tags", arrayToJsonArray(row.getValue("tags")))
-                .put("extra", row.getValue("extra") as? JsonObject ?: JsonObject())
+                .put("metadata", row.getValue("extra") as? JsonObject ?: JsonObject())
                 .put("created_by", row.getValue("created_by")?.toString() ?: "")
                 .put("updated_by", row.getValue("updated_by")?.toString() ?: "")
                 .put("created_at", row.getValue("created_at")?.toString())

@@ -105,7 +105,7 @@ object KnowledgeRoutes {
             val deviceIds = b.getJsonArray("device_ids")?.map { it.toString() } ?: emptyList()
             val positionIds = b.getJsonArray("position_ids")?.map { it.toString() } ?: emptyList()
             val tags = b.getJsonArray("tags")?.map { it.toString() } ?: emptyList()
-            val extra = b.getJsonObject("extra", JsonObject())
+            val extra = b.getJsonObject("metadata", JsonObject())
             val createdBy = b.getString("created_by", "")
             service.createEntry(title, type, categoryIds, deviceIds, positionIds, tags, extra, createdBy, createdBy)
                 .onSuccess { ctx.json(it) }
@@ -131,7 +131,7 @@ object KnowledgeRoutes {
             val deviceIds = b.getJsonArray("device_ids")?.map { it.toString() }
             val positionIds = b.getJsonArray("position_ids")?.map { it.toString() }
             val tags = b.getJsonArray("tags")?.map { it.toString() }
-            val extra = b.getJsonObject("extra")
+            val extra = b.getJsonObject("metadata")
             val updatedBy = b.getString("updated_by", "")
             service.updateEntry(id, title, type, categoryIds, deviceIds, positionIds, tags, extra, updatedBy)
                 .onSuccess { ctx.json(it) }
