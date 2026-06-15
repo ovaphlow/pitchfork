@@ -1,0 +1,8 @@
+---
+import AdminLayout from "../layouts/AdminLayout.astro";
+import DepartmentList from "../components/DepartmentList.tsx";
+---
+
+<AdminLayout title="部门管理" active="departments">
+  <DepartmentList client:load />
+</AdminLayout>
