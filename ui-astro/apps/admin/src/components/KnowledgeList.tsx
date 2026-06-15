@@ -41,14 +41,15 @@ export default function KnowledgeList() {
         {row.title}
       </a>
     )},
-    { key: "category_name", header: "分类", render: (row) => row.category_name ? <Badge>{row.category_name}</Badge> : "—" },
+    { key: "type", header: "类型", render: (row) => row.type ? <Badge>{row.type}</Badge> : "—" },
     { key: "status", header: "状态", render: (row) => (
       <Badge variant={statusVariant[row.status ?? ""] || "default"}>
         {statusLabel[row.status ?? ""] || row.status}
       </Badge>
     )},
-    { key: "version", header: "版本" },
-    { key: "author", header: "作者" },
+    { key: "tags", header: "标签", render: (row) => row.tags?.length ? (
+      <div className="flex gap-1 flex-wrap">{row.tags.map((t) => <Badge key={t}>{t}</Badge>)}</div>
+    ) : "—" },
     { key: "updated_at", header: "更新时间", render: (row) => {
       const d = row.updated_at ? new Date(row.updated_at) : null;
       return d ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}` : "—";
