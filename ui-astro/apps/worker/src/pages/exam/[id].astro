@@ -1,0 +1,12 @@
+---
+import MobileLayout from "../../layouts/MobileLayout.astro";
+import ExamPage from "../../components/ExamPage.tsx";
+
+export function getStaticPaths() {
+  return [{ params: { id: "placeholder" } }];
+}
+---
+
+<MobileLayout title="考试">
+  <ExamPage client:load />
+</MobileLayout>

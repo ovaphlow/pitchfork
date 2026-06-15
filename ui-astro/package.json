@@ -3,6 +3,8 @@
   "private": true,
   "scripts": {
     "dev": "pnpm --filter @pitchfork/auth dev",
+    "dev:admin": "pnpm --filter @pitchfork/admin dev",
+    "dev:worker": "pnpm --filter @pitchfork/worker dev",
     "build": "pnpm -r build",
     "preview": "pnpm --filter @pitchfork/auth preview"
   }

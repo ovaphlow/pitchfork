@@ -1,0 +1,8 @@
+---
+import MobileLayout from "../layouts/MobileLayout.astro";
+import ProfileSettings from "../components/ProfileSettings.tsx";
+---
+
+<MobileLayout title="个人设置" active="profile">
+  <ProfileSettings client:load />
+</MobileLayout>

@@ -4,7 +4,19 @@
 package com.ovaphlow.crate.database.gen.public_;
 
 
+import com.ovaphlow.crate.database.gen.public_.tables.AiQaLogs;
+import com.ovaphlow.crate.database.gen.public_.tables.CourseChapters;
+import com.ovaphlow.crate.database.gen.public_.tables.DeviceQrCodes;
+import com.ovaphlow.crate.database.gen.public_.tables.EmployeeCertificates;
+import com.ovaphlow.crate.database.gen.public_.tables.EmployeeSkills;
+import com.ovaphlow.crate.database.gen.public_.tables.ExamRecords;
+import com.ovaphlow.crate.database.gen.public_.tables.KnowledgeEntries;
+import com.ovaphlow.crate.database.gen.public_.tables.KnowledgeFeedbacks;
+import com.ovaphlow.crate.database.gen.public_.tables.KnowledgeVersions;
+import com.ovaphlow.crate.database.gen.public_.tables.LearningProgress;
+import com.ovaphlow.crate.database.gen.public_.tables.Questions;
 import com.ovaphlow.crate.database.gen.public_.tables.Settings;
+import com.ovaphlow.crate.database.gen.public_.tables.TrainingAssignments;
 import com.ovaphlow.crate.database.gen.public_.tables.Users;
 
 import org.jooq.Index;
@@ -23,8 +35,29 @@ public class Indexes {
     // INDEX definitions
     // -------------------------------------------------------------------------
 
+    public static final Index IDX_AI_QA_LOGS_CREATED = Internal.createIndex(DSL.name("idx_ai_qa_logs_created"), AiQaLogs.AI_QA_LOGS, new OrderField[] { AiQaLogs.AI_QA_LOGS.CREATED_AT }, false);
+    public static final Index IDX_AI_QA_LOGS_USER = Internal.createIndex(DSL.name("idx_ai_qa_logs_user"), AiQaLogs.AI_QA_LOGS, new OrderField[] { AiQaLogs.AI_QA_LOGS.USER_ID }, false);
+    public static final Index IDX_COURSE_CHAPTERS_COURSE = Internal.createIndex(DSL.name("idx_course_chapters_course"), CourseChapters.COURSE_CHAPTERS, new OrderField[] { CourseChapters.COURSE_CHAPTERS.COURSE_ID }, false);
+    public static final Index IDX_DEVICE_QR_CODES_CODE = Internal.createIndex(DSL.name("idx_device_qr_codes_code"), DeviceQrCodes.DEVICE_QR_CODES, new OrderField[] { DeviceQrCodes.DEVICE_QR_CODES.CODE }, false);
+    public static final Index IDX_DEVICE_QR_CODES_DEVICE = Internal.createIndex(DSL.name("idx_device_qr_codes_device"), DeviceQrCodes.DEVICE_QR_CODES, new OrderField[] { DeviceQrCodes.DEVICE_QR_CODES.DEVICE_ID }, false);
+    public static final Index IDX_EMPLOYEE_CERTIFICATES_EMPLOYEE = Internal.createIndex(DSL.name("idx_employee_certificates_employee"), EmployeeCertificates.EMPLOYEE_CERTIFICATES, new OrderField[] { EmployeeCertificates.EMPLOYEE_CERTIFICATES.EMPLOYEE_ID }, false);
+    public static final Index IDX_EMPLOYEE_SKILLS_EMPLOYEE = Internal.createIndex(DSL.name("idx_employee_skills_employee"), EmployeeSkills.EMPLOYEE_SKILLS, new OrderField[] { EmployeeSkills.EMPLOYEE_SKILLS.EMPLOYEE_ID }, false);
+    public static final Index IDX_EMPLOYEE_SKILLS_SKILL = Internal.createIndex(DSL.name("idx_employee_skills_skill"), EmployeeSkills.EMPLOYEE_SKILLS, new OrderField[] { EmployeeSkills.EMPLOYEE_SKILLS.SKILL_ID }, false);
+    public static final Index IDX_EXAM_RECORDS_EMPLOYEE = Internal.createIndex(DSL.name("idx_exam_records_employee"), ExamRecords.EXAM_RECORDS, new OrderField[] { ExamRecords.EXAM_RECORDS.EMPLOYEE_ID }, false);
+    public static final Index IDX_EXAM_RECORDS_PAPER = Internal.createIndex(DSL.name("idx_exam_records_paper"), ExamRecords.EXAM_RECORDS, new OrderField[] { ExamRecords.EXAM_RECORDS.PAPER_ID }, false);
+    public static final Index IDX_KNOWLEDGE_ENTRIES_EXTRA = Internal.createIndex(DSL.name("idx_knowledge_entries_extra"), KnowledgeEntries.KNOWLEDGE_ENTRIES, new OrderField[] { KnowledgeEntries.KNOWLEDGE_ENTRIES.EXTRA }, false);
+    public static final Index IDX_KNOWLEDGE_ENTRIES_TAGS = Internal.createIndex(DSL.name("idx_knowledge_entries_tags"), KnowledgeEntries.KNOWLEDGE_ENTRIES, new OrderField[] { KnowledgeEntries.KNOWLEDGE_ENTRIES.TAGS }, false);
+    public static final Index IDX_KNOWLEDGE_ENTRIES_TYPE_STATUS = Internal.createIndex(DSL.name("idx_knowledge_entries_type_status"), KnowledgeEntries.KNOWLEDGE_ENTRIES, new OrderField[] { KnowledgeEntries.KNOWLEDGE_ENTRIES.TYPE, KnowledgeEntries.KNOWLEDGE_ENTRIES.STATUS }, false);
+    public static final Index IDX_KNOWLEDGE_FEEDBACKS_ENTRY_ID = Internal.createIndex(DSL.name("idx_knowledge_feedbacks_entry_id"), KnowledgeFeedbacks.KNOWLEDGE_FEEDBACKS, new OrderField[] { KnowledgeFeedbacks.KNOWLEDGE_FEEDBACKS.ENTRY_ID }, false);
+    public static final Index IDX_KNOWLEDGE_VERSIONS_ENTRY_ID = Internal.createIndex(DSL.name("idx_knowledge_versions_entry_id"), KnowledgeVersions.KNOWLEDGE_VERSIONS, new OrderField[] { KnowledgeVersions.KNOWLEDGE_VERSIONS.ENTRY_ID }, false);
+    public static final Index IDX_LEARNING_PROGRESS_ASSIGNMENT = Internal.createIndex(DSL.name("idx_learning_progress_assignment"), LearningProgress.LEARNING_PROGRESS, new OrderField[] { LearningProgress.LEARNING_PROGRESS.ASSIGNMENT_ID }, false);
+    public static final Index IDX_LEARNING_PROGRESS_EMPLOYEE = Internal.createIndex(DSL.name("idx_learning_progress_employee"), LearningProgress.LEARNING_PROGRESS, new OrderField[] { LearningProgress.LEARNING_PROGRESS.EMPLOYEE_ID }, false);
+    public static final Index IDX_QUESTIONS_CONTENT = Internal.createIndex(DSL.name("idx_questions_content"), Questions.QUESTIONS, new OrderField[] { Questions.QUESTIONS.CONTENT }, false);
+    public static final Index IDX_QUESTIONS_TAGS = Internal.createIndex(DSL.name("idx_questions_tags"), Questions.QUESTIONS, new OrderField[] { Questions.QUESTIONS.TAGS }, false);
     public static final Index IDX_SETTINGS_CATEGORY = Internal.createIndex(DSL.name("idx_settings_category"), Settings.SETTINGS, new OrderField[] { Settings.SETTINGS.CATEGORY }, false);
     public static final Index IDX_SETTINGS_CATEGORY_CODE = Internal.createIndex(DSL.name("idx_settings_category_code"), Settings.SETTINGS, new OrderField[] { Settings.SETTINGS.CATEGORY, Settings.SETTINGS.CODE }, false);
+    public static final Index IDX_TRAINING_ASSIGNMENTS_COURSE = Internal.createIndex(DSL.name("idx_training_assignments_course"), TrainingAssignments.TRAINING_ASSIGNMENTS, new OrderField[] { TrainingAssignments.TRAINING_ASSIGNMENTS.COURSE_ID }, false);
+    public static final Index IDX_TRAINING_ASSIGNMENTS_TARGET = Internal.createIndex(DSL.name("idx_training_assignments_target"), TrainingAssignments.TRAINING_ASSIGNMENTS, new OrderField[] { TrainingAssignments.TRAINING_ASSIGNMENTS.TARGET_TYPE, TrainingAssignments.TRAINING_ASSIGNMENTS.TARGET_IDS }, false);
     public static final Index IDX_USERS_EMAIL = Internal.createIndex(DSL.name("idx_users_email"), Users.USERS, new OrderField[] { Users.USERS.EMAIL }, false);
     public static final Index IDX_USERS_PHONE = Internal.createIndex(DSL.name("idx_users_phone"), Users.USERS, new OrderField[] { Users.USERS.PHONE }, false);
     public static final Index IDX_USERS_USERNAME = Internal.createIndex(DSL.name("idx_users_username"), Users.USERS, new OrderField[] { Users.USERS.USERNAME }, false);

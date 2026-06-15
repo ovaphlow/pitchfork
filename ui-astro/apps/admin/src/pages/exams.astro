@@ -1,0 +1,8 @@
+---
+import AdminLayout from "../layouts/AdminLayout.astro";
+import ExamList from "../components/ExamList.tsx";
+---
+
+<AdminLayout title="试卷管理" active="exams">
+  <ExamList client:load />
+</AdminLayout>

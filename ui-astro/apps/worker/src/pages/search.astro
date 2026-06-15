@@ -1,0 +1,8 @@
+---
+import MobileLayout from "../layouts/MobileLayout.astro";
+import KnowledgeSearch from "../components/KnowledgeSearch.tsx";
+---
+
+<MobileLayout title="知识搜索" active="search">
+  <KnowledgeSearch client:load />
+</MobileLayout>

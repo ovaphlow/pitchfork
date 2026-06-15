@@ -1,0 +1,12 @@
+---
+import MobileLayout from "../../layouts/MobileLayout.astro";
+import KnowledgeDetail from "../../components/KnowledgeDetail.tsx";
+
+export function getStaticPaths() {
+  return [{ params: { id: "placeholder" } }];
+}
+---
+
+<MobileLayout title="知识详情">
+  <KnowledgeDetail client:load />
+</MobileLayout>

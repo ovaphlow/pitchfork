@@ -9,7 +9,7 @@
     <generator>
         <database>
             <name>org.jooq.meta.postgres.PostgresDatabase</name>
-            <includes>users|settings|messages|files|behaviors</includes>
+            <includes>users|settings|messages|files|behaviors|knowledge_entries|knowledge_versions|knowledge_categories|knowledge_feedbacks|departments|employees|positions|skills|employee_skills|certificates|employee_certificates|courses|course_chapters|questions|exam_papers|training_assignments|learning_progress|exam_records|ai_qa_logs|faq_pairs|preventive_push_rules|device_qr_codes|offline_cache_policies</includes>
         </database>
         <target>
             <packageName>com.ovaphlow.crate.database.gen</packageName>

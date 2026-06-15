@@ -4,10 +4,33 @@
 package com.ovaphlow.crate.database.gen.public_;
 
 
+import com.ovaphlow.crate.database.gen.public_.tables.AiQaLogs;
 import com.ovaphlow.crate.database.gen.public_.tables.Behaviors;
+import com.ovaphlow.crate.database.gen.public_.tables.Certificates;
+import com.ovaphlow.crate.database.gen.public_.tables.CourseChapters;
+import com.ovaphlow.crate.database.gen.public_.tables.Courses;
+import com.ovaphlow.crate.database.gen.public_.tables.Departments;
+import com.ovaphlow.crate.database.gen.public_.tables.DeviceQrCodes;
+import com.ovaphlow.crate.database.gen.public_.tables.EmployeeCertificates;
+import com.ovaphlow.crate.database.gen.public_.tables.EmployeeSkills;
+import com.ovaphlow.crate.database.gen.public_.tables.Employees;
+import com.ovaphlow.crate.database.gen.public_.tables.ExamPapers;
+import com.ovaphlow.crate.database.gen.public_.tables.ExamRecords;
+import com.ovaphlow.crate.database.gen.public_.tables.FaqPairs;
 import com.ovaphlow.crate.database.gen.public_.tables.Files;
+import com.ovaphlow.crate.database.gen.public_.tables.KnowledgeCategories;
+import com.ovaphlow.crate.database.gen.public_.tables.KnowledgeEntries;
+import com.ovaphlow.crate.database.gen.public_.tables.KnowledgeFeedbacks;
+import com.ovaphlow.crate.database.gen.public_.tables.KnowledgeVersions;
+import com.ovaphlow.crate.database.gen.public_.tables.LearningProgress;
 import com.ovaphlow.crate.database.gen.public_.tables.Messages;
+import com.ovaphlow.crate.database.gen.public_.tables.OfflineCachePolicies;
+import com.ovaphlow.crate.database.gen.public_.tables.Positions;
+import com.ovaphlow.crate.database.gen.public_.tables.PreventivePushRules;
+import com.ovaphlow.crate.database.gen.public_.tables.Questions;
 import com.ovaphlow.crate.database.gen.public_.tables.Settings;
+import com.ovaphlow.crate.database.gen.public_.tables.Skills;
+import com.ovaphlow.crate.database.gen.public_.tables.TrainingAssignments;
 import com.ovaphlow.crate.database.gen.public_.tables.Users;
 
 
@@ -18,9 +41,69 @@ import com.ovaphlow.crate.database.gen.public_.tables.Users;
 public class Tables {
 
     /**
+     * The table <code>public.ai_qa_logs</code>.
+     */
+    public static final AiQaLogs AI_QA_LOGS = AiQaLogs.AI_QA_LOGS;
+
+    /**
      * The table <code>public.behaviors</code>.
      */
     public static final Behaviors BEHAVIORS = Behaviors.BEHAVIORS;
+
+    /**
+     * The table <code>public.certificates</code>.
+     */
+    public static final Certificates CERTIFICATES = Certificates.CERTIFICATES;
+
+    /**
+     * The table <code>public.course_chapters</code>.
+     */
+    public static final CourseChapters COURSE_CHAPTERS = CourseChapters.COURSE_CHAPTERS;
+
+    /**
+     * The table <code>public.courses</code>.
+     */
+    public static final Courses COURSES = Courses.COURSES;
+
+    /**
+     * The table <code>public.departments</code>.
+     */
+    public static final Departments DEPARTMENTS = Departments.DEPARTMENTS;
+
+    /**
+     * The table <code>public.device_qr_codes</code>.
+     */
+    public static final DeviceQrCodes DEVICE_QR_CODES = DeviceQrCodes.DEVICE_QR_CODES;
+
+    /**
+     * The table <code>public.employee_certificates</code>.
+     */
+    public static final EmployeeCertificates EMPLOYEE_CERTIFICATES = EmployeeCertificates.EMPLOYEE_CERTIFICATES;
+
+    /**
+     * 员工技能档案
+     */
+    public static final EmployeeSkills EMPLOYEE_SKILLS = EmployeeSkills.EMPLOYEE_SKILLS;
+
+    /**
+     * The table <code>public.employees</code>.
+     */
+    public static final Employees EMPLOYEES = Employees.EMPLOYEES;
+
+    /**
+     * 试卷表
+     */
+    public static final ExamPapers EXAM_PAPERS = ExamPapers.EXAM_PAPERS;
+
+    /**
+     * 考试记录
+     */
+    public static final ExamRecords EXAM_RECORDS = ExamRecords.EXAM_RECORDS;
+
+    /**
+     * The table <code>public.faq_pairs</code>.
+     */
+    public static final FaqPairs FAQ_PAIRS = FaqPairs.FAQ_PAIRS;
 
     /**
      * The table <code>public.files</code>.
@@ -28,14 +111,69 @@ public class Tables {
     public static final Files FILES = Files.FILES;
 
     /**
+     * The table <code>public.knowledge_categories</code>.
+     */
+    public static final KnowledgeCategories KNOWLEDGE_CATEGORIES = KnowledgeCategories.KNOWLEDGE_CATEGORIES;
+
+    /**
+     * 知识条目主表
+     */
+    public static final KnowledgeEntries KNOWLEDGE_ENTRIES = KnowledgeEntries.KNOWLEDGE_ENTRIES;
+
+    /**
+     * The table <code>public.knowledge_feedbacks</code>.
+     */
+    public static final KnowledgeFeedbacks KNOWLEDGE_FEEDBACKS = KnowledgeFeedbacks.KNOWLEDGE_FEEDBACKS;
+
+    /**
+     * 知识版本表
+     */
+    public static final KnowledgeVersions KNOWLEDGE_VERSIONS = KnowledgeVersions.KNOWLEDGE_VERSIONS;
+
+    /**
+     * The table <code>public.learning_progress</code>.
+     */
+    public static final LearningProgress LEARNING_PROGRESS = LearningProgress.LEARNING_PROGRESS;
+
+    /**
      * The table <code>public.messages</code>.
      */
     public static final Messages MESSAGES = Messages.MESSAGES;
 
     /**
+     * The table <code>public.offline_cache_policies</code>.
+     */
+    public static final OfflineCachePolicies OFFLINE_CACHE_POLICIES = OfflineCachePolicies.OFFLINE_CACHE_POLICIES;
+
+    /**
+     * The table <code>public.positions</code>.
+     */
+    public static final Positions POSITIONS = Positions.POSITIONS;
+
+    /**
+     * The table <code>public.preventive_push_rules</code>.
+     */
+    public static final PreventivePushRules PREVENTIVE_PUSH_RULES = PreventivePushRules.PREVENTIVE_PUSH_RULES;
+
+    /**
+     * The table <code>public.questions</code>.
+     */
+    public static final Questions QUESTIONS = Questions.QUESTIONS;
+
+    /**
      * The table <code>public.settings</code>.
      */
     public static final Settings SETTINGS = Settings.SETTINGS;
+
+    /**
+     * The table <code>public.skills</code>.
+     */
+    public static final Skills SKILLS = Skills.SKILLS;
+
+    /**
+     * The table <code>public.training_assignments</code>.
+     */
+    public static final TrainingAssignments TRAINING_ASSIGNMENTS = TrainingAssignments.TRAINING_ASSIGNMENTS;
 
     /**
      * The table <code>public.users</code>.

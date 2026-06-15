@@ -7,6 +7,13 @@ import com.ovaphlow.crate.messages.MessagesRoutes
 import com.ovaphlow.crate.permission.PermissionRoutes
 import com.ovaphlow.crate.users.UsersRoutes
 import com.ovaphlow.crate.settings.SettingsRoutes
+import com.ovaphlow.crate.knowledge.KnowledgeRoutes
+import com.ovaphlow.crate.skills.SkillsRoutes
+import com.ovaphlow.crate.training.TrainingRoutes
+import com.ovaphlow.crate.exam.ExamRoutes
+import com.ovaphlow.crate.onsite.OnsiteRoutes
+import com.ovaphlow.crate.aiassistant.AiAssistantRoutes
+import com.ovaphlow.crate.analytics.AnalyticsRoutes
 import io.vertx.config.ConfigRetriever
 import io.vertx.config.ConfigRetrieverOptions
 import io.vertx.config.ConfigStoreOptions
@@ -77,6 +84,13 @@ fun main() {
     apiRouter.route("/permission/v1/*").subRouter(PermissionRoutes.create(vertx, pool, jwtAuth))
     apiRouter.route("/messages/v1/*").subRouter(MessagesRoutes.create(vertx, pool))
     apiRouter.route("/users/v1/*").subRouter(UsersRoutes.create(vertx, pool))
+    apiRouter.route("/knowledge/v1/*").subRouter(KnowledgeRoutes.create(vertx, pool))
+    apiRouter.route("/skills/v1/*").subRouter(SkillsRoutes.create(vertx, pool))
+    apiRouter.route("/training/v1/*").subRouter(TrainingRoutes.create(vertx, pool))
+    apiRouter.route("/exam/v1/*").subRouter(ExamRoutes.create(vertx, pool))
+    apiRouter.route("/onsite/v1/*").subRouter(OnsiteRoutes.create(vertx, pool))
+    apiRouter.route("/ai/v1/*").subRouter(AiAssistantRoutes.create(vertx, pool))
+    apiRouter.route("/analytics/v1/*").subRouter(AnalyticsRoutes.create(vertx, pool))
     mainRouter.route("/crate-api/*").subRouter(apiRouter)
 
     mainRouter.route("/health").handler { ctx ->

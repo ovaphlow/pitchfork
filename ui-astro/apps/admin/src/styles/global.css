@@ -1,0 +1,39 @@
+@import "tailwindcss";
+
+@theme {
+  --sidebar-w: 260px;
+  --sidebar-collapsed-w: 64px;
+  --topbar-h: 60px;
+
+  --color-bg: oklch(14% 0.008 250);
+  --color-surface: oklch(17% 0.008 250);
+  --color-surface-overlay: oklch(22% 0.012 250);
+  --color-surface-alt: oklch(19% 0.01 250);
+  --color-border: oklch(25% 0.01 250);
+  --color-border-light: oklch(22% 0.008 250);
+  --color-fg: oklch(85% 0.008 250);
+  --color-fg-emphasis: oklch(95% 0.005 250);
+  --color-fg-muted: oklch(55% 0.015 250);
+  --color-fg-dimmed: oklch(38% 0.015 250);
+
+  --color-accent: oklch(62% 0.16 235);
+  --color-accent-subtle: oklch(62% 0.16 235 / 0.12);
+
+  --color-success: oklch(58% 0.15 150);
+  --color-success-bg: oklch(58% 0.15 150 / 0.12);
+  --color-warning: oklch(68% 0.14 78);
+  --color-warning-bg: oklch(68% 0.14 78 / 0.12);
+  --color-danger: oklch(58% 0.16 30);
+  --color-danger-bg: oklch(58% 0.16 30 / 0.12);
+  --color-info: oklch(60% 0.12 200);
+  --color-info-bg: oklch(60% 0.12 200 / 0.12);
+
+  --font-body: "Inter", "Noto Sans SC", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+
+  --shadow-overlay: 0 8px 32px oklch(0% 0 0 / 0.4);
+}
+
+html, body {
+  font-family: var(--font-body);
+}

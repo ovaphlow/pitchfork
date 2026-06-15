@@ -1,0 +1,20 @@
+{
+  "server": {
+    "port": 8080
+  },
+  "database": {
+    "host": "localhost",
+    "port": 5432,
+    "database": "ovaphlow",
+    "user": "ovaphlow",
+    "password": "dsdfJk#1123",
+    "pool-size": 10
+  },
+  "auth": {
+    "jwt-secret": "crate-default-secret",
+    "token-expiry-seconds": 86400,
+    "rsa-private-key": "",
+    "rsa-public-key": ""
+  },
+  "console-level": "DEBUG"
+}

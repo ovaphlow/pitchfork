@@ -1,0 +1,8 @@
+---
+import AdminLayout from "../layouts/AdminLayout.astro";
+import KnowledgeList from "../components/KnowledgeList.tsx";
+---
+
+<AdminLayout title="知识库" active="knowledge">
+  <KnowledgeList client:load />
+</AdminLayout>

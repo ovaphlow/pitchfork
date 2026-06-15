@@ -1,0 +1,8 @@
+---
+import AdminLayout from "../layouts/AdminLayout.astro";
+import PositionList from "../components/PositionList.tsx";
+---
+
+<AdminLayout title="岗位定义" active="positions">
+  <PositionList client:load />
+</AdminLayout>

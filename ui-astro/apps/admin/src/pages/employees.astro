@@ -1,0 +1,8 @@
+---
+import AdminLayout from "../layouts/AdminLayout.astro";
+import EmployeeList from "../components/EmployeeList.tsx";
+---
+
+<AdminLayout title="员工管理" active="employees">
+  <EmployeeList client:load />
+</AdminLayout>

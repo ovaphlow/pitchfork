@@ -1,0 +1,12 @@
+---
+import MobileLayout from "../../layouts/MobileLayout.astro";
+import CourseLearning from "../../components/CourseLearning.tsx";
+
+export function getStaticPaths() {
+  return [{ params: { id: "placeholder" } }];
+}
+---
+
+<MobileLayout title="课程学习">
+  <CourseLearning client:load />
+</MobileLayout>

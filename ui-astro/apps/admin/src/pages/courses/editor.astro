@@ -1,0 +1,8 @@
+---
+import AdminLayout from "../../layouts/AdminLayout.astro";
+import CourseEditor from "../../components/CourseEditor.tsx";
+---
+
+<AdminLayout title="课程设计" active="courses-editor">
+  <CourseEditor client:load />
+</AdminLayout>

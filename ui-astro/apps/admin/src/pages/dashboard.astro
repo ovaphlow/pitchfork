@@ -1,0 +1,8 @@
+---
+import AdminLayout from "../layouts/AdminLayout.astro";
+import DashboardPage from "../components/DashboardPage.tsx";
+---
+
+<AdminLayout title="仪表盘" active="dashboard">
+  <DashboardPage client:load />
+</AdminLayout>

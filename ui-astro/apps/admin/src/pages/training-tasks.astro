@@ -1,0 +1,8 @@
+---
+import AdminLayout from "../layouts/AdminLayout.astro";
+import TrainingTaskManager from "../components/TrainingTaskManager.tsx";
+---
+
+<AdminLayout title="培训任务" active="training-tasks">
+  <TrainingTaskManager client:load />
+</AdminLayout>

@@ -9,6 +9,13 @@ include(
     "libs:common",
     "libs:messages",
     "libs:users",
+    "libs:knowledge",
+    "libs:skills",
+    "libs:training",
+    "libs:exam",
+    "libs:onsite",
+    "libs:ai-assistant",
+    "libs:analytics",
     "apps:service"
 )
 

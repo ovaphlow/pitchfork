@@ -1,0 +1,8 @@
+---
+import AdminLayout from "../layouts/AdminLayout.astro";
+import QuestionBank from "../components/QuestionBank.tsx";
+---
+
+<AdminLayout title="题库" active="questions">
+  <QuestionBank client:load />
+</AdminLayout>

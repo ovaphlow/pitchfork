@@ -196,12 +196,12 @@ class PermissionService(private val pool: Pool) {
         if (cond.containsKey("all")) {
             val list = cond.getJsonArray("all")
             if (list == null || list.size() == 0) return true
-            return list.all { evaluateConditionTree(it as JsonObject, ctx) }
+            return list.all { (it as? JsonObject)?.let { evaluateConditionTree(it, ctx) } ?: false }
         }
         if (cond.containsKey("any")) {
             val list = cond.getJsonArray("any")
             if (list == null || list.size() == 0) return true
-            return list.any { evaluateConditionTree(it as JsonObject, ctx) }
+            return list.any { (it as? JsonObject)?.let { evaluateConditionTree(it, ctx) } ?: false }
         }
         if (cond.containsKey("not")) {
             return !evaluateConditionTree(cond.getJsonObject("not"), ctx)
