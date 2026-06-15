@@ -277,6 +277,16 @@ export async function updateUserStatus(
 	});
 }
 
+export async function updateUser(
+	id: string,
+	data: { department_code?: string },
+): Promise<unknown> {
+	return request(`/users/v1/users/${id}`, {
+		method: "PUT",
+		body: JSON.stringify(data),
+	});
+}
+
 // ---- Roles & Permissions ----
 
 export async function listRoles(): Promise<{ id: string; name: string; code: string; description?: string }[]> {

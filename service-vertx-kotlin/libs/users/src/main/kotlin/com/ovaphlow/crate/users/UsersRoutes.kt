@@ -41,6 +41,14 @@ object UsersRoutes {
                 .onFailure { if (it is NotFoundException) respond(ctx, 404, it.message) else respondError(ctx, it) }
         }
 
+        router.put("/users/:id").handler { ctx ->
+            val id = ctx.pathParam("id") ?: return@handler respond(ctx, 400, "id required")
+            val b = body(ctx)
+            service.updateUser(id, b.getString("department_code"))
+                .onSuccess { ctx.json(it) }
+                .onFailure { if (it is NotFoundException) respond(ctx, 404, it.message) else respondError(ctx, it) }
+        }
+
         return router
     }
 

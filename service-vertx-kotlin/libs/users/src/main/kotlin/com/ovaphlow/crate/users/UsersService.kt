@@ -7,6 +7,7 @@ import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
 import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
+import io.vertx.sqlclient.Tuple
 import org.jooq.DSLContext
 import org.slf4j.LoggerFactory
 
@@ -20,7 +21,7 @@ class UsersService(private val pool: Pool, private val ctx: DSLContext = Databas
         search?.let { conditions.add(u.USERNAME.like("%$it%").or(u.EMAIL.like("%$it%")).or(u.PHONE.like("%$it%"))) }
         status?.let { conditions.add(u.STATUS.eq(it)) }
 
-        val query = ctx.select(u.ID, u.EMAIL, u.USERNAME, u.PHONE, u.USER_TYPE, u.STATUS, u.DEPT_ID, u.CREATED_AT, u.UPDATED_AT)
+        val query = ctx.select(u.ID, u.EMAIL, u.USERNAME, u.PHONE, u.USER_TYPE, u.STATUS, org.jooq.impl.DSL.field("department_code"), u.CREATED_AT, u.UPDATED_AT)
             .from(u)
             .where(conditions)
             .orderBy(u.CREATED_AT.desc())
@@ -37,9 +38,18 @@ class UsersService(private val pool: Pool, private val ctx: DSLContext = Databas
             .set(u.STATUS, status)
             .set(u.UPDATED_AT, java.time.OffsetDateTime.now())
             .where(u.ID.eq(id))
-            .returning(u.ID, u.EMAIL, u.USERNAME, u.PHONE, u.USER_TYPE, u.STATUS, u.DEPT_ID, u.CREATED_AT, u.UPDATED_AT)
+            .returning(u.ID, u.EMAIL, u.USERNAME, u.PHONE, u.USER_TYPE, u.STATUS, org.jooq.impl.DSL.field("department_code"), u.CREATED_AT, u.UPDATED_AT)
         return pool.preparedQuery(DatabaseConfig.sql(query))
             .execute(DatabaseConfig.tuple(query))
+            .flatMap { rows ->
+                if (rows.size() == 0) Future.failedFuture(NotFoundException("user not found"))
+                else Future.succeededFuture(toJson(rows.iterator().next()))
+            }
+    }
+
+    fun updateUser(id: String, departmentCode: String?): Future<JsonObject> {
+        return pool.preparedQuery("UPDATE users SET department_code = $1, updated_at = $2 WHERE id = $3 RETURNING *")
+            .execute(Tuple.of(departmentCode ?: "", java.time.OffsetDateTime.now(), id))
             .flatMap { rows ->
                 if (rows.size() == 0) Future.failedFuture(NotFoundException("user not found"))
                 else Future.succeededFuture(toJson(rows.iterator().next()))
@@ -54,7 +64,7 @@ class UsersService(private val pool: Pool, private val ctx: DSLContext = Databas
             .put("phone", row.getValue("phone")?.toString())
             .put("user_type", row.getValue("user_type")?.toString())
             .put("status", row.getValue("status")?.toString())
-            .put("dept_id", row.getValue("dept_id")?.toString() ?: "")
+            .put("department_code", row.getValue("department_code")?.toString() ?: "")
             .put("created_at", row.getValue("created_at")?.toString())
             .put("updated_at", row.getValue("updated_at")?.toString())
     }

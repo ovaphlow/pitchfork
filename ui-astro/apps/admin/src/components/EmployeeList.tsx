@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
-import { listUsers, listRoles, listDepartments, assignRole, unassignRole, getUserAssignments } from "@pitchfork/shared";
+import { listUsers, listRoles, listDepartments, assignRole, unassignRole, getUserAssignments, updateUser } from "@pitchfork/shared";
 import { Button, Badge, Card, Table, type Column, Input } from "@pitchfork/ui";
 
 interface UserWithInfo {
@@ -9,6 +9,7 @@ interface UserWithInfo {
   phone: string;
   user_type: string;
   status: string;
+  department_code?: string;
   department_name?: string;
   role_names?: string[];
 }
@@ -22,6 +23,7 @@ export default function EmployeeList() {
   // Assign modal state
   const [modalUser, setModalUser] = useState<UserWithInfo | null>(null);
   const [userRoles, setUserRoles] = useState<string[]>([]);
+  const [userDept, setUserDept] = useState("");
   const [saving, setSaving] = useState(false);
 
   const fetchData = async () => {
@@ -52,6 +54,7 @@ export default function EmployeeList() {
           phone: u.phone || "",
           user_type: u.user_type || "regular",
           status: u.status || "active",
+          department_code: u.department_code || "",
           department_name: deptMap.get(u.department_code) || "—",
           role_names: roleNames,
         });
@@ -68,6 +71,7 @@ export default function EmployeeList() {
 
   const openAssign = async (user: UserWithInfo) => {
     setModalUser(user);
+    setUserDept(user.department_code || "");
     try {
       const assignments = await getUserAssignments(user.id);
       setUserRoles(assignments.map((a) => a.role_id));
@@ -96,6 +100,11 @@ export default function EmployeeList() {
         if (!currentRoleIds.includes(rid)) {
           await assignRole(modalUser.id, rid);
         }
+      }
+
+      // Save department
+      if (userDept !== (modalUser.department_code || "")) {
+        await updateUser(modalUser.id, { department_code: userDept || undefined });
       }
 
       setModalUser(null);
@@ -140,8 +149,23 @@ export default function EmployeeList() {
       {modalUser && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setModalUser(null)}>
           <div className="bg-surface rounded-xl border border-border p-6 w-full max-w-lg max-h-[80vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-base font-semibold text-fg-emphasis mb-1">角色分配</h3>
+            <h3 className="text-base font-semibold text-fg-emphasis mb-1">员工设置</h3>
             <p className="text-sm text-fg-dimmed mb-5">{modalUser.username} ({modalUser.email})</p>
+
+            {/* Department */}
+            <div className="mb-5">
+              <label className="text-sm font-medium text-fg-muted block mb-2">部门</label>
+              <select
+                value={userDept}
+                onChange={(e) => setUserDept(e.target.value)}
+                className="h-10 px-3 rounded-md bg-surface border border-border text-sm text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent w-full"
+              >
+                <option value="">无部门</option>
+                {allDepts.map((d) => (
+                  <option key={d.code} value={d.code}>{d.name}</option>
+                ))}
+              </select>
+            </div>
 
             {/* Roles */}
             <div className="mb-5">

@@ -114,6 +114,7 @@ class AuthService(private val pool: Pool, private val jwtAuth: JWTAuth, private 
                 .put("phone", row.getValue("phone")?.toString())
                 .put("user_type", row.getValue("user_type")?.toString())
                 .put("status", row.getValue("status")?.toString())
+                .put("department_code", row.getValue("department_code")?.toString() ?: "")
                 .put("security_info", row.getValue("security_info") as? JsonObject)
                 .put("verification_info", row.getValue("verification_info") as? JsonObject)
                 .put("password_reset_info", row.getValue("password_reset_info") as? JsonObject)
