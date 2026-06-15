@@ -319,50 +319,55 @@ class PermissionService(private val pool: Pool) {
     }
 
     // ────────────────────────────────────────────────────────────
-    //  Roles CRUD
+    //  Roles CRUD (stored in settings table, category="role")
     // ────────────────────────────────────────────────────────────
 
     fun createRole(name: String, description: String): Future<JsonObject> {
-        return pool.preparedQuery("SELECT count(*) FROM roles WHERE name = $1")
+        return pool.preparedQuery("SELECT count(*) FROM settings WHERE category = 'role' AND payload->>'name' = $1")
             .execute(Tuple.of(name))
             .flatMap { rows ->
                 if (rows.iterator().next().getLong(0) > 0)
                     return@flatMap Future.failedFuture(DuplicateException("role name already exists"))
                 val id = Ulid.generate()
-                pool.preparedQuery("INSERT INTO roles (id, name, description) VALUES ($1, $2, $3) RETURNING *")
-                    .execute(Tuple.of(id, name, description))
+                val payload = JsonObject().put("name", name).put("description", description)
+                pool.preparedQuery("INSERT INTO settings (id, category, code, payload) VALUES ($1, 'role', $1, $2::jsonb) RETURNING *")
+                    .execute(Tuple.of(id, payload.encode()))
                     .map { toRoleJson(it.iterator().next()) }
             }
     }
 
-    fun listRoles(): Future<JsonArray> = pool.preparedQuery("SELECT * FROM roles ORDER BY created_at")
-        .execute().map { rows -> val a = JsonArray(); rows.forEach { a.add(toRoleJson(it)) }; a }
+    fun listRoles(): Future<JsonArray> =
+        pool.preparedQuery("SELECT * FROM settings WHERE category = 'role' ORDER BY created_at")
+            .execute().map { rows -> val a = JsonArray(); rows.forEach { a.add(toRoleJson(it)) }; a }
 
-    fun getRole(id: String): Future<JsonObject> = pool.preparedQuery("SELECT * FROM roles WHERE id = $1")
-        .execute(Tuple.of(id)).flatMap { rows ->
-            if (rows.size() == 0) Future.failedFuture(NotFoundException("role not found"))
-            else Future.succeededFuture(toRoleJson(rows.iterator().next()))
-        }
+    fun getRole(id: String): Future<JsonObject> =
+        pool.preparedQuery("SELECT * FROM settings WHERE category = 'role' AND id = $1")
+            .execute(Tuple.of(id)).flatMap { rows ->
+                if (rows.size() == 0) Future.failedFuture(NotFoundException("role not found"))
+                else Future.succeededFuture(toRoleJson(rows.iterator().next()))
+            }
 
     fun updateRole(id: String, name: String?, description: String?): Future<JsonObject> {
-        val sets = mutableListOf<String>()
-        val params = mutableListOf<Any>()
-        var idx = 1
-        name?.let { sets.add("name = $${idx++}"); params.add(it) }
-        description?.let { sets.add("description = $${idx++}"); params.add(it) }
-        if (sets.isEmpty()) return getRole(id)
-        sets.add("updated_at = now()")
-        params.add(id)
-        val sql = "UPDATE roles SET ${sets.joinToString(", ")} WHERE id = $${idx} RETURNING *"
-        val tuple = Tuple.tuple(); params.forEach { tuple.addValue(it) }
-        return pool.preparedQuery(sql).execute(tuple).flatMap { rows ->
-            if (rows.size() == 0) Future.failedFuture(NotFoundException("role not found"))
-            else Future.succeededFuture(toRoleJson(rows.iterator().next()))
+        return getRole(id).flatMap { existing ->
+            val payload = existing.getJsonObject("payload", JsonObject())
+            val newName = name ?: payload.getString("name", "")
+            val newDesc = description ?: payload.getString("description", "")
+            val newPayload = JsonObject().put("name", newName).put("description", newDesc)
+            pool.preparedQuery("UPDATE settings SET payload = $1::jsonb, updated_at = now() WHERE category = 'role' AND id = $2 RETURNING *")
+                .execute(Tuple.of(newPayload.encode(), id)).flatMap { rows ->
+                    if (rows.size() == 0) Future.failedFuture(NotFoundException("role not found"))
+                    else Future.succeededFuture(toRoleJson(rows.iterator().next()))
+                }
         }
     }
 
+    // deleteRole also cleans up RBAC assignments and role-permission links
     fun deleteRole(id: String): Future<Void> =
-        pool.preparedQuery("DELETE FROM roles WHERE id = $1").execute(Tuple.of(id)).map { null }
+        pool.preparedQuery("DELETE FROM rbac_assignments WHERE role_id = $1")
+            .execute(Tuple.of(id))
+            .flatMap { pool.preparedQuery("DELETE FROM role_permissions WHERE role_id = $1").execute(Tuple.of(id)) }
+            .flatMap { pool.preparedQuery("DELETE FROM settings WHERE category = 'role' AND id = $1").execute(Tuple.of(id)) }
+            .map { null }
 
     // ────────────────────────────────────────────────────────────
     //  Permissions CRUD
@@ -426,8 +431,8 @@ class PermissionService(private val pool: Pool) {
 
     fun getUserAssignments(userId: String): Future<JsonArray> =
         pool.preparedQuery("""
-            SELECT ra.*, r.name AS role_name FROM rbac_assignments ra
-            JOIN roles r ON r.id = ra.role_id WHERE ra.user_id = $1 ORDER BY ra.scope_type, ra.scope_id
+            SELECT ra.*, (s.payload->>'name') AS role_name FROM rbac_assignments ra
+            JOIN settings s ON s.id = ra.role_id AND s.category = 'role' WHERE ra.user_id = $1 ORDER BY ra.scope_type, ra.scope_id
         """.trimIndent()).execute(Tuple.of(userId))
             .map { rows -> val a = JsonArray(); rows.forEach { a.add(toAssignmentJson(it)) }; a }
 
@@ -512,9 +517,9 @@ class PermissionService(private val pool: Pool) {
     companion object {
         fun toRoleJson(row: Row) = JsonObject()
             .put("id", row.getValue("id")?.toString())
-            .put("name", row.getValue("name")?.toString())
-            .put("description", row.getValue("description")?.toString())
-            .put("is_system", row.getValue("is_system") as? Boolean ?: false)
+            .put("name", (row.getValue("payload") as? JsonObject)?.getString("name") ?: "")
+            .put("description", (row.getValue("payload") as? JsonObject)?.getString("description") ?: "")
+            .put("code", row.getValue("code")?.toString() ?: "")
             .put("created_at", row.getValue("created_at")?.toString())
             .put("updated_at", row.getValue("updated_at")?.toString())
 

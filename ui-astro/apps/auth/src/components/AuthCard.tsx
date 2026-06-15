@@ -1,27 +1,21 @@
 import { useState } from "react";
 import LoginForm from "./LoginForm";
-import RegisterForm from "./RegisterForm";
 import { setToken } from "@pitchfork/shared";
 
 interface Props {
-	mode: "login" | "register";
+	mode: "login";
 }
 
 export default function AuthCard({ mode }: Props) {
-	const [isLogin, setIsLogin] = useState(mode === "login");
 	const [success, setSuccess] = useState(false);
 
 	function handleLoginSuccess(t: string, _user: unknown) {
 		setToken(t);
 		setSuccess(true);
-		// 跳转到主应用首页（可根据需要改路径）
+		// 跳转到主应用首页
 		setTimeout(() => {
 			window.location.href = "/dashboard";
 		}, 800);
-	}
-
-	function handleRegisterSuccess(_user: unknown) {
-		setIsLogin(true);
 	}
 
 	if (success) {
@@ -52,46 +46,7 @@ export default function AuthCard({ mode }: Props) {
 
 	return (
 		<div className="w-full max-w-md rounded-2xl border border-gray-800 bg-gray-900/80 p-8 shadow-2xl backdrop-blur">
-			<div className="mb-6">
-				<div className="flex border-b border-gray-800">
-					<button
-						type="button"
-						onClick={() => setIsLogin(true)}
-						className={`flex-1 pb-3 text-sm font-medium transition-colors cursor-pointer
-              ${
-								isLogin
-									? "border-b-2 border-indigo-500 text-white"
-									: "text-gray-500 hover:text-gray-300"
-							}`}
-					>
-						登录
-					</button>
-					<button
-						type="button"
-						onClick={() => setIsLogin(false)}
-						className={`flex-1 pb-3 text-sm font-medium transition-colors cursor-pointer
-              ${
-								!isLogin
-									? "border-b-2 border-indigo-500 text-white"
-									: "text-gray-500 hover:text-gray-300"
-							}`}
-					>
-						注册
-					</button>
-				</div>
-			</div>
-
-			{isLogin ? (
-				<LoginForm
-					onSuccess={handleLoginSuccess}
-					onSwitchToRegister={() => setIsLogin(false)}
-				/>
-			) : (
-				<RegisterForm
-					onSuccess={handleRegisterSuccess}
-					onSwitchToLogin={() => setIsLogin(true)}
-				/>
-			)}
+			<LoginForm onSuccess={handleLoginSuccess} />
 		</div>
 	);
 }

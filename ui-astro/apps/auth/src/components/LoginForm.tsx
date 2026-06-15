@@ -3,10 +3,9 @@ import { login } from "@pitchfork/shared";
 
 interface Props {
 	onSuccess: (token: string, user: unknown) => void;
-	onSwitchToRegister: () => void;
 }
 
-export default function LoginForm({ onSuccess, onSwitchToRegister }: Props) {
+export default function LoginForm({ onSuccess }: Props) {
 	const [email, setEmail] = useState("");
 	const [password, setPassword] = useState("");
 	const [error, setError] = useState("");
@@ -91,17 +90,6 @@ export default function LoginForm({ onSuccess, onSwitchToRegister }: Props) {
 			>
 				{loading ? "登录中..." : "登录"}
 			</button>
-
-			<p className="text-center text-sm text-gray-500">
-				还没有账号？{" "}
-				<button
-					type="button"
-					onClick={onSwitchToRegister}
-					className="font-medium text-indigo-400 hover:text-indigo-300 transition-colors cursor-pointer"
-				>
-					立即注册
-				</button>
-			</p>
 		</form>
 	);
 }
