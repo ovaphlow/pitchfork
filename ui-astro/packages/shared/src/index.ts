@@ -326,6 +326,7 @@ export interface KnowledgeEntry {
 	tags?: string[];
 	version?: number;
 	version_number?: number;
+	change_note?: string;
 	author?: string;
 	created_at?: string;
 	updated_at?: string;

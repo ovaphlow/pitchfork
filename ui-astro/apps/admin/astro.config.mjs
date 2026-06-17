@@ -7,7 +7,7 @@ export default defineConfig({
   vite: {
     plugins: [tailwindcss()],
     ssr: {
-      noExternal: ["jsencrypt"],
+      noExternal: ["@pitchfork/ui", "@pitchfork/shared", "jsencrypt"],
     },
   },
   server: {

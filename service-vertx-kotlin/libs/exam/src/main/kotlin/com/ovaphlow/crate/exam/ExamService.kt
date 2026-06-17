@@ -11,7 +11,6 @@ import io.vertx.core.json.JsonObject
 import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.RowSet
-import io.vertx.sqlclient.Tuple
 import org.jooq.Condition
 import org.jooq.DSLContext
 import org.jooq.JSONB
@@ -180,15 +179,20 @@ class ExamService(private val pool: Pool, private val ctx: DSLContext = Database
             val newExplanation = explanation ?: existing.getString("explanation") ?: ""
             val now = OffsetDateTime.now()
 
-            val sql = """UPDATE questions
-                         SET type = ${'$'}1, difficulty = ${'$'}2, tags = ${'$'}3, content = ${'$'}4::jsonb,
-                             options = ${'$'}5::jsonb, answer = ${'$'}6::jsonb, explanation = ${'$'}7, updated_at = ${'$'}8
-                         WHERE id = ${'$'}9
-                         RETURNING id, type, difficulty, tags, content, options, answer, explanation, created_by, created_at, updated_at""".trimIndent()
-            val tuple = Tuple.of(newType, newDifficulty.toShort(), newTags.toList().map { it?.toString() ?: "" }.toTypedArray(), newContent.encode(), newOptions.encode(), newAnswer.encode(), newExplanation, now, id)
+            val query = ctx.update(q)
+                .set(q.TYPE, newType)
+                .set(q.DIFFICULTY, newDifficulty.toShort())
+                .set(q.TAGS, newTags.toList().map { it?.toString() ?: "" }.toTypedArray())
+                .set(q.CONTENT, JSONB.valueOf(newContent.encode()))
+                .set(q.OPTIONS, JSONB.valueOf(newOptions.encode()))
+                .set(q.ANSWER, JSONB.valueOf(newAnswer.encode()))
+                .set(q.EXPLANATION, newExplanation)
+                .set(q.UPDATED_AT, now)
+                .where(q.ID.eq(id))
+                .returning(q.ID, q.TYPE, q.DIFFICULTY, q.TAGS, q.CONTENT, q.OPTIONS, q.ANSWER, q.EXPLANATION, q.CREATED_BY, q.CREATED_AT, q.UPDATED_AT)
 
-            pool.preparedQuery(sql)
-                .execute(tuple)
+            pool.preparedQuery(DatabaseConfig.sql(query))
+                .execute(DatabaseConfig.tuple(query))
                 .flatMap { rows: RowSet<Row> ->
                     if (rows.size() == 0) Future.failedFuture(NotFoundException("question not found"))
                     else Future.succeededFuture(questionToJson(rows.iterator().next()))
@@ -214,18 +218,18 @@ class ExamService(private val pool: Pool, private val ctx: DSLContext = Database
         limit: Int = 50,
         offset: Int = 0
     ): Future<JsonObject> {
-        val countSql = """SELECT count(*) AS total FROM exam_papers""".trimIndent()
-        val dataSql = """SELECT id, title, duration_minutes, pass_score, generation_strategy, anti_cheat_config, extra_rules, created_by, created_at
-                         FROM exam_papers
-                         ORDER BY created_at DESC
-                         LIMIT ${'$'}1 OFFSET ${'$'}2""".trimIndent()
+        val countQuery = ctx.select(count().`as`("total")).from(ep)
+        val dataQuery = ctx.select(ep.ID, ep.TITLE, ep.DURATION_MINUTES, ep.PASS_SCORE, ep.GENERATION_STRATEGY, ep.ANTI_CHEAT_CONFIG, ep.EXTRA_RULES, ep.CREATED_BY, ep.CREATED_AT)
+            .from(ep)
+            .orderBy(ep.CREATED_AT.desc())
+            .limit(limit).offset(offset)
 
-        return pool.preparedQuery(countSql)
-            .execute()
+        return pool.preparedQuery(DatabaseConfig.sql(countQuery))
+            .execute(DatabaseConfig.tuple(countQuery))
             .flatMap { countRows ->
                 val total = countRows.iterator().next().getLong("total") ?: 0L
-                pool.preparedQuery(dataSql)
-                    .execute(Tuple.of(limit, offset))
+                pool.preparedQuery(DatabaseConfig.sql(dataQuery))
+                    .execute(DatabaseConfig.tuple(dataQuery))
                     .map { dataRows ->
                         val records = JsonArray()
                         for (row in dataRows) {
@@ -247,21 +251,22 @@ class ExamService(private val pool: Pool, private val ctx: DSLContext = Database
     ): Future<JsonObject> {
         val id = Ulid.generate()
         val now = OffsetDateTime.now()
-        val sql = """INSERT INTO exam_papers (id, title, duration_minutes, pass_score, generation_strategy, anti_cheat_config, extra_rules, created_by, created_at)
-                     VALUES (${'$'}1, ${'$'}2, ${'$'}3, ${'$'}4, ${'$'}5::jsonb, ${'$'}6::jsonb, ${'$'}7::jsonb, ${'$'}8, ${'$'}9)
-                     RETURNING id, title, duration_minutes, pass_score, generation_strategy, anti_cheat_config, extra_rules, created_by, created_at""".trimIndent()
-        val tuple = Tuple.of(id, title, durationMinutes, passScore, generationStrategy.encode(), antiCheatConfig.encode(), extraRules.encode(), createdBy, now)
-        return pool.preparedQuery(sql)
-            .execute(tuple)
+        val query = ctx.insertInto(ep)
+            .columns(ep.ID, ep.TITLE, ep.DURATION_MINUTES, ep.PASS_SCORE, ep.GENERATION_STRATEGY, ep.ANTI_CHEAT_CONFIG, ep.EXTRA_RULES, ep.CREATED_BY, ep.CREATED_AT)
+            .values(id, title, durationMinutes.toShort(), passScore.toBigDecimal(), JSONB.valueOf(generationStrategy.encode()), JSONB.valueOf(antiCheatConfig.encode()), JSONB.valueOf(extraRules.encode()), createdBy, now)
+            .returning(ep.ID, ep.TITLE, ep.DURATION_MINUTES, ep.PASS_SCORE, ep.GENERATION_STRATEGY, ep.ANTI_CHEAT_CONFIG, ep.EXTRA_RULES, ep.CREATED_BY, ep.CREATED_AT)
+
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
             .map { rows -> paperToJson(rows.iterator().next()) }
     }
 
     fun getPaper(id: String): Future<JsonObject> {
-        val sql = """SELECT id, title, duration_minutes, pass_score, generation_strategy, anti_cheat_config, extra_rules, created_by, created_at, updated_at
-                     FROM exam_papers
-                     WHERE id = ${'$'}1""".trimIndent()
-        return pool.preparedQuery(sql)
-            .execute(Tuple.of(id))
+        val query = ctx.select(ep.ID, ep.TITLE, ep.DURATION_MINUTES, ep.PASS_SCORE, ep.GENERATION_STRATEGY, ep.ANTI_CHEAT_CONFIG, ep.EXTRA_RULES, ep.CREATED_BY, ep.CREATED_AT)
+            .from(ep)
+            .where(ep.ID.eq(id))
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
             .flatMap { rows: RowSet<Row> ->
                 if (rows.size() == 0) Future.failedFuture(NotFoundException("paper not found"))
                 else Future.succeededFuture(paperToJson(rows.iterator().next()))
@@ -286,16 +291,18 @@ class ExamService(private val pool: Pool, private val ctx: DSLContext = Database
             val newExtraRules = extraRules ?: existing.getJsonObject("extra_rules") ?: JsonObject()
             val now = OffsetDateTime.now()
 
-            val sql = """UPDATE exam_papers
-                         SET title = ${'$'}1, duration_minutes = ${'$'}2, pass_score = ${'$'}3,
-                             generation_strategy = ${'$'}4::jsonb, anti_cheat_config = ${'$'}5::jsonb,
-                             extra_rules = ${'$'}6::jsonb
-                         WHERE id = ${'$'}7
-                         RETURNING id, title, duration_minutes, pass_score, generation_strategy, anti_cheat_config, extra_rules, created_by, created_at""".trimIndent()
-            val tuple = Tuple.of(newTitle, newDurationMinutes, newPassScore, newGenerationStrategy.encode(), newAntiCheatConfig.encode(), newExtraRules.encode(), id)
+            val query = ctx.update(ep)
+                .set(ep.TITLE, newTitle)
+                .set(ep.DURATION_MINUTES, newDurationMinutes.toShort())
+                .set(ep.PASS_SCORE, newPassScore.toBigDecimal())
+                .set(ep.GENERATION_STRATEGY, JSONB.valueOf(newGenerationStrategy.encode()))
+                .set(ep.ANTI_CHEAT_CONFIG, JSONB.valueOf(newAntiCheatConfig.encode()))
+                .set(ep.EXTRA_RULES, JSONB.valueOf(newExtraRules.encode()))
+                .where(ep.ID.eq(id))
+                .returning(ep.ID, ep.TITLE, ep.DURATION_MINUTES, ep.PASS_SCORE, ep.GENERATION_STRATEGY, ep.ANTI_CHEAT_CONFIG, ep.EXTRA_RULES, ep.CREATED_BY, ep.CREATED_AT)
 
-            pool.preparedQuery(sql)
-                .execute(tuple)
+            pool.preparedQuery(DatabaseConfig.sql(query))
+                .execute(DatabaseConfig.tuple(query))
                 .flatMap { rows: RowSet<Row> ->
                     if (rows.size() == 0) Future.failedFuture(NotFoundException("paper not found"))
                     else Future.succeededFuture(paperToJson(rows.iterator().next()))
@@ -494,7 +501,7 @@ class ExamService(private val pool: Pool, private val ctx: DSLContext = Database
                         .put("content", qObj.getJsonObject("content"))
                         .put("options", qObj.getJsonObject("options"))
                         .put("score_per_question", 100 / questions.size())
-                        .put("answer", null)
+                        .put("answer", qObj.getJsonObject("answer"))
                         .put("user_answer", null)
                         .put("correct", null)
                     )
@@ -577,12 +584,13 @@ class ExamService(private val pool: Pool, private val ctx: DSLContext = Database
                     val qid = sq.getString("question_id")
                     val scorePerQ = sq.getInteger("score_per_question") ?: 0
                     val correctAnswer = sq.getValue("answer")
+                    val correctValue = if (correctAnswer is JsonObject) correctAnswer.getValue("correct") else correctAnswer
 
                     val submitted = answerMap[qid]
                     val userAnswer = submitted?.getValue("answer")
 
-                    val isCorrect = if (userAnswer != null && correctAnswer != null) {
-                        userAnswer.toString() == correctAnswer.toString()
+                    val isCorrect = if (userAnswer != null && correctValue != null) {
+                        userAnswer.toString() == correctValue.toString()
                     } else false
 
                     if (isCorrect) {
@@ -606,15 +614,16 @@ class ExamService(private val pool: Pool, private val ctx: DSLContext = Database
                 val passed = totalScore >= passScore
                 val now = OffsetDateTime.now()
 
-                val sql = """UPDATE exam_records
-                             SET end_time = ${'$'}1, score = ${'$'}2, passed = ${'$'}3,
-                                 answers_snapshot = ${'$'}4::jsonb
-                             WHERE id = ${'$'}5
-                             RETURNING id, employee_id, paper_id, start_time, end_time, score, passed, answers_snapshot, cheat_flags""".trimIndent()
-                val tuple = Tuple.of(now, totalScore, passed, updatedSnapshot.encode(), id)
+                val query = ctx.update(er)
+                    .set(er.END_TIME, now)
+                    .set(er.SCORE, totalScore.toBigDecimal())
+                    .set(er.PASSED, passed)
+                    .set(er.ANSWERS_SNAPSHOT, JSONB.valueOf(updatedSnapshot.encode()))
+                    .where(er.ID.eq(id))
+                    .returning(er.ID, er.EMPLOYEE_ID, er.PAPER_ID, er.START_TIME, er.END_TIME, er.SCORE, er.PASSED, er.ANSWERS_SNAPSHOT, er.CHEAT_FLAGS)
 
-                pool.preparedQuery(sql)
-                    .execute(tuple)
+                pool.preparedQuery(DatabaseConfig.sql(query))
+                    .execute(DatabaseConfig.tuple(query))
                     .map { rows ->
                         JsonObject()
                             .put("record", recordToJson(rows.iterator().next()))
@@ -669,11 +678,10 @@ class ExamService(private val pool: Pool, private val ctx: DSLContext = Database
             return JsonObject()
                 .put("id", row.getValue("id")?.toString())
                 .put("type", row.getValue("type")?.toString())
-                .put("difficulty", row.getValue("difficulty") as? Int ?: 1)
-                .put("tags", arrayToJsonArray(row.getValue("tags")))
-                .put("content", row.getValue("content") as? JsonObject ?: JsonObject())
-                .put("options", row.getValue("options") as? JsonArray ?: row.getValue("options") as? JsonObject ?: JsonObject())
-                .put("answer", row.getValue("answer") as? JsonObject ?: JsonObject())
+                .put("difficulty", (row.getValue("difficulty") as? Number)?.toInt() ?: 1)
+                .put("content", jsonObj(row, "content"))
+                .put("options", jsonObjOrArray(row, "options"))
+                .put("answer", jsonObj(row, "answer"))
                 .put("explanation", row.getValue("explanation")?.toString() ?: "")
                 .put("created_by", row.getValue("created_by")?.toString() ?: "")
                 .put("created_at", row.getValue("created_at")?.toString())
@@ -684,11 +692,11 @@ class ExamService(private val pool: Pool, private val ctx: DSLContext = Database
             return JsonObject()
                 .put("id", row.getValue("id")?.toString())
                 .put("title", row.getValue("title")?.toString())
-                .put("duration_minutes", row.getValue("duration_minutes") as? Int ?: 0)
-                .put("pass_score", row.getValue("pass_score") as? Int ?: 60)
-                .put("generation_strategy", row.getValue("generation_strategy") as? JsonObject ?: JsonObject())
-                .put("anti_cheat_config", row.getValue("anti_cheat_config") as? JsonObject ?: JsonObject())
-                .put("extra_rules", row.getValue("extra_rules") as? JsonObject ?: JsonObject())
+                .put("duration_minutes", (row.getValue("duration_minutes") as? Number)?.toInt() ?: 0)
+                .put("pass_score", (row.getValue("pass_score") as? Number)?.toInt() ?: 60)
+                .put("generation_strategy", jsonObj(row, "generation_strategy"))
+                .put("anti_cheat_config", jsonObj(row, "anti_cheat_config"))
+                .put("extra_rules", jsonObj(row, "extra_rules"))
                 .put("created_by", row.getValue("created_by")?.toString() ?: "")
                 .put("created_at", row.getValue("created_at")?.toString())
         }
@@ -700,11 +708,11 @@ class ExamService(private val pool: Pool, private val ctx: DSLContext = Database
                 .put("paper_id", row.getValue("paper_id")?.toString())
                 .put("start_time", row.getValue("start_time")?.toString())
                 .put("end_time", row.getValue("end_time")?.toString() ?: "")
-                .put("score", row.getValue("score") as? Int ?: 0)
+                .put("score", (row.getValue("score") as? Number)?.toInt() ?: 0)
                 .put("passed", row.getValue("passed") as? Boolean ?: false)
-                .put("answers_snapshot", row.getValue("answers_snapshot") as? JsonObject ?: row.getValue("answers_snapshot") as? JsonArray ?: JsonArray())
-                .put("cheat_flags", row.getValue("cheat_flags") as? JsonObject ?: JsonObject())
-            val paperTitle = row.getValue("paper_title")?.toString()
+                .put("answers_snapshot", jsonArr(row, "answers_snapshot"))
+                .put("cheat_flags", jsonObj(row, "cheat_flags"))
+            val paperTitle = try { row.getValue("paper_title")?.toString() } catch (e: NoSuchElementException) { null }
             if (paperTitle != null) {
                 obj.put("paper_title", paperTitle)
             }
@@ -741,7 +749,38 @@ class ExamService(private val pool: Pool, private val ctx: DSLContext = Database
                 else -> JsonArray()
             }
         }
+
+        private fun jsonObj(row: Row, column: String): JsonObject {
+            val v = row.getValue(column)
+            return when (v) {
+                is JsonObject -> v
+                is String -> try { JsonObject(v) } catch (e: Exception) { JsonObject() }
+                else -> JsonObject()
+            }
+        }
+
+        private fun jsonArr(row: Row, column: String): JsonArray {
+            val v = row.getValue(column)
+            return when (v) {
+                is JsonArray -> v
+                is String -> try { JsonArray(v) } catch (e: Exception) { JsonArray() }
+                else -> JsonArray()
+            }
+        }
+
+        private fun jsonObjOrArray(row: Row, column: String): JsonObject {
+            val v = row.getValue(column)
+            return when (v) {
+                is JsonObject -> v
+                is JsonArray -> { val arr = v; if (arr.size() > 0) arr.getJsonObject(0) ?: JsonObject() else JsonObject() }
+                is String -> try { JsonObject(v) } catch (e: Exception) {
+                    try { val arr = JsonArray(v); if (arr.size() > 0) arr.getJsonObject(0) ?: JsonObject() else JsonObject() } catch (e: Exception) { JsonObject() }
+                }
+                else -> JsonObject()
+            }
+        }
     }
+
 }
 
 class NotFoundException(message: String) : Exception(message)

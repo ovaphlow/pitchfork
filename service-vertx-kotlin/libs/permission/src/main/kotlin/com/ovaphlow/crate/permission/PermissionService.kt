@@ -1,17 +1,25 @@
 package com.ovaphlow.crate.permission
 
 import com.ovaphlow.crate.common.Ulid
+import com.ovaphlow.crate.database.DatabaseConfig
+import com.ovaphlow.crate.database.gen.public_.tables.Settings
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
 import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.Tuple
+import org.jooq.Condition
+import org.jooq.DSLContext
+import org.jooq.JSONB
+import org.jooq.impl.DSL
 import org.slf4j.LoggerFactory
 
 data class CheckResult(val allowed: Boolean, val reason: String = "", val engine: String = "")
 
-class PermissionService(private val pool: Pool) {
+class PermissionService(private val pool: Pool, private val ctx: DSLContext = DatabaseConfig.createDSL()) {
+    private val s = Settings.SETTINGS
+
 
     private val log = LoggerFactory.getLogger(PermissionService::class.java)
 
@@ -63,16 +71,16 @@ class PermissionService(private val pool: Pool) {
     // ────────────────────────────────────────────────────────────
 
     private fun checkRbac(userId: String, action: String, resourceType: String): Future<CheckResult> {
-        return pool.preparedQuery("""
-            SELECT 1 FROM rbac_assignments ra
-            JOIN role_permissions rp ON rp.role_id = ra.role_id
-            JOIN permissions p ON p.id = rp.permission_id
-            WHERE ra.user_id = $1
-              AND (p.resource = $2 OR p.resource = '*')
-              AND (p.action = $3 OR p.action = '*')
-            LIMIT 1
-        """.trimIndent())
-            .execute(Tuple.of(userId, resourceType, action))
+        val query = ctx.selectOne()
+            .from(DSL.table("rbac_assignments"))
+            .join(DSL.table("role_permissions")).on(DSL.field("role_permissions.role_id").eq(DSL.field("rbac_assignments.role_id")))
+            .join(DSL.table("permissions")).on(DSL.field("permissions.id").eq(DSL.field("role_permissions.permission_id")))
+            .where(DSL.field("rbac_assignments.user_id").eq(userId))
+            .and(DSL.field("permissions.resource").eq(resourceType).or(DSL.field("permissions.resource").eq("*")))
+            .and(DSL.field("permissions.action").eq(action).or(DSL.field("permissions.action").eq("*")))
+            .limit(1)
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
             .map { rows ->
                 if (rows.size() > 0) CheckResult(true, "allowed by RBAC", "rbac")
                 else CheckResult(false, "no RBAC match", "rbac")
@@ -109,20 +117,26 @@ class PermissionService(private val pool: Pool) {
         // direct: (user, userId, relation, objectType, objectId)
         // transitive: (team, teamId, relation, objectType, objectId)
         //   where (user, userId, member, team, teamId)
-        return pool.preparedQuery("""
-            SELECT rr.relation FROM rebac_relations rr
-            WHERE rr.object_type = $1 AND rr.object_id = $2
-              AND (
-                (rr.subject_type = 'user' AND rr.subject_id = $3)
-                OR
-                (rr.subject_type = 'team' AND rr.subject_id IN (
-                  SELECT t.subject_id FROM rebac_relations t
-                  WHERE t.subject_type = 'user' AND t.subject_id = $3
-                    AND t.relation = 'member' AND t.object_type = 'team'
-                ))
-              )
-        """.trimIndent())
-            .execute(Tuple.of(objectType, objectId, userId))
+        val subquery = ctx.select(DSL.field("t.subject_id"))
+            .from(DSL.table("rebac_relations").`as`("t"))
+            .where(DSL.field("t.subject_type").eq("user"))
+            .and(DSL.field("t.subject_id").eq(userId))
+            .and(DSL.field("t.relation").eq("member"))
+            .and(DSL.field("t.object_type").eq("team"))
+
+        val query = ctx.select(DSL.field("rr.relation"))
+            .from(DSL.table("rebac_relations").`as`("rr"))
+            .where(DSL.field("rr.object_type").eq(objectType))
+            .and(DSL.field("rr.object_id").eq(objectId))
+            .and(
+                DSL.field("rr.subject_type").eq("user").and(DSL.field("rr.subject_id").eq(userId))
+                    .or(
+                        DSL.field("rr.subject_type").eq("team")
+                            .and(DSL.field("rr.subject_id").`in`(subquery))
+                    )
+            )
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
             .map { rows ->
                 if (rows.size() == 0) return@map CheckResult(false, "no ReBAC relation", "rebac")
                 var maxLevel = 0
@@ -155,14 +169,18 @@ class PermissionService(private val pool: Pool) {
         context: JsonObject,
         effect: String
     ): Future<CheckResult> {
-        return pool.preparedQuery("""
-            SELECT * FROM abac_policies
-            WHERE (resource_type = $1 OR resource_type = '*')
-              AND (action = $2 OR action = '*')
-              AND effect = $3
-            ORDER BY priority DESC
-        """.trimIndent())
-            .execute(Tuple.of(resourceType, action, effect))
+        val query = ctx.select(
+                DSL.field("id"), DSL.field("resource_type"), DSL.field("action"),
+                DSL.field("effect"), DSL.field("priority"), DSL.field("condition_json"),
+                DSL.field("description"), DSL.field("created_at"), DSL.field("updated_at")
+            )
+            .from(DSL.table("abac_policies"))
+            .where(DSL.field("resource_type").eq(resourceType).or(DSL.field("resource_type").eq("*")))
+            .and(DSL.field("action").eq(action).or(DSL.field("action").eq("*")))
+            .and(DSL.field("effect").eq(effect))
+            .orderBy(DSL.field("priority").desc())
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
             .flatMap { rows ->
                 if (rows.size() == 0) {
                     return@flatMap Future.succeededFuture(CheckResult(false, "no ABAC match", "abac"))
@@ -281,8 +299,11 @@ class PermissionService(private val pool: Pool) {
     // ────────────────────────────────────────────────────────────
 
     private fun resolveUserAttrs(userId: String): Future<JsonObject> {
-        return pool.preparedQuery("SELECT attr_key, attr_value FROM user_attributes WHERE user_id = $1")
-            .execute(Tuple.of(userId))
+        val query = ctx.select(DSL.field("attr_key"), DSL.field("attr_value"))
+            .from(DSL.table("user_attributes"))
+            .where(DSL.field("user_id").eq(userId))
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
             .map { rows ->
                 val obj = JsonObject()
                 rows.forEach { row ->
@@ -295,15 +316,24 @@ class PermissionService(private val pool: Pool) {
     }
 
     fun setUserAttributes(userId: String, attrs: JsonObject): Future<Void> {
-        return pool.preparedQuery("DELETE FROM user_attributes WHERE user_id = $1")
-            .execute(Tuple.of(userId))
+        val delQuery = ctx.deleteFrom(DSL.table("user_attributes"))
+            .where(DSL.field("user_id").eq(userId))
+        return pool.preparedQuery(DatabaseConfig.sql(delQuery))
+            .execute(DatabaseConfig.tuple(delQuery))
             .flatMap {
                 val futures = mutableListOf<Future<*>>()
                 attrs.fieldNames().forEach { key ->
                     val value = attrs.getValue(key)?.toString() ?: ""
+                    val insertQuery = ctx.insertInto(
+                            DSL.table("user_attributes"),
+                            DSL.field("user_id"), DSL.field("attr_key"), DSL.field("attr_value")
+                        )
+                        .values(userId, key, value)
+                        .onConflict(DSL.field("user_id"), DSL.field("attr_key"))
+                        .doUpdate().set(DSL.field("attr_value"), value)
                     futures.add(
-                        pool.preparedQuery("INSERT INTO user_attributes (user_id, attr_key, attr_value) VALUES ($1, $2, $3) ON CONFLICT (user_id, attr_key) DO UPDATE SET attr_value = $3")
-                            .execute(Tuple.of(userId, key, value))
+                        pool.preparedQuery(DatabaseConfig.sql(insertQuery))
+                            .execute(DatabaseConfig.tuple(insertQuery))
                     )
                 }
                 if (futures.isEmpty()) Future.succeededFuture()
@@ -314,8 +344,11 @@ class PermissionService(private val pool: Pool) {
     fun getUserAttributes(userId: String): Future<JsonObject> = resolveUserAttrs(userId)
 
     fun deleteUserAttribute(userId: String, key: String): Future<Void> {
-        return pool.preparedQuery("DELETE FROM user_attributes WHERE user_id = $1 AND attr_key = $2")
-            .execute(Tuple.of(userId, key)).map { null }
+        val query = ctx.deleteFrom(DSL.table("user_attributes"))
+            .where(DSL.field("user_id").eq(userId))
+            .and(DSL.field("attr_key").eq(key))
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query)).map { null }
     }
 
     // ────────────────────────────────────────────────────────────
@@ -323,29 +356,48 @@ class PermissionService(private val pool: Pool) {
     // ────────────────────────────────────────────────────────────
 
     fun createRole(name: String, description: String): Future<JsonObject> {
-        return pool.preparedQuery("SELECT count(*) FROM settings WHERE category = 'role' AND payload->>'name' = $1")
-            .execute(Tuple.of(name))
+        val checkQuery = ctx.selectCount()
+            .from(s)
+            .where(s.CATEGORY.eq("role"))
+            .and(DSL.field("payload->>'name'").eq(name))
+        return pool.preparedQuery(DatabaseConfig.sql(checkQuery))
+            .execute(DatabaseConfig.tuple(checkQuery))
             .flatMap { rows ->
                 if (rows.iterator().next().getLong(0) > 0)
                     return@flatMap Future.failedFuture(DuplicateException("role name already exists"))
                 val id = Ulid.generate()
                 val payload = JsonObject().put("name", name).put("description", description)
-                pool.preparedQuery("INSERT INTO settings (id, category, code, payload) VALUES ($1, 'role', $1, $2::jsonb) RETURNING *")
-                    .execute(Tuple.of(id, payload.encode()))
+                val insertQuery = ctx.insertInto(s, s.ID, s.CATEGORY, s.CODE, s.PAYLOAD)
+                    .values(id, "role", id, JSONB.valueOf(payload.encode()))
+                    .returning(s.ID, s.PAYLOAD, s.CODE, s.CREATED_AT, s.UPDATED_AT)
+                pool.preparedQuery(DatabaseConfig.sql(insertQuery))
+                    .execute(DatabaseConfig.tuple(insertQuery))
                     .map { toRoleJson(it.iterator().next()) }
             }
     }
 
-    fun listRoles(): Future<JsonArray> =
-        pool.preparedQuery("SELECT * FROM settings WHERE category = 'role' ORDER BY created_at")
-            .execute().map { rows -> val a = JsonArray(); rows.forEach { a.add(toRoleJson(it)) }; a }
+    fun listRoles(): Future<JsonArray> {
+        val query = ctx.select(s.ID, s.PAYLOAD, s.CODE, s.CREATED_AT, s.UPDATED_AT)
+            .from(s)
+            .where(s.CATEGORY.eq("role"))
+            .orderBy(s.CREATED_AT.asc())
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
+            .map { rows -> val a = JsonArray(); rows.forEach { a.add(toRoleJson(it)) }; a }
+    }
 
-    fun getRole(id: String): Future<JsonObject> =
-        pool.preparedQuery("SELECT * FROM settings WHERE category = 'role' AND id = $1")
-            .execute(Tuple.of(id)).flatMap { rows ->
+    fun getRole(id: String): Future<JsonObject> {
+        val query = ctx.select(s.ID, s.PAYLOAD, s.CODE, s.CREATED_AT, s.UPDATED_AT)
+            .from(s)
+            .where(s.CATEGORY.eq("role"))
+            .and(s.ID.eq(id))
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
+            .flatMap { rows ->
                 if (rows.size() == 0) Future.failedFuture(NotFoundException("role not found"))
                 else Future.succeededFuture(toRoleJson(rows.iterator().next()))
             }
+    }
 
     fun updateRole(id: String, name: String?, description: String?): Future<JsonObject> {
         return getRole(id).flatMap { existing ->
@@ -353,8 +405,15 @@ class PermissionService(private val pool: Pool) {
             val newName = name ?: payload.getString("name", "")
             val newDesc = description ?: payload.getString("description", "")
             val newPayload = JsonObject().put("name", newName).put("description", newDesc)
-            pool.preparedQuery("UPDATE settings SET payload = $1::jsonb, updated_at = now() WHERE category = 'role' AND id = $2 RETURNING *")
-                .execute(Tuple.of(newPayload.encode(), id)).flatMap { rows ->
+            val query = ctx.update(s)
+                .set(s.PAYLOAD, JSONB.valueOf(newPayload.encode()))
+                .set(s.UPDATED_AT, java.time.LocalDateTime.now())
+                .where(s.CATEGORY.eq("role"))
+                .and(s.ID.eq(id))
+                .returning(s.ID, s.PAYLOAD, s.CODE, s.CREATED_AT, s.UPDATED_AT)
+            pool.preparedQuery(DatabaseConfig.sql(query))
+                .execute(DatabaseConfig.tuple(query))
+                .flatMap { rows ->
                     if (rows.size() == 0) Future.failedFuture(NotFoundException("role not found"))
                     else Future.succeededFuture(toRoleJson(rows.iterator().next()))
                 }
@@ -362,103 +421,200 @@ class PermissionService(private val pool: Pool) {
     }
 
     // deleteRole also cleans up RBAC assignments and role-permission links
-    fun deleteRole(id: String): Future<Void> =
-        pool.preparedQuery("DELETE FROM rbac_assignments WHERE role_id = $1")
-            .execute(Tuple.of(id))
-            .flatMap { pool.preparedQuery("DELETE FROM role_permissions WHERE role_id = $1").execute(Tuple.of(id)) }
-            .flatMap { pool.preparedQuery("DELETE FROM settings WHERE category = 'role' AND id = $1").execute(Tuple.of(id)) }
+    fun deleteRole(id: String): Future<Void> {
+        val delRbac = ctx.deleteFrom(DSL.table("rbac_assignments")).where(DSL.field("role_id").eq(id))
+        val delRp = ctx.deleteFrom(DSL.table("role_permissions")).where(DSL.field("role_id").eq(id))
+        val delSetting = ctx.deleteFrom(s).where(s.CATEGORY.eq("role")).and(s.ID.eq(id))
+        return pool.preparedQuery(DatabaseConfig.sql(delRbac))
+            .execute(DatabaseConfig.tuple(delRbac))
+            .flatMap { pool.preparedQuery(DatabaseConfig.sql(delRp)).execute(DatabaseConfig.tuple(delRp)) }
+            .flatMap { pool.preparedQuery(DatabaseConfig.sql(delSetting)).execute(DatabaseConfig.tuple(delSetting)) }
             .map { null }
+    }
 
     // ────────────────────────────────────────────────────────────
     //  Permissions CRUD
     // ────────────────────────────────────────────────────────────
 
     fun createPermission(name: String, description: String, resource: String, action: String): Future<JsonObject> {
-        return pool.preparedQuery("SELECT count(*) FROM permissions WHERE name = $1")
-            .execute(Tuple.of(name)).flatMap { rows ->
+        val checkQuery = ctx.selectCount()
+            .from(DSL.table("permissions"))
+            .where(DSL.field("name").eq(name))
+        return pool.preparedQuery(DatabaseConfig.sql(checkQuery))
+            .execute(DatabaseConfig.tuple(checkQuery))
+            .flatMap { rows ->
                 if (rows.iterator().next().getLong(0) > 0)
                     return@flatMap Future.failedFuture(DuplicateException("permission name already exists"))
                 val id = Ulid.generate()
-                pool.preparedQuery("INSERT INTO permissions (id, name, description, resource, action) VALUES ($1, $2, $3, $4, $5) RETURNING *")
-                    .execute(Tuple.of(id, name, description, resource, action))
+                val insertQuery = ctx.insertInto(
+                        DSL.table("permissions"),
+                        DSL.field("id"), DSL.field("name"), DSL.field("description"),
+                        DSL.field("resource"), DSL.field("action")
+                    )
+                    .values(id, name, description, resource, action)
+                    .returning(DSL.field("id"), DSL.field("name"), DSL.field("description"),
+                        DSL.field("resource"), DSL.field("action"), DSL.field("created_at"))
+                pool.preparedQuery(DatabaseConfig.sql(insertQuery))
+                    .execute(DatabaseConfig.tuple(insertQuery))
                     .map { toPermissionJson(it.iterator().next()) }
             }
     }
 
-    fun listPermissions(): Future<JsonArray> =
-        pool.preparedQuery("SELECT * FROM permissions ORDER BY resource, action").execute()
+    fun listPermissions(): Future<JsonArray> {
+        val query = ctx.select(
+                DSL.field("id"), DSL.field("name"), DSL.field("description"),
+                DSL.field("resource"), DSL.field("action"), DSL.field("created_at")
+            )
+            .from(DSL.table("permissions"))
+            .orderBy(DSL.field("resource").asc(), DSL.field("action").asc())
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
             .map { rows -> val a = JsonArray(); rows.forEach { a.add(toPermissionJson(it)) }; a }
+    }
 
-    fun getPermission(id: String): Future<JsonObject> =
-        pool.preparedQuery("SELECT * FROM permissions WHERE id = $1").execute(Tuple.of(id)).flatMap { rows ->
-            if (rows.size() == 0) Future.failedFuture(NotFoundException("permission not found"))
-            else Future.succeededFuture(toPermissionJson(rows.iterator().next()))
-        }
+    fun getPermission(id: String): Future<JsonObject> {
+        val query = ctx.select(
+                DSL.field("id"), DSL.field("name"), DSL.field("description"),
+                DSL.field("resource"), DSL.field("action"), DSL.field("created_at")
+            )
+            .from(DSL.table("permissions"))
+            .where(DSL.field("id").eq(id))
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
+            .flatMap { rows ->
+                if (rows.size() == 0) Future.failedFuture(NotFoundException("permission not found"))
+                else Future.succeededFuture(toPermissionJson(rows.iterator().next()))
+            }
+    }
 
-    fun deletePermission(id: String): Future<Void> =
-        pool.preparedQuery("DELETE FROM permissions WHERE id = $1").execute(Tuple.of(id)).map { null }
+    fun deletePermission(id: String): Future<Void> {
+        val query = ctx.deleteFrom(DSL.table("permissions")).where(DSL.field("id").eq(id))
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query)).map { null }
+    }
 
     // ────────────────────────────────────────────────────────────
     //  Role ↔ Permission
     // ────────────────────────────────────────────────────────────
 
-    fun assignPermissionToRole(roleId: String, permissionId: String): Future<Void> =
-        pool.preparedQuery("INSERT INTO role_permissions VALUES ($1, $2) ON CONFLICT DO NOTHING")
-            .execute(Tuple.of(roleId, permissionId)).map { null }
+    fun assignPermissionToRole(roleId: String, permissionId: String): Future<Void> {
+        val query = ctx.insertInto(
+                DSL.table("role_permissions"),
+                DSL.field("role_id"), DSL.field("permission_id")
+            )
+            .values(roleId, permissionId)
+            .onConflictDoNothing()
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query)).map { null }
+    }
 
-    fun removePermissionFromRole(roleId: String, permissionId: String): Future<Void> =
-        pool.preparedQuery("DELETE FROM role_permissions WHERE role_id = $1 AND permission_id = $2")
-            .execute(Tuple.of(roleId, permissionId)).map { null }
+    fun removePermissionFromRole(roleId: String, permissionId: String): Future<Void> {
+        val query = ctx.deleteFrom(DSL.table("role_permissions"))
+            .where(DSL.field("role_id").eq(roleId))
+            .and(DSL.field("permission_id").eq(permissionId))
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query)).map { null }
+    }
 
-    fun getRolePermissions(roleId: String): Future<JsonArray> =
-        pool.preparedQuery("""
-            SELECT p.* FROM permissions p JOIN role_permissions rp ON rp.permission_id = p.id
-            WHERE rp.role_id = $1 ORDER BY p.resource, p.action
-        """.trimIndent()).execute(Tuple.of(roleId))
+    fun getRolePermissions(roleId: String): Future<JsonArray> {
+        val p = DSL.table("permissions").`as`("p")
+        val rp = DSL.table("role_permissions").`as`("rp")
+        val query = ctx.select(
+                DSL.field("p.id"), DSL.field("p.name"), DSL.field("p.description"),
+                DSL.field("p.resource"), DSL.field("p.action"), DSL.field("p.created_at")
+            )
+            .from(p)
+            .join(rp).on(DSL.field("rp.permission_id").eq(DSL.field("p.id")))
+            .where(DSL.field("rp.role_id").eq(roleId))
+            .orderBy(DSL.field("p.resource").asc(), DSL.field("p.action").asc())
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
             .map { rows -> val a = JsonArray(); rows.forEach { a.add(toPermissionJson(it)) }; a }
+    }
 
     // ────────────────────────────────────────────────────────────
     //  RBAC assignments
     // ────────────────────────────────────────────────────────────
 
-    fun assignRole(userId: String, roleId: String, scopeType: String = "global", scopeId: String = "0"): Future<Void> =
-        pool.preparedQuery("INSERT INTO rbac_assignments (user_id, role_id, scope_type, scope_id) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING")
-            .execute(Tuple.of(userId, roleId, scopeType, scopeId)).map { null }
+    fun assignRole(userId: String, roleId: String, scopeType: String = "global", scopeId: String = "0"): Future<Void> {
+        val query = ctx.insertInto(
+                DSL.table("rbac_assignments"),
+                DSL.field("user_id"), DSL.field("role_id"), DSL.field("scope_type"), DSL.field("scope_id")
+            )
+            .values(userId, roleId, scopeType, scopeId)
+            .onConflictDoNothing()
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query)).map { null }
+    }
 
-    fun unassignRole(userId: String, roleId: String, scopeType: String = "global", scopeId: String = "0"): Future<Void> =
-        pool.preparedQuery("DELETE FROM rbac_assignments WHERE user_id = $1 AND role_id = $2 AND scope_type = $3 AND scope_id = $4")
-            .execute(Tuple.of(userId, roleId, scopeType, scopeId)).map { null }
+    fun unassignRole(userId: String, roleId: String, scopeType: String = "global", scopeId: String = "0"): Future<Void> {
+        val query = ctx.deleteFrom(DSL.table("rbac_assignments"))
+            .where(DSL.field("user_id").eq(userId))
+            .and(DSL.field("role_id").eq(roleId))
+            .and(DSL.field("scope_type").eq(scopeType))
+            .and(DSL.field("scope_id").eq(scopeId))
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query)).map { null }
+    }
 
-    fun getUserAssignments(userId: String): Future<JsonArray> =
-        pool.preparedQuery("""
-            SELECT ra.*, (s.payload->>'name') AS role_name FROM rbac_assignments ra
-            JOIN settings s ON s.id = ra.role_id AND s.category = 'role' WHERE ra.user_id = $1 ORDER BY ra.scope_type, ra.scope_id
-        """.trimIndent()).execute(Tuple.of(userId))
+    fun getUserAssignments(userId: String): Future<JsonArray> {
+        val ra = DSL.table("rbac_assignments").`as`("ra")
+        val query = ctx.select(
+                DSL.field("ra.user_id"), DSL.field("ra.role_id"), DSL.field("ra.scope_type"),
+                DSL.field("ra.scope_id"), DSL.field("ra.created_at"),
+                DSL.field("s.payload->>'name'").`as`("role_name")
+            )
+            .from(ra)
+            .join(s).on(DSL.field("ra.role_id").eq(s.ID).and(s.CATEGORY.eq("role")))
+            .where(DSL.field("ra.user_id").eq(userId))
+            .orderBy(DSL.field("ra.scope_type").asc(), DSL.field("ra.scope_id").asc())
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
             .map { rows -> val a = JsonArray(); rows.forEach { a.add(toAssignmentJson(it)) }; a }
+    }
 
     // ────────────────────────────────────────────────────────────
     //  ReBAC relations
     // ────────────────────────────────────────────────────────────
 
-    fun createRelation(subjectType: String, subjectId: String, relation: String, objectType: String, objectId: String): Future<Void> =
-        pool.preparedQuery("INSERT INTO rebac_relations VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING")
-            .execute(Tuple.of(subjectType, subjectId, relation, objectType, objectId)).map { null }
+    fun createRelation(subjectType: String, subjectId: String, relation: String, objectType: String, objectId: String): Future<Void> {
+        val query = ctx.insertInto(
+                DSL.table("rebac_relations"),
+                DSL.field("subject_type"), DSL.field("subject_id"), DSL.field("relation"),
+                DSL.field("object_type"), DSL.field("object_id")
+            )
+            .values(subjectType, subjectId, relation, objectType, objectId)
+            .onConflictDoNothing()
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query)).map { null }
+    }
 
-    fun deleteRelation(subjectType: String, subjectId: String, relation: String, objectType: String, objectId: String): Future<Void> =
-        pool.preparedQuery("DELETE FROM rebac_relations WHERE subject_type = $1 AND subject_id = $2 AND relation = $3 AND object_type = $4 AND object_id = $5")
-            .execute(Tuple.of(subjectType, subjectId, relation, objectType, objectId)).map { null }
+    fun deleteRelation(subjectType: String, subjectId: String, relation: String, objectType: String, objectId: String): Future<Void> {
+        val query = ctx.deleteFrom(DSL.table("rebac_relations"))
+            .where(DSL.field("subject_type").eq(subjectType))
+            .and(DSL.field("subject_id").eq(subjectId))
+            .and(DSL.field("relation").eq(relation))
+            .and(DSL.field("object_type").eq(objectType))
+            .and(DSL.field("object_id").eq(objectId))
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query)).map { null }
+    }
 
     fun listRelations(subjectType: String? = null, subjectId: String? = null, objectType: String? = null, objectId: String? = null): Future<JsonArray> {
-        val clauses = mutableListOf<String>()
-        val params = mutableListOf<Any>()
-        var idx = 1
-        subjectType?.let { clauses.add("subject_type = $${idx++}"); params.add(it) }
-        subjectId?.let { clauses.add("subject_id = $${idx++}"); params.add(it) }
-        objectType?.let { clauses.add("object_type = $${idx++}"); params.add(it) }
-        objectId?.let { clauses.add("object_id = $${idx++}"); params.add(it) }
-        val where = if (clauses.isEmpty()) "" else "WHERE ${clauses.joinToString(" AND ")}"
-        val tuple = Tuple.tuple(); params.forEach { tuple.addValue(it) }
-        return pool.preparedQuery("SELECT * FROM rebac_relations $where ORDER BY created_at").execute(tuple)
+        val conditions = mutableListOf<Condition>()
+        subjectType?.let { conditions.add(DSL.field("subject_type").eq(it)) }
+        subjectId?.let { conditions.add(DSL.field("subject_id").eq(it)) }
+        objectType?.let { conditions.add(DSL.field("object_type").eq(it)) }
+        objectId?.let { conditions.add(DSL.field("object_id").eq(it)) }
+        val query = ctx.select(
+                DSL.field("subject_type"), DSL.field("subject_id"), DSL.field("relation"),
+                DSL.field("object_type"), DSL.field("object_id"), DSL.field("created_at")
+            )
+            .from(DSL.table("rebac_relations"))
+            .where(conditions)
+            .orderBy(DSL.field("created_at").asc())
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
             .map { rows -> val a = JsonArray(); rows.forEach { a.add(toRelationJson(it)) }; a }
     }
 
@@ -469,46 +625,82 @@ class PermissionService(private val pool: Pool) {
     fun createPolicy(resourceType: String, action: String, effect: String = "allow",
                      priority: Int = 0, conditionJson: JsonObject = JsonObject(), description: String = ""): Future<JsonObject> {
         val id = Ulid.generate()
-        return pool.preparedQuery(
-            "INSERT INTO abac_policies (id, resource_type, action, effect, priority, condition_json, description) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7) RETURNING *"
-        ).execute(Tuple.of(id, resourceType, action, effect, priority, conditionJson, description))
+        val query = ctx.insertInto(
+                DSL.table("abac_policies"),
+                DSL.field("id"), DSL.field("resource_type"), DSL.field("action"),
+                DSL.field("effect"), DSL.field("priority"), DSL.field("condition_json"),
+                DSL.field("description")
+            )
+            .values(id, resourceType, action, effect, priority, JSONB.valueOf(conditionJson.encode()), description)
+            .returning(DSL.field("id"), DSL.field("resource_type"), DSL.field("action"),
+                DSL.field("effect"), DSL.field("priority"), DSL.field("condition_json"),
+                DSL.field("description"), DSL.field("created_at"), DSL.field("updated_at"))
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
             .map { toPolicyJson(it.iterator().next()) }
     }
 
-    fun listPolicies(): Future<JsonArray> =
-        pool.preparedQuery("SELECT * FROM abac_policies ORDER BY priority DESC, created_at").execute()
+    fun listPolicies(): Future<JsonArray> {
+        val query = ctx.select(
+                DSL.field("id"), DSL.field("resource_type"), DSL.field("action"),
+                DSL.field("effect"), DSL.field("priority"), DSL.field("condition_json"),
+                DSL.field("description"), DSL.field("created_at"), DSL.field("updated_at")
+            )
+            .from(DSL.table("abac_policies"))
+            .orderBy(DSL.field("priority").desc(), DSL.field("created_at").asc())
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
             .map { rows -> val a = JsonArray(); rows.forEach { a.add(toPolicyJson(it)) }; a }
-
-    fun getPolicy(id: String): Future<JsonObject> =
-        pool.preparedQuery("SELECT * FROM abac_policies WHERE id = $1").execute(Tuple.of(id)).flatMap { rows ->
-            if (rows.size() == 0) Future.failedFuture(NotFoundException("policy not found"))
-            else Future.succeededFuture(toPolicyJson(rows.iterator().next()))
-        }
-
-    fun updatePolicy(id: String, resourceType: String?, action: String?, effect: String?,
-                     priority: Int?, conditionJson: JsonObject?, description: String?): Future<JsonObject> {
-        val sets = mutableListOf<String>()
-        val params = mutableListOf<Any>()
-        var idx = 1
-        resourceType?.let { sets.add("resource_type = $${idx++}"); params.add(it) }
-        action?.let { sets.add("action = $${idx++}"); params.add(it) }
-        effect?.let { sets.add("effect = $${idx++}"); params.add(it) }
-        priority?.let { sets.add("priority = $${idx++}"); params.add(it) }
-        conditionJson?.let { sets.add("condition_json = $${idx++}::jsonb"); params.add(it) }
-        description?.let { sets.add("description = $${idx++}"); params.add(it) }
-        if (sets.isEmpty()) return getPolicy(id)
-        sets.add("updated_at = now()")
-        params.add(id)
-        val sql = "UPDATE abac_policies SET ${sets.joinToString(", ")} WHERE id = $${idx} RETURNING *"
-        val tuple = Tuple.tuple(); params.forEach { tuple.addValue(it) }
-        return pool.preparedQuery(sql).execute(tuple).flatMap { rows ->
-            if (rows.size() == 0) Future.failedFuture(NotFoundException("policy not found"))
-            else Future.succeededFuture(toPolicyJson(rows.iterator().next()))
-        }
     }
 
-    fun deletePolicy(id: String): Future<Void> =
-        pool.preparedQuery("DELETE FROM abac_policies WHERE id = $1").execute(Tuple.of(id)).map { null }
+    fun getPolicy(id: String): Future<JsonObject> {
+        val query = ctx.select(
+                DSL.field("id"), DSL.field("resource_type"), DSL.field("action"),
+                DSL.field("effect"), DSL.field("priority"), DSL.field("condition_json"),
+                DSL.field("description"), DSL.field("created_at"), DSL.field("updated_at")
+            )
+            .from(DSL.table("abac_policies"))
+            .where(DSL.field("id").eq(id))
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
+            .flatMap { rows ->
+                if (rows.size() == 0) Future.failedFuture(NotFoundException("policy not found"))
+                else Future.succeededFuture(toPolicyJson(rows.iterator().next()))
+            }
+    }
+    fun updatePolicy(id: String, resourceType: String?, action: String?, effect: String?,
+                     priority: Int?, conditionJson: JsonObject?, description: String?): Future<JsonObject> {
+        val map = mutableMapOf<org.jooq.Field<*>, Any?>()
+        resourceType?.let { map[DSL.field("resource_type")] = it }
+        action?.let { map[DSL.field("action")] = it }
+        effect?.let { map[DSL.field("effect")] = it }
+        priority?.let { map[DSL.field("priority")] = it }
+        conditionJson?.let { map[DSL.field("condition_json")] = JSONB.valueOf(it.encode()) }
+        description?.let { map[DSL.field("description")] = it }
+        if (map.isEmpty()) return getPolicy(id)
+        map[DSL.field("updated_at")] = DSL.now()
+
+        val query = ctx.update(DSL.table("abac_policies"))
+            .set(map)
+            .where(DSL.field("id").eq(id))
+            .returning(
+                DSL.field("id"), DSL.field("resource_type"), DSL.field("action"),
+                DSL.field("effect"), DSL.field("priority"), DSL.field("condition_json"),
+                DSL.field("description"), DSL.field("created_at"), DSL.field("updated_at")
+            )
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
+            .flatMap { rows ->
+                if (rows.size() == 0) Future.failedFuture(NotFoundException("policy not found"))
+                else Future.succeededFuture(toPolicyJson(rows.iterator().next()))
+            }
+    }
+
+    fun deletePolicy(id: String): Future<Void> {
+        val query = ctx.deleteFrom(DSL.table("abac_policies")).where(DSL.field("id").eq(id))
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query)).map { null }
+    }
 
     // ────────────────────────────────────────────────────────────
     //  Row mappers

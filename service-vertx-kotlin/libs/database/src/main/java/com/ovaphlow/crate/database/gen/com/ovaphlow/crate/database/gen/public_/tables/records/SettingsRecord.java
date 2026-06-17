@@ -106,30 +106,30 @@ public class SettingsRecord extends UpdatableRecordImpl<SettingsRecord> {
     }
 
     /**
-     * Setter for <code>public.settings.create_time</code>.
+     * Setter for <code>public.settings.created_at</code>.
      */
-    public void setCreateTime(LocalDateTime value) {
+    public void setCreatedAt(LocalDateTime value) {
         set(6, value);
     }
 
     /**
-     * Getter for <code>public.settings.create_time</code>.
+     * Getter for <code>public.settings.created_at</code>.
      */
-    public LocalDateTime getCreateTime() {
+    public LocalDateTime getCreatedAt() {
         return (LocalDateTime) get(6);
     }
 
     /**
-     * Setter for <code>public.settings.update_time</code>.
+     * Setter for <code>public.settings.updated_at</code>.
      */
-    public void setUpdateTime(LocalDateTime value) {
+    public void setUpdatedAt(LocalDateTime value) {
         set(7, value);
     }
 
     /**
-     * Getter for <code>public.settings.update_time</code>.
+     * Getter for <code>public.settings.updated_at</code>.
      */
-    public LocalDateTime getUpdateTime() {
+    public LocalDateTime getUpdatedAt() {
         return (LocalDateTime) get(7);
     }
 
@@ -156,7 +156,7 @@ public class SettingsRecord extends UpdatableRecordImpl<SettingsRecord> {
     /**
      * Create a detached, initialised SettingsRecord
      */
-    public SettingsRecord(String id, String category, String code, String rootCode, String parentCode, JSONB payload, LocalDateTime createTime, LocalDateTime updateTime) {
+    public SettingsRecord(String id, String category, String code, String rootCode, String parentCode, JSONB payload, LocalDateTime createdAt, LocalDateTime updatedAt) {
         super(Settings.SETTINGS);
 
         setId(id);
@@ -165,8 +165,8 @@ public class SettingsRecord extends UpdatableRecordImpl<SettingsRecord> {
         setRootCode(rootCode);
         setParentCode(parentCode);
         setPayload(payload);
-        setCreateTime(createTime);
-        setUpdateTime(updateTime);
+        setCreatedAt(createdAt);
+        setUpdatedAt(updatedAt);
         resetChangedOnNotNull();
     }
 }

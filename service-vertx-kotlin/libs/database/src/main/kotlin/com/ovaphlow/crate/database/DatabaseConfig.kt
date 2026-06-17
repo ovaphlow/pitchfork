@@ -70,7 +70,14 @@ object DatabaseConfig {
         val t = Tuple.tuple()
         query.getBindValues().forEach { v ->
             when (v) {
-                is JSONB -> t.addValue(JsonObject(v.data()))
+                is JSONB -> {
+                    val data = v.data()
+                    if (data.trimStart().startsWith("[")) {
+                        t.addValue(io.vertx.core.json.JsonArray(data))
+                    } else {
+                        t.addValue(io.vertx.core.json.JsonObject(data))
+                    }
+                }
                 else -> t.addValue(v)
             }
         }

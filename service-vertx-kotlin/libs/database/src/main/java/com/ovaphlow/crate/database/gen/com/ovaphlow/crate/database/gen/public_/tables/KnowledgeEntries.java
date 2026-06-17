@@ -109,9 +109,10 @@ public class KnowledgeEntries extends TableImpl<KnowledgeEntriesRecord> {
     public final TableField<KnowledgeEntriesRecord, String[]> TAGS = createField(DSL.name("tags"), SQLDataType.VARCHAR(100).array().defaultValue(DSL.field(DSL.raw("'{}'::character varying[]"), SQLDataType.VARCHAR.array())), this, "");
 
     /**
-     * The column <code>public.knowledge_entries.extra</code>. 扩展属性，如故障代码、参数列表等
+     * The column <code>public.knowledge_entries.metadata</code>.
+     * 扩展属性，如故障代码、参数列表等
      */
-    public final TableField<KnowledgeEntriesRecord, JSONB> EXTRA = createField(DSL.name("extra"), SQLDataType.JSONB.defaultValue(DSL.field(DSL.raw("'{}'::jsonb"), SQLDataType.JSONB)), this, "扩展属性，如故障代码、参数列表等");
+    public final TableField<KnowledgeEntriesRecord, JSONB> METADATA = createField(DSL.name("metadata"), SQLDataType.JSONB.defaultValue(DSL.field(DSL.raw("'{}'::jsonb"), SQLDataType.JSONB)), this, "扩展属性，如故障代码、参数列表等");
 
     /**
      * The column <code>public.knowledge_entries.created_by</code>.

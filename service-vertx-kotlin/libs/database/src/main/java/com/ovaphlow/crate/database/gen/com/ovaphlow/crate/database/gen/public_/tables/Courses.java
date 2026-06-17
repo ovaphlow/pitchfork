@@ -112,6 +112,11 @@ public class Courses extends TableImpl<CoursesRecord> {
      */
     public final TableField<CoursesRecord, OffsetDateTime> UPDATED_AT = createField(DSL.name("updated_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6).nullable(false).defaultValue(DSL.field(DSL.raw("now()"), SQLDataType.TIMESTAMPWITHTIMEZONE)), this, "");
 
+    /**
+     * The column <code>public.courses.metadata</code>.
+     */
+    public final TableField<CoursesRecord, JSONB> METADATA = createField(DSL.name("metadata"), SQLDataType.JSONB.nullable(false).defaultValue(DSL.field(DSL.raw("'{}'::jsonb"), SQLDataType.JSONB)), this, "");
+
     private Courses(Name alias, Table<CoursesRecord> aliased) {
         this(alias, aliased, (Field<?>[]) null, null);
     }

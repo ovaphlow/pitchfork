@@ -161,6 +161,20 @@ public class CoursesRecord extends UpdatableRecordImpl<CoursesRecord> {
         return (OffsetDateTime) get(9);
     }
 
+    /**
+     * Setter for <code>public.courses.metadata</code>.
+     */
+    public void setMetadata(JSONB value) {
+        set(10, value);
+    }
+
+    /**
+     * Getter for <code>public.courses.metadata</code>.
+     */
+    public JSONB getMetadata() {
+        return (JSONB) get(10);
+    }
+
     // -------------------------------------------------------------------------
     // Primary key information
     // -------------------------------------------------------------------------
@@ -184,7 +198,7 @@ public class CoursesRecord extends UpdatableRecordImpl<CoursesRecord> {
     /**
      * Create a detached, initialised CoursesRecord
      */
-    public CoursesRecord(String id, String title, String type, String coverImage, String[] targetPositions, JSONB completionRules, String status, String createdBy, OffsetDateTime createdAt, OffsetDateTime updatedAt) {
+    public CoursesRecord(String id, String title, String type, String coverImage, String[] targetPositions, JSONB completionRules, String status, String createdBy, OffsetDateTime createdAt, OffsetDateTime updatedAt, JSONB metadata) {
         super(Courses.COURSES);
 
         setId(id);
@@ -197,6 +211,7 @@ public class CoursesRecord extends UpdatableRecordImpl<CoursesRecord> {
         setCreatedBy(createdBy);
         setCreatedAt(createdAt);
         setUpdatedAt(updatedAt);
+        setMetadata(metadata);
         resetChangedOnNotNull();
     }
 }

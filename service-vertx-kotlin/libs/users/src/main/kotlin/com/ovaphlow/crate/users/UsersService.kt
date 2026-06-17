@@ -48,8 +48,13 @@ class UsersService(private val pool: Pool, private val ctx: DSLContext = Databas
     }
 
     fun updateUser(id: String, departmentCode: String?): Future<JsonObject> {
-        return pool.preparedQuery("UPDATE users SET department_code = $1, updated_at = $2 WHERE id = $3 RETURNING *")
-            .execute(Tuple.of(departmentCode ?: "", java.time.OffsetDateTime.now(), id))
+        val query = ctx.update(u)
+            .set(u.DEPARTMENT_CODE, departmentCode ?: "")
+            .set(u.UPDATED_AT, java.time.OffsetDateTime.now())
+            .where(u.ID.eq(id))
+            .returning(u.ID, u.EMAIL, u.USERNAME, u.PHONE, u.USER_TYPE, u.STATUS, u.DEPARTMENT_CODE, u.CREATED_AT, u.UPDATED_AT)
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
             .flatMap { rows ->
                 if (rows.size() == 0) Future.failedFuture(NotFoundException("user not found"))
                 else Future.succeededFuture(toJson(rows.iterator().next()))

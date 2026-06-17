@@ -125,6 +125,11 @@ public class Users extends TableImpl<UsersRecord> {
      */
     public final TableField<UsersRecord, String> DEPT_ID = createField(DSL.name("dept_id"), SQLDataType.VARCHAR(32).defaultValue(DSL.field(DSL.raw("''::character varying"), SQLDataType.VARCHAR)), this, "");
 
+    /**
+     * The column <code>public.users.department_code</code>.
+     */
+    public final TableField<UsersRecord, String> DEPARTMENT_CODE = createField(DSL.name("department_code"), SQLDataType.VARCHAR, this, "");
+
     private Users(Name alias, Table<UsersRecord> aliased) {
         this(alias, aliased, (Field<?>[]) null, null);
     }

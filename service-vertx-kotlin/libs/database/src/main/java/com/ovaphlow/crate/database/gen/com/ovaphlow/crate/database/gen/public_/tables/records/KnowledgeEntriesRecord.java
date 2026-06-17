@@ -148,16 +148,18 @@ public class KnowledgeEntriesRecord extends UpdatableRecordImpl<KnowledgeEntries
     }
 
     /**
-     * Setter for <code>public.knowledge_entries.extra</code>. 扩展属性，如故障代码、参数列表等
+     * Setter for <code>public.knowledge_entries.metadata</code>.
+     * 扩展属性，如故障代码、参数列表等
      */
-    public void setExtra(JSONB value) {
+    public void setMetadata(JSONB value) {
         set(9, value);
     }
 
     /**
-     * Getter for <code>public.knowledge_entries.extra</code>. 扩展属性，如故障代码、参数列表等
+     * Getter for <code>public.knowledge_entries.metadata</code>.
+     * 扩展属性，如故障代码、参数列表等
      */
-    public JSONB getExtra() {
+    public JSONB getMetadata() {
         return (JSONB) get(9);
     }
 
@@ -240,7 +242,7 @@ public class KnowledgeEntriesRecord extends UpdatableRecordImpl<KnowledgeEntries
     /**
      * Create a detached, initialised KnowledgeEntriesRecord
      */
-    public KnowledgeEntriesRecord(String id, String title, String type, String status, String currentVersionId, String[] categoryIds, String[] deviceIds, String[] positionIds, String[] tags, JSONB extra, String createdBy, String updatedBy, OffsetDateTime createdAt, OffsetDateTime updatedAt) {
+    public KnowledgeEntriesRecord(String id, String title, String type, String status, String currentVersionId, String[] categoryIds, String[] deviceIds, String[] positionIds, String[] tags, JSONB metadata, String createdBy, String updatedBy, OffsetDateTime createdAt, OffsetDateTime updatedAt) {
         super(KnowledgeEntries.KNOWLEDGE_ENTRIES);
 
         setId(id);
@@ -252,7 +254,7 @@ public class KnowledgeEntriesRecord extends UpdatableRecordImpl<KnowledgeEntries
         setDeviceIds(deviceIds);
         setPositionIds(positionIds);
         setTags(tags);
-        setExtra(extra);
+        setMetadata(metadata);
         setCreatedBy(createdBy);
         setUpdatedBy(updatedBy);
         setCreatedAt(createdAt);

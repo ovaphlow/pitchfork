@@ -160,7 +160,7 @@ class OnsiteService(private val pool: Pool, private val ctx: DSLContext = Databa
                     if (linkedIds.isEmpty()) {
                         Future.succeededFuture(JsonObject().put("device", device).put("knowledge", JsonArray()))
                     } else {
-                        // Use direct SQL for IN clause which is simpler with dynamic IDs
+                        // Use direct SQL for IN clause since KnowledgeEntries jOOQ field for "extra" column is named METADATA in generated code
                         val placeholders = linkedIds.mapIndexed { i, _ -> "\${${i + 1}}" }.joinToString(", ")
                         val knowledgeSql = """
                             SELECT id, title, type, status, tags, extra
@@ -219,12 +219,12 @@ class OnsiteService(private val pool: Pool, private val ctx: DSLContext = Databa
     ): Future<JsonObject> {
         val id = Ulid.generate()
         val now = OffsetDateTime.now()
-        val sql = """INSERT INTO offline_cache_policies (id, position_id, cache_size_limit_mb, include_knowledge_types, include_recent_days, extra, created_at, updated_at)
-                     VALUES (${'$'}1, ${'$'}2, ${'$'}3, ${'$'}4, ${'$'}5, ${'$'}6::jsonb, ${'$'}7, ${'$'}8)
-                     RETURNING id, position_id, cache_size_limit_mb, include_knowledge_types, include_recent_days, extra, created_at, updated_at""".trimIndent()
-        val tuple = Tuple.of(id, positionId, cacheSizeLimitMb, includeKnowledgeTypes.toTypedArray(), includeRecentDays, extra.encode(), now, now)
-        return pool.preparedQuery(sql)
-            .execute(tuple)
+        val query = ctx.insertInto(ocp)
+            .columns(ocp.ID, ocp.POSITION_ID, ocp.CACHE_SIZE_LIMIT_MB, ocp.INCLUDE_KNOWLEDGE_TYPES, ocp.INCLUDE_RECENT_DAYS, ocp.EXTRA, ocp.CREATED_AT, ocp.UPDATED_AT)
+            .values(id, positionId, cacheSizeLimitMb.toShort(), includeKnowledgeTypes.toTypedArray(), includeRecentDays.toShort(), JSONB.valueOf(extra.encode()), now, now)
+            .returning(ocp.ID, ocp.POSITION_ID, ocp.CACHE_SIZE_LIMIT_MB, ocp.INCLUDE_KNOWLEDGE_TYPES, ocp.INCLUDE_RECENT_DAYS, ocp.EXTRA, ocp.CREATED_AT, ocp.UPDATED_AT)
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
             .map { rows -> cachePolicyToJson(rows.iterator().next()) }
     }
 

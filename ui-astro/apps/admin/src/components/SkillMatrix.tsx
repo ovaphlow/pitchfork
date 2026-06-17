@@ -13,7 +13,7 @@ export default function SkillMatrix() {
 
   useEffect(() => {
     listSkills({ limit: 100 })
-      .then(setSkills)
+      .then((d: any) => setSkills(d.records || d))
       .catch(() => setSkills([]))
       .finally(() => setLoading(false));
   }, []);

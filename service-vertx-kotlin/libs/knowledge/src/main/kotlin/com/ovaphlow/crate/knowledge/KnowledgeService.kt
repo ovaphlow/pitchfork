@@ -66,12 +66,15 @@ class KnowledgeService(private val pool: Pool, private val ctx: DSLContext = Dat
 
     fun createCategory(name: String, parentId: String? = null, sortOrder: Int = 0, description: String? = null): Future<JsonObject> {
         val id = Ulid.generate()
-        val query = ctx.insertInto(kc)
+        var step = ctx.insertInto(kc)
             .set(kc.ID, id)
             .set(kc.NAME, name)
-            .set(kc.PARENT_ID, parentId ?: "")
             .set(kc.SORT_ORDER, sortOrder.toShort())
             .set(kc.DESCRIPTION, description ?: "")
+        if (parentId != null) {
+            step = step.set(kc.PARENT_ID, parentId)
+        }
+        val query = step
             .returning(kc.ID, kc.NAME, kc.PARENT_ID, kc.SORT_ORDER, kc.DESCRIPTION)
         return pool.preparedQuery(DatabaseConfig.sql(query))
             .execute(DatabaseConfig.tuple(query))
@@ -81,13 +84,13 @@ class KnowledgeService(private val pool: Pool, private val ctx: DSLContext = Dat
     fun updateCategory(id: String, name: String? = null, parentId: String? = null, sortOrder: Int? = null, description: String? = null): Future<JsonObject> {
         return getCategory(id).flatMap { existing: JsonObject ->
             val newName = name ?: existing.getString("name")
-            val newParentId = if (parentId != null) parentId else existing.getString("parent_id") ?: ""
             val newSortOrder = (sortOrder ?: existing.getInteger("sort_order") ?: 0).toShort()
             val newDescription = description ?: existing.getString("description") ?: ""
-
             val query = ctx.update(kc)
                 .set(kc.NAME, newName)
-                .set(kc.PARENT_ID, newParentId)
+                .let { step ->
+                    if (parentId != null) step.set(kc.PARENT_ID, parentId) else step
+                }
                 .set(kc.SORT_ORDER, newSortOrder)
                 .set(kc.DESCRIPTION, newDescription)
                 .where(kc.ID.eq(id))
@@ -551,7 +554,7 @@ class KnowledgeService(private val pool: Pool, private val ctx: DSLContext = Dat
                 .put("id", row.getValue("id")?.toString())
                 .put("name", row.getValue("name")?.toString())
                 .put("parent_id", row.getValue("parent_id")?.toString() ?: "")
-                .put("sort_order", row.getValue("sort_order") as? Int ?: 0)
+                .put("sort_order", (row.getValue("sort_order") as? Number)?.toInt() ?: 0)
                 .put("description", row.getValue("description")?.toString() ?: "")
                 .put("children", children)
         }
@@ -562,12 +565,12 @@ class KnowledgeService(private val pool: Pool, private val ctx: DSLContext = Dat
                 .put("title", row.getValue("title")?.toString())
                 .put("type", row.getValue("type")?.toString())
                 .put("status", row.getValue("status")?.toString())
+                .put("metadata", row.getValue("metadata") as? JsonObject ?: JsonObject())
                 .put("current_version_id", row.getValue("current_version_id")?.toString() ?: "")
                 .put("category_ids", arrayToJsonArray(row.getValue("category_ids")))
                 .put("device_ids", arrayToJsonArray(row.getValue("device_ids")))
                 .put("position_ids", arrayToJsonArray(row.getValue("position_ids")))
                 .put("tags", arrayToJsonArray(row.getValue("tags")))
-                .put("metadata", row.getValue("extra") as? JsonObject ?: JsonObject())
                 .put("created_by", row.getValue("created_by")?.toString() ?: "")
                 .put("updated_by", row.getValue("updated_by")?.toString() ?: "")
                 .put("created_at", row.getValue("created_at")?.toString())

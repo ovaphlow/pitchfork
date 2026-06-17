@@ -3,7 +3,7 @@ import LoginForm from "./LoginForm";
 import { setToken } from "@pitchfork/shared";
 
 interface Props {
-	mode: "login";
+	mode: "login" | "register";
 }
 
 export default function AuthCard({ mode }: Props) {
@@ -44,6 +44,24 @@ export default function AuthCard({ mode }: Props) {
 		);
 	}
 
+	if (mode === "register") {
+		return (
+			<div className="w-full max-w-md rounded-2xl border border-gray-800 bg-gray-900/80 p-8 shadow-2xl backdrop-blur">
+				<div className="space-y-4 text-center">
+					<h3 className="text-lg font-semibold text-white">注册功能已关闭</h3>
+					<p className="text-sm text-gray-400">
+						请联系管理员开通账号
+					</p>
+					<a
+						href="/login"
+						className="inline-block mt-4 text-sm text-indigo-400 hover:text-indigo-300"
+					>
+						返回登录
+					</a>
+				</div>
+			</div>
+		);
+	}
 	return (
 		<div className="w-full max-w-md rounded-2xl border border-gray-800 bg-gray-900/80 p-8 shadow-2xl backdrop-blur">
 			<LoginForm onSuccess={handleLoginSuccess} />

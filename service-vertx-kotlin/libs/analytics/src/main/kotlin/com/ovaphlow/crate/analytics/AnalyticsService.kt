@@ -1,17 +1,25 @@
 package com.ovaphlow.crate.analytics
 
 import com.ovaphlow.crate.database.DatabaseConfig
+import com.ovaphlow.crate.database.gen.public_.tables.Courses
+import com.ovaphlow.crate.database.gen.public_.tables.Employees
+import com.ovaphlow.crate.database.gen.public_.tables.EmployeeSkills
+import com.ovaphlow.crate.database.gen.public_.tables.ExamRecords
+import com.ovaphlow.crate.database.gen.public_.tables.LearningProgress
+import com.ovaphlow.crate.database.gen.public_.tables.Positions
+import com.ovaphlow.crate.database.gen.public_.tables.TrainingAssignments
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
 import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.RowSet
-import io.vertx.sqlclient.Tuple
+import org.jooq.Condition
+import org.jooq.DSLContext
+import org.jooq.impl.DSL
 import org.slf4j.LoggerFactory
-import java.time.OffsetDateTime
 
-class AnalyticsService(private val pool: Pool) {
+class AnalyticsService(private val pool: Pool, private val ctx: DSLContext = DatabaseConfig.createDSL()) {
 
     private val log = LoggerFactory.getLogger(AnalyticsService::class.java)
 
@@ -20,39 +28,45 @@ class AnalyticsService(private val pool: Pool) {
     // ==============================
 
     fun getTrainingSummary(): Future<JsonObject> {
-        val coursesSql = "SELECT COUNT(*) AS cnt FROM courses"
-        val assignmentsSql = "SELECT COUNT(*) AS cnt FROM training_assignments"
-        val completionSql = """
-            SELECT COALESCE(
-                COUNT(*) FILTER (WHERE status = '已完成') * 1.0 / NULLIF(COUNT(*), 0), 0.0
-            ) AS rate FROM learning_progress
-        """.trimIndent()
-        val avgScoreSql = "SELECT COALESCE(AVG(score), 0) AS avg_score FROM exam_records"
-        val activeSql = "SELECT COUNT(*) AS cnt FROM learning_progress WHERE status = '学习中'"
-        val employeesSql = "SELECT COUNT(*) AS cnt FROM employees"
+        val coursesQuery = ctx.select(DSL.count().`as`("cnt")).from(Courses.COURSES)
+        val assignmentsQuery = ctx.select(DSL.count().`as`("cnt")).from(TrainingAssignments.TRAINING_ASSIGNMENTS)
+        val completionQuery = ctx.select(
+            DSL.coalesce(
+                DSL.count().filterWhere(LearningProgress.LEARNING_PROGRESS.STATUS.eq("已完成")).mul(1.0)
+                    .div(DSL.nullif(DSL.count(), 0)),
+                0.0
+            ).`as`("rate")
+        ).from(LearningProgress.LEARNING_PROGRESS)
+        val avgScoreQuery = ctx.select(
+            DSL.coalesce(DSL.avg(ExamRecords.EXAM_RECORDS.SCORE), DSL.inline(java.math.BigDecimal.ZERO)).`as`("avg_score")
+        ).from(ExamRecords.EXAM_RECORDS)
+        val activeQuery = ctx.select(DSL.count().`as`("cnt"))
+            .from(LearningProgress.LEARNING_PROGRESS)
+            .where(LearningProgress.LEARNING_PROGRESS.STATUS.eq("学习中"))
+        val employeesQuery = ctx.select(DSL.count().`as`("cnt")).from(Employees.EMPLOYEES)
 
-        return pool.preparedQuery(coursesSql)
-            .execute()
+        return pool.preparedQuery(DatabaseConfig.sql(coursesQuery))
+            .execute(DatabaseConfig.tuple(coursesQuery))
             .flatMap { coursesRows ->
                 val totalCourses = coursesRows.iterator().next().getLong("cnt") ?: 0L
-                pool.preparedQuery(assignmentsSql)
-                    .execute()
+                pool.preparedQuery(DatabaseConfig.sql(assignmentsQuery))
+                    .execute(DatabaseConfig.tuple(assignmentsQuery))
                     .flatMap { assignRows ->
                         val totalAssignments = assignRows.iterator().next().getLong("cnt") ?: 0L
-                        pool.preparedQuery(completionSql)
-                            .execute()
+                        pool.preparedQuery(DatabaseConfig.sql(completionQuery))
+                            .execute(DatabaseConfig.tuple(completionQuery))
                             .flatMap { compRows ->
                                 val completionRate = compRows.iterator().next().getDouble("rate") ?: 0.0
-                                pool.preparedQuery(avgScoreSql)
-                                    .execute()
+                                pool.preparedQuery(DatabaseConfig.sql(avgScoreQuery))
+                                    .execute(DatabaseConfig.tuple(avgScoreQuery))
                                     .flatMap { scoreRows ->
                                         val avgScore = scoreRows.iterator().next().getDouble("avg_score") ?: 0.0
-                                        pool.preparedQuery(activeSql)
-                                            .execute()
+                                        pool.preparedQuery(DatabaseConfig.sql(activeQuery))
+                                            .execute(DatabaseConfig.tuple(activeQuery))
                                             .flatMap { activeRows ->
                                                 val activeTraining = activeRows.iterator().next().getLong("cnt") ?: 0L
-                                                pool.preparedQuery(employeesSql)
-                                                    .execute()
+                                                pool.preparedQuery(DatabaseConfig.sql(employeesQuery))
+                                                    .execute(DatabaseConfig.tuple(employeesQuery))
                                                     .map { empRows ->
                                                         val totalEmployees = empRows.iterator().next().getLong("cnt") ?: 0L
                                                         JsonObject()
@@ -75,22 +89,23 @@ class AnalyticsService(private val pool: Pool) {
     // ==============================
 
     fun getSkillHeatmap(departmentId: String?): Future<JsonObject> {
-        val conditions = mutableListOf<String>()
-        val params = mutableListOf<Any?>()
-        var idx = 1
+        val emp = Employees.EMPLOYEES
+        val pos = Positions.POSITIONS
+        val es = EmployeeSkills.EMPLOYEE_SKILLS
 
-        if (!departmentId.isNullOrBlank()) {
-            conditions.add("emp.department_id = \${$idx}")
-            params.add(departmentId)
-            idx++
-        }
+        val empConditions = mutableListOf<Condition>()
+        departmentId?.takeIf { it.isNotBlank() }?.let { empConditions.add(emp.DEPARTMENT_ID.eq(it)) }
 
-        val whereClause = if (conditions.isEmpty()) "" else "WHERE ${conditions.joinToString(" AND ")}"
-        val employeesSql = "SELECT id, name FROM employees emp $whereClause ORDER BY name ASC"
-        val positionsSql = "SELECT id, name FROM positions ORDER BY name ASC"
+        val employeesQuery = ctx.select(emp.ID, emp.NAME)
+            .from(emp)
+            .where(empConditions)
+            .orderBy(emp.NAME.asc())
+        val positionsQuery = ctx.select(pos.ID, pos.NAME)
+            .from(pos)
+            .orderBy(pos.NAME.asc())
 
-        return pool.preparedQuery(employeesSql)
-            .execute(buildTuple(params))
+        return pool.preparedQuery(DatabaseConfig.sql(employeesQuery))
+            .execute(DatabaseConfig.tuple(employeesQuery))
             .flatMap { empRows: RowSet<Row> ->
                 val employees = mutableListOf<JsonObject>()
                 for (row in empRows) {
@@ -99,8 +114,8 @@ class AnalyticsService(private val pool: Pool) {
                         .put("name", row.getValue("name")?.toString()))
                 }
 
-                pool.preparedQuery(positionsSql)
-                    .execute()
+                pool.preparedQuery(DatabaseConfig.sql(positionsQuery))
+                    .execute(DatabaseConfig.tuple(positionsQuery))
                     .flatMap { posRows: RowSet<Row> ->
                         val positions = mutableListOf<JsonObject>()
                         for (row in posRows) {
@@ -119,21 +134,15 @@ class AnalyticsService(private val pool: Pool) {
                         val posIds = positions.map { it.getString("id") }
                         val empIds = employees.map { it.getString("id") }
 
-                        val placeholders = posIds.mapIndexed { i, _ -> "\${${i + 1}}" }.joinToString(", ")
-                        val empPlaceholders = empIds.mapIndexed { i, _ -> "\${${posIds.size + i + 1}}" }.joinToString(", ")
+                        val skillQuery = ctx.select(
+                                es.SKILL_ID.`as`("position_id"), es.EMPLOYEE_ID,
+                                DSL.coalesce(es.CURRENT_LEVEL, 0.toShort()).`as`("skill_level")
+                            )
+                            .from(es)
+                            .where(es.SKILL_ID.`in`(posIds).and(es.EMPLOYEE_ID.`in`(empIds)))
 
-                        val skillSql = """
-                            SELECT position_id, employee_id, COALESCE(current_level, 0) AS skill_level
-                            FROM employee_skills
-                            WHERE position_id IN ($placeholders) AND employee_id IN ($empPlaceholders)
-                        """.trimIndent()
-
-                        val skillTuple = Tuple.tuple()
-                        for (pid in posIds) skillTuple.addString(pid)
-                        for (eid in empIds) skillTuple.addString(eid)
-
-                        pool.preparedQuery(skillSql)
-                            .execute(skillTuple)
+                        pool.preparedQuery(DatabaseConfig.sql(skillQuery))
+                            .execute(DatabaseConfig.tuple(skillQuery))
                             .map { skillRows: RowSet<Row> ->
                                 val skillMap = mutableMapOf<String, MutableMap<String, Int>>()
                                 for (row in skillRows) {
@@ -169,41 +178,40 @@ class AnalyticsService(private val pool: Pool) {
     // ==============================
 
     fun getQualityCorrelation(departmentId: String?): Future<JsonObject> {
-        val conditions = mutableListOf<String>()
-        val params = mutableListOf<Any?>()
-        var idx = 1
+        val e = Employees("e")
+        val es = EmployeeSkills("es")
+        val er = ExamRecords("er")
 
-        if (!departmentId.isNullOrBlank()) {
-            conditions.add("e.department_id = \${$idx}")
-            params.add(departmentId)
-            idx++
-        }
+        val conditions = mutableListOf<Condition>()
+        departmentId?.takeIf { it.isNotBlank() }?.let { conditions.add(e.DEPARTMENT_ID.eq(it)) }
 
-        val whereClause = if (conditions.isEmpty()) "" else "WHERE ${conditions.joinToString(" AND ")}"
+        val skillSub = DSL.field(
+            DSL.select(
+                DSL.count().filterWhere(es.CURRENT_LEVEL.ge(2.toShort()))
+                    .mul(1.0)
+                    .div(DSL.nullif(DSL.count(), DSL.inline(0)))
+            ).from(es).where(es.EMPLOYEE_ID.eq(e.ID))
+        )
 
-        // 关联 employees → employee_skills（技能达标率）+ exam_records（考试合格率）
-        val sql = """
-            SELECT 
-                e.id AS employee_id,
-                e.name AS employee_name,
-                COALESCE(
-                    (SELECT COUNT(*) FILTER (WHERE es.current_level >= 2) * 1.0 / NULLIF(COUNT(*), 0)
-                     FROM employee_skills es WHERE es.employee_id = e.id),
-                    0.0
-                ) AS skill_compliance_rate,
-                COALESCE(
-                    (SELECT COUNT(*) FILTER (WHERE er.passed = TRUE) * 1.0 / NULLIF(COUNT(*), 0)
-                     FROM exam_records er WHERE er.employee_id = e.id),
-                    0.0
-                ) AS exam_pass_rate
-            FROM employees e
-            $whereClause
-            ORDER BY e.name ASC
-        """.trimIndent()
+        val examSub = DSL.field(
+            DSL.select(
+                DSL.count().filterWhere(er.PASSED.eq(true))
+                    .mul(1.0)
+                    .div(DSL.nullif(DSL.count(), DSL.inline(0)))
+            ).from(er).where(er.EMPLOYEE_ID.eq(e.ID))
+        )
 
-        val tuple = buildTuple(params)
-        return pool.preparedQuery(sql)
-            .execute(tuple)
+        val query = ctx.select(
+                e.ID.`as`("employee_id"),
+                e.NAME.`as`("employee_name"),
+                DSL.coalesce(skillSub, DSL.inline(0.0)).`as`("skill_compliance_rate"),
+                DSL.coalesce(examSub, DSL.inline(0.0)).`as`("exam_pass_rate")
+            ).from(e)
+            .where(conditions)
+            .orderBy(e.NAME.asc())
+
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
             .map { rows: RowSet<Row> ->
                 val records = JsonArray()
                 var totalCompliance = 0.0
@@ -230,26 +238,5 @@ class AnalyticsService(private val pool: Pool) {
                         .put("avg_exam_pass_rate", avgExamPass)
                         .put("employee_count", count))
             }
-    }
-
-    // ==============================
-    // Helpers
-    // ==============================
-
-    private fun buildTuple(params: List<Any?>): Tuple {
-        val tuple = Tuple.tuple()
-        for (p in params) {
-            when (p) {
-                is String -> tuple.addString(p)
-                is Int -> tuple.addInteger(p)
-                is Long -> tuple.addLong(p)
-                is Boolean -> tuple.addBoolean(p)
-                is Float -> tuple.addFloat(p)
-                is Double -> tuple.addDouble(p)
-                is OffsetDateTime -> tuple.addOffsetDateTime(p)
-                else -> tuple.addValue(p)
-            }
-        }
-        return tuple
     }
 }

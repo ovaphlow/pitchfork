@@ -125,9 +125,9 @@ class SkillsService(private val pool: Pool, private val ctx: DSLContext = Databa
     }
 
     fun deletePosition(id: String): Future<Void> {
-        val sql = "DELETE FROM positions WHERE id = ?"
-        return pool.preparedQuery(sql)
-            .execute(io.vertx.sqlclient.Tuple.of(id))
+        val query = ctx.deleteFrom(p).where(p.ID.eq(id))
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
             .map { null as Void? }
     }
 
@@ -265,9 +265,9 @@ class SkillsService(private val pool: Pool, private val ctx: DSLContext = Databa
     }
 
     fun deleteSkill(id: String): Future<Void> {
-        val sql = "DELETE FROM skills WHERE id = ?"
-        return pool.preparedQuery(sql)
-            .execute(io.vertx.sqlclient.Tuple.of(id))
+        val query = ctx.deleteFrom(s).where(s.ID.eq(id))
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
             .map { null as Void? }
     }
 
@@ -310,17 +310,18 @@ class SkillsService(private val pool: Pool, private val ctx: DSLContext = Databa
             return Future.failedFuture(IllegalArgumentException("current_level must be between 1 and 4"))
         }
         val id = Ulid.generate()
-        val sql = """
-            INSERT INTO employee_skills (id, employee_id, skill_id, current_level, assessed_date, assessor_id, expire_date, assessment_record)
-            VALUES (${'$'}1, ${'$'}2, ${'$'}3, ${'$'}4, ${'$'}5, ${'$'}6, ${'$'}7, ${'$'}8::jsonb)
-            RETURNING id, employee_id, skill_id, current_level, assessed_date, assessor_id, expire_date, assessment_record
-        """.trimIndent()
-        val tuple = io.vertx.sqlclient.Tuple.of(
-            id, employeeId, skillId, currentLevel.toShort(),
-            assessedDate ?: "", assessorId ?: "", expireDate ?: "", assessmentRecord.encode()
-        )
-        return pool.preparedQuery(sql)
-            .execute(tuple)
+        val query = ctx.insertInto(es)
+            .set(es.ID, id)
+            .set(es.EMPLOYEE_ID, employeeId)
+            .set(es.SKILL_ID, skillId)
+            .set(es.CURRENT_LEVEL, currentLevel.toShort())
+            .set(es.ASSESSED_DATE, if (assessedDate != null) LocalDate.parse(assessedDate) else null)
+            .set(es.ASSESSOR_ID, assessorId ?: "")
+            .set(es.EXPIRE_DATE, if (expireDate != null) LocalDate.parse(expireDate) else null)
+            .set(es.ASSESSMENT_RECORD, JSONB.valueOf(assessmentRecord.encode()))
+        query.returning(es.ID, es.EMPLOYEE_ID, es.SKILL_ID, es.CURRENT_LEVEL, es.ASSESSED_DATE, es.ASSESSOR_ID, es.EXPIRE_DATE, es.ASSESSMENT_RECORD)
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
             .map { rows -> employeeSkillToJson(rows.iterator().next()) }
             .recover { err ->
                 val msg = err.message ?: ""
@@ -365,20 +366,19 @@ class SkillsService(private val pool: Pool, private val ctx: DSLContext = Databa
             }
             val newSkillId = skillId ?: existing.getString("skill_id")
             val newCurrentLevel = currentLevel ?: existing.getInteger("current_level")
-            val newAssessedDate = assessedDate ?: existing.getString("assessed_date") ?: ""
             val newAssessorId = assessorId ?: existing.getString("assessor_id") ?: ""
-            val newExpireDate = expireDate ?: existing.getString("expire_date") ?: ""
             val newAssessmentRecord = assessmentRecord ?: existing.getJsonObject("assessment_record") ?: JsonObject()
-
-            val sql = """
-                UPDATE employee_skills
-                SET skill_id = ${'$'}1, current_level = ${'$'}2, assessed_date = ${'$'}3, assessor_id = ${'$'}4, expire_date = ${'$'}5, assessment_record = ${'$'}6::jsonb
-                WHERE id = ${'$'}7
-                RETURNING id, employee_id, skill_id, current_level, assessed_date, assessor_id, expire_date, assessment_record
-            """.trimIndent()
-            val tuple = io.vertx.sqlclient.Tuple.of(newSkillId, newCurrentLevel.toShort(), newAssessedDate, newAssessorId, newExpireDate, newAssessmentRecord.encode(), id)
-            pool.preparedQuery(sql)
-                .execute(tuple)
+            val query = ctx.update(es)
+                .set(es.SKILL_ID, newSkillId)
+                .set(es.CURRENT_LEVEL, newCurrentLevel.toShort())
+                .set(es.ASSESSED_DATE, if (assessedDate != null) LocalDate.parse(assessedDate) else if (existing.getString("assessed_date") != null && existing.getString("assessed_date")!!.isNotEmpty()) LocalDate.parse(existing.getString("assessed_date")) else null)
+                .set(es.ASSESSOR_ID, newAssessorId)
+                .set(es.EXPIRE_DATE, if (expireDate != null) LocalDate.parse(expireDate) else if (existing.getString("expire_date") != null && existing.getString("expire_date")!!.isNotEmpty()) LocalDate.parse(existing.getString("expire_date")) else null)
+                .set(es.ASSESSMENT_RECORD, JSONB.valueOf(newAssessmentRecord.encode()))
+                .where(es.ID.eq(id))
+            query.returning(es.ID, es.EMPLOYEE_ID, es.SKILL_ID, es.CURRENT_LEVEL, es.ASSESSED_DATE, es.ASSESSOR_ID, es.EXPIRE_DATE, es.ASSESSMENT_RECORD)
+            pool.preparedQuery(DatabaseConfig.sql(query))
+                .execute(DatabaseConfig.tuple(query))
                 .flatMap { rows ->
                     if (rows.size() == 0) Future.failedFuture(NotFoundException("employee skill not found"))
                     else Future.succeededFuture(employeeSkillToJson(rows.iterator().next()))
@@ -387,9 +387,9 @@ class SkillsService(private val pool: Pool, private val ctx: DSLContext = Databa
     }
 
     fun deleteEmployeeSkill(id: String): Future<Void> {
-        val sql = "DELETE FROM employee_skills WHERE id = ?"
-        return pool.preparedQuery(sql)
-            .execute(io.vertx.sqlclient.Tuple.of(id))
+        val query = ctx.deleteFrom(es).where(es.ID.eq(id))
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
             .map { null as Void? }
     }
 
@@ -398,16 +398,15 @@ class SkillsService(private val pool: Pool, private val ctx: DSLContext = Databa
             return Future.failedFuture(IllegalArgumentException("current_level must be between 1 and 4"))
         }
         return getEmployeeSkill(id).flatMap { existing: JsonObject ->
-            val now = LocalDate.now().toString()
-            val sql = """
-                UPDATE employee_skills
-                SET current_level = ${'$'}1, assessed_date = ${'$'}2, assessment_record = ${'$'}3::jsonb
-                WHERE id = ${'$'}4
-                RETURNING id, employee_id, skill_id, current_level, assessed_date, assessor_id, expire_date, assessment_record
-            """.trimIndent()
-            val tuple = io.vertx.sqlclient.Tuple.of(currentLevel.toShort(), now, assessmentRecord.encode(), id)
-            pool.preparedQuery(sql)
-                .execute(tuple)
+            val now = LocalDate.now()
+            val query = ctx.update(es)
+                .set(es.CURRENT_LEVEL, currentLevel.toShort())
+                .set(es.ASSESSED_DATE, now)
+                .set(es.ASSESSMENT_RECORD, JSONB.valueOf(assessmentRecord.encode()))
+                .where(es.ID.eq(id))
+            query.returning(es.ID, es.EMPLOYEE_ID, es.SKILL_ID, es.CURRENT_LEVEL, es.ASSESSED_DATE, es.ASSESSOR_ID, es.EXPIRE_DATE, es.ASSESSMENT_RECORD)
+            pool.preparedQuery(DatabaseConfig.sql(query))
+                .execute(DatabaseConfig.tuple(query))
                 .flatMap { rows ->
                     if (rows.size() == 0) Future.failedFuture(NotFoundException("employee skill not found"))
                     else Future.succeededFuture(employeeSkillToJson(rows.iterator().next()))
@@ -498,9 +497,9 @@ class SkillsService(private val pool: Pool, private val ctx: DSLContext = Databa
     }
 
     fun deleteCertificate(id: String): Future<Void> {
-        val sql = "DELETE FROM certificates WHERE id = ?"
-        return pool.preparedQuery(sql)
-            .execute(io.vertx.sqlclient.Tuple.of(id))
+        val query = ctx.deleteFrom(c).where(c.ID.eq(id))
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
             .map { null as Void? }
     }
 
@@ -539,14 +538,17 @@ class SkillsService(private val pool: Pool, private val ctx: DSLContext = Databa
         extra: JsonObject = JsonObject()
     ): Future<JsonObject> {
         val id = Ulid.generate()
-        val sql = """
-            INSERT INTO employee_certificates (id, employee_id, certificate_id, issue_date, expire_date, attachment, extra)
-            VALUES (${'$'}1, ${'$'}2, ${'$'}3, ${'$'}4, ${'$'}5, ${'$'}6, ${'$'}7::jsonb)
-            RETURNING id, employee_id, certificate_id, issue_date, expire_date, attachment, extra
-        """.trimIndent()
-        val tuple = io.vertx.sqlclient.Tuple.of(id, employeeId, certificateId, issueDate ?: "", expireDate ?: "", attachment, extra.encode())
-        return pool.preparedQuery(sql)
-            .execute(tuple)
+        val query = ctx.insertInto(ec)
+            .set(ec.ID, id)
+            .set(ec.EMPLOYEE_ID, employeeId)
+            .set(ec.CERTIFICATE_ID, certificateId)
+            .set(ec.ISSUE_DATE, if (issueDate != null) LocalDate.parse(issueDate) else null)
+            .set(ec.EXPIRE_DATE, if (expireDate != null) LocalDate.parse(expireDate) else null)
+            .set(ec.ATTACHMENT, attachment)
+            .set(ec.EXTRA, JSONB.valueOf(extra.encode()))
+        query.returning(ec.ID, ec.EMPLOYEE_ID, ec.CERTIFICATE_ID, ec.ISSUE_DATE, ec.EXPIRE_DATE, ec.ATTACHMENT, ec.EXTRA)
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
             .map { rows -> employeeCertificateToJson(rows.iterator().next()) }
             .recover { err ->
                 val msg = err.message ?: ""
@@ -559,9 +561,9 @@ class SkillsService(private val pool: Pool, private val ctx: DSLContext = Databa
     }
 
     fun deleteEmployeeCertificate(employeeId: String, certificateId: String): Future<Void> {
-        val sql = "DELETE FROM employee_certificates WHERE employee_id = ? AND certificate_id = ?"
-        return pool.preparedQuery(sql)
-            .execute(io.vertx.sqlclient.Tuple.of(employeeId, certificateId))
+        val query = ctx.deleteFrom(ec).where(ec.EMPLOYEE_ID.eq(employeeId)).and(ec.CERTIFICATE_ID.eq(certificateId))
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
             .flatMap { rows ->
                 if (rows.size() == 0) Future.failedFuture(NotFoundException("employee certificate not found"))
                 else Future.succeededFuture(null as Void?)

@@ -34,17 +34,22 @@ object KnowledgeRoutes {
         }
 
         router.post("/categories").handler { ctx ->
-            val b = body(ctx)
-            val name = b.getString("name", "")
-            if (name.isBlank()) {
-                respond(ctx, 400, "name required"); return@handler
+            try {
+                val b = body(ctx)
+                val name = b.getString("name") ?: ""
+                if (name.isBlank()) {
+                    respond(ctx, 400, "name required"); return@handler
+                }
+                val parentId = b.getString("parent_id")?.ifBlank { null }
+                val sortOrder = (b.getInteger("sort_order") ?: 0)
+                val description = b.getString("description")?.ifBlank { null }
+                service.createCategory(name, parentId, sortOrder, description)
+                    .onSuccess { ctx.json(it) }
+                    .onFailure { respondError(ctx, it) }
+            } catch (e: Exception) {
+                log.error("POST /categories error", e)
+                respond(ctx, 500, e.message)
             }
-            val parentId = b.getString("parent_id", "")
-            val sortOrder = b.getInteger("sort_order", 0)
-            val description = b.getString("description", "")
-            service.createCategory(name, parentId.ifBlank { null }, sortOrder, description.ifBlank { null })
-                .onSuccess { ctx.json(it) }
-                .onFailure { respondError(ctx, it) }
         }
 
         router.put("/categories/:id").handler { ctx ->
@@ -274,7 +279,7 @@ object KnowledgeRoutes {
     }
 
     private fun body(ctx: RoutingContext): JsonObject =
-        ctx.body().asJsonObject() ?: JsonObject()
+        ctx.body()?.asJsonObject() ?: JsonObject()
 
     private fun respond(ctx: RoutingContext, status: Int, message: String?) {
         ctx.response().setStatusCode(status)

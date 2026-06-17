@@ -11,13 +11,12 @@ import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
 import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
-import io.vertx.sqlclient.RowSet
-import io.vertx.sqlclient.Tuple
 import org.jooq.Condition
 import org.jooq.DSLContext
 import org.jooq.JSONB
 import org.slf4j.LoggerFactory
 import java.time.OffsetDateTime
+import org.jooq.impl.DSL.`when`
 import org.jooq.impl.DSL.count
 
 class TrainingService(private val pool: Pool, private val ctx: DSLContext = DatabaseConfig.createDSL()) {
@@ -93,12 +92,12 @@ class TrainingService(private val pool: Pool, private val ctx: DSLContext = Data
             return Future.failedFuture(IllegalArgumentException("invalid status: $status, must be one of $validStatuses"))
         }
 
-        val sql = """INSERT INTO courses (id, title, type, cover_image, target_positions, completion_rules, metadata, status, created_by, created_at, updated_at)
-                     VALUES (${'$'}1, ${'$'}2, ${'$'}3, ${'$'}4, ${'$'}5, ${'$'}6::jsonb, ${'$'}7::jsonb, ${'$'}8, ${'$'}9, ${'$'}10, ${'$'}11)
-                     RETURNING id, title, type, cover_image, target_positions, completion_rules, metadata, status, created_by, created_at, updated_at""".trimIndent()
-        val tuple = Tuple.of(id, title, type, coverImage, targetPositions.toList().map { it?.toString() ?: "" }.toTypedArray(), completionRules.encode(), metadata.encode(), status, createdBy, now, now)
-        return pool.preparedQuery(sql)
-            .execute(tuple)
+        val query = ctx.insertInto(c)
+            .columns(c.ID, c.TITLE, c.TYPE, c.COVER_IMAGE, c.TARGET_POSITIONS, c.COMPLETION_RULES, c.METADATA, c.STATUS, c.CREATED_BY, c.CREATED_AT, c.UPDATED_AT)
+            .values(id, title, type, coverImage, targetPositions.toList().map { it?.toString() ?: "" }.toTypedArray(), JSONB.valueOf(completionRules.encode()), JSONB.valueOf(metadata.encode()), status, createdBy, now, now)
+            .returning(c.ID, c.TITLE, c.TYPE, c.COVER_IMAGE, c.TARGET_POSITIONS, c.COMPLETION_RULES, c.METADATA, c.STATUS, c.CREATED_BY, c.CREATED_AT, c.UPDATED_AT)
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
             .map { rows -> courseToJson(rows.iterator().next()) }
     }
 
@@ -252,12 +251,12 @@ class TrainingService(private val pool: Pool, private val ctx: DSLContext = Data
                 if (rows.size() == 0) Future.failedFuture(NotFoundException("course not found"))
                 else {
                     val id = Ulid.generate()
-                    val sql = """INSERT INTO course_chapters (id, course_id, sort_order, title, blocks, quiz_config)
-                                 VALUES (${'$'}1, ${'$'}2, ${'$'}3, ${'$'}4, ${'$'}5::jsonb, ${'$'}6::jsonb)
-                                 RETURNING id, course_id, sort_order, title, blocks, quiz_config""".trimIndent()
-                    val tuple = Tuple.of(id, courseId, sortOrder, title, blocks.encode(), quizConfig.encode())
-                    pool.preparedQuery(sql)
-                        .execute(tuple)
+                    val query = ctx.insertInto(cc)
+                        .columns(cc.ID, cc.COURSE_ID, cc.SORT_ORDER, cc.TITLE, cc.BLOCKS, cc.QUIZ_CONFIG)
+                        .values(id, courseId, sortOrder.toShort(), title, JSONB.valueOf(blocks.encode()), JSONB.valueOf(quizConfig.encode()))
+                        .returning(cc.ID, cc.COURSE_ID, cc.SORT_ORDER, cc.TITLE, cc.BLOCKS, cc.QUIZ_CONFIG)
+                    pool.preparedQuery(DatabaseConfig.sql(query))
+                        .execute(DatabaseConfig.tuple(query))
                         .map { insertRows -> chapterToJson(insertRows.iterator().next()) }
                 }
             }
@@ -351,12 +350,13 @@ class TrainingService(private val pool: Pool, private val ctx: DSLContext = Data
                 else {
                     val id = Ulid.generate()
                     val now = OffsetDateTime.now()
-                    val sql = """INSERT INTO training_assignments (id, course_id, assign_type, trigger_rule, deadline, target_type, target_ids, created_by, created_at)
-                                 VALUES (${'$'}1, ${'$'}2, ${'$'}3, ${'$'}4::jsonb, ${'$'}5, ${'$'}6, ${'$'}7, ${'$'}8, ${'$'}9)
-                                 RETURNING id, course_id, assign_type, trigger_rule, deadline, target_type, target_ids, created_by, created_at""".trimIndent()
-                    val tuple = Tuple.of(id, courseId, assignType, triggerRule.encode(), deadline, targetType, targetIds.toList().map { it?.toString() ?: "" }.toTypedArray(), createdBy, now)
-                    pool.preparedQuery(sql)
-                        .execute(tuple)
+                    val deadlineDt = try { OffsetDateTime.parse(deadline) } catch (e: Exception) { null }
+                    val query = ctx.insertInto(ta)
+                        .columns(ta.ID, ta.COURSE_ID, ta.ASSIGN_TYPE, ta.TRIGGER_RULE, ta.DEADLINE, ta.TARGET_TYPE, ta.TARGET_IDS, ta.CREATED_BY, ta.CREATED_AT)
+                        .values(id, courseId, assignType, JSONB.valueOf(triggerRule.encode()), deadlineDt, targetType, targetIds.toList().map { it?.toString() ?: "" }.toTypedArray(), createdBy, now)
+                        .returning(ta.ID, ta.COURSE_ID, ta.ASSIGN_TYPE, ta.TRIGGER_RULE, ta.DEADLINE, ta.TARGET_TYPE, ta.TARGET_IDS, ta.CREATED_BY, ta.CREATED_AT)
+                    pool.preparedQuery(DatabaseConfig.sql(query))
+                        .execute(DatabaseConfig.tuple(query))
                         .map { insertRows -> assignmentToJson(insertRows.iterator().next()) }
                 }
             }
@@ -522,34 +522,27 @@ class TrainingService(private val pool: Pool, private val ctx: DSLContext = Data
                     pool.preparedQuery(DatabaseConfig.sql(checkChapter))
                         .execute(DatabaseConfig.tuple(checkChapter))
                         .flatMap { chapterRows ->
-                            if (chapterRows.size() == 0) Future.failedFuture(NotFoundException("chapter not found"))
-                            else {
-                                val id = Ulid.generate()
-                                val now = OffsetDateTime.now().toString()
-                                val status = if (progressPercent >= 100) "已完成" else "学习中"
-                                val startedAt = now
-                                val completedAt = if (progressPercent >= 100) now else ""
+                            if (chapterRows.size() == 0) return@flatMap Future.failedFuture<JsonObject>(NotFoundException("chapter not found"))
+                            val id = Ulid.generate()
+                            val now = OffsetDateTime.now()
+                            val status = if (progressPercent >= 100) "已完成" else "学习中"
+                            val startedAt = now
+                            val completedAt = if (progressPercent >= 100) now else null
 
-                                // Use raw SQL for the ON CONFLICT upsert which is complex with CASE expressions
-                                val upsertSql = """
-                                    INSERT INTO learning_progress (id, assignment_id, employee_id, chapter_id, progress_percent, status, detail, started_at, completed_at)
-                                    VALUES (${'$'}1, ${'$'}2, ${'$'}3, ${'$'}4, ${'$'}5, ${'$'}6, ${'$'}7::jsonb, ${'$'}8, ${'$'}9)
-                                    ON CONFLICT (assignment_id, employee_id, chapter_id)
-                                    DO UPDATE SET progress_percent = ${'$'}5, status = ${'$'}6, detail = ${'$'}7::jsonb,
-                                                  started_at = CASE WHEN learning_progress.started_at IS NULL THEN ${'$'}8 ELSE learning_progress.started_at END,
-                                                  completed_at = CASE WHEN ${'$'}9 IS NOT NULL AND ${'$'}9 <> '' THEN ${'$'}9 ELSE learning_progress.completed_at END
-                                    RETURNING id, assignment_id, employee_id, chapter_id, progress_percent, status, detail, started_at, completed_at
-                                """.trimIndent()
-
-                                val tuple = Tuple.of(
-                                    id, assignmentId, employeeId, chapterId,
-                                    progressPercent, status, detail.encode(),
-                                    startedAt, completedAt
-                                )
-                                pool.preparedQuery(upsertSql)
-                                    .execute(tuple)
-                                    .map { rows -> progressToJson(rows.iterator().next()) }
-                            }
+                            val query = ctx.insertInto(lp)
+                                .columns(lp.ID, lp.ASSIGNMENT_ID, lp.EMPLOYEE_ID, lp.CHAPTER_ID, lp.PROGRESS_PERCENT, lp.STATUS, lp.DETAIL, lp.STARTED_AT, lp.COMPLETED_AT)
+                                .values(id, assignmentId, employeeId, chapterId, java.math.BigDecimal.valueOf(progressPercent.toLong()), status, JSONB.valueOf(detail.encode()), startedAt, completedAt)
+                                .onConflict(lp.ASSIGNMENT_ID, lp.EMPLOYEE_ID, lp.CHAPTER_ID)
+                                .doUpdate()
+                                .set(lp.PROGRESS_PERCENT, java.math.BigDecimal.valueOf(progressPercent.toLong()))
+                                .set(lp.STATUS, status)
+                                .set(lp.DETAIL, JSONB.valueOf(detail.encode()))
+                                .set(lp.STARTED_AT, `when`(lp.STARTED_AT.isNull, startedAt).otherwise(lp.STARTED_AT))
+                                .set(lp.COMPLETED_AT, `when`(lp.COMPLETED_AT.isNull, completedAt).otherwise(lp.COMPLETED_AT))
+                                .returning(lp.ID, lp.ASSIGNMENT_ID, lp.EMPLOYEE_ID, lp.CHAPTER_ID, lp.PROGRESS_PERCENT, lp.STATUS, lp.DETAIL, lp.STARTED_AT, lp.COMPLETED_AT)
+                            pool.preparedQuery(DatabaseConfig.sql(query))
+                                .execute(DatabaseConfig.tuple(query))
+                                .map { rows -> progressToJson(rows.iterator().next()) }
                         }
                 }
             }
@@ -567,25 +560,25 @@ class TrainingService(private val pool: Pool, private val ctx: DSLContext = Data
                     pool.preparedQuery(DatabaseConfig.sql(chaptersQuery))
                         .execute(DatabaseConfig.tuple(chaptersQuery))
                         .flatMap { chapterRows ->
-                            val now = OffsetDateTime.now().toString()
+                            val now = OffsetDateTime.now()
                             var chain: Future<*> = Future.succeededFuture<Any?>(null)
 
                             for (chapter in chapterRows) {
                                 val chapterId = chapter.getValue("id")?.toString() ?: ""
                                 val id = Ulid.generate()
-                                val upsertSql = """
-                                    INSERT INTO learning_progress (id, assignment_id, employee_id, chapter_id, progress_percent, status, detail, started_at, completed_at)
-                                    VALUES (${'$'}1, ${'$'}2, ${'$'}3, ${'$'}4, 100, '已完成', '{}'::jsonb, ${'$'}5, ${'$'}5)
-                                    ON CONFLICT (assignment_id, employee_id, chapter_id)
-                                    DO UPDATE SET progress_percent = 100, status = '已完成',
-                                                  detail = CASE WHEN learning_progress.detail IS NULL OR learning_progress.detail = '{}'::jsonb THEN '{}'::jsonb ELSE learning_progress.detail END,
-                                                  completed_at = ${'$'}5
-                                    RETURNING id, assignment_id, employee_id, chapter_id, progress_percent, status, detail, started_at, completed_at
-                                """.trimIndent()
-                                val tuple = Tuple.of(id, assignmentId, employeeId, chapterId, now)
+                                val query = ctx.insertInto(lp)
+                                    .columns(lp.ID, lp.ASSIGNMENT_ID, lp.EMPLOYEE_ID, lp.CHAPTER_ID, lp.PROGRESS_PERCENT, lp.STATUS, lp.DETAIL, lp.STARTED_AT, lp.COMPLETED_AT)
+                                    .values(id, assignmentId, employeeId, chapterId, java.math.BigDecimal.valueOf(100), "已完成", JSONB.valueOf("{}"), now, now)
+                                    .onConflict(lp.ASSIGNMENT_ID, lp.EMPLOYEE_ID, lp.CHAPTER_ID)
+                                    .doUpdate()
+                                    .set(lp.PROGRESS_PERCENT, java.math.BigDecimal.valueOf(100))
+                                    .set(lp.STATUS, "已完成")
+                                    .set(lp.DETAIL, `when`(lp.DETAIL.isNull.or(lp.DETAIL.eq(JSONB.valueOf("{}"))), JSONB.valueOf("{}")).otherwise(lp.DETAIL))
+                                    .set(lp.COMPLETED_AT, now)
+                                    .returning(lp.ID, lp.ASSIGNMENT_ID, lp.EMPLOYEE_ID, lp.CHAPTER_ID, lp.PROGRESS_PERCENT, lp.STATUS, lp.DETAIL, lp.STARTED_AT, lp.COMPLETED_AT)
                                 chain = chain.flatMap {
                                     @Suppress("UNCHECKED_CAST")
-                                    pool.preparedQuery(upsertSql).execute(tuple) as Future<Any?>
+                                    pool.preparedQuery(DatabaseConfig.sql(query)).execute(DatabaseConfig.tuple(query)) as Future<Any?>
                                 }
                             }
 
@@ -603,8 +596,31 @@ class TrainingService(private val pool: Pool, private val ctx: DSLContext = Data
     // ==========================================
 
     companion object {
+        private fun jsonObj(row: Row, column: String): JsonObject {
+            val v = row.getValue(column)
+            return when (v) {
+                is JsonObject -> v
+                is String -> try { JsonObject(v) } catch (e: Exception) { JsonObject() }
+                else -> JsonObject()
+            }
+        }
+
+        private fun jsonArr(row: Row, column: String): JsonArray {
+            val v = row.getValue(column)
+            return when (v) {
+                is JsonArray -> v
+                is String -> try { JsonArray(v) } catch (e: Exception) { JsonArray() }
+                else -> JsonArray()
+            }
+        }
+
+        private fun num(row: Row, column: String): Int? {
+            val v = row.getValue(column)
+            return (v as? Number)?.toInt()
+        }
+
         fun courseToJson(row: Row): JsonObject {
-            val meta = row.getValue("metadata") as? JsonObject ?: JsonObject()
+            val meta = jsonObj(row, "metadata")
             val coverImage = row.getValue("cover_image")?.toString() ?: ""
             return JsonObject()
                 .put("id", row.getValue("id")?.toString())
@@ -618,7 +634,7 @@ class TrainingService(private val pool: Pool, private val ctx: DSLContext = Data
                 .put("duration", meta.getInteger("duration"))
                 .put("metadata", meta)
                 .put("target_positions", arrayToJsonArray(row.getValue("target_positions")))
-                .put("completion_rules", row.getValue("completion_rules") as? JsonObject ?: JsonObject())
+                .put("completion_rules", jsonObj(row, "completion_rules"))
                 .put("status", row.getValue("status")?.toString())
                 .put("created_by", row.getValue("created_by")?.toString() ?: "")
                 .put("created_at", row.getValue("created_at")?.toString())
@@ -629,10 +645,10 @@ class TrainingService(private val pool: Pool, private val ctx: DSLContext = Data
             return JsonObject()
                 .put("id", row.getValue("id")?.toString())
                 .put("course_id", row.getValue("course_id")?.toString())
-                .put("sort_order", row.getValue("sort_order") as? Int ?: 0)
+                .put("sort_order", num(row, "sort_order") ?: 0)
                 .put("title", row.getValue("title")?.toString())
-                .put("blocks", row.getValue("blocks") as? JsonObject ?: JsonObject())
-                .put("quiz_config", row.getValue("quiz_config") as? JsonObject ?: JsonObject())
+                .put("blocks", jsonObj(row, "blocks"))
+                .put("quiz_config", jsonObj(row, "quiz_config"))
         }
 
         fun assignmentToJson(row: Row): JsonObject {
@@ -640,13 +656,13 @@ class TrainingService(private val pool: Pool, private val ctx: DSLContext = Data
                 .put("id", row.getValue("id")?.toString())
                 .put("course_id", row.getValue("course_id")?.toString())
                 .put("assign_type", row.getValue("assign_type")?.toString())
-                .put("trigger_rule", row.getValue("trigger_rule") as? JsonObject ?: JsonObject())
+                .put("trigger_rule", jsonObj(row, "trigger_rule"))
                 .put("deadline", row.getValue("deadline")?.toString() ?: "")
                 .put("target_type", row.getValue("target_type")?.toString() ?: "")
                 .put("target_ids", arrayToJsonArray(row.getValue("target_ids")))
                 .put("created_by", row.getValue("created_by")?.toString() ?: "")
                 .put("created_at", row.getValue("created_at")?.toString())
-            val courseTitle = row.getValue("course_title")?.toString()
+            val courseTitle = try { row.getValue("course_title")?.toString() } catch (e: NoSuchElementException) { null }
             if (courseTitle != null) {
                 obj.put("course_title", courseTitle)
             }
@@ -659,16 +675,16 @@ class TrainingService(private val pool: Pool, private val ctx: DSLContext = Data
                 .put("assignment_id", row.getValue("assignment_id")?.toString())
                 .put("employee_id", row.getValue("employee_id")?.toString())
                 .put("chapter_id", row.getValue("chapter_id")?.toString())
-                .put("progress_percent", row.getValue("progress_percent") as? Int ?: 0)
+                .put("progress_percent", num(row, "progress_percent") ?: 0)
                 .put("status", row.getValue("status")?.toString())
-                .put("detail", row.getValue("detail") as? JsonObject ?: JsonObject())
+                .put("detail", jsonObj(row, "detail"))
                 .put("started_at", row.getValue("started_at")?.toString() ?: "")
                 .put("completed_at", row.getValue("completed_at")?.toString() ?: "")
-            val chapterTitle = row.getValue("chapter_title")?.toString()
+            val chapterTitle = try { row.getValue("chapter_title")?.toString() } catch (e: NoSuchElementException) { null }
             if (chapterTitle != null) {
                 obj.put("chapter_title", chapterTitle)
             }
-            val chapterSortOrder = row.getValue("chapter_sort_order") as? Int
+            val chapterSortOrder = try { num(row, "chapter_sort_order") } catch (e: NoSuchElementException) { null }
             if (chapterSortOrder != null) {
                 obj.put("chapter_sort_order", chapterSortOrder)
             }

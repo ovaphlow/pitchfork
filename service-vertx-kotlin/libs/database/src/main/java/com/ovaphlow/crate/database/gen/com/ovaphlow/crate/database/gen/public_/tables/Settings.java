@@ -86,14 +86,14 @@ public class Settings extends TableImpl<SettingsRecord> {
     public final TableField<SettingsRecord, JSONB> PAYLOAD = createField(DSL.name("payload"), SQLDataType.JSONB.nullable(false), this, "");
 
     /**
-     * The column <code>public.settings.create_time</code>.
+     * The column <code>public.settings.created_at</code>.
      */
-    public final TableField<SettingsRecord, LocalDateTime> CREATE_TIME = createField(DSL.name("create_time"), SQLDataType.LOCALDATETIME(6).defaultValue(DSL.field(DSL.raw("CURRENT_TIMESTAMP"), SQLDataType.LOCALDATETIME)), this, "");
+    public final TableField<SettingsRecord, LocalDateTime> CREATED_AT = createField(DSL.name("created_at"), SQLDataType.LOCALDATETIME(6).defaultValue(DSL.field(DSL.raw("CURRENT_TIMESTAMP"), SQLDataType.LOCALDATETIME)), this, "");
 
     /**
-     * The column <code>public.settings.update_time</code>.
+     * The column <code>public.settings.updated_at</code>.
      */
-    public final TableField<SettingsRecord, LocalDateTime> UPDATE_TIME = createField(DSL.name("update_time"), SQLDataType.LOCALDATETIME(6).defaultValue(DSL.field(DSL.raw("CURRENT_TIMESTAMP"), SQLDataType.LOCALDATETIME)), this, "");
+    public final TableField<SettingsRecord, LocalDateTime> UPDATED_AT = createField(DSL.name("updated_at"), SQLDataType.LOCALDATETIME(6).defaultValue(DSL.field(DSL.raw("CURRENT_TIMESTAMP"), SQLDataType.LOCALDATETIME)), this, "");
 
     private Settings(Name alias, Table<SettingsRecord> aliased) {
         this(alias, aliased, (Field<?>[]) null, null);

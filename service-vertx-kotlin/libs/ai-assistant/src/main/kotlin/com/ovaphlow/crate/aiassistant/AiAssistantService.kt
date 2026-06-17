@@ -237,12 +237,13 @@ class AiAssistantService(private val pool: Pool, private val ctx: DSLContext = D
     ): Future<JsonObject> {
         val id = Ulid.generate()
         val now = OffsetDateTime.now()
-        val sql = """INSERT INTO preventive_push_rules (id, name, trigger_metric, threshold, target_positions, target_course_id, enabled, extra, created_at, updated_at)
-                     VALUES (${'$'}1, ${'$'}2, ${'$'}3, ${'$'}4, ${'$'}5, ${'$'}6, ${'$'}7, ${'$'}8::jsonb, ${'$'}9, ${'$'}10)
-                     RETURNING id, name, trigger_metric, threshold, target_positions, target_course_id, enabled, extra, created_at, updated_at""".trimIndent()
-        val tuple = Tuple.of(id, name, triggerMetric, threshold, targetPositions.toTypedArray(), targetCourseId ?: "", enabled, extra.encode(), now, now)
-        return pool.preparedQuery(sql)
-            .execute(tuple)
+
+        val query = ctx.insertInto(ppr)
+            .columns(ppr.ID, ppr.NAME, ppr.TRIGGER_METRIC, ppr.THRESHOLD, ppr.TARGET_POSITIONS, ppr.TARGET_COURSE_ID, ppr.ENABLED, ppr.EXTRA, ppr.CREATED_AT, ppr.UPDATED_AT)
+            .values(id, name, triggerMetric, threshold.toBigDecimal(), targetPositions.toTypedArray(), targetCourseId ?: "", enabled, JSONB.valueOf(extra.encode()), now, now)
+            .returning(ppr.ID, ppr.NAME, ppr.TRIGGER_METRIC, ppr.THRESHOLD, ppr.TARGET_POSITIONS, ppr.TARGET_COURSE_ID, ppr.ENABLED, ppr.EXTRA, ppr.CREATED_AT, ppr.UPDATED_AT)
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
             .map { rows -> pushRuleToJson(rows.iterator().next()) }
     }
 
