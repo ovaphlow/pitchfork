@@ -27,7 +27,7 @@ dependencies {
 }
 
 application {
-    mainClass.set("com.ovaphlow.crate.service.MainKt")
+    mainClass.set("com.ovaphlow.crate.trainova.MainKt")
 }
 
 tasks.withType<JavaExec> {

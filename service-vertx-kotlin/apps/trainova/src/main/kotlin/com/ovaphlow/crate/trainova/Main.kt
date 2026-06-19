@@ -1,4 +1,4 @@
-package com.ovaphlow.crate.service
+package com.ovaphlow.crate.trainova
 
 import com.ovaphlow.crate.auth.AuthRoutes
 import com.ovaphlow.crate.database.DatabaseConfig
@@ -28,7 +28,7 @@ import io.vertx.ext.web.Router
 import io.vertx.ext.web.handler.CorsHandler
 import org.slf4j.LoggerFactory
 
-private val log = LoggerFactory.getLogger("com.ovaphlow.crate.service.MainKt")
+private val log = LoggerFactory.getLogger("com.ovaphlow.crate.trainova.MainKt")
 
 fun main() {
     val vertx = Vertx.vertx()
@@ -94,7 +94,7 @@ fun main() {
     mainRouter.route("/crate-api/*").subRouter(apiRouter)
 
     mainRouter.route("/health").handler { ctx ->
-        ctx.json(JsonObject().put("status", "ok").put("app", "service-vertx-kotlin"))
+        ctx.json(JsonObject().put("status", "ok").put("app", "trainova"))
     }
 
     mainRouter.route().failureHandler { ctx ->

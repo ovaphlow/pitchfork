@@ -18,7 +18,7 @@ include(
     "libs:logging",
     "libs:analytics",
     "apps:aceso",
-    "apps:service"
+    "apps:trainova"
 )
 
 pluginManagement {
