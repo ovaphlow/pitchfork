@@ -14,6 +14,7 @@ include(
     "libs:trainings",
     "libs:exams",
     "libs:onsite",
+    "libs:inventories",
     "libs:logging",
     "libs:analytics",
     "apps:service"
