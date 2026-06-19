@@ -17,6 +17,7 @@ include(
     "libs:inventories",
     "libs:logging",
     "libs:analytics",
+    "apps:aceso",
     "apps:service"
 )
 
