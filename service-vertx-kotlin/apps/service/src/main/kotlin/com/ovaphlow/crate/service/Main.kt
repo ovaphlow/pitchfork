@@ -3,6 +3,7 @@ package com.ovaphlow.crate.service
 import com.ovaphlow.crate.auth.AuthRoutes
 import com.ovaphlow.crate.database.DatabaseConfig
 import com.ovaphlow.crate.files.FileRoutes
+import com.ovaphlow.crate.inventories.InventoriesRoutes
 import com.ovaphlow.crate.messages.MessagesRoutes
 import com.ovaphlow.crate.permission.PermissionRoutes
 import com.ovaphlow.crate.users.UsersRoutes
@@ -80,6 +81,7 @@ fun main() {
     apiRouter.route("/auth/v1/*").subRouter(AuthRoutes.create(vertx, pool, authConfig))
     apiRouter.route("/settings/v1/*").subRouter(SettingsRoutes.create(vertx, pool))
     apiRouter.route("/files/v1/*").subRouter(FileRoutes.create(vertx))
+    apiRouter.route("/inventories/v1/*").subRouter(InventoriesRoutes.create(vertx, pool))
     apiRouter.route("/permission/v1/*").subRouter(PermissionRoutes.create(vertx, pool, jwtAuth))
     apiRouter.route("/messages/v1/*").subRouter(MessagesRoutes.create(vertx, pool))
     apiRouter.route("/users/v1/*").subRouter(UsersRoutes.create(vertx, pool))
