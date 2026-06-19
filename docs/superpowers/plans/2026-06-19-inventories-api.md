@@ -187,7 +187,7 @@ package com.ovaphlow.crate.inventories
 
 import com.ovaphlow.crate.common.Ulid
 import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.database.gen.public_.tables.Materials
+import com.ovaphlow.crate.database.gen.inventory.tables.Materials
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
@@ -499,10 +499,9 @@ git commit -m "feat: implement MaterialRoutes with CRUD endpoints"
 ```kotlin
 package com.ovaphlow.crate.inventories
 
-import com.ovaphlow.crate.common.Ulid
 import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.database.gen.public_.tables.Lots
-import com.ovaphlow.crate.database.gen.public_.tables.Materials
+import com.ovaphlow.crate.database.gen.inventory.tables.Lots
+import com.ovaphlow.crate.database.gen.inventory.tables.Materials
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
