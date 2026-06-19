@@ -4,7 +4,7 @@ plugins {
 
 dependencies {
     api(project(":libs:database"))
-    api(project(":libs:permission"))
+    api(project(":libs:permissions"))
     api(project(":libs:common"))
     api(libs.vertx.web)
     api(libs.jooq)

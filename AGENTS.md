@@ -2,6 +2,8 @@
 
 ## Monorepo 结构
 
+service-core-go-stdlib 忽略
+
 ```
 pitchfork/
 ├── service-vertx-kotlin/    # Vert.x Kotlin 后端 — 克拉特培训平台核心 API

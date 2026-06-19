@@ -30,16 +30,16 @@ service-vertx-kotlin/
     ├── auth/                # 登录/注册/JWT
     ├── settings/            # 部门管理 + KV 配置
     ├── files/               # 静态文件服务
-    ├── permission/          # RBAC + ReBAC + ABAC
+    ├── permissions/          # RBAC + ReBAC + ABAC
     ├── messages/            # 通知消息
     ├── users/               # 员工管理
     ├── knowledge/           # 知识库
     ├── skills/              # 技能/岗位/证书
-    ├── training/            # 课程/章节/作业
-    ├── exam/                # 题库/试卷/考试记录
+    ├── trainings/            # 课程/章节/作业
+    ├── exams/                # 题库/试卷/考试记录
     ├── onsite/              # 现场设备扫码/离线缓存
-    ├── ai-assistant/        # AI 问答/FAQ/推送规则
     ├── analytics/           # 聚合仪表盘
+    ├── logging/              # JSON 结构化日志
     ├── database/            # DB连接/Flyway/jOOQ codegen
     └── common/              # Ulid, RsaCrypto 工具
 ```

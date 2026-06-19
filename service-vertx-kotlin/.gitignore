@@ -14,5 +14,5 @@ Thumbs.db
 
 .kotlin
 
-logs/
+./logs/
 bin/
