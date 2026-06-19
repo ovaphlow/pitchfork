@@ -1,9 +1,5 @@
 # Pitchfork — Monorepo AI Agent Context
 
-## 项目简介
-
-Pitchfork 是哈尔滨乔汉科技有限公司的招聘与培训一体化平台，包含 **龙招聘 / 龙江学子就业网** 以及 **克拉特 (Crate) 制造企业员工培训与质量管理平台**。
-
 ## Monorepo 结构
 
 ```
@@ -14,16 +10,6 @@ pitchfork/
 ├── ui-astro/                 # Astro + React + Tailwind v4 前端
 │   ├── AGENTS.md             # 前端索引 → skills/
 │   └── skills/               # 前端技能文档
-├── service-core-go-stdlib/   # Go 后端微服务 (龙招聘核心)
-├── service-infra-axum/       # Rust/Axum 基础架构服务
-├── service-consul-image/     # Consul Docker 镜像
-├── service-traefik-image/    # Traefik Docker 镜像
-├── consul.d/                 # Consul 服务发现配置
-├── traefik/                  # Traefik 动态路由配置
-├── docker-compose.yml        # Consul + Traefik + PostgreSQL 开发环境
-├── PODMAN.md                 # Podman 部署说明
-├── project2606.md            # 项目设计文档
-└── package.json              # pnpm workspace root
 ```
 
 ## 快速导航
