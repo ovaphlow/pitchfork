@@ -4,6 +4,7 @@
 package com.ovaphlow.crate.database.gen;
 
 
+import com.ovaphlow.crate.database.gen.inventory.Inventory;
 import com.ovaphlow.crate.database.gen.public_.Public;
 
 import java.util.Arrays;
@@ -28,6 +29,11 @@ public class DefaultCatalog extends CatalogImpl {
     public static final DefaultCatalog DEFAULT_CATALOG = new DefaultCatalog();
 
     /**
+     * The schema <code>inventory</code>.
+     */
+    public final Inventory INVENTORY = Inventory.INVENTORY;
+
+    /**
      * The schema <code>public</code>.
      */
     public final Public PUBLIC = Public.PUBLIC;
@@ -42,6 +48,7 @@ public class DefaultCatalog extends CatalogImpl {
     @Override
     public final List<Schema> getSchemas() {
         return Arrays.asList(
+            Inventory.INVENTORY,
             Public.PUBLIC
         );
     }
