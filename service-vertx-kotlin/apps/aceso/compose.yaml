@@ -1,0 +1,22 @@
+# Podman Compose — PostgreSQL 17 for aceso
+# Matches config.json database settings
+# Usage: podman-compose up -d   or   podman compose up -d
+
+services:
+  pitchfork-db:
+    image: docker.1ms.run/library/postgres:18-trixie
+    container_name: pitchfork-db
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ovaphlow
+      POSTGRES_PASSWORD: dsdfJk#1123
+    volumes:
+      - ./.data/pg:/var/lib/postgresql:Z
+      - ./init-dbs.sh:/docker-entrypoint-initdb.d/init-dbs.sh:Z
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ovaphlow -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5

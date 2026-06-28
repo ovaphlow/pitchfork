@@ -2,7 +2,7 @@ package com.ovaphlow.crate.inventories
 
 import com.ovaphlow.crate.common.Ulid
 import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.database.gen.inventory.tables.Materials
+import com.ovaphlow.crate.database.gen.inventories.public_.tables.Materials
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
@@ -13,7 +13,7 @@ import org.jooq.DSLContext
 import org.jooq.JSONB
 import org.jooq.impl.DSL.count
 import org.jooq.UpdateSetMoreStep
-import com.ovaphlow.crate.database.gen.inventory.tables.records.MaterialsRecord
+import com.ovaphlow.crate.database.gen.inventories.public_.tables.records.MaterialsRecord
 import java.math.BigDecimal
 import java.time.OffsetDateTime
 

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<configuration>
+    <jdbc>
+        <driver>org.postgresql.Driver</driver>
+        <url>jdbc:postgresql://localhost:5432/aceso</url>
+        <user>ovaphlow</user>
+        <password>dsdfJk#1123</password>
+    </jdbc>
+    <generator>
+        <database>
+            <name>org.jooq.meta.postgres.PostgresDatabase</name>
+            <schemata>
+                <schema>
+                    <inputSchema>pharmacy</inputSchema>
+                </schema>
+            </schemata>
+            <includes>pharmacy_dispenses|pharmacy_dispense_items|pharmacy_returns|pharmacy_return_items|pharmacy_requisitions|pharmacy_requisition_items</includes>
+        </database>
+        <target>
+            <packageName>com.ovaphlow.crate.database.gen.pharmacy</packageName>
+            <directory>src/main/java</directory>
+        </target>
+    </generator>
+</configuration>

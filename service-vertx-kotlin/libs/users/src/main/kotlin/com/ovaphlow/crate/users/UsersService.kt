@@ -1,7 +1,7 @@
 package com.ovaphlow.crate.users
 
 import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.database.gen.public_.tables.Users
+import com.ovaphlow.crate.database.gen.users.public_.tables.Users
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject

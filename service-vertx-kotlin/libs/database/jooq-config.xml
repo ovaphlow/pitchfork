@@ -2,14 +2,15 @@
 <configuration>
     <jdbc>
         <driver>org.postgresql.Driver</driver>
-        <url>jdbc:postgresql://localhost:5432/ovaphlow</url>
+        <url>jdbc:postgresql://localhost:5432/aceso</url>
         <user>ovaphlow</user>
         <password>dsdfJk#1123</password>
     </jdbc>
     <generator>
         <database>
             <name>org.jooq.meta.postgres.PostgresDatabase</name>
-            <includes>users|settings|messages|files|behaviors|knowledge_entries|knowledge_versions|knowledge_categories|knowledge_feedbacks|departments|employees|positions|skills|employee_skills|certificates|employee_certificates|courses|course_chapters|questions|exam_papers|training_assignments|learning_progress|exam_records|ai_qa_logs|faq_pairs|preventive_push_rules|device_qr_codes|offline_cache_policies|materials|lots|pharmacy_dispenses|pharmacy_dispense_items|pharmacy_returns|pharmacy_return_items|pharmacy_requisitions|pharmacy_requisition_items|nursing_service_periods|nursing_assessments|nursing_plans|nursing_plan_items|nursing_tasks|nursing_task_executions|nursing_visit_schedules</includes>
+            <outputSchemaToDefault>true</outputSchemaToDefault>
+            <includes>knowledge_entries|knowledge_versions|knowledge_categories|knowledge_feedbacks|departments|employees|positions|skills|employee_skills|certificates|employee_certificates|courses|course_chapters|questions|exam_papers|training_assignments|learning_progress|exam_records|ai_qa_logs|faq_pairs|preventive_push_rules|device_qr_codes|offline_cache_policies|messages|files|behaviors</includes>
         </database>
         <target>
             <packageName>com.ovaphlow.crate.database.gen</packageName>

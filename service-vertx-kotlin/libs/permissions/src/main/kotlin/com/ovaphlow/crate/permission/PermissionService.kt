@@ -2,7 +2,7 @@ package com.ovaphlow.crate.permission
 
 import com.ovaphlow.crate.common.Ulid
 import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.database.gen.public_.tables.Settings
+import com.ovaphlow.crate.database.gen.settings.public_.tables.Settings
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject

@@ -2,7 +2,7 @@ package com.ovaphlow.crate.auth
 
 import com.ovaphlow.crate.common.Ulid
 import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.database.gen.public_.tables.Users
+import com.ovaphlow.crate.database.gen.users.public_.tables.Users
 import io.vertx.core.Future
 import io.vertx.core.json.JsonObject
 import io.vertx.ext.auth.jwt.JWTAuth

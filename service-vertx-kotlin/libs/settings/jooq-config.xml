@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<configuration>
+    <jdbc>
+        <driver>org.postgresql.Driver</driver>
+        <url>jdbc:postgresql://localhost:5432/aceso</url>
+        <user>ovaphlow</user>
+        <password>dsdfJk#1123</password>
+    </jdbc>
+    <generator>
+        <database>
+            <name>org.jooq.meta.postgres.PostgresDatabase</name>
+            <outputSchemaToDefault>true</outputSchemaToDefault>
+            <includes>settings</includes>
+        </database>
+        <target>
+            <packageName>com.ovaphlow.crate.database.gen.settings</packageName>
+            <directory>src/main/java</directory>
+        </target>
+    </generator>
+</configuration>
