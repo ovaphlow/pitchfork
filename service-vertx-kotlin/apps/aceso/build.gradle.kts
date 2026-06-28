@@ -4,6 +4,8 @@ plugins {
 
 dependencies {
     implementation(project(":libs:inventories"))
+    implementation(project(":libs:pharmacy"))
+    implementation(project(":libs:nursing"))
     implementation(project(":libs:users"))
     implementation(project(":libs:settings"))
     implementation(project(":libs:logging"))

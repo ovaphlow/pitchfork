@@ -16,7 +16,10 @@ include(
     "libs:onsite",
     "libs:inventories",
     "libs:logging",
+    "libs:pharmacy",
     "libs:analytics",
+    "libs:healthcare",
+    "libs:nursing",
     "apps:aceso",
     "apps:trainova"
 )

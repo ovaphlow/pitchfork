@@ -74,11 +74,20 @@ class LotService(
                             .set(l.SUPPLIER, body.getString("supplier"))
                             .set(l.METADATA, body.containsKey("metadata")
                                 .let { if (it) JSONB.valueOf(body.getJsonObject("metadata").encode()) else null })
-                            .returning(l)
 
                         pool.preparedQuery(DatabaseConfig.sql(insertQuery))
                             .execute(DatabaseConfig.tuple(insertQuery))
-                            .map { insertRows -> toJson(insertRows.iterator().next()) }
+                            .map {
+                                JsonObject()
+                                    .put("id", id)
+                                    .put("material_id", materialId)
+                                    .put("batch_no", batchNo)
+                                    .put("production_date", body.getString("production_date"))
+                                    .put("expiry_date", body.getString("expiry_date"))
+                                    .put("manufacturer", body.getString("manufacturer"))
+                                    .put("supplier", body.getString("supplier"))
+                                    .put("metadata", body.getJsonObject("metadata"))
+                            }
                     }
             }
     }

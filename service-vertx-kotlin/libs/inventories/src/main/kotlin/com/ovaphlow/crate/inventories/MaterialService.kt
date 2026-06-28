@@ -42,11 +42,25 @@ class MaterialService(
                 .let { if (it) JSONB.valueOf(body.getJsonObject("metadata").encode()) else null })
             .set(t.STATUS, body.getString("status"))
             .set(t.CREATED_AT, now)
-            .returning(t)
 
         return pool.preparedQuery(DatabaseConfig.sql(query))
             .execute(DatabaseConfig.tuple(query))
-            .map { rows -> toJson(rows.iterator().next()) }
+            .map {
+                JsonObject()
+                    .put("id", id)
+                    .put("code", body.getString("code"))
+                    .put("name", body.getString("name"))
+                    .put("category", body.getString("category"))
+                    .put("spec", body.getString("spec"))
+                    .put("package_unit", body.getString("package_unit"))
+                    .put("split_unit", body.getString("split_unit"))
+                    .put("split_ratio", body.getDouble("split_ratio"))
+                    .put("enable_batch_control", body.getBoolean("enable_batch_control"))
+                    .put("cost_method", body.getString("cost_method"))
+                    .put("metadata", body.getJsonObject("metadata"))
+                    .put("status", body.getString("status"))
+                    .put("created_at", now.toString())
+            }
     }
 
     fun list(
@@ -134,11 +148,11 @@ class MaterialService(
                 q = q.set(t.STATUS, body.getString("status"))
             }
 
-            val query = q.where(t.ID.eq(id)).returning(t)
+            val query = q.where(t.ID.eq(id))
 
             pool.preparedQuery(DatabaseConfig.sql(query))
                 .execute(DatabaseConfig.tuple(query))
-                .map { rows -> toJson(rows.iterator().next()) }
+                .flatMap { get(id) }
         }
     }
 

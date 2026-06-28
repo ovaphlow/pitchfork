@@ -2,6 +2,8 @@ package com.ovaphlow.crate.aceso
 
 import com.ovaphlow.crate.database.DatabaseConfig
 import com.ovaphlow.crate.inventories.InventoriesRoutes
+import com.ovaphlow.crate.nursing.NursingRoutes
+import com.ovaphlow.crate.pharmacy.PharmacyRoutes
 import com.ovaphlow.crate.settings.SettingsRoutes
 import com.ovaphlow.crate.users.UsersRoutes
 import com.ovaphlow.crate.log.Log
@@ -57,6 +59,8 @@ fun main() {
 
     val apiRouter = Router.router(vertx)
     apiRouter.route("/inventories/v1/*").subRouter(InventoriesRoutes.create(vertx, pool))
+    apiRouter.route("/nursing/v1/*").subRouter(NursingRoutes.create(vertx, pool))
+    apiRouter.route("/pharmacy/v1/*").subRouter(PharmacyRoutes.create(vertx, pool))
     apiRouter.route("/users/v1/*").subRouter(UsersRoutes.create(vertx, pool))
     apiRouter.route("/settings/v1/*").subRouter(SettingsRoutes.create(vertx, pool))
     mainRouter.route("/crate-api/*").subRouter(apiRouter)
