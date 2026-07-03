@@ -1,4 +1,6 @@
-.pi-lens/
 node_modules/
 .vscode/
 .data/
+.pi-subagents/
+.superpowers/
+.pi-lens/
