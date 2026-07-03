@@ -51,7 +51,7 @@ The database already has the `aceso` database created via `init-dbs.sh`. The aut
 |------|------|-------------|
 | `package.json` | config | `@pitchfork/aceso`, deps: astro, react, tailwind, shared, ui |
 | `tsconfig.json` | config | Extends `astro/tsconfigs/strict`, jsx: react-jsx |
-| `astro.config.mjs` | config | Port `4323`, react integration, tailwindcss vite plugin |
+| `astro.config.mjs` | config | Port `4321`, react integration, tailwindcss vite plugin |
 | `src/env.d.ts` | types | Astro env types |
 | `src/styles/global.css` | styles | `@import "tailwindcss"` |
 | `src/layouts/AuthLayout.astro` | layout | Full-screen dark split layout with Aceso branding |
@@ -59,9 +59,11 @@ The database already has the `aceso` database created via `init-dbs.sh`. The aut
 | `src/components/AuthCard.tsx` | component | Login-only card wrapper with success transition |
 | `src/components/LoginForm.tsx` | component | Email/password form, uses `@pitchfork/shared::login` |
 | `src/components/DashboardPage.tsx` | component | Welcome greeting + placeholder stat cards |
+| `src/components/ThemeToggle.tsx` | component | Sun/moon button that toggles dark/light class on `<html>` |
 | `src/pages/index.astro` | page | Redirects to `/login` |
 | `src/pages/login.astro` | page | Renders AuthCard with LoginForm |
 | `src/pages/dashboard.astro` | page | Renders DashboardPage inside DashboardLayout |
+| `src/styles/theme.css` | styles | `.light` class overrides for all CSS variables |
 
 ## Key Design Decisions
 
@@ -72,11 +74,20 @@ The database already has the `aceso` database created via `init-dbs.sh`. The aut
 - The shared `signUp()` function exists in `@pitchfork/shared` but is never imported
 
 ### Port
-- Port `4323` to avoid collision with auth (`4321`), admin, and worker apps
+- Port `4321`
+
+### Theme Toggle (Dark / Light)
+- `AuthLayout.astro` and `DashboardLayout.astro` support dark/light mode via CSS class `dark` / `light` on `<html>`
+- Dark mode: the existing CSS variables (oklch dark values) remain as default
+- Light mode: `.light` class overrides with light-friendly oklch values
+- A moon/sun toggle button in the dashboard topbar switches between themes
+- Preference persisted to `localStorage('aceso-theme')`
+- Inline `<script>` in layout `<head>` reads localStorage and applies class **before** first paint (no flash)
+- AuthLayout also respects the theme preference
 
 ### Dashboard
 - Minimal placeholder: welcome message + 3 stat cards (总用户数, 今日活跃, 系统状态)
-- Styled with Tailwind v4, matching the existing dark theme
+- Styled with Tailwind v4, matching the existing dark/light theme system
 - Fully client-rendered React component (no SSR data fetching)
 
 ## Constraints
