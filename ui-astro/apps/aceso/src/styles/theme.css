@@ -1,0 +1,23 @@
+.light {
+  --color-bg: oklch(96% 0.005 250);
+  --color-surface: oklch(100% 0 0);
+  --color-surface-overlay: oklch(98% 0.005 250);
+  --color-surface-alt: oklch(93% 0.005 250);
+  --color-border: oklch(86% 0.008 250);
+  --color-border-light: oklch(90% 0.005 250);
+  --color-fg: oklch(25% 0.01 250);
+  --color-fg-emphasis: oklch(10% 0.01 250);
+  --color-fg-muted: oklch(50% 0.015 250);
+  --color-fg-dimmed: oklch(65% 0.01 250);
+  --color-accent: oklch(55% 0.18 235);
+  --color-accent-subtle: oklch(55% 0.18 235 / 0.1);
+  --color-success: oklch(50% 0.15 150);
+  --color-success-bg: oklch(50% 0.15 150 / 0.1);
+  --color-warning: oklch(60% 0.14 78);
+  --color-warning-bg: oklch(60% 0.14 78 / 0.1);
+  --color-danger: oklch(50% 0.16 30);
+  --color-danger-bg: oklch(50% 0.16 30 / 0.1);
+  --color-info: oklch(52% 0.12 200);
+  --color-info-bg: oklch(52% 0.12 200 / 0.1);
+  --shadow-overlay: 0 8px 32px oklch(0% 0 0 / 0.1);
+}
