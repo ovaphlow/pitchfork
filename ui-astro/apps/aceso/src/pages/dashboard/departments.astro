@@ -1,0 +1,8 @@
+---
+import DashboardLayout from "../../layouts/DashboardLayout.astro";
+import DepartmentsPage from "../../components/DepartmentsPage.tsx";
+---
+
+<DashboardLayout title="部门管理">
+  <DepartmentsPage client:load />
+</DashboardLayout>

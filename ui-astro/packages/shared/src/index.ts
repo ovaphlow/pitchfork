@@ -277,9 +277,21 @@ export async function updateUserStatus(
 	});
 }
 
+export async function createUser(data: {
+	email: string;
+	password: string;
+	username?: string;
+	phone?: string;
+}): Promise<unknown> {
+	return request("/users/v1/users", {
+		method: "POST",
+		body: JSON.stringify(data),
+	});
+}
+
 export async function updateUser(
 	id: string,
-	data: { department_code?: string },
+	data: { email?: string; username?: string; phone?: string; department_code?: string },
 ): Promise<unknown> {
 	return request(`/users/v1/users/${id}`, {
 		method: "PUT",

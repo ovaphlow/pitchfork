@@ -159,43 +159,69 @@ export function Modal({
   onClose,
   title,
   children,
-  width = "max-w-lg",
 }: ModalProps) {
   if (!open) return null;
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 50,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        background: "rgba(0,0,0,0.6)",
+        padding: "1rem",
+      }}
       onClick={onClose}
     >
       <div
-        className={`w-full ${width} rounded-lg border border-border bg-surface-overlay shadow-overlay`}
+        style={{
+          background: "oklch(22% 0.012 250)",
+          border: "1px solid oklch(25% 0.01 250)",
+          borderRadius: "0.5rem",
+          width: "100%",
+          maxWidth: "32rem",
+          maxHeight: "85vh",
+          overflowY: "auto",
+          boxShadow: "0 8px 32px rgba(0,0,0,0.4)",
+        }}
         onClick={(e) => e.stopPropagation()}
       >
         {title && (
-          <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-            <h3 className="text-base font-semibold text-fg-emphasis">
+          <div style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            padding: "1.25rem 2rem",
+            borderBottom: "1px solid oklch(25% 0.01 250)",
+          }}>
+            <h3 style={{ fontSize: "1rem", fontWeight: 600, color: "oklch(95% 0.005 250)" }}>
               {title}
             </h3>
             <button
               onClick={onClose}
-              className="w-8 h-8 flex items-center justify-center rounded-md text-fg-muted hover:bg-surface-alt hover:text-fg cursor-pointer border-none transition-all duration-150"
+              style={{
+                width: "2rem",
+                height: "2rem",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                background: "transparent",
+                border: "none",
+                borderRadius: "0.375rem",
+                color: "oklch(65% 0.015 250)",
+                cursor: "pointer",
+              }}
             >
-              <svg
-                width="16"
-                height="16"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-              >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <line x1="18" y1="6" x2="6" y2="18" />
                 <line x1="6" y1="6" x2="18" y2="18" />
               </svg>
             </button>
           </div>
         )}
-        <div className="p-5">{children}</div>
+        <div style={{ padding: "2rem" }}>{children}</div>
       </div>
     </div>
   );

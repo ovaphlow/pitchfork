@@ -31,6 +31,21 @@ object UsersRoutes {
             ).onSuccess { ctx.json(it) }.onFailure { respondError(ctx, it) }
         }
 
+        router.post("/users").handler { ctx ->
+            val b = body(ctx)
+            val email = b.getString("email", "")
+            if (email.isBlank()) { respond(ctx, 400, "email required"); return@handler }
+            val password = b.getString("password", "")
+            if (password.isBlank()) { respond(ctx, 400, "password required"); return@handler }
+            service.create(
+                email = email,
+                password = password,
+                username = b.getString("username", ""),
+                phone = b.getString("phone", ""),
+                departmentCode = b.getString("department_code")
+            ).onSuccess { ctx.json(it) }.onFailure { respondError(ctx, it) }
+        }
+
         router.patch("/users/:id/status").handler { ctx ->
             val id = ctx.pathParam("id") ?: return@handler respond(ctx, 400, "id required")
             val b = body(ctx)
@@ -44,8 +59,13 @@ object UsersRoutes {
         router.put("/users/:id").handler { ctx ->
             val id = ctx.pathParam("id") ?: return@handler respond(ctx, 400, "id required")
             val b = body(ctx)
-            service.updateUser(id, b.getString("department_code"))
-                .onSuccess { ctx.json(it) }
+            service.updateUser(
+                id = id,
+                email = b.getString("email"),
+                username = b.getString("username"),
+                phone = b.getString("phone"),
+                departmentCode = b.getString("department_code")
+            ).onSuccess { ctx.json(it) }
                 .onFailure { if (it is NotFoundException) respond(ctx, 404, it.message) else respondError(ctx, it) }
         }
 

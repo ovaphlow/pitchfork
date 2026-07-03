@@ -79,7 +79,7 @@ class AuthService(private val pool: Pool, private val jwtAuth: JWTAuth, private 
 
                 val insertQuery = ctx.insertInto(
                     u, u.ID, u.EMAIL, u.USERNAME, u.PHONE, u.PASSWORD_HASH, u.USER_TYPE, u.STATUS, u.CREATED_AT, u.UPDATED_AT
-                ).values(id, email, "", "", hash, "regular", "pending", now, now)
+                ).values(id, email, "", "", hash, "regular", "PENDING", now, now)
                     .returning(u.ID)
                 System.err.println("=== INSERT SQL: ${DatabaseConfig.sql(insertQuery)}")
                 System.err.println("=== INSERT BIND values: ${insertQuery.getBindValues()}")
@@ -113,7 +113,7 @@ class AuthService(private val pool: Pool, private val jwtAuth: JWTAuth, private 
                 .put("username", row.getValue("username")?.toString())
                 .put("phone", row.getValue("phone")?.toString())
                 .put("user_type", row.getValue("user_type")?.toString())
-                .put("status", row.getValue("status")?.toString())
+                .put("status", row.getValue("status")?.toString()?.uppercase())
                 .put("department_code", row.getValue("department_code")?.toString() ?: "")
                 .put("security_info", row.getValue("security_info") as? JsonObject)
                 .put("verification_info", row.getValue("verification_info") as? JsonObject)

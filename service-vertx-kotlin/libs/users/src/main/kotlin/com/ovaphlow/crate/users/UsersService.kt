@@ -1,5 +1,6 @@
 package com.ovaphlow.crate.users
 
+import com.ovaphlow.crate.common.Ulid
 import com.ovaphlow.crate.database.DatabaseConfig
 import com.ovaphlow.crate.database.gen.users.public_.tables.Users
 import io.vertx.core.Future
@@ -15,6 +16,19 @@ class UsersService(private val pool: Pool, private val ctx: DSLContext = Databas
 
     private val log = LoggerFactory.getLogger(UsersService::class.java)
     private val u = Users.USERS
+
+    fun create(email: String, password: String, username: String, phone: String, departmentCode: String?): Future<JsonObject> {
+        val hash = at.favre.lib.crypto.bcrypt.BCrypt.withDefaults().hashToString(12, password.toCharArray())
+        val now = java.time.OffsetDateTime.now()
+        val id = com.ovaphlow.crate.common.Ulid.generate()
+        val query = ctx.insertInto(
+            u, u.ID, u.EMAIL, u.USERNAME, u.PHONE, u.PASSWORD_HASH, u.USER_TYPE, u.STATUS, u.CREATED_AT, u.UPDATED_AT
+        ).values(id, email, username, phone, hash, "regular", "ACTIVE", now, now)
+            .returning(u.ID, u.EMAIL, u.USERNAME, u.PHONE, u.USER_TYPE, u.STATUS, org.jooq.impl.DSL.field("department_code"), u.CREATED_AT, u.UPDATED_AT)
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
+            .map { rows -> toJson(rows.iterator().next()) }
+    }
 
     fun list(search: String? = null, status: String? = null, limit: Int = 50, offset: Int = 0): Future<JsonArray> {
         val conditions = mutableListOf<org.jooq.Condition>()
@@ -35,7 +49,7 @@ class UsersService(private val pool: Pool, private val ctx: DSLContext = Databas
 
     fun updateStatus(id: String, status: String): Future<JsonObject> {
         val query = ctx.update(u)
-            .set(u.STATUS, status)
+            .set(u.STATUS, status.uppercase())
             .set(u.UPDATED_AT, java.time.OffsetDateTime.now())
             .where(u.ID.eq(id))
             .returning(u.ID, u.EMAIL, u.USERNAME, u.PHONE, u.USER_TYPE, u.STATUS, org.jooq.impl.DSL.field("department_code"), u.CREATED_AT, u.UPDATED_AT)
@@ -47,9 +61,12 @@ class UsersService(private val pool: Pool, private val ctx: DSLContext = Databas
             }
     }
 
-    fun updateUser(id: String, departmentCode: String?): Future<JsonObject> {
+    fun updateUser(id: String, email: String?, username: String?, phone: String?, departmentCode: String?): Future<JsonObject> {
         val query = ctx.update(u)
-            .set(u.DEPARTMENT_CODE, departmentCode ?: "")
+            .apply { email?.let { set(u.EMAIL, it) } }
+            .apply { username?.let { set(u.USERNAME, it) } }
+            .apply { phone?.let { set(u.PHONE, it) } }
+            .apply { departmentCode?.let { set(u.DEPARTMENT_CODE, it) } }
             .set(u.UPDATED_AT, java.time.OffsetDateTime.now())
             .where(u.ID.eq(id))
             .returning(u.ID, u.EMAIL, u.USERNAME, u.PHONE, u.USER_TYPE, u.STATUS, u.DEPARTMENT_CODE, u.CREATED_AT, u.UPDATED_AT)
@@ -68,7 +85,7 @@ class UsersService(private val pool: Pool, private val ctx: DSLContext = Databas
             .put("username", row.getValue("username")?.toString())
             .put("phone", row.getValue("phone")?.toString())
             .put("user_type", row.getValue("user_type")?.toString())
-            .put("status", row.getValue("status")?.toString())
+            .put("status", row.getValue("status")?.toString()?.uppercase())
             .put("department_code", row.getValue("department_code")?.toString() ?: "")
             .put("created_at", row.getValue("created_at")?.toString())
             .put("updated_at", row.getValue("updated_at")?.toString())

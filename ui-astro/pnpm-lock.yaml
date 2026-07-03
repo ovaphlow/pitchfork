@@ -28,6 +28,9 @@ importers:
       astro:
         specifier: ^5.7.0
         version: 5.18.2(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.60.4)(typescript@5.8.2)(yaml@2.9.0)
+      jsencrypt:
+        specifier: ^3.5.4
+        version: 3.5.4
       react:
         specifier: ^19.1.0
         version: 19.2.6
