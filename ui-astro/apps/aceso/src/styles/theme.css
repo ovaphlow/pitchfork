@@ -7,8 +7,8 @@
   --color-border-light: oklch(90% 0.005 250);
   --color-fg: oklch(25% 0.01 250);
   --color-fg-emphasis: oklch(10% 0.01 250);
-  --color-fg-muted: oklch(50% 0.015 250);
-  --color-fg-dimmed: oklch(65% 0.01 250);
+  --color-fg-muted: oklch(45% 0.015 250);
+  --color-fg-dimmed: oklch(60% 0.01 250);
   --color-accent: oklch(55% 0.18 235);
   --color-accent-subtle: oklch(55% 0.18 235 / 0.1);
   --color-success: oklch(50% 0.15 150);
