@@ -4,13 +4,9 @@
     "port": 5432,
     "database": "ovaphlow",
     "user": "ovaphlow",
-    "password": "dsdfJk#1123",
     "pool-size": 10
   },
-  "console-level": "DEBUG",
-  "auth": {
-    "jwt-secret": "la estatua"
-  },
+  "console-level": "INFO",
   "server": {
     "port": 8421
   }

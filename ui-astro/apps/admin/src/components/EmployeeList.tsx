@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
-import { listUsers, listRoles, listDepartments, assignRole, unassignRole, getUserAssignments, updateUser } from "@pitchfork/shared";
+import { listUsers, listRoles, listDepartments, assignRole, unassignRole, getUserAssignments, updateUser } from "@pitchfork/shared/trainova";
 import { Button, Badge, Card, Table, type Column, Input } from "@pitchfork/ui";
 
 interface UserWithInfo {

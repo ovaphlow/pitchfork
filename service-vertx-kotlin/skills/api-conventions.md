@@ -66,7 +66,7 @@ params.add(type); idx++
 ## 模块注册
 
 1. 添加到 `settings.gradle.kts` 作为 `"libs:<name>"`
-2. 添加 `implementation(project(":libs:<name>"))` 到 `apps/service/build.gradle.kts`
+2. 确认模块所属产品后，添加 `implementation(project(":libs:<name>"))` 到对应的 `apps/<product>/build.gradle.kts`
 3. 路由挂载到 `Main.kt`：`apiRouter.route("/<module>/v1/*").subRouter(<Module>Routes.create(vertx, pool))`
 
 ## 中文枚举值

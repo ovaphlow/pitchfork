@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { getKnowledgeEntry, createKnowledgeEntry, updateKnowledgeEntry, createKnowledgeVersion, listKnowledgeCategorySettings, listKnowledgeTagSettings, type KnowledgeEntry } from "@pitchfork/shared";
+import { getKnowledgeEntry, createKnowledgeEntry, updateKnowledgeEntry, createKnowledgeVersion, listKnowledgeCategorySettings, listKnowledgeTagSettings, type KnowledgeEntry } from "@pitchfork/shared/trainova";
 import { Button, Input, Card, Badge } from "@pitchfork/ui";
 
 function useQueryParam(key: string): string {

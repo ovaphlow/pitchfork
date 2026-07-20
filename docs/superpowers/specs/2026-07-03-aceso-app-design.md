@@ -1,5 +1,7 @@
 # Aceso App — Design Specification
 
+> **Status (2026-07-20):** Implemented and reconciled with the current product boundaries. The authoritative topology, ports, configuration, and API-import contract are in [`docs/architecture.md`](../../architecture.md).
+
 ## Overview
 
 Aceso is a new frontend app within the pitchfork monorepo. It provides a minimal authentication flow (login only, no registration) with a post-login dashboard. The corresponding backend already lives at `service-vertx-kotlin/apps/aceso/` and needs only auth routes added.
@@ -16,7 +18,7 @@ Aceso is a new frontend app within the pitchfork monorepo. It provides a minimal
 
 ```
 User → /login (LoginForm.tsx)
-         → RSA encrypt password (via @pitchfork/shared::login)
+         → RSA encrypt password (via @pitchfork/shared/aceso::login)
          → POST /crate-api/auth/v1/login (aceso backend)
          → JWT token → localStorage → redirect /dashboard
 
@@ -38,7 +40,7 @@ implementation(project(":libs:auth"))
 - Import `AuthRoutes`
 - Mount auth sub-router:
   ```kotlin
-  apiRouter.route("/auth/v1/*").subRouter(AuthRoutes.create(vertx, pool))
+  apiRouter.route("/auth/v1/*").subRouter(AuthRoutes.create(vertx, pool, jwtSecret))
   ```
 
 The database already has the `aceso` database created via `init-dbs.sh`. The auth lib handles migrations and user table creation.
@@ -51,13 +53,13 @@ The database already has the `aceso` database created via `init-dbs.sh`. The aut
 |------|------|-------------|
 | `package.json` | config | `@pitchfork/aceso`, deps: astro, react, tailwind, shared, ui |
 | `tsconfig.json` | config | Extends `astro/tsconfigs/strict`, jsx: react-jsx |
-| `astro.config.mjs` | config | Port `4321`, react integration, tailwindcss vite plugin |
+| `astro.config.mjs` | config | Port `4324`, react integration, tailwindcss vite plugin |
 | `src/env.d.ts` | types | Astro env types |
 | `src/styles/global.css` | styles | `@import "tailwindcss"` |
 | `src/layouts/AuthLayout.astro` | layout | Full-screen dark split layout with Aceso branding |
 | `src/layouts/DashboardLayout.astro` | layout | Sidebar + topbar + content area (no nav items) |
 | `src/components/AuthCard.tsx` | component | Login-only card wrapper with success transition |
-| `src/components/LoginForm.tsx` | component | Email/password form, uses `@pitchfork/shared::login` |
+| `src/components/LoginForm.tsx` | component | Email/password form, uses `@pitchfork/shared/aceso::login` |
 | `src/components/DashboardPage.tsx` | component | Welcome greeting + placeholder stat cards |
 | `src/components/ThemeToggle.tsx` | component | Sun/moon button that toggles dark/light class on `<html>` |
 | `src/pages/index.astro` | page | Redirects to `/login` |
@@ -71,10 +73,10 @@ The database already has the `aceso` database created via `init-dbs.sh`. The aut
 - `AuthCard.tsx` does not support `mode="register"` — removed entirely
 - `index.astro` redirects to `/login` instead of showing a welcome page with login/register buttons
 - `LoginForm.tsx` has no "注册" link
-- The shared `signUp()` function exists in `@pitchfork/shared` but is never imported
+- The Aceso API export does not expose a registration function
 
 ### Port
-- Port `4321`
+- Port `4324`
 
 ### Theme Toggle (Dark / Light)
 - `AuthLayout.astro` and `DashboardLayout.astro` support dark/light mode via CSS class `dark` / `light` on `<html>`
@@ -92,8 +94,8 @@ The database already has the `aceso` database created via `init-dbs.sh`. The aut
 
 ## Constraints
 
-- The aceso backend already uses port `8421` (same as trainova backend)
-- JWT secret defaults to `"crate-default-secret"` if not specified in config.json
+- The Aceso backend uses port `8422`, independently from Trainova on `8421`
+- `PITCHFORK_CONFIG`, `PITCHFORK_DB_PASSWORD`, and `PITCHFORK_JWT_SECRET` are mandatory; no secret or configuration fallback exists
 - Auth routes require the `users` table which is created by flyway migrations in the `:libs:auth` module
 - The `aceso` database is already created via `init-dbs.sh`
 

@@ -2,7 +2,7 @@
 
 ## Overview
 
-**Crate** (克拉特) — 制造企业员工培训与质量管理平台。Vert.x Kotlin 后端，管理员工技能发展的全生命周期：知识库、培训课程、考试评估、现场设备扫码、AI 问答、主动推送规则、RBAC/ReBAC/ABAC 权限控制、分析仪表盘。
+Vert.x Kotlin monorepo with two independently deployable products: Trainova (manufacturing training) and Aceso (healthcare operations). Shared libraries provide platform capabilities; product-domain libraries are mounted only by their owning application.
 
 ## Tech Stack
 
@@ -19,30 +19,38 @@
 
 ## API Base
 
-所有 API 统一挂载于 `/crate-api/<module>/v1/<resource>`，端口 `8421`。
+所有 API 统一挂载于 `/crate-api/<module>/v1/<resource>`。Trainova 使用 `8421`，Aceso 使用 `8422`。
 
 ## Architecture
 
 ```
 service-vertx-kotlin/
-├── apps/service/            # 入口 (Main.kt, 子路由挂载)
-└── libs/                    # 领域模块
+├── apps/
+│   ├── trainova/            # 培训产品入口（8421）
+│   └── aceso/               # 医疗运营产品入口（8422）
+└── libs/
     ├── auth/                # 登录/注册/JWT
     ├── settings/            # 部门管理 + KV 配置
     ├── files/               # 静态文件服务
     ├── permissions/          # RBAC + ReBAC + ABAC
     ├── messages/            # 通知消息
     ├── users/               # 员工管理
-    ├── knowledge/           # 知识库
-    ├── skills/              # 技能/岗位/证书
-    ├── trainings/            # 课程/章节/作业
-    ├── exams/                # 题库/试卷/考试记录
-    ├── onsite/              # 现场设备扫码/离线缓存
-    ├── analytics/           # 聚合仪表盘
+    ├── knowledge/           # Trainova：知识库
+    ├── skills/              # Trainova：技能/岗位/证书
+    ├── trainings/           # Trainova：课程/章节/作业
+    ├── exams/               # Trainova：题库/试卷/考试记录
+    ├── onsite/              # Trainova：现场设备扫码/离线缓存
+    ├── analytics/           # Trainova：聚合仪表盘
+    ├── inventories/         # Aceso：物资与批次
+    ├── pharmacy/            # Aceso：药房
+    ├── nursing/             # Aceso：护理
+    ├── healthcare/          # 孵化中；未挂载前不得由 app 依赖
     ├── logging/              # JSON 结构化日志
     ├── database/            # DB连接/Flyway/jOOQ codegen
     └── common/              # Ulid, RsaCrypto 工具
 ```
+
+完整产品边界、配置和迁移策略见 [`../docs/architecture.md`](../docs/architecture.md)。
 
 ## Available Skills
 

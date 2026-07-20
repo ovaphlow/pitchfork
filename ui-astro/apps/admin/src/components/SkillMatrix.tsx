@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { listSkills, createSkill, updateSkill, deleteSkill, type Skill } from "@pitchfork/shared";
+import { listSkills, createSkill, updateSkill, deleteSkill, type Skill } from "@pitchfork/shared/trainova";
 import { Button, Badge, Card, Table, Input, Modal, type Column } from "@pitchfork/ui";
 
 export default function SkillMatrix() {

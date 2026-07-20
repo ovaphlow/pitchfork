@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { scanDevice, listKnowledgeEntries, type Device, type KnowledgeEntry } from "@pitchfork/shared";
+import { scanDevice, listKnowledgeEntries, type Device, type KnowledgeEntry } from "@pitchfork/shared/trainova";
 import { Input, Button, Badge, LoadingSpinner } from "@pitchfork/ui";
 
 export default function ScanResult() {

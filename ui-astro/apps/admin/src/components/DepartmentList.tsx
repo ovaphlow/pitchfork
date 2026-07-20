@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
-import { listDepartments, createDepartment, updateDepartment, deleteDepartment } from "@pitchfork/shared";
+import { listDepartments, createDepartment, updateDepartment, deleteDepartment } from "@pitchfork/shared/trainova";
 import { Button, Input, Card } from "@pitchfork/ui";
 
 interface Department {

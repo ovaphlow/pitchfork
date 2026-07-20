@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { listExamPapers, deleteExamPaper, generateExamPaper, type ExamPaper } from "@pitchfork/shared";
+import { listExamPapers, deleteExamPaper, generateExamPaper, type ExamPaper } from "@pitchfork/shared/trainova";
 import { Button, Badge, Card, Table, type Column } from "@pitchfork/ui";
 
 export default function ExamList() {

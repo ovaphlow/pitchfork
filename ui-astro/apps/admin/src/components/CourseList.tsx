@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { listCourses, deleteCourse, type Course } from "@pitchfork/shared";
+import { listCourses, deleteCourse, type Course } from "@pitchfork/shared/trainova";
 import { Button, Badge, Card, Table, type Column } from "@pitchfork/ui";
 
 export default function CourseList() {

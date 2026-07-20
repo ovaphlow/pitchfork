@@ -6,8 +6,6 @@ dependencies {
     implementation(project(":libs:auth"))
     implementation(project(":libs:settings"))
     implementation(project(":libs:files"))
-    implementation(project(":libs:inventories"))
-    implementation(project(":libs:pharmacy"))
     implementation(project(":libs:permissions"))
     implementation(project(":libs:messages"))
     implementation(project(":libs:users"))

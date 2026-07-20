@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { getTrainingSummary, type TrainingSummary } from "@pitchfork/shared";
+import { getTrainingSummary, type TrainingSummary } from "@pitchfork/shared/trainova";
 import { Card, LoadingSpinner } from "@pitchfork/ui";
 
 export default function DashboardPage() {

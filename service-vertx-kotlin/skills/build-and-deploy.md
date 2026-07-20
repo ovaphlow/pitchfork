@@ -1,36 +1,34 @@
 # Build & Deploy — Gradle 构建与运行
 
-## Build Commands
+## Product Commands
 
 ```bash
-# 完整清理构建 (lib 源码变更后必须用此命令)
-./gradlew clean :apps:service:installDist --no-build-cache --rerun-tasks
+# Trainova distribution
+./gradlew clean :apps:trainova:installDist --no-build-cache --rerun-tasks
+
+# Aceso distribution
+./gradlew clean :apps:aceso:installDist --no-build-cache --rerun-tasks
 
 # 快速编译检查单个模块
 ./gradlew :libs:<module>:compileKotlin
 
-# jOOQ codegen (schema 变更后)
-./gradlew :libs:database:generateJooq
+# jOOQ codegen (schema 变更后；密码仅从环境变量读取)
+PITCHFORK_DB_PASSWORD='local-development-password' ./gradlew :libs:<module>:generateJooq
 ```
 
 ## Run
 
-```bash
-cd /path/to/service-vertx-kotlin
-./apps/service/build/install/service/bin/service
-```
-
-## Kill Stale Processes
+每个进程都必须显式指定本地配置文件和两个 secret：
 
 ```bash
-ps aux | grep '[s]ervice/bin/service' | awk '{print $2}' | xargs kill -9
+cp apps/trainova/config.example.json apps/trainova/config.json
+export PITCHFORK_CONFIG="$PWD/apps/trainova/config.json"
+export PITCHFORK_DB_PASSWORD='local-development-password'
+export PITCHFORK_JWT_SECRET='long-random-secret'
+./gradlew :apps:trainova:run
 ```
 
-## Logs
-
-```bash
-cat logs/app.jsonl | grep 'route error' | tail -5
-```
+Trainova 使用端口 `8421`；Aceso 使用 `8422`。配置文件不含密码，`config.json` 和 `.env` 均不得提交。
 
 ## Gradle Cache
 
@@ -41,8 +39,4 @@ cat logs/app.jsonl | grep 'route error' | tail -5
 
 `installDist` 将 lib 的 JAR 复制到 distribution 目录。即使代码编译通过，distribution 中的 JAR **可能已过时**。
 
-**Rule of thumb**: 修改任何 lib 模块的代码后，始终使用 `clean` 或 `--rerun-tasks` 重建。
-
-## 多实例/端口冲突
-
-两个实例运行会因端口冲突导致启动失败。每次重新启动前先杀光旧进程。
+修改任何 lib 模块代码后，使用 `clean` 或 `--rerun-tasks` 重新构建目标产品的 distribution。

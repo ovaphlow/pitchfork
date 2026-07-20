@@ -20,15 +20,21 @@ import org.slf4j.LoggerFactory
 
 private val log = Log.getLogger("com.ovaphlow.crate.aceso.MainKt")
 
+private fun requiredEnvironment(name: String): String {
+    return System.getenv(name)?.takeIf(String::isNotBlank)
+        ?: error("$name must be set")
+}
+
 fun main() {
     val vertx = Vertx.vertx()
+    val configPath = requiredEnvironment("PITCHFORK_CONFIG")
 
     val retriever = ConfigRetriever.create(vertx,
         ConfigRetrieverOptions().addStore(
             ConfigStoreOptions()
                 .setType("file")
                 .setFormat("json")
-                .setConfig(JsonObject().put("path", "config.json"))
+                .setConfig(JsonObject().put("path", configPath))
         )
     )
 
@@ -43,6 +49,7 @@ fun main() {
     val pool = DatabaseConfig.createPool(vertx, dbConfig)
 
     val mainRouter = Router.router(vertx)
+    val jwtSecret = requiredEnvironment("PITCHFORK_JWT_SECRET")
 
     // --- CORS ---
     mainRouter.route().handler(
@@ -59,7 +66,7 @@ fun main() {
     )
 
     val apiRouter = Router.router(vertx)
-    apiRouter.route("/auth/v1/*").subRouter(AuthRoutes.create(vertx, pool))
+    apiRouter.route("/auth/v1/*").subRouter(AuthRoutes.create(vertx, pool, jwtSecret))
     apiRouter.route("/inventories/v1/*").subRouter(InventoriesRoutes.create(vertx, pool))
     apiRouter.route("/nursing/v1/*").subRouter(NursingRoutes.create(vertx, pool))
     apiRouter.route("/pharmacy/v1/*").subRouter(PharmacyRoutes.create(vertx, pool))

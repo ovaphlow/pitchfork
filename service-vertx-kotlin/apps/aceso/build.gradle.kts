@@ -9,7 +9,6 @@ dependencies {
     implementation(project(":libs:users"))
     implementation(project(":libs:settings"))
     implementation(project(":libs:auth"))
-    implementation(project(":libs:healthcare"))
     implementation(project(":libs:logging"))
     implementation(project(":libs:database"))
     implementation(project(":libs:common"))

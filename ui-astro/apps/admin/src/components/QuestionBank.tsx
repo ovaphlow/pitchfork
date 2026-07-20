@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { listQuestions, createQuestion, updateQuestion, deleteQuestion, type Question } from "@pitchfork/shared";
+import { listQuestions, createQuestion, updateQuestion, deleteQuestion, type Question } from "@pitchfork/shared/trainova";
 import { Button, Badge, Card, Table, Input, Modal, type Column } from "@pitchfork/ui";
 
 export default function QuestionBank() {

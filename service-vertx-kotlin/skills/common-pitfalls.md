@@ -8,7 +8,7 @@
 
 **解决**: lib 代码修改后始终使用 `clean` 或 `--rerun-tasks`：
 ```bash
-./gradlew clean :apps:service:installDist --no-build-cache --rerun-tasks
+./gradlew clean :apps:trainova:installDist --no-build-cache --rerun-tasks
 ```
 
 ## 2. Port in Use (端口占用)
@@ -17,7 +17,7 @@
 
 **解决**: 启动前确认无残留进程：
 ```bash
-ps aux | grep '[s]ervice/bin/service' | awk '{print $2}' | xargs kill -9
+ps aux | grep '[t]rainova\|[a]ceso' | awk '{print $2}' | xargs kill -9
 ```
 
 ## 3. jOOQ Null Inlining
@@ -58,7 +58,7 @@ ps aux | grep '[s]ervice/bin/service' | awk '{print $2}' | xargs kill -9
 
 **原因**: Flyway scanner 产生大量 DEBUG 日志，看起来像卡住。
 
-**解决**: 用 `curl localhost:8421/crate-api/<module>/v1/health` 测试，不要仅靠日志判断。
+**解决**: 用对应产品端口测试，例如 `curl localhost:8421/health` 或 `curl localhost:8422/health`，不要仅靠日志判断。
 
 ## 9. ArrayList cannot be cast to JsonObject
 

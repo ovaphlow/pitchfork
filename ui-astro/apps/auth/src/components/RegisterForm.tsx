@@ -1,5 +1,5 @@
 import { type FormEvent, useState } from "react";
-import { signUp } from "@pitchfork/shared";
+import { signUp } from "@pitchfork/shared/trainova";
 
 interface Props {
 	onSuccess: (user: unknown) => void;

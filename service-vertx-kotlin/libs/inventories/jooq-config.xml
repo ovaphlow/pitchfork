@@ -4,7 +4,7 @@
         <driver>org.postgresql.Driver</driver>
         <url>jdbc:postgresql://localhost:5432/aceso</url>
         <user>ovaphlow</user>
-        <password>dsdfJk#1123</password>
+        <password>__PITCHFORK_DB_PASSWORD__</password>
     </jdbc>
     <generator>
         <database>

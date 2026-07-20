@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { listPositions, getPositionTree, createPosition, updatePosition, deletePosition, type Position } from "@pitchfork/shared";
+import { listPositions, getPositionTree, createPosition, updatePosition, deletePosition, type Position } from "@pitchfork/shared/trainova";
 import { Button, Badge, Card, Input, Modal } from "@pitchfork/ui";
 
 export default function PositionList() {

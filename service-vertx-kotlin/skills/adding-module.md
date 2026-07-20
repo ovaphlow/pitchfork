@@ -35,9 +35,9 @@ dependencies {
 include("libs:<name>")
 ```
 
-### 3. 添加到入口模块依赖
+### 3. 添加到所属产品的入口模块依赖
 
-编辑 `apps/service/build.gradle.kts`，添加：
+先确认模块归属 Trainova、Aceso 或平台层；仅编辑该产品的 `apps/<product>/build.gradle.kts`：
 ```kotlin
 implementation(project(":libs:<name>"))
 ```
@@ -50,8 +50,9 @@ apiRouter.route("/<module>/v1/*").subRouter(<Name>Routes.create(vertx, pool))
 
 ### 5. 如需要新建数据表
 
-- 在 `libs/database/src/main/resources/db/migration/` 添加 Flyway 迁移脚本
-- 执行 jOOQ codegen: `./gradlew :libs:database:generateJooq`
+- 在 `libs/<name>/src/main/resources/db/migration/` 添加 Flyway 迁移脚本
+- 选择该 lib 的预留版本号段；不要修改或移动 Trainova legacy `V5-V7`
+- 执行 jOOQ codegen: `PITCHFORK_DB_PASSWORD=... ./gradlew :libs:<name>:generateJooq`
 - 参见 [DB Migration](./db-migration.md)
 
 ### 6. 更新文档

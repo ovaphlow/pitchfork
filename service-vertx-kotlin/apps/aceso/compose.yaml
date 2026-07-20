@@ -1,17 +1,17 @@
 # Podman Compose — PostgreSQL 17 for aceso
-# Matches config.json database settings
+# Uses PITCHFORK_DB_PASSWORD from the shell or a local .env file
 # Usage: podman-compose up -d   or   podman compose up -d
 
 services:
-  pitchfork-db:
-    image: docker.1ms.run/library/postgres:18-trixie
-    container_name: pitchfork-db
+  pitchfork-aceso-db:
+    image: docker.1ms.run/library/postgres:17
+    container_name: pitchfork-aceso-db
     restart: unless-stopped
     ports:
       - "5432:5432"
     environment:
       POSTGRES_USER: ovaphlow
-      POSTGRES_PASSWORD: dsdfJk#1123
+      POSTGRES_PASSWORD: "${PITCHFORK_DB_PASSWORD:?PITCHFORK_DB_PASSWORD must be set}"
     volumes:
       - ./.data/pg:/var/lib/postgresql:Z
       - ./init-dbs.sh:/docker-entrypoint-initdb.d/init-dbs.sh:Z

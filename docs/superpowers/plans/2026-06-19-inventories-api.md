@@ -1,10 +1,12 @@
 # Inventories — 物资档案与批次 API 实施计划
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+>
+> **Status (2026-07-20):** The inventories domain belongs to Aceso. The active composition and migration rules are in [`docs/architecture.md`](../../architecture.md); do not mount this domain in Trainova.
 
 **Goal:** 实现 `materials`（物资档案 CRUD）和 `lots`（批次创建/查询）的后端 API 接口。
 
-**Architecture:** 单一 Gradle module `libs:inventories`，内部拆分为 `MaterialRoutes/Service` + `LotRoutes/Service` 两组文件。所有表放 `public` schema 以匹配现有 jOOQ 模式。新增 V10 Flyway 迁移，添加表到 jOOQ codegen include 列表。
+**Architecture:** 单一 Gradle module `libs:inventories`，内部拆分为 `MaterialRoutes/Service` + `LotRoutes/Service` 两组文件。所有表放 `public` schema 以匹配现有 jOOQ 模式。新增 inventories 所属的 V200 Flyway 迁移，并更新该库的 jOOQ codegen include 列表。
 
 **Tech Stack:** Vert.x + jOOQ + PostgreSQL + Kotlin
 
@@ -13,7 +15,7 @@
 ### Task 1: Flyway 迁移 — 创建 materials + lots 表
 
 **Files:**
-- Create: `libs/database/src/main/resources/db/migration/V10__create_inventory_tables.sql`
+- Create: `libs/inventories/src/main/resources/db/migration/V200__create_inventory_tables.sql`
 
 - [ ] **Step 1: 创建迁移文件**
 
@@ -56,8 +58,8 @@ CREATE TABLE IF NOT EXISTS lots
 - [ ] **Step 2: 提交**
 
 ```bash
-git add libs/database/src/main/resources/db/migration/V10__create_inventory_tables.sql
-git commit -m "feat: add V10 migration for materials and lots tables"
+git add libs/inventories/src/main/resources/db/migration/V200__create_inventory_tables.sql
+git commit -m "feat: add inventory migration for materials and lots tables"
 ```
 
 ---
@@ -65,7 +67,7 @@ git commit -m "feat: add V10 migration for materials and lots tables"
 ### Task 2: 更新 jOOQ codegen 配置并重新生成
 
 **Files:**
-- Modify: `libs/database/jooq-config.xml`
+- Modify: `libs/inventories/jooq-config.xml`
 
 - [ ] **Step 1: 将 materials 和 lots 加入 jOOQ include 列表**
 
@@ -78,15 +80,15 @@ git commit -m "feat: add V10 migration for materials and lots tables"
 - [ ] **Step 2: 运行 jOOQ codegen**
 
 ```bash
-./gradlew :libs:database:generateJooq
+PITCHFORK_DB_PASSWORD='<database password>' ./gradlew :libs:inventories:generateJooq
 ```
 
-预期：生成 `libs/database/src/main/java/com/ovaphlow/crate/database/gen/public_/tables/Materials.java` 和 `Lots.java`。
+预期：生成 `libs/inventories/src/main/java/com/ovaphlow/crate/database/gen/inventories/public_/tables/Materials.java` 和 `Lots.java`。
 
 - [ ] **Step 3: 提交**
 
 ```bash
-git add libs/database/jooq-config.xml libs/database/src/main/java/com/ovaphlow/crate/database/gen/public_/tables/Materials.java libs/database/src/main/java/com/ovaphlow/crate/database/gen/public_/tables/Lots.java
+git add libs/inventories/jooq-config.xml libs/inventories/src/main/java/com/ovaphlow/crate/database/gen/inventories/public_/tables/Materials.java libs/inventories/src/main/java/com/ovaphlow/crate/database/gen/inventories/public_/tables/Lots.java
 git commit -m "feat: regenerate jOOQ codegen for materials and lots tables"
 ```
 
@@ -742,8 +744,8 @@ git commit -m "feat: implement LotRoutes with create and query endpoints"
 
 **Files:**
 - Modify: `settings.gradle.kts`
-- Modify: `apps/service/build.gradle.kts`
-- Modify: `apps/service/src/main/kotlin/com/ovaphlow/crate/service/Main.kt`
+- Modify: `apps/aceso/build.gradle.kts`
+- Modify: `apps/aceso/src/main/kotlin/com/ovaphlow/crate/aceso/Main.kt`
 - Create: (dir entry) 模块目录已存在
 
 - [ ] **Step 1: 在 settings.gradle.kts 中添加 `"libs:inventories"`**
@@ -768,13 +770,14 @@ include(
     "libs:onsite",
     "libs:logging",
     "libs:analytics",
-    "apps:service"
+    "apps:aceso",
+    "apps:trainova"
 )
 ```
 
-- [ ] **Step 2: 在 apps/service/build.gradle.kts 中添加依赖**
+- [ ] **Step 2: 在 apps/aceso/build.gradle.kts 中添加依赖**
 
-在 `dependencies` 块中，按字母序添加（放在 `"libs:files"` 之后、`"libs:knowledge"` 之前）：
+在 Aceso 的 `dependencies` 块中添加：
 
 ```kotlin
     implementation(project(":libs:inventories"))
@@ -797,7 +800,7 @@ import com.ovaphlow.crate.inventories.InventoriesRoutes
 - [ ] **Step 4: 提交**
 
 ```bash
-git add settings.gradle.kts apps/service/build.gradle.kts apps/service/src/main/kotlin/com/ovaphlow/crate/service/Main.kt
+git add settings.gradle.kts apps/aceso/build.gradle.kts apps/aceso/src/main/kotlin/com/ovaphlow/crate/aceso/Main.kt
 git commit -m "feat: register inventories module in project build and router"
 ```
 
@@ -816,7 +819,7 @@ git commit -m "feat: register inventories module in project build and router"
 - [ ] **Step 2: 完整编译**
 
 ```bash
-./gradlew :apps:service:compileKotlin
+./gradlew :apps:aceso:compileKotlin
 ```
 
 预期：BUILD SUCCESSFUL

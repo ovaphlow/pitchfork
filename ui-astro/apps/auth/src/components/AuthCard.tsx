@@ -1,6 +1,6 @@
 import { useState } from "react";
 import LoginForm from "./LoginForm";
-import { setToken } from "@pitchfork/shared";
+import { setToken } from "@pitchfork/shared/trainova";
 
 interface Props {
 	mode: "login" | "register";

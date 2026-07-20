@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { listTrainingAssignments, type TrainingAssignment } from "@pitchfork/shared";
+import { listTrainingAssignments, type TrainingAssignment } from "@pitchfork/shared/trainova";
 import { Badge, LoadingSpinner, EmptyState } from "@pitchfork/ui";
 
 export default function TrainingTaskList() {

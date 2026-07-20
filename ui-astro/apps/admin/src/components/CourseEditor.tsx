@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { listCourses, createCourse, updateCourse, listChapters, createChapter, updateChapter, deleteChapter, type Course, type Chapter } from "@pitchfork/shared";
+import { listCourses, createCourse, updateCourse, listChapters, createChapter, updateChapter, deleteChapter, type Course, type Chapter } from "@pitchfork/shared/trainova";
 import { Button, Input, Card, Badge } from "@pitchfork/ui";
 
 export default function CourseEditor() {

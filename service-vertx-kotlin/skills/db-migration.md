@@ -14,6 +14,8 @@ Service 中使用生成的 Table/Field 类
 
 ## Flyway Migration
 
+迁移必须放在拥有该表和业务行为的 `libs/<module>/src/main/resources/db/migration/`。Trainova app 中的 `V5-V7` 是历史基线，不得移动、修改或复制；新变更必须从所属 lib 的后续版本开始。
+
 ### 命名规则
 
 ```
@@ -51,10 +53,10 @@ END $$;
 更改 schema 后执行：
 
 ```bash
-./gradlew :libs:database:generateJooq
+PITCHFORK_DB_PASSWORD='local-development-password' ./gradlew :libs:<module>:generateJooq
 ```
 
-生成的类位于 `libs/database/build/generated-sources/jooq/`。
+当前生成的类写入各模块的 `src/main/java/com/ovaphlow/crate/database/gen/`。jOOQ XML 中的密码占位符会在任务执行时渲染到 `build/tmp`，不可提交渲染文件。
 
 ## jOOQ Query 模式
 

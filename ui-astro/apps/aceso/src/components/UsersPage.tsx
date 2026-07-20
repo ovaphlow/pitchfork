@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { listUsers, createUser, updateUser, updateUserStatus, type User } from "@pitchfork/shared";
+import { listUsers, createUser, updateUser, updateUserStatus, type User } from "@pitchfork/shared/aceso";
 import { Table, type Column, Badge, Card } from "@pitchfork/ui";
 
 const statusMap: Record<string, { label: string; variant: "success" | "danger" | "default" | "warning" | "info" }> = {

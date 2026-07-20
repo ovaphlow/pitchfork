@@ -17,9 +17,8 @@ object AuthRoutes {
 
     private val log = LoggerFactory.getLogger(AuthRoutes::class.java)
 
-    fun create(vertx: Vertx, pool: Pool, authConfig: JsonObject = JsonObject()): Router {
+    fun create(vertx: Vertx, pool: Pool, jwtSecret: String): Router {
         val router = Router.router(vertx)
-        val jwtSecret = authConfig.getString("jwt-secret", "crate-default-secret")
         val jwtAuth = JWTAuth.create(vertx, JWTAuthOptions()
             .addPubSecKey(PubSecKeyOptions()
                 .setAlgorithm("HS256")

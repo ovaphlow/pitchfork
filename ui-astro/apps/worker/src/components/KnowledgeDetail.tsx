@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { listKnowledgeEntries, listKnowledgeVersions, listKnowledgeFeedbacks, type KnowledgeEntry, type KnowledgeVersion, type KnowledgeFeedback } from "@pitchfork/shared";
+import { listKnowledgeEntries, listKnowledgeVersions, listKnowledgeFeedbacks, type KnowledgeEntry, type KnowledgeVersion, type KnowledgeFeedback } from "@pitchfork/shared/trainova";
 import { Badge, LoadingSpinner } from "@pitchfork/ui";
 
 // Simple hook to get path params since we're in Astro

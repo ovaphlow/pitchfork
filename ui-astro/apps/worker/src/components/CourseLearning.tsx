@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { listCourses, listChapters, updateLearningProgress, completeLearning, type Course, type Chapter } from "@pitchfork/shared";
+import { listCourses, listChapters, updateLearningProgress, completeLearning, type Course, type Chapter } from "@pitchfork/shared/trainova";
 import { Button, Badge, LoadingSpinner } from "@pitchfork/ui";
 
 function usePathId() {

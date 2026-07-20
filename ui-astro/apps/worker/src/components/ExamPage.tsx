@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { listExamPapers, startExam, submitExam, type ExamPaper, type ExamRecord } from "@pitchfork/shared";
+import { listExamPapers, startExam, submitExam, type ExamPaper, type ExamRecord } from "@pitchfork/shared/trainova";
 import { Button, Badge, LoadingSpinner } from "@pitchfork/ui";
 
 function usePathId() {

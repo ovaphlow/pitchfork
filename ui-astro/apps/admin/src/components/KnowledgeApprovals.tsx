@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { listKnowledgeEntries, listKnowledgeVersions, approveKnowledgeVersion, rejectKnowledgeVersion, type KnowledgeEntry, type KnowledgeVersion } from "@pitchfork/shared";
+import { listKnowledgeEntries, listKnowledgeVersions, approveKnowledgeVersion, rejectKnowledgeVersion, type KnowledgeEntry, type KnowledgeVersion } from "@pitchfork/shared/trainova";
 import { Button, Badge, Card, Table, type Column, LoadingSpinner } from "@pitchfork/ui";
 
 export default function KnowledgeApprovals() {

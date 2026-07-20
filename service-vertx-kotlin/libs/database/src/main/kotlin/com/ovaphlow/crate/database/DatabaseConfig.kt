@@ -19,17 +19,28 @@ object DatabaseConfig {
 
     private val log = LoggerFactory.getLogger(DatabaseConfig::class.java)
 
+    private fun requiredConfigString(config: JsonObject, key: String): String {
+        return config.getString(key)?.takeIf(String::isNotBlank)
+            ?: error("database.$key must be configured")
+    }
+
+    private fun requiredDatabasePassword(): String {
+        return System.getenv("PITCHFORK_DB_PASSWORD")?.takeIf(String::isNotBlank)
+            ?: error("PITCHFORK_DB_PASSWORD must be set")
+    }
+
     private fun buildJdbcUrl(config: JsonObject): String {
-        val host = config.getString("host", "localhost")
-        val port = config.getInteger("port", 5432)
-        val database = config.getString("database", "ovaphlow")
+        val host = requiredConfigString(config, "host")
+        val port = config.getInteger("port")
+            ?: error("database.port must be configured")
+        val database = requiredConfigString(config, "database")
         return "jdbc:postgresql://$host:$port/$database"
     }
 
     fun migrate(config: JsonObject = JsonObject()) {
         val url = buildJdbcUrl(config)
-        val user = config.getString("user", "ovaphlow")
-        val password = config.getString("password", "dsdfJk#1123")
+        val user = requiredConfigString(config, "user")
+        val password = requiredDatabasePassword()
 
         Flyway.configure()
             .dataSource(url, user, password)
@@ -43,11 +54,11 @@ object DatabaseConfig {
 
     fun createPool(vertx: Vertx, config: JsonObject = JsonObject()): Pool {
         val connectOptions = PgConnectOptions()
-            .setPort(config.getInteger("port", 5432))
-            .setHost(config.getString("host", "localhost"))
-            .setDatabase(config.getString("database", "ovaphlow"))
-            .setUser(config.getString("user", "ovaphlow"))
-            .setPassword(config.getString("password", "dsdfJk#1123"))
+            .setPort(config.getInteger("port") ?: error("database.port must be configured"))
+            .setHost(requiredConfigString(config, "host"))
+            .setDatabase(requiredConfigString(config, "database"))
+            .setUser(requiredConfigString(config, "user"))
+            .setPassword(requiredDatabasePassword())
 
         val poolOptions = PoolOptions().setMaxSize(
             config.getInteger("pool-size", 10)

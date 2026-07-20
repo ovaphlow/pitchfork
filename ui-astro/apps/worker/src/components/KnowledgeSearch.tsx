@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { listKnowledgeEntries, type KnowledgeEntry, listKnowledgeCategories, type KnowledgeCategory } from "@pitchfork/shared";
+import { listKnowledgeEntries, type KnowledgeEntry, listKnowledgeCategories, type KnowledgeCategory } from "@pitchfork/shared/trainova";
 import { Input, Badge, LoadingSpinner } from "@pitchfork/ui";
 
 export default function KnowledgeSearch() {

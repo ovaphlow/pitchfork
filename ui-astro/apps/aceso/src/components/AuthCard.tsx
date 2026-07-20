@@ -1,6 +1,6 @@
 import { useState } from "react";
 import LoginForm from "./LoginForm";
-import { setToken } from "@pitchfork/shared";
+import { setToken } from "@pitchfork/shared/aceso";
 
 export default function AuthCard() {
 	const [success, setSuccess] = useState(false);

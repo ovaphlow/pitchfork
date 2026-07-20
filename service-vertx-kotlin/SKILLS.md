@@ -2,7 +2,7 @@
 
 ## Overview
 
-**Crate** (Kubernetes: 克拉特) — a manufacturing employee training & quality management platform. Manages the full lifecycle of employee skill development: knowledge base, training courses, exam/assessment, on-site device QR scanning, AI-powered Q&A, preventive push rules, role-based access control, and analytics dashboards.
+This file is the Trainova API reference for the Kotlin monorepo. Aceso is a separate product composition root with its own routes and port; see `../docs/architecture.md` for product boundaries.
 
 ## Tech Stack
 
@@ -19,9 +19,9 @@
 
 ## Architecture
 
-Monorepo: `apps/service` (entrypoint) + `libs/*` (domain modules).
+Monorepo: `apps:trainova` and `apps:aceso` are composition roots; `libs/*` contain platform and product-domain modules.
 
-All API routes are mounted under `/crate-api/<module>/v1/*`. The entrypoint `Main.kt` does CORS, JWT setup, DB pool creation, Flyway migration, and sub-router mounting.
+All API routes are mounted under `/crate-api/<module>/v1/*`. Each product's `Main.kt` owns CORS, JWT setup, DB pool creation, Flyway migration, and sub-router mounting; the endpoint reference below covers Trainova.
 
 ## Module & API Reference
 
@@ -266,8 +266,8 @@ Dashboard aggregation endpoints.
 ## Database
 
 - **Tables**: users, settings, messages, files, behaviors, rbac_roles, rbac_permissions, rbac_assignments, rebac_relations, abac_policies, user_attributes, knowledge_categories, knowledge_entries, knowledge_versions, knowledge_feedbacks, positions, skills, employee_skills, certificates, employee_certificates, courses, course_chapters, training_assignments, learning_progress, questions, exam_papers, exam_records, device_qr_codes, offline_cache_policies, ai_qa_logs, faq_pairs, preventive_push_rules
-- **Migration**: Flyway (versioned SQL in `libs/database/src/main/resources/db/migration/`)
-- **Codegen**: jOOQ code generation via `libs/database/jooq-config.xml`
+- **Migration**: Flyway (versioned SQL in the owning library's `libs/<module>/src/main/resources/db/migration/`)
+- **Codegen**: jOOQ code generation via the owning library's `libs/<module>/jooq-config.xml`
 
 ## Common Conventions
 

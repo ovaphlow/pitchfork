@@ -2,7 +2,7 @@
 
 ## Overview
 
-Astro + React 19 + Tailwind v4 前端 monorepo，服务于 **克拉特 (Crate)** 制造企业员工培训平台。暗色主题，中文优先 UI。
+Astro + React 19 + Tailwind v4 frontend monorepo for two products: Trainova (manufacturing training) and Aceso (healthcare operations). The UI is dark themed and Chinese first.
 
 ## Quick Start
 
@@ -12,6 +12,7 @@ pnpm install
 pnpm dev          # @pitchfork/auth (port 4321)
 pnpm dev:admin    # @pitchfork/admin (port 4322)
 pnpm dev:worker   # @pitchfork/worker (port 4323)
+pnpm dev:aceso    # @pitchfork/aceso (port 4324)
 pnpm build        # 全部 apps 构建 (astro check + astro build)
 ```
 
@@ -31,14 +32,16 @@ ui-astro/
 │   │       ├── layouts/AdminLayout.astro
 │   │       ├── pages/             # dashboard, courses, knowledge, exams, ...
 │   │       └── components/        # 管理功能 React 组件
-│   └── worker/        (4323)      # 员工移动端 - 学习/考试/知识搜索/扫码
-│       └── src/
-│           ├── layouts/MobileLayout.astro
-│           ├── pages/             # search, training, exam, profile, scan, ...
-│           └── components/        # 员工端 React 组件
+│   ├── worker/        (4323)      # 员工移动端 - 学习/考试/知识搜索/扫码
+│   │   └── src/
+│   │       ├── layouts/MobileLayout.astro
+│   │       ├── pages/             # search, training, exam, profile, scan, ...
+│   │       └── components/        # 员工端 React 组件
+│   └── aceso/         (4324)      # 医疗运营后台
+│       └── src/                   # Aceso routes and page components
 └── packages/                      # 共享包
-    ├── shared/                    # @pitchfork/shared - API 客户端 + TS 类型
-    │   └── src/index.ts           # request(), login(), 所有 CRUD API
+    ├── shared/                    # @pitchfork/shared - 产品作用域 API 客户端 + TS 类型
+    │   └── src/{trainova,aceso}.ts # 每个产品的允许 API surface
     └── ui/                        # @pitchfork/ui - React 组件库
         └── src/index.tsx          # Button, Input, Table, Modal, Card, ...
 ```
@@ -49,13 +52,17 @@ ui-astro/
 - `apps/*/src/components/` — 页面级 React 组件
 - `packages/shared/` — API 客户端、TS 类型、工具函数
 - `packages/ui/` — 共享 UI 组件（全局复用，不含业务逻辑）
+- Trainova app 只能从 `@pitchfork/shared/trainova` 导入 API
+- Aceso 只能从 `@pitchfork/shared/aceso` 导入 API
 
 ## API 集成
 
-- API base: `PUBLIC_API_URL` env / fallback `http://192.168.0.109:8421/crate-api`
+- API base: 每个 app 的 `.env` 中必须设置 `PUBLIC_API_URL`；没有后备地址
 - 认证: JWT Bearer token 存 `localStorage`
 - 密码传输: RSA 加密 (`jsencrypt` → 后端 `/auth/v1/public-key`)
 - Token 过期自动 401 → 跳转 `/login`
+
+完整产品边界、端口和环境变量见 [`../docs/architecture.md`](../docs/architecture.md)。
 
 ## Available Skills
 

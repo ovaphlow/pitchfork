@@ -1,7 +1,12 @@
 import { JSEncrypt } from "jsencrypt";
 
-const API_BASE =
-	import.meta.env.PUBLIC_API_URL ?? "http://192.168.0.109:8421/crate-api";
+function apiBase(): string {
+	const configured = import.meta.env.PUBLIC_API_URL?.trim();
+	if (!configured) {
+		throw new Error("PUBLIC_API_URL must be configured for this application");
+	}
+	return configured.replace(/\/$/, "");
+}
 
 const TOKEN_KEY = "auth_token";
 const PUBLIC_KEY_CACHE_KEY = "auth_public_key";
@@ -58,7 +63,7 @@ async function fetchPublicKeyBase64(): Promise<string> {
 	const cached = localStorage.getItem(PUBLIC_KEY_CACHE_KEY);
 	if (cached) return cached;
 
-	const res = await fetch(`${API_BASE}/auth/v1/public-key`);
+	const res = await fetch(`${apiBase()}/auth/v1/public-key`);
 	if (!res.ok) throw new Error("无法获取加密密钥");
 	const { publicKey } = await res.json();
 	localStorage.setItem(PUBLIC_KEY_CACHE_KEY, publicKey);
@@ -75,7 +80,7 @@ async function encryptPassword(password: string): Promise<string> {
 }
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-	const url = `${API_BASE}${path}`;
+	const url = `${apiBase()}${path}`;
 	const { headers: optHeaders, ...rest } = options;
 
 	const headers: Record<string, string> = {

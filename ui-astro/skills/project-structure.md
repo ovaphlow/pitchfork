@@ -9,13 +9,14 @@ ui-astro/
 ├── apps/                          # pnpm workspace 应用
 │   ├── auth/          (4321)      # 登录 + 员工管理 + 部门设置
 │   ├── admin/         (4322)      # 管理后台
-│   └── worker/        (4323)      # 员工移动端
+│   ├── worker/        (4323)      # 员工移动端
+│   └── aceso/         (4324)      # 医疗运营后台
 └── packages/                      # 共享包
     ├── shared/                    # API 客户端 + TS 类型定义
     └── ui/                        # React UI 组件库
 ```
 
-## 三个 Apps 的职责
+## 四个 Apps 的职责
 
 ### @pitchfork/auth (port 4321)
 
@@ -67,16 +68,19 @@ ui-astro/
 | 扫码 | `/scan` | ScanResult |
 | 个人设置 | `/profile` | ProfileSettings |
 
+### @pitchfork/aceso (port 4324)
+
+医疗运营后台。目前提供登录、控制台、用户和部门管理，并展示医疗运营导航。其后端地址必须指向 Aceso API（本地为 `http://localhost:8422/crate-api`）。
+
 ## 共享包
 
 ### @pitchfork/shared (`packages/shared/`)
 
-API 客户端入口 `src/index.ts`：
+API 客户端按产品导出：
 
-- `request<T>(path, options)` — 基础 HTTP 客户端（自动注入 JWT、401 处理）
-- `encryptedPost<T>(path, email, password)` — RSA 加密密码 POST
-- 所有 CRUD 函数: `listXxx()`, `createXxx()`, `updateXxx()`, `deleteXxx()`
-- 所有 TS 类型接口: `KnowledgeEntry`, `Course`, `Question`, `EmployeeSkill`...
+- `@pitchfork/shared/trainova` — Trainova 的平台与培训域 API
+- `@pitchfork/shared/aceso` — Aceso 已实现的认证、用户和部门 API
+- 每个 app 的 `.env` 必须定义 `PUBLIC_API_URL`，客户端不提供默认后端
 
 ### @pitchfork/ui (`packages/ui/`)
 
@@ -93,4 +97,4 @@ React 组件库入口 `src/index.tsx`：
 
 ## 禁止修改其它 App
 
-迁移或新增功能时，只能修改目标 app 的代码。`packages/` 的修改可以影响所有 app，`apps/` 的修改必须严格限定在目标 app 内。
+迁移或新增功能时，只能修改目标 app 的代码。`packages/` 的修改可以影响所有 app，`apps/` 的修改必须严格限定在目标 app 内。不得从另一个产品的 `@pitchfork/shared/<product>` 入口导入 API。

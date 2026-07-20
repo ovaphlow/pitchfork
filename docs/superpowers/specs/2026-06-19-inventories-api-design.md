@@ -104,6 +104,6 @@ libs/inventories/
 
 1. 创建 `libs/inventories/build.gradle.kts`
 2. `settings.gradle.kts` 添加 `"libs:inventories"`
-3. `apps/service/build.gradle.kts` 添加 `implementation(project(":libs:inventories"))`
+3. `apps/aceso/build.gradle.kts` 添加 `implementation(project(":libs:inventories"))`
 4. `Main.kt` 挂载路由：`apiRouter.route("/inventories/v1/*").subRouter(InventoriesRoutes.create(vertx, pool))`
 5. 数据库迁移已在设计阶段完成（6 张表），当前范围仅用到 `materials` 和 `lots`

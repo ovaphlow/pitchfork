@@ -3,10 +3,10 @@
 ## 全流程
 
 ```
-1. 确定属于哪个 App (auth/admin/worker)
+1. 确定属于哪个 App (auth/admin/worker/aceso) 及其产品边界
 2. 在对应的 apps/<app>/src/pages/ 建 Astro 路由页面
 3. 在对应的 apps/<app>/src/components/ 建 React 组件
-4. 如需要新 API 调用 → 更新 packages/shared/src/index.ts
+4. 如需要新 API 调用 → 更新该产品的 `@pitchfork/shared/<product>` API surface
 5. 如需要新 UI 模式 → 更新 packages/ui/src/index.tsx
 ```
 
@@ -56,7 +56,7 @@ export default function ReportsPage() {
 
 ### Step 3: API 调用
 
-如需要新的 API 端点，先在 `packages/shared/src/index.ts` 添加函数：
+如需要新的 Trainova API 端点，先在 Trainova 的共享 API 实现中添加函数，并从 `@pitchfork/shared/trainova` 导入。Aceso 端点遵循相同规则但使用 `@pitchfork/shared/aceso`：
 
 ```typescript
 export interface Report {

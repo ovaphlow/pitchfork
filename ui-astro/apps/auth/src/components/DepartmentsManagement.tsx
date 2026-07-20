@@ -4,7 +4,7 @@ import {
 	createDepartment,
 	updateDepartment,
 	deleteDepartment,
-} from "@pitchfork/shared";
+} from "@pitchfork/shared/trainova";
 
 interface Department {
 	id: string;

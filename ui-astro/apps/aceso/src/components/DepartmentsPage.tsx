@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { listDepartments, createDepartment, updateDepartment, deleteDepartment } from "@pitchfork/shared";
+import { listDepartments, createDepartment, updateDepartment, deleteDepartment } from "@pitchfork/shared/aceso";
 import { Table, type Column, Card } from "@pitchfork/ui";
 
 interface Department {

@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { listKnowledgeEntries, deleteKnowledgeEntry, type KnowledgeEntry } from "@pitchfork/shared";
+import { listKnowledgeEntries, deleteKnowledgeEntry, type KnowledgeEntry } from "@pitchfork/shared/trainova";
 import { Button, Badge, Card, Table, type Column, LoadingSpinner } from "@pitchfork/ui";
 
 export default function KnowledgeList() {

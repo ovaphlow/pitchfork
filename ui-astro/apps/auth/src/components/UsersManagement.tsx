@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { listUsers, listDepartments, updateUserStatus } from "@pitchfork/shared";
+import { listUsers, listDepartments, updateUserStatus } from "@pitchfork/shared/trainova";
 
 interface User {
 	id: string;

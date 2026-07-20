@@ -3,8 +3,6 @@ package com.ovaphlow.crate.trainova
 import com.ovaphlow.crate.auth.AuthRoutes
 import com.ovaphlow.crate.database.DatabaseConfig
 import com.ovaphlow.crate.files.FileRoutes
-import com.ovaphlow.crate.inventories.InventoriesRoutes
-import com.ovaphlow.crate.pharmacy.PharmacyRoutes
 import com.ovaphlow.crate.messages.MessagesRoutes
 import com.ovaphlow.crate.permission.PermissionRoutes
 import com.ovaphlow.crate.users.UsersRoutes
@@ -31,15 +29,21 @@ import org.slf4j.LoggerFactory
 
 private val log = LoggerFactory.getLogger("com.ovaphlow.crate.trainova.MainKt")
 
+private fun requiredEnvironment(name: String): String {
+    return System.getenv(name)?.takeIf(String::isNotBlank)
+        ?: error("$name must be set")
+}
+
 fun main() {
     val vertx = Vertx.vertx()
+    val configPath = requiredEnvironment("PITCHFORK_CONFIG")
 
     val retriever = ConfigRetriever.create(vertx,
         ConfigRetrieverOptions().addStore(
             ConfigStoreOptions()
                 .setType("file")
                 .setFormat("json")
-                .setConfig(JsonObject().put("path", "config.json"))
+                .setConfig(JsonObject().put("path", configPath))
         )
     )
 
@@ -69,7 +73,7 @@ fun main() {
             .allowedHeader("Authorization")
     )
 
-    val jwtSecret = config.getJsonObject("auth", JsonObject()).getString("jwt-secret", "crate-default-secret")
+    val jwtSecret = requiredEnvironment("PITCHFORK_JWT_SECRET")
     val jwtAuth = JWTAuth.create(vertx, JWTAuthOptions()
         .addPubSecKey(PubSecKeyOptions()
             .setAlgorithm("HS256")
@@ -78,12 +82,9 @@ fun main() {
         .setJWTOptions(JWTOptions().setExpiresInSeconds(86400)))
 
     val apiRouter = Router.router(vertx)
-    val authConfig = config.getJsonObject("auth", JsonObject())
-    apiRouter.route("/auth/v1/*").subRouter(AuthRoutes.create(vertx, pool, authConfig))
+    apiRouter.route("/auth/v1/*").subRouter(AuthRoutes.create(vertx, pool, jwtSecret))
     apiRouter.route("/settings/v1/*").subRouter(SettingsRoutes.create(vertx, pool))
     apiRouter.route("/files/v1/*").subRouter(FileRoutes.create(vertx))
-    apiRouter.route("/inventories/v1/*").subRouter(InventoriesRoutes.create(vertx, pool))
-    apiRouter.route("/pharmacy/v1/*").subRouter(PharmacyRoutes.create(vertx, pool))
     apiRouter.route("/permission/v1/*").subRouter(PermissionRoutes.create(vertx, pool, jwtAuth))
     apiRouter.route("/messages/v1/*").subRouter(MessagesRoutes.create(vertx, pool))
     apiRouter.route("/users/v1/*").subRouter(UsersRoutes.create(vertx, pool))

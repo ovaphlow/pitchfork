@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { listEmployeeSkills, listEmployeeCertificates, type EmployeeSkill, type EmployeeCertificate } from "@pitchfork/shared";
+import { listEmployeeSkills, listEmployeeCertificates, type EmployeeSkill, type EmployeeCertificate } from "@pitchfork/shared/trainova";
 import { Badge, LoadingSpinner, EmptyState } from "@pitchfork/ui";
 
 export default function SkillProfile() {

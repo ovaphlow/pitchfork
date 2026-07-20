@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { getTrainingSummary, getSkillHeatmap, getQualityCorrelation, type TrainingSummary, type SkillHeatmap, type QualityCorrelation } from "@pitchfork/shared";
+import { getTrainingSummary, getSkillHeatmap, getQualityCorrelation, type TrainingSummary, type SkillHeatmap, type QualityCorrelation } from "@pitchfork/shared/trainova";
 import { Card, LoadingSpinner } from "@pitchfork/ui";
 
 export default function AnalyticsPage() {

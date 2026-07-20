@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { listCourses, listTrainingAssignments, createTrainingAssignment, deleteTrainingAssignment, type Course, type TrainingAssignment } from "@pitchfork/shared";
+import { listCourses, listTrainingAssignments, createTrainingAssignment, deleteTrainingAssignment, type Course, type TrainingAssignment } from "@pitchfork/shared/trainova";
 import { Button, Badge, Card, Table, Modal, type Column } from "@pitchfork/ui";
 
 export default function TrainingTaskManager() {
