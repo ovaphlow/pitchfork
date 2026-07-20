@@ -1,0 +1,6 @@
+.data/
+bin/
+.env
+logs/
+identityd
+identityd.exe
