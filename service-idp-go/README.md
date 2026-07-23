@@ -62,8 +62,25 @@ accepts either `{"status":"禁用"}` or
 `{"temporary_password":"a sufficiently long password"}`. The latter marks
 the credential `需更新`; the next successful login receives a `仅改密` session
 that can access only the password route and sign-out. Lists use
-`{ "records": [...], "meta": { "total": N } }`; single subjects and errors
-follow the repository JSON conventions.
+`{ "records": [...], "meta": { "total": N } }`; single subjects are returned
+directly. Every HTTP error body, including unmatched routes and unsupported
+methods, uses RFC 9457 Problem Details with
+`Content-Type: application/problem+json`:
+
+```json
+{
+  "type": "/crate-api/identity/v1/problems/invalid-request",
+  "title": "Bad Request",
+  "status": 400,
+  "detail": "invalid JSON request",
+  "instance": "/crate-api/identity/v1/subjects"
+}
+```
+
+`type` is a stable, service-local URI reference, `title` is the HTTP status
+phrase, and `instance` is the requested URI (including its query string).
+Problem Details never include the legacy `error` member. Browser form failures
+that intentionally redirect do not send an error body.
 
 `GET /subjects` returns its JSON list by default. A browser request with
 `Accept: text/html` receives the server-rendered management page; HTMX requests

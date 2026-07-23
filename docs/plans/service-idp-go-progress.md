@@ -16,6 +16,7 @@
 - Node 仅用于构建期依赖管理：`make assets` 按 `pnpm-lock.yaml` 安装依赖，生成 Tailwind CSS 与本地 HTMX 文件，随后由 Go 二进制嵌入。
 - 管理员可为主体设置临时密码，凭据标记为 `需更新`；下次登录仅生成可改密、可退出的受限会话。
 - 当前主体可通过 CSRF 保护的密码页和 JSON API 修改密码；凭据修订号乐观锁、主体安全版本递增、会话撤销与 `凭据变更` 审计在同一事务中完成。
+- 所有 HTTP 异常正文（含业务错误、未匹配路由和不支持的请求方法）统一采用 RFC 9457 Problem Details，媒体类型为 `application/problem+json`，并包含 `type`、`title`、`status`、`detail` 和 `instance`；浏览器表单的既有重定向流程不产生错误正文。
 
 ## 已验证
 

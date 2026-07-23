@@ -16,8 +16,15 @@ import (
 	"github.com/ovaphlow/pitchfork/service-idp-go/web"
 )
 
-const identityPrefix = "/crate-api/identity/v1"
-const identityAssetsPrefix = identityPrefix + "/assets"
+const (
+	identityPrefix        = "/crate-api/identity/v1"
+	identityAssetsPrefix  = identityPrefix + "/assets"
+	problemMediaType      = "application/problem+json"
+	problemTypePrefix     = identityPrefix + "/problems/"
+	problemGenericDetail  = "The request could not be completed."
+	problemNotFoundDetail = "The requested resource was not found."
+	problemMethodDetail   = "The request method is not allowed for this resource."
+)
 
 const (
 	defaultSubjectListLimit int64 = 20
@@ -45,7 +52,7 @@ type Handler struct {
 	trustedProxyPrefixes []netip.Prefix
 }
 
-func NewMux(database *sql.DB, options Options) *http.ServeMux {
+func NewMux(database *sql.DB, options Options) http.Handler {
 	handler := Handler{
 		database:             database,
 		sessionSettings:      options.SessionSettings,
@@ -71,12 +78,12 @@ func NewMux(database *sql.DB, options Options) *http.ServeMux {
 	mux.HandleFunc("POST "+identityPrefix+"/subjects", handler.createSubject)
 	mux.HandleFunc("GET "+identityPrefix+"/subjects/{subjectID}", handler.getSubject)
 	mux.HandleFunc("PATCH "+identityPrefix+"/subjects/{subjectID}", handler.updateSubject)
-	return mux
+	return problemDetailsHandler{next: mux}
 }
 
 func (handler Handler) health(responseWriter http.ResponseWriter, request *http.Request) {
 	if err := handler.database.PingContext(request.Context()); err != nil {
-		writeJSON(responseWriter, http.StatusServiceUnavailable, map[string]string{"error": "database unavailable"})
+		writeProblem(responseWriter, request, http.StatusServiceUnavailable, "service-unavailable", "database unavailable")
 		return
 	}
 	writeJSON(responseWriter, http.StatusOK, map[string]string{"status": "ok"})
@@ -146,7 +153,7 @@ func (handler Handler) changePassword(responseWriter http.ResponseWriter, reques
 			http.Redirect(responseWriter, request, identityPrefix+"/login", http.StatusSeeOther)
 			return
 		}
-		writeJSON(responseWriter, http.StatusUnauthorized, map[string]string{"error": "not authenticated"})
+		writeProblem(responseWriter, request, http.StatusUnauthorized, "not-authenticated", "not authenticated")
 		return
 	}
 	if !requestHasValidCSRFToken(request, session) {
@@ -154,7 +161,7 @@ func (handler Handler) changePassword(responseWriter http.ResponseWriter, reques
 			handler.redirectPasswordWithError(responseWriter, request)
 			return
 		}
-		writeJSON(responseWriter, http.StatusForbidden, map[string]string{"error": "invalid CSRF token"})
+		writeProblem(responseWriter, request, http.StatusForbidden, "invalid-csrf-token", "invalid CSRF token")
 		return
 	}
 
@@ -169,7 +176,7 @@ func (handler Handler) changePassword(responseWriter http.ResponseWriter, reques
 			NewPassword:     request.PostForm.Get("new_password"),
 		}
 	} else if err := decodeJSON(request, responseWriter, &input); err != nil {
-		writeJSON(responseWriter, http.StatusBadRequest, map[string]string{"error": "invalid JSON request"})
+		writeProblem(responseWriter, request, http.StatusBadRequest, "invalid-request", "invalid JSON request")
 		return
 	}
 	if err := identity.ChangePassword(request.Context(), handler.database, session.SubjectID, identity.ChangePasswordInput{
@@ -180,7 +187,7 @@ func (handler Handler) changePassword(responseWriter http.ResponseWriter, reques
 			handler.redirectPasswordWithError(responseWriter, request)
 			return
 		}
-		handler.writePasswordChangeError(responseWriter, err)
+		handler.writePasswordChangeError(responseWriter, request, err)
 		return
 	}
 	handler.clearSessionCookies(responseWriter)
@@ -204,16 +211,16 @@ func (handler Handler) dashboard(responseWriter http.ResponseWriter, request *ht
 		return
 	}
 	if session.Access != "完整" {
-		http.Error(responseWriter, "password change required", http.StatusForbidden)
+		writeProblem(responseWriter, request, http.StatusForbidden, "password-change-required", "password change required")
 		return
 	}
 	administrator, err := identity.HasRole(request.Context(), handler.database, session.SubjectID, "identity.admin")
 	if err != nil {
-		writeJSON(responseWriter, http.StatusInternalServerError, map[string]string{"error": "could not authorize subject"})
+		writeProblem(responseWriter, request, http.StatusInternalServerError, "internal-error", "could not authorize subject")
 		return
 	}
 	if !administrator {
-		writeJSON(responseWriter, http.StatusForbidden, map[string]string{"error": "not authorized"})
+		writeProblem(responseWriter, request, http.StatusForbidden, "not-authorized", "not authorized")
 		return
 	}
 
@@ -224,16 +231,16 @@ func (handler Handler) dashboard(responseWriter http.ResponseWriter, request *ht
 func (handler Handler) deleteCurrentSession(responseWriter http.ResponseWriter, request *http.Request) {
 	session, err := handler.currentSession(request)
 	if err != nil {
-		writeJSON(responseWriter, http.StatusUnauthorized, map[string]string{"error": "not authenticated"})
+		writeProblem(responseWriter, request, http.StatusUnauthorized, "not-authenticated", "not authenticated")
 		return
 	}
 	if !requestHasValidCSRFToken(request, session) {
-		writeJSON(responseWriter, http.StatusForbidden, map[string]string{"error": "invalid CSRF token"})
+		writeProblem(responseWriter, request, http.StatusForbidden, "invalid-csrf-token", "invalid CSRF token")
 		return
 	}
 	sessionCookie, _ := request.Cookie(sessionCookieName)
 	if err := identity.Logout(request.Context(), handler.database, sessionCookie.Value); err != nil && !errors.Is(err, identity.ErrInvalidSession) {
-		writeJSON(responseWriter, http.StatusInternalServerError, map[string]string{"error": "could not end session"})
+		writeProblem(responseWriter, request, http.StatusInternalServerError, "internal-error", "could not end session")
 		return
 	}
 	handler.clearSessionCookies(responseWriter)
@@ -255,12 +262,12 @@ func (handler Handler) listSubjects(responseWriter http.ResponseWriter, request 
 	}
 	limit, offset, err := subjectListPagination(request)
 	if err != nil {
-		writeJSON(responseWriter, http.StatusBadRequest, map[string]string{"error": "invalid pagination"})
+		writeProblem(responseWriter, request, http.StatusBadRequest, "invalid-request", "invalid pagination")
 		return
 	}
 	result, err := identity.ListSubjects(request.Context(), handler.database, identity.ListSubjectsInput{Limit: limit, Offset: offset})
 	if err != nil {
-		writeJSON(responseWriter, http.StatusInternalServerError, map[string]string{"error": "could not list subjects"})
+		writeProblem(responseWriter, request, http.StatusInternalServerError, "internal-error", "could not list subjects")
 		return
 	}
 	writeJSON(responseWriter, http.StatusOK, map[string]any{
@@ -275,7 +282,7 @@ func (handler Handler) getSubject(responseWriter http.ResponseWriter, request *h
 	}
 	subject, err := identity.GetSubject(request.Context(), handler.database, request.PathValue("subjectID"))
 	if err != nil {
-		handler.writeSubjectManagementError(responseWriter, err)
+		handler.writeSubjectManagementError(responseWriter, request, err)
 		return
 	}
 	writeJSON(responseWriter, http.StatusOK, subject)
@@ -305,7 +312,7 @@ func (handler Handler) createSubject(responseWriter http.ResponseWriter, request
 			handler.redirectSubjectsWithError(responseWriter, request)
 			return
 		}
-		writeJSON(responseWriter, http.StatusForbidden, map[string]string{"error": "invalid CSRF token"})
+		writeProblem(responseWriter, request, http.StatusForbidden, "invalid-csrf-token", "invalid CSRF token")
 		return
 	}
 	var input createSubjectRequest
@@ -320,7 +327,7 @@ func (handler Handler) createSubject(responseWriter http.ResponseWriter, request
 			Password:    request.PostForm.Get("password"),
 		}
 	} else if err := decodeJSON(request, responseWriter, &input); err != nil {
-		writeJSON(responseWriter, http.StatusBadRequest, map[string]string{"error": "invalid JSON request"})
+		writeProblem(responseWriter, request, http.StatusBadRequest, "invalid-request", "invalid JSON request")
 		return
 	}
 	subject, err := identity.CreateSubject(request.Context(), handler.database, session.SubjectID, identity.CreateSubjectInput{
@@ -333,7 +340,7 @@ func (handler Handler) createSubject(responseWriter http.ResponseWriter, request
 			handler.redirectSubjectsWithError(responseWriter, request)
 			return
 		}
-		handler.writeSubjectManagementError(responseWriter, err)
+		handler.writeSubjectManagementError(responseWriter, request, err)
 		return
 	}
 	if htmlRequest {
@@ -372,7 +379,7 @@ func (handler Handler) updateSubject(responseWriter http.ResponseWriter, request
 			handler.redirectSubjectsWithError(responseWriter, request)
 			return
 		}
-		writeJSON(responseWriter, http.StatusForbidden, map[string]string{"error": "invalid CSRF token"})
+		writeProblem(responseWriter, request, http.StatusForbidden, "invalid-csrf-token", "invalid CSRF token")
 		return
 	}
 	var input updateSubjectRequest
@@ -386,7 +393,7 @@ func (handler Handler) updateSubject(responseWriter http.ResponseWriter, request
 			TemporaryPassword: request.PostForm.Get("temporary_password"),
 		}
 	} else if err := decodeJSON(request, responseWriter, &input); err != nil {
-		writeJSON(responseWriter, http.StatusBadRequest, map[string]string{"error": "invalid JSON request"})
+		writeProblem(responseWriter, request, http.StatusBadRequest, "invalid-request", "invalid JSON request")
 		return
 	}
 	subjectID := request.PathValue("subjectID")
@@ -405,7 +412,7 @@ func (handler Handler) updateSubject(responseWriter http.ResponseWriter, request
 			handler.redirectSubjectsWithError(responseWriter, request)
 			return
 		}
-		writeJSON(responseWriter, http.StatusBadRequest, map[string]string{"error": "unsupported subject update"})
+		writeProblem(responseWriter, request, http.StatusBadRequest, "invalid-request", "unsupported subject update")
 		return
 	}
 	if err != nil {
@@ -413,7 +420,7 @@ func (handler Handler) updateSubject(responseWriter http.ResponseWriter, request
 			handler.redirectSubjectsWithError(responseWriter, request)
 			return
 		}
-		handler.writeSubjectManagementError(responseWriter, err)
+		handler.writeSubjectManagementError(responseWriter, request, err)
 		return
 	}
 	if subject.ID == session.SubjectID {
@@ -450,16 +457,16 @@ func (handler Handler) redirectPasswordWithError(responseWriter http.ResponseWri
 	http.Redirect(responseWriter, request, location, http.StatusSeeOther)
 }
 
-func (handler Handler) writePasswordChangeError(responseWriter http.ResponseWriter, err error) {
+func (handler Handler) writePasswordChangeError(responseWriter http.ResponseWriter, request *http.Request, err error) {
 	switch {
 	case errors.Is(err, identity.ErrInvalidPasswordInput), errors.Is(err, identity.ErrIncorrectPassword):
-		writeJSON(responseWriter, http.StatusBadRequest, map[string]string{"error": "invalid password change"})
+		writeProblem(responseWriter, request, http.StatusBadRequest, "invalid-password-change", "invalid password change")
 	case errors.Is(err, identity.ErrPasswordUpdateConflict):
-		writeJSON(responseWriter, http.StatusConflict, map[string]string{"error": "password changed concurrently"})
+		writeProblem(responseWriter, request, http.StatusConflict, "password-change-conflict", "password changed concurrently")
 	case errors.Is(err, identity.ErrPasswordCredentialNotFound):
-		writeJSON(responseWriter, http.StatusNotFound, map[string]string{"error": "subject not found"})
+		writeProblem(responseWriter, request, http.StatusNotFound, "subject-not-found", "subject not found")
 	default:
-		writeJSON(responseWriter, http.StatusInternalServerError, map[string]string{"error": "could not change password"})
+		writeProblem(responseWriter, request, http.StatusInternalServerError, "internal-error", "could not change password")
 	}
 }
 
@@ -467,20 +474,20 @@ func (handler Handler) requireAdministrator(responseWriter http.ResponseWriter, 
 	session, err := handler.currentSession(request)
 	if err != nil {
 		handler.clearSessionCookies(responseWriter)
-		writeJSON(responseWriter, http.StatusUnauthorized, map[string]string{"error": "not authenticated"})
+		writeProblem(responseWriter, request, http.StatusUnauthorized, "not-authenticated", "not authenticated")
 		return identity.Session{}, false
 	}
 	if session.Access != "完整" {
-		writeJSON(responseWriter, http.StatusForbidden, map[string]string{"error": "password change required"})
+		writeProblem(responseWriter, request, http.StatusForbidden, "password-change-required", "password change required")
 		return identity.Session{}, false
 	}
 	administrator, err := identity.HasRole(request.Context(), handler.database, session.SubjectID, "identity.admin")
 	if err != nil {
-		writeJSON(responseWriter, http.StatusInternalServerError, map[string]string{"error": "could not authorize subject"})
+		writeProblem(responseWriter, request, http.StatusInternalServerError, "internal-error", "could not authorize subject")
 		return identity.Session{}, false
 	}
 	if !administrator {
-		writeJSON(responseWriter, http.StatusForbidden, map[string]string{"error": "not authorized"})
+		writeProblem(responseWriter, request, http.StatusForbidden, "not-authorized", "not authorized")
 		return identity.Session{}, false
 	}
 	return session, true
@@ -494,16 +501,16 @@ func (handler Handler) requireAdministratorPage(responseWriter http.ResponseWrit
 		return identity.Session{}, false
 	}
 	if session.Access != "完整" {
-		http.Error(responseWriter, "password change required", http.StatusForbidden)
+		writeProblem(responseWriter, request, http.StatusForbidden, "password-change-required", "password change required")
 		return identity.Session{}, false
 	}
 	administrator, err := identity.HasRole(request.Context(), handler.database, session.SubjectID, "identity.admin")
 	if err != nil {
-		http.Error(responseWriter, "could not authorize subject", http.StatusInternalServerError)
+		writeProblem(responseWriter, request, http.StatusInternalServerError, "internal-error", "could not authorize subject")
 		return identity.Session{}, false
 	}
 	if !administrator {
-		http.Error(responseWriter, "not authorized", http.StatusForbidden)
+		writeProblem(responseWriter, request, http.StatusForbidden, "not-authorized", "not authorized")
 		return identity.Session{}, false
 	}
 	return session, true
@@ -512,7 +519,7 @@ func (handler Handler) requireAdministratorPage(responseWriter http.ResponseWrit
 func (handler Handler) renderSubjectsPage(responseWriter http.ResponseWriter, request *http.Request, statusCode int) {
 	result, err := identity.ListSubjects(request.Context(), handler.database, identity.ListSubjectsInput{Limit: defaultSubjectListLimit, Offset: 0})
 	if err != nil {
-		http.Error(responseWriter, "could not list subjects", http.StatusInternalServerError)
+		writeProblem(responseWriter, request, http.StatusInternalServerError, "internal-error", "could not list subjects")
 		return
 	}
 	csrfToken := requestCSRFToken(request)
@@ -540,20 +547,18 @@ func (handler Handler) redirectSubjectsWithError(responseWriter http.ResponseWri
 	http.Redirect(responseWriter, request, location, http.StatusSeeOther)
 }
 
-func (handler Handler) writeSubjectManagementError(responseWriter http.ResponseWriter, err error) {
+func (handler Handler) writeSubjectManagementError(responseWriter http.ResponseWriter, request *http.Request, err error) {
 	switch {
-	case errors.Is(err, identity.ErrSubjectNotFound):
-		writeJSON(responseWriter, http.StatusNotFound, map[string]string{"error": "subject not found"})
+	case errors.Is(err, identity.ErrSubjectNotFound), errors.Is(err, identity.ErrPasswordCredentialNotFound):
+		writeProblem(responseWriter, request, http.StatusNotFound, "subject-not-found", "subject not found")
 	case errors.Is(err, identity.ErrIdentifierAlreadyExists), errors.Is(err, identity.ErrInvalidSubjectInput), errors.Is(err, identity.ErrInvalidPasswordInput):
-		writeJSON(responseWriter, http.StatusBadRequest, map[string]string{"error": "invalid subject input"})
-	case errors.Is(err, identity.ErrPasswordCredentialNotFound), errors.Is(err, identity.ErrSubjectNotFound):
-		writeJSON(responseWriter, http.StatusNotFound, map[string]string{"error": "subject not found"})
+		writeProblem(responseWriter, request, http.StatusBadRequest, "invalid-request", "invalid subject input")
 	case errors.Is(err, identity.ErrPasswordUpdateConflict):
-		writeJSON(responseWriter, http.StatusConflict, map[string]string{"error": "password changed concurrently"})
+		writeProblem(responseWriter, request, http.StatusConflict, "password-change-conflict", "password changed concurrently")
 	case errors.Is(err, identity.ErrLastAdministrator):
-		writeJSON(responseWriter, http.StatusForbidden, map[string]string{"error": "cannot disable the last enabled administrator"})
+		writeProblem(responseWriter, request, http.StatusForbidden, "last-administrator", "cannot disable the last enabled administrator")
 	default:
-		writeJSON(responseWriter, http.StatusInternalServerError, map[string]string{"error": "could not manage subject"})
+		writeProblem(responseWriter, request, http.StatusInternalServerError, "internal-error", "could not manage subject")
 	}
 }
 
@@ -656,5 +661,101 @@ func (handler Handler) clearSessionCookies(responseWriter http.ResponseWriter) {
 func writeJSON(responseWriter http.ResponseWriter, statusCode int, value any) {
 	responseWriter.Header().Set("Content-Type", "application/json; charset=utf-8")
 	responseWriter.WriteHeader(statusCode)
-	json.NewEncoder(responseWriter).Encode(value)
+	_ = json.NewEncoder(responseWriter).Encode(value)
+}
+
+type problemDetails struct {
+	Type     string `json:"type"`
+	Title    string `json:"title"`
+	Status   int    `json:"status"`
+	Detail   string `json:"detail"`
+	Instance string `json:"instance"`
+}
+
+func writeProblem(responseWriter http.ResponseWriter, request *http.Request, statusCode int, problemType string, detail string) {
+	responseWriter.Header().Del("Content-Length")
+	responseWriter.Header().Set("Content-Type", problemMediaType)
+	responseWriter.WriteHeader(statusCode)
+	_ = json.NewEncoder(responseWriter).Encode(problemDetails{
+		Type:     problemTypePrefix + problemType,
+		Title:    http.StatusText(statusCode),
+		Status:   statusCode,
+		Detail:   detail,
+		Instance: request.URL.RequestURI(),
+	})
+}
+
+type problemDetailsHandler struct {
+	next http.Handler
+}
+
+func (handler problemDetailsHandler) ServeHTTP(responseWriter http.ResponseWriter, request *http.Request) {
+	handler.next.ServeHTTP(&problemDetailsResponseWriter{ResponseWriter: responseWriter, request: request}, request)
+}
+
+type problemDetailsResponseWriter struct {
+	http.ResponseWriter
+	request     *http.Request
+	wroteHeader bool
+	discardBody bool
+}
+
+func (responseWriter *problemDetailsResponseWriter) WriteHeader(statusCode int) {
+	if responseWriter.wroteHeader {
+		return
+	}
+	responseWriter.wroteHeader = true
+	if statusCode >= http.StatusBadRequest && responseWriter.Header().Get("HX-Redirect") == "" && !isProblemMediaType(responseWriter.Header().Get("Content-Type")) {
+		responseWriter.discardBody = true
+		writeProblem(responseWriter.ResponseWriter, responseWriter.request, statusCode, problemTypeForStatus(statusCode), problemDetailForStatus(statusCode))
+		return
+	}
+	responseWriter.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (responseWriter *problemDetailsResponseWriter) Write(value []byte) (int, error) {
+	if !responseWriter.wroteHeader {
+		responseWriter.WriteHeader(http.StatusOK)
+	}
+	if responseWriter.discardBody {
+		return len(value), nil
+	}
+	return responseWriter.ResponseWriter.Write(value)
+}
+
+func (responseWriter *problemDetailsResponseWriter) Unwrap() http.ResponseWriter {
+	return responseWriter.ResponseWriter
+}
+
+func isProblemMediaType(contentType string) bool {
+	mediaType, _, _ := strings.Cut(contentType, ";")
+	return strings.EqualFold(strings.TrimSpace(mediaType), problemMediaType)
+}
+
+func problemTypeForStatus(statusCode int) string {
+	switch statusCode {
+	case http.StatusBadRequest:
+		return "invalid-request"
+	case http.StatusUnauthorized:
+		return "not-authenticated"
+	case http.StatusForbidden:
+		return "not-authorized"
+	case http.StatusNotFound:
+		return "not-found"
+	case http.StatusMethodNotAllowed:
+		return "method-not-allowed"
+	default:
+		return "internal-error"
+	}
+}
+
+func problemDetailForStatus(statusCode int) string {
+	switch statusCode {
+	case http.StatusNotFound:
+		return problemNotFoundDetail
+	case http.StatusMethodNotAllowed:
+		return problemMethodDetail
+	default:
+		return problemGenericDetail
+	}
 }

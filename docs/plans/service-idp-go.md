@@ -275,9 +275,27 @@ GET    /crate-api/identity/v1/password
 PATCH  /crate-api/identity/v1/password
 ```
 
-Lists return `{ "records": [...], "meta": { "total": N } }`; errors return
-`{ "error": "..." }`. The subject `PATCH` body is either
-`{"status":"禁用"}` or `{"temporary_password":"..."}`. A temporary password
+Lists return `{ "records": [...], "meta": { "total": N } }`. Every HTTP
+error body, including unmatched routes and unsupported methods, follows RFC
+9457 and uses `Content-Type: application/problem+json`:
+
+```json
+{
+  "type": "/crate-api/identity/v1/problems/invalid-request",
+  "title": "Bad Request",
+  "status": 400,
+  "detail": "invalid JSON request",
+  "instance": "/crate-api/identity/v1/subjects"
+}
+```
+
+`type` is a stable service-local URI reference, `title` is the HTTP status
+phrase, and `instance` is the complete request URI including the query string.
+Problem Details do not include the legacy `error` member. Browser form flows
+that deliberately redirect do not produce an error body.
+
+The subject `PATCH` body is either `{"status":"禁用"}` or
+`{"temporary_password":"..."}`. A temporary password
 sets the credential status to `需更新`, so the next login is `仅改密` and may use
 only the password-change and sign-out routes. The password route accepts
 `{"current_password":"...","new_password":"..."}`. Its successful update

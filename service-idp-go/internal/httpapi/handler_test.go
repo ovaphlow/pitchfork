@@ -53,6 +53,94 @@ func TestHealthzReturnsOKWhenDatabaseIsAvailable(t *testing.T) {
 	}
 }
 
+func TestProblemDetailsResponses(t *testing.T) {
+	databaseConnection, err := database.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "identityd.sqlite"))
+	if err != nil {
+		t.Fatalf("open SQLite database: %v", err)
+	}
+	t.Cleanup(func() {
+		databaseConnection.Close()
+	})
+	if _, err := database.Migrate(context.Background(), databaseConnection, migrations.Files); err != nil {
+		t.Fatalf("migrate database: %v", err)
+	}
+	if _, err := identity.EnsureBootstrap(context.Background(), databaseConnection, identity.BootstrapInput{
+		Identifier: "admin",
+		Password:   "correct horse battery staple",
+	}); err != nil {
+		t.Fatalf("ensure bootstrap: %v", err)
+	}
+
+	mux := httpapi.NewMux(databaseConnection, httpapi.Options{
+		SessionSettings: identity.SessionSettings{TTL: time.Hour, IdleTTL: 30 * time.Minute},
+		LoginThrottle:   testLoginThrottle,
+	})
+
+	unauthenticatedRequest := httptest.NewRequest(http.MethodGet, "/crate-api/identity/v1/subjects", nil)
+	unauthenticatedResponse := httptest.NewRecorder()
+	mux.ServeHTTP(unauthenticatedResponse, unauthenticatedRequest)
+	assertProblemDetails(t, unauthenticatedResponse, http.StatusUnauthorized, "not-authenticated", "/crate-api/identity/v1/subjects")
+
+	adminSession, adminCSRF := loginCookies(t, mux, "admin", "correct horse battery staple")
+
+	missingCSRFRequest := httptest.NewRequest(http.MethodPost, "/crate-api/identity/v1/subjects", strings.NewReader(`{"display_name":"张三","identifier":"zhangsan","password":"a sufficiently long password"}`))
+	missingCSRFRequest.Header.Set("Content-Type", "application/json")
+	missingCSRFRequest.AddCookie(adminSession)
+	missingCSRFResponse := httptest.NewRecorder()
+	mux.ServeHTTP(missingCSRFResponse, missingCSRFRequest)
+	assertProblemDetails(t, missingCSRFResponse, http.StatusForbidden, "invalid-csrf-token", "/crate-api/identity/v1/subjects")
+
+	invalidJSONRequest := httptest.NewRequest(http.MethodPost, "/crate-api/identity/v1/subjects", strings.NewReader(`{"display_name":`))
+	invalidJSONRequest.Header.Set("Content-Type", "application/json")
+	invalidJSONRequest.Header.Set("X-CSRF-Token", adminCSRF.Value)
+	invalidJSONRequest.AddCookie(adminSession)
+	invalidJSONRequest.AddCookie(adminCSRF)
+	invalidJSONResponse := httptest.NewRecorder()
+	mux.ServeHTTP(invalidJSONResponse, invalidJSONRequest)
+	assertProblemDetails(t, invalidJSONResponse, http.StatusBadRequest, "invalid-request", "/crate-api/identity/v1/subjects")
+
+	missingSubjectRequest := httptest.NewRequest(http.MethodGet, "/crate-api/identity/v1/subjects/unknown-subject", nil)
+	missingSubjectRequest.AddCookie(adminSession)
+	missingSubjectResponse := httptest.NewRecorder()
+	mux.ServeHTTP(missingSubjectResponse, missingSubjectRequest)
+	assertProblemDetails(t, missingSubjectResponse, http.StatusNotFound, "subject-not-found", "/crate-api/identity/v1/subjects/unknown-subject")
+
+	invalidPaginationRequest := httptest.NewRequest(http.MethodGet, "/crate-api/identity/v1/subjects?limit=invalid", nil)
+	invalidPaginationRequest.AddCookie(adminSession)
+	invalidPaginationResponse := httptest.NewRecorder()
+	mux.ServeHTTP(invalidPaginationResponse, invalidPaginationRequest)
+	assertProblemDetails(t, invalidPaginationResponse, http.StatusBadRequest, "invalid-request", "/crate-api/identity/v1/subjects?limit=invalid")
+
+	unknownRouteRequest := httptest.NewRequest(http.MethodGet, "/crate-api/identity/v1/unknown", nil)
+	unknownRouteResponse := httptest.NewRecorder()
+	mux.ServeHTTP(unknownRouteResponse, unknownRouteRequest)
+	assertProblemDetails(t, unknownRouteResponse, http.StatusNotFound, "not-found", "/crate-api/identity/v1/unknown")
+
+	unsupportedMethodRequest := httptest.NewRequest(http.MethodPost, "/crate-api/identity/v1/healthz", nil)
+	unsupportedMethodResponse := httptest.NewRecorder()
+	mux.ServeHTTP(unsupportedMethodResponse, unsupportedMethodRequest)
+	assertProblemDetails(t, unsupportedMethodResponse, http.StatusMethodNotAllowed, "method-not-allowed", "/crate-api/identity/v1/healthz")
+	if allow := unsupportedMethodResponse.Header().Get("Allow"); !strings.Contains(allow, http.MethodGet) {
+		t.Errorf("405 Allow header = %q, want it to contain %q", allow, http.MethodGet)
+	}
+
+	htmxCSRFRequest := httptest.NewRequest(http.MethodPost, "/crate-api/identity/v1/subjects", strings.NewReader("display_name=张三&identifier=zhangsan&password=a+sufficiently+long+password"))
+	htmxCSRFRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	htmxCSRFRequest.Header.Set("HX-Request", "true")
+	htmxCSRFRequest.AddCookie(adminSession)
+	htmxCSRFResponse := httptest.NewRecorder()
+	mux.ServeHTTP(htmxCSRFResponse, htmxCSRFRequest)
+	if htmxCSRFResponse.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("HTMX CSRF status = %d, want %d", htmxCSRFResponse.Code, http.StatusUnprocessableEntity)
+	}
+	if redirect := htmxCSRFResponse.Header().Get("HX-Redirect"); redirect != "/crate-api/identity/v1/subjects?error=1" {
+		t.Errorf("HTMX CSRF redirect = %q", redirect)
+	}
+	if htmxCSRFResponse.Body.Len() != 0 {
+		t.Errorf("HTMX CSRF response body = %q, want empty", htmxCSRFResponse.Body.String())
+	}
+}
+
 func TestLoginDashboardAndCSRFFlow(t *testing.T) {
 	databaseConnection, err := database.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "identityd.sqlite"))
 	if err != nil {
@@ -478,4 +566,48 @@ func loginCookiesWithRedirect(t *testing.T, handler http.Handler, identifier str
 		t.Fatalf("login %s did not return session cookies", identifier)
 	}
 	return sessionCookie, csrfCookie
+}
+
+func assertProblemDetails(t *testing.T, response *httptest.ResponseRecorder, wantStatus int, wantType string, wantInstance string) {
+	t.Helper()
+	if response.Code != wantStatus {
+		t.Fatalf("status = %d, want %d; body = %s", response.Code, wantStatus, response.Body.String())
+	}
+	if contentType := response.Header().Get("Content-Type"); contentType != "application/problem+json" {
+		t.Fatalf("content type = %q, want application/problem+json", contentType)
+	}
+
+	var problem struct {
+		Type     string `json:"type"`
+		Title    string `json:"title"`
+		Status   int    `json:"status"`
+		Detail   string `json:"detail"`
+		Instance string `json:"instance"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &problem); err != nil {
+		t.Fatalf("decode problem details: %v; body = %s", err, response.Body.String())
+	}
+	if problem.Type != "/crate-api/identity/v1/problems/"+wantType {
+		t.Errorf("type = %q, want %q", problem.Type, "/crate-api/identity/v1/problems/"+wantType)
+	}
+	if problem.Title != http.StatusText(wantStatus) {
+		t.Errorf("title = %q, want %q", problem.Title, http.StatusText(wantStatus))
+	}
+	if problem.Status != wantStatus {
+		t.Errorf("problem status = %d, want %d", problem.Status, wantStatus)
+	}
+	if problem.Detail == "" {
+		t.Error("detail is empty")
+	}
+	if problem.Instance != wantInstance {
+		t.Errorf("instance = %q, want %q", problem.Instance, wantInstance)
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(response.Body.Bytes(), &fields); err != nil {
+		t.Fatalf("decode problem detail fields: %v", err)
+	}
+	if _, ok := fields["error"]; ok {
+		t.Error("problem response contains legacy error field")
+	}
 }
