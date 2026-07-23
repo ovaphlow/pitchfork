@@ -479,6 +479,9 @@ db/queries/
 ├── sessions.sql
 ├── throttles.sql
 ├── audit_events.sql
+├── subject_management.sql
+├── role_management.sql
+├── session_revocation.sql
 ├── oidc_clients.sql              # Phase 2
 ├── oidc_authorization_codes.sql  # Phase 3
 ├── oidc_refresh_tokens.sql       # Phase 3
@@ -587,7 +590,8 @@ deployment.
   protocol `client_id` is resolved only at the service boundary.
 - The first OIDC release supports first-party public SPAs with PKCE and only
   `openid profile` scopes. Verified-email support is a later addition.
-- No generated Go or frontend build output is committed.
+- Generated Go query code is committed with its migrations and query source;
+  frontend build output is not committed.
 
 ## 12. Deferred Phase 2/3 Decisions
 

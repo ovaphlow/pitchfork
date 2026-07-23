@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -14,19 +15,26 @@ const (
 	defaultDatabasePath     = ".data/identityd.sqlite"
 	defaultSessionTTL       = 12 * time.Hour
 	defaultSessionIdleTTL   = 30 * time.Minute
+	defaultThrottleWindow   = 15 * time.Minute
+	defaultThrottleLockout  = 15 * time.Minute
+	defaultThrottleFailures = 5
 	defaultTrustedProxyCIDR = "127.0.0.1/32"
 )
 
 type Config struct {
-	Address              string
-	DatabasePath         string
-	BootstrapIdentifier  string
-	BootstrapPassword    string
-	SessionTTL           time.Duration
-	SessionIdleTTL       time.Duration
-	SecureSessionCookie  bool
-	PublicURL            *url.URL
-	TrustedProxyPrefixes []netip.Prefix
+	Address                   string
+	DatabasePath              string
+	BootstrapIdentifier       string
+	BootstrapPassword         string
+	SessionTTL                time.Duration
+	SessionIdleTTL            time.Duration
+	LoginThrottleSecret       []byte
+	LoginThrottleWindow       time.Duration
+	LoginThrottleLockout      time.Duration
+	LoginThrottleFailureLimit int
+	SecureSessionCookie       bool
+	PublicURL                 *url.URL
+	TrustedProxyPrefixes      []netip.Prefix
 }
 
 func Load() (Config, error) {
@@ -44,6 +52,22 @@ func LoadFromLookup(lookup func(string) string) (Config, error) {
 	}
 	if sessionIdleTTL > sessionTTL {
 		return Config{}, fmt.Errorf("IDENTITYD_SESSION_IDLE_TTL must not exceed IDENTITYD_SESSION_TTL")
+	}
+	loginThrottleSecret, err := throttleSecretValue(lookup("IDENTITYD_LOGIN_THROTTLE_SECRET"))
+	if err != nil {
+		return Config{}, err
+	}
+	loginThrottleWindow, err := durationValue(lookup, "IDENTITYD_LOGIN_THROTTLE_WINDOW", defaultThrottleWindow)
+	if err != nil {
+		return Config{}, err
+	}
+	loginThrottleLockout, err := durationValue(lookup, "IDENTITYD_LOGIN_THROTTLE_LOCKOUT", defaultThrottleLockout)
+	if err != nil {
+		return Config{}, err
+	}
+	loginThrottleFailureLimit, err := positiveIntegerValue(lookup, "IDENTITYD_LOGIN_THROTTLE_FAILURES", defaultThrottleFailures)
+	if err != nil {
+		return Config{}, err
 	}
 
 	secureCookie, err := booleanValue(lookup, "IDENTITYD_SESSION_SECURE_COOKIE", false)
@@ -68,16 +92,28 @@ func LoadFromLookup(lookup func(string) string) (Config, error) {
 	}
 
 	return Config{
-		Address:              stringValue(lookup, "IDENTITYD_ADDR", defaultAddress),
-		DatabasePath:         stringValue(lookup, "IDENTITYD_DATABASE_PATH", defaultDatabasePath),
-		BootstrapIdentifier:  bootstrapIdentifier,
-		BootstrapPassword:    bootstrapPassword,
-		SessionTTL:           sessionTTL,
-		SessionIdleTTL:       sessionIdleTTL,
-		SecureSessionCookie:  secureCookie,
-		PublicURL:            publicURL,
-		TrustedProxyPrefixes: trustedProxyPrefixes,
+		Address:                   stringValue(lookup, "IDENTITYD_ADDR", defaultAddress),
+		DatabasePath:              stringValue(lookup, "IDENTITYD_DATABASE_PATH", defaultDatabasePath),
+		BootstrapIdentifier:       bootstrapIdentifier,
+		BootstrapPassword:         bootstrapPassword,
+		SessionTTL:                sessionTTL,
+		SessionIdleTTL:            sessionIdleTTL,
+		LoginThrottleSecret:       loginThrottleSecret,
+		LoginThrottleWindow:       loginThrottleWindow,
+		LoginThrottleLockout:      loginThrottleLockout,
+		LoginThrottleFailureLimit: loginThrottleFailureLimit,
+		SecureSessionCookie:       secureCookie,
+		PublicURL:                 publicURL,
+		TrustedProxyPrefixes:      trustedProxyPrefixes,
 	}, nil
+}
+
+func throttleSecretValue(value string) ([]byte, error) {
+	secret := []byte(strings.TrimSpace(value))
+	if len(secret) < 32 {
+		return nil, fmt.Errorf("IDENTITYD_LOGIN_THROTTLE_SECRET must contain at least 32 bytes")
+	}
+	return secret, nil
 }
 
 func stringValue(lookup func(string) string, key string, fallback string) string {
@@ -98,6 +134,19 @@ func durationValue(lookup func(string) string, key string, fallback time.Duratio
 		return 0, fmt.Errorf("%s must be a positive Go duration", key)
 	}
 	return duration, nil
+}
+
+func positiveIntegerValue(lookup func(string) string, key string, fallback int) (int, error) {
+	value := strings.TrimSpace(lookup(key))
+	if value == "" {
+		return fallback, nil
+	}
+
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer", key)
+	}
+	return parsed, nil
 }
 
 func booleanValue(lookup func(string) string, key string, fallback bool) (bool, error) {

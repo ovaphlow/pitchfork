@@ -10,23 +10,37 @@ import (
 
 type Querier interface {
 	AssignSubjectRole(ctx context.Context, arg AssignSubjectRoleParams) error
+	CountEnabledSubjectsByRoleCodeExcludingSubjectID(ctx context.Context, arg CountEnabledSubjectsByRoleCodeExcludingSubjectIDParams) (int64, error)
 	CountSubjectRoleAssignments(ctx context.Context, arg CountSubjectRoleAssignmentsParams) (int64, error)
 	CountSubjects(ctx context.Context) (int64, error)
+	CountSubjectsForManagement(ctx context.Context) (int64, error)
 	CreateIdentifier(ctx context.Context, arg CreateIdentifierParams) error
 	CreatePasswordCredential(ctx context.Context, arg CreatePasswordCredentialParams) error
 	CreateProfile(ctx context.Context, arg CreateProfileParams) error
 	CreateRoleIfAbsent(ctx context.Context, arg CreateRoleIfAbsentParams) error
 	CreateSession(ctx context.Context, arg CreateSessionParams) error
 	CreateSubject(ctx context.Context, arg CreateSubjectParams) error
+	DeleteLoginThrottle(ctx context.Context, arg DeleteLoginThrottleParams) error
+	DisableSubject(ctx context.Context, arg DisableSubjectParams) (int64, error)
 	GetActiveSessionByTokenHash(ctx context.Context, arg GetActiveSessionByTokenHashParams) (GetActiveSessionByTokenHashRow, error)
 	GetActiveSessionSubjectByTokenHash(ctx context.Context, tokenHash []byte) (string, error)
 	GetEnabledSubjectSecurityVersion(ctx context.Context, arg GetEnabledSubjectSecurityVersionParams) (int64, error)
+	GetIdentifierSubjectID(ctx context.Context, arg GetIdentifierSubjectIDParams) (string, error)
 	GetLoginCredentialByNormalizedIdentifier(ctx context.Context, arg GetLoginCredentialByNormalizedIdentifierParams) (GetLoginCredentialByNormalizedIdentifierRow, error)
+	GetLoginThrottle(ctx context.Context, arg GetLoginThrottleParams) (IdentityLoginThrottle, error)
+	GetPasswordCredentialBySubjectID(ctx context.Context, subjectID string) (GetPasswordCredentialBySubjectIDRow, error)
 	GetRoleIDByCode(ctx context.Context, roleCode string) (string, error)
 	GetSubjectByID(ctx context.Context, id string) (IdentitySubject, error)
+	GetSubjectForManagement(ctx context.Context, arg GetSubjectForManagementParams) (GetSubjectForManagementRow, error)
+	IncrementEnabledSubjectSecurityVersion(ctx context.Context, arg IncrementEnabledSubjectSecurityVersionParams) (int64, error)
 	InsertAuditEvent(ctx context.Context, arg InsertAuditEventParams) error
+	ListRoleCodesBySubjectID(ctx context.Context, subjectID string) ([]string, error)
+	ListSubjectsForManagement(ctx context.Context, arg ListSubjectsForManagementParams) ([]ListSubjectsForManagementRow, error)
 	RevokeActiveSessionByTokenHash(ctx context.Context, arg RevokeActiveSessionByTokenHashParams) (int64, error)
+	RevokeActiveSessionsBySubjectID(ctx context.Context, arg RevokeActiveSessionsBySubjectIDParams) (int64, error)
 	TouchActiveSession(ctx context.Context, arg TouchActiveSessionParams) (int64, error)
+	UpdatePasswordCredential(ctx context.Context, arg UpdatePasswordCredentialParams) (int64, error)
+	UpsertLoginThrottle(ctx context.Context, arg UpsertLoginThrottleParams) error
 }
 
 var _ Querier = (*Queries)(nil)

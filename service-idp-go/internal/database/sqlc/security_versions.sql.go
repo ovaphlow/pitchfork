@@ -7,6 +7,7 @@ package sqlc
 
 import (
 	"context"
+	"time"
 )
 
 const getEnabledSubjectSecurityVersion = `-- name: GetEnabledSubjectSecurityVersion :one
@@ -25,4 +26,24 @@ func (q *Queries) GetEnabledSubjectSecurityVersion(ctx context.Context, arg GetE
 	var security_version int64
 	err := row.Scan(&security_version)
 	return security_version, err
+}
+
+const incrementEnabledSubjectSecurityVersion = `-- name: IncrementEnabledSubjectSecurityVersion :execrows
+UPDATE identity_subjects
+SET security_version=security_version+1,updated_at=?
+WHERE id=? AND status=?
+`
+
+type IncrementEnabledSubjectSecurityVersionParams struct {
+	UpdatedAt time.Time `json:"updated_at"`
+	ID        string    `json:"id"`
+	Status    string    `json:"status"`
+}
+
+func (q *Queries) IncrementEnabledSubjectSecurityVersion(ctx context.Context, arg IncrementEnabledSubjectSecurityVersionParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, incrementEnabledSubjectSecurityVersion, arg.UpdatedAt, arg.ID, arg.Status)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }

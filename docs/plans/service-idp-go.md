@@ -84,7 +84,7 @@ protection, rate limiting, audit logging, or strict redirect URI validation.
 | HTML | `html/template` and `go:embed` | Server rendering keeps the control plane light and avoids a separate JavaScript application. |
 | Interaction | Locally served HTMX | Partial page updates without a frontend runtime or external CDN dependency. |
 | Styling | Tailwind CSS v4 compiled during the build | The production service serves static CSS and needs no network access in the browser. |
-| Generated outputs | Do not commit `sqlc` output or built static assets | `make generate` and `make assets` produce them locally and in CI before test, build, or packaging. |
+| Generated outputs | Commit `sqlc` Go output; do not commit built static assets | Generated query code is required to compile and is reviewable; CI verifies it is synchronized with the SQL source. |
 | Password storage | Argon2id hashes only | Passwords are never reversible or stored as encrypted plaintext. |
 | Token signing | Asymmetric signing keys in the future OIDC phase | Products verify with public JWKS keys and cannot mint tokens themselves. |
 
@@ -99,7 +99,7 @@ service-idp-go/
 │   └── queries/                 # Named SQL consumed by sqlc
 ├── internal/
 │   ├── database/                # Connection, WAL pragmas, embedded migrator
-│   │   └── sqlc/                # Generated, ignored Go code; never edited manually
+│   │   └── sqlc/                # Generated, committed Go code; never edited manually
 │   ├── identity/                # User, credential, client, audit services
 │   ├── session/                 # Opaque browser sessions and CSRF validation
 │   ├── web/                     # HTTP handlers, templates, static assets
@@ -114,10 +114,19 @@ service-idp-go/
 └── README.md
 ```
 
-Generated `internal/database/sqlc` code and `web/static` assets are not
-committed. `make generate` and `make assets` are prerequisites of `make test`,
-`make build`, and the release image build. The generated directories are listed
-in the service's `.gitignore`.
+Generated `internal/database/sqlc` code is committed, while `web/static`
+assets are not. `make generate` updates the generated query code after a
+migration or query-source change; `make check-generated` regenerates it and
+fails when the working tree differs. `make test`, `make build`, and release
+packaging compile the committed generated source directly.
+
+Login throttling uses a required `IDENTITYD_LOGIN_THROTTLE_SECRET` with at
+least 32 bytes. It is a deployment-specific HMAC key, remains outside SQLite,
+and must stay stable across restarts. Phase 1 defaults to five failures within
+15 minutes per identifier/source pair, followed by a 15-minute lockout. The
+window, failure count, and lockout duration are configurable with
+`IDENTITYD_LOGIN_THROTTLE_WINDOW`, `IDENTITYD_LOGIN_THROTTLE_FAILURES`, and
+`IDENTITYD_LOGIN_THROTTLE_LOCKOUT`.
 
 ## 6. `sqlc` Plan
 
@@ -150,6 +159,7 @@ override. Local and CI commands will be:
 
 ```bash
 make generate
+make check-generated
 make assets
 make test
 ```
@@ -201,23 +211,23 @@ one prefix:
 /crate-api/identity/v1
 ```
 
-Human-facing administration routes return HTML and use REST-shaped resource
-URLs beneath that prefix. A future JSON representation uses the same versioned
-resource boundary and follows the repository response conventions. OIDC route
-names are specified by the protocol, but they also remain beneath the same
-versioned issuer path.
+The current administration API uses JSON and REST-shaped resource URLs beneath
+that prefix. Tailwind/HTMX pages use the same resources and browser session;
+Node manages their pinned build-time dependencies only, never the production
+HTTP service. OIDC route names are specified by the protocol, but they also
+remain beneath the same versioned issuer path.
 
 The standard-library router wiring remains direct and method-qualified:
 
 ```go
 const identityPrefix = "/crate-api/identity/v1"
 
-mux.HandleFunc("GET "+identityPrefix+"/users", handler.ListUsers)
-mux.HandleFunc("POST "+identityPrefix+"/users", handler.CreateUser)
-mux.HandleFunc("PATCH "+identityPrefix+"/users/{id}", handler.UpdateUser)
+mux.HandleFunc("GET "+identityPrefix+"/subjects", handler.listSubjects)
+mux.HandleFunc("POST "+identityPrefix+"/subjects", handler.createSubject)
+mux.HandleFunc("PATCH "+identityPrefix+"/subjects/{subjectID}", handler.updateSubject)
 ```
 
-### Phase 1: Administration UI
+### Phase 1: Administration API and UI
 
 | Method pattern | URL | Purpose |
 | --- | --- | --- |
@@ -225,47 +235,54 @@ mux.HandleFunc("PATCH "+identityPrefix+"/users/{id}", handler.UpdateUser)
 | `GET /crate-api/identity/v1/login` | `/crate-api/identity/v1/login` | Local administrator login page. |
 | `POST /crate-api/identity/v1/sessions` | `/crate-api/identity/v1/sessions` | Create browser session after credential verification. |
 | `DELETE /crate-api/identity/v1/sessions/current` | `/crate-api/identity/v1/sessions/current` | End current browser session. |
+| `GET /crate-api/identity/v1/password` | `/crate-api/identity/v1/password` | Render the self-service password-change page for the current session. |
+| `PATCH /crate-api/identity/v1/password` | `/crate-api/identity/v1/password` | Change the current subject password; requires CSRF validation and revokes active sessions. |
 | `GET /crate-api/identity/v1/dashboard` | `/crate-api/identity/v1/dashboard` | Operational dashboard. |
-| `GET /crate-api/identity/v1/users` | `/crate-api/identity/v1/users` | Paginated/filterable identity list. |
-| `GET /crate-api/identity/v1/users/new` | `/crate-api/identity/v1/users/new` | New identity form. |
-| `POST /crate-api/identity/v1/users` | `/crate-api/identity/v1/users` | Create a local identity. |
-| `GET /crate-api/identity/v1/users/{id}` | `/crate-api/identity/v1/users/{id}` | Identity detail page. |
-| `GET /crate-api/identity/v1/users/{id}/edit` | `/crate-api/identity/v1/users/{id}/edit` | Identity edit form. |
-| `PATCH /crate-api/identity/v1/users/{id}` | `/crate-api/identity/v1/users/{id}` | Update display information or state. |
+| `GET /crate-api/identity/v1/subjects` | `/crate-api/identity/v1/subjects` | Paginated identity list; requires `identity.admin`. |
+| `POST /crate-api/identity/v1/subjects` | `/crate-api/identity/v1/subjects` | Create a local identity; requires `identity.admin` and CSRF validation. |
+| `GET /crate-api/identity/v1/subjects/{subjectID}` | `/crate-api/identity/v1/subjects/{subjectID}` | Identity detail; requires `identity.admin`. |
+| `PATCH /crate-api/identity/v1/subjects/{subjectID}` | `/crate-api/identity/v1/subjects/{subjectID}` | Disable the subject or set its temporary password; requires `identity.admin` and CSRF validation. |
 | `GET /crate-api/identity/v1/clients` | `/crate-api/identity/v1/clients` | Registered OIDC-client list, added in Phase 2. |
 | `POST /crate-api/identity/v1/clients` | `/crate-api/identity/v1/clients` | Register a first-party client, added in Phase 2. |
 | `PATCH /crate-api/identity/v1/clients/{id}` | `/crate-api/identity/v1/clients/{id}` | Update or disable a client, added in Phase 2. |
 | `GET /crate-api/identity/v1/assets/{path...}` | `/crate-api/identity/v1/assets/{path...}` | Versioned, locally served Tailwind and HTMX assets. |
 
-HTMX requests use the same resource URLs and HTTP methods as full-page forms.
-Handlers return a partial only when the request has `HX-Request: true`; a
-normal browser request receives a redirect-after-write or a complete page.
-The service does not create `/api` variants merely for HTMX.
+The management page uses the same resources and HTTP methods as the JSON API.
+`Accept: text/html` selects the complete server-rendered page, and
+`HX-Request: true` selects an HTML row fragment after a write. No `/api`
+variants exist merely for HTMX.
 
-The response-selection contract is explicit so HTML and a later JSON
-representation cannot be confused by browsers or reverse proxies:
+The representation-selection contract remains explicit so HTML and JSON cannot
+be confused by browsers or reverse proxies:
 
 ```text
-HX-Request: true                 -> HTML fragment
-Accept: text/html                -> complete HTML page
-Accept: application/json         -> standard JSON API representation, when added
+HX-Request: true                 -> HTML fragment after a management write
+Accept: text/html                -> complete HTML management page
+Accept: application/json         -> standard JSON API representation
 Vary: Accept, HX-Request         -> set on representation-dependent responses
 ```
 
-### Future JSON Representation
+### Current JSON Representation
 
-If product automation requires a JSON administration representation, it uses
-the same versioned resources, for example:
+The current administrator API uses the same versioned resources:
 
 ```text
-GET    /crate-api/identity/v1/users?limit=50&offset=0
-POST   /crate-api/identity/v1/users
-GET    /crate-api/identity/v1/users/{id}
-PATCH  /crate-api/identity/v1/users/{id}
+GET    /crate-api/identity/v1/subjects?limit=50&offset=0
+POST   /crate-api/identity/v1/subjects
+GET    /crate-api/identity/v1/subjects/{subjectID}
+PATCH  /crate-api/identity/v1/subjects/{subjectID}
+GET    /crate-api/identity/v1/password
+PATCH  /crate-api/identity/v1/password
 ```
 
 Lists return `{ "records": [...], "meta": { "total": N } }`; errors return
-`{ "error": "..." }`.
+`{ "error": "..." }`. The subject `PATCH` body is either
+`{"status":"禁用"}` or `{"temporary_password":"..."}`. A temporary password
+sets the credential status to `需更新`, so the next login is `仅改密` and may use
+only the password-change and sign-out routes. The password route accepts
+`{"current_password":"...","new_password":"..."}`. Its successful update
+uses the stored credential revision, increments the subject security version,
+revokes every active browser session, records `凭据变更`, and returns `204`.
 
 ### Phase 3: Standard OIDC Endpoints
 
@@ -416,7 +433,9 @@ Operational requirements:
 3. Implement bootstrap admin creation, local login/logout, authorization,
    session handling, CSRF validation, rate limiting, final-administrator
    protection, and local recovery.
-4. Implement Tailwind/HTMX pages for dashboard and identity management.
+4. Implement Tailwind/HTMX pages for dashboard and identity management; build
+   local CSS and vendored HTMX with pinned Node dependencies, then embed only
+   the generated assets in the Go binary.
 5. Add unit, database integration, HTTP handler, and browser-flow tests.
 
 **Acceptance criteria:** a fresh, empty SQLite database can start safely;
@@ -475,7 +494,7 @@ is invalid.
 | HTTP tests | Exact `net/http` method/path matching, redirect-after-write, CSRF, cookie attributes, HTMX partial responses, and 401/403 behaviour. |
 | OIDC conformance tests | Added in Phase 3 for PKCE, redirect URI, code reuse, key rotation, token claims, and revocation. |
 | UI checks | Desktop and narrow viewport screenshots; verify Tailwind output, locally served HTMX, and no clipped or overlapping text. |
-| CI checks | Generate ignored `sqlc` source, build ignored assets, run `go test ./...`, `go vet ./...`, and execute a minimal startup smoke test. |
+| CI checks | Regenerate and compare committed `sqlc` source, build ignored assets, run `go test ./...`, `go vet ./...`, and execute a minimal startup smoke test. |
 
 ## 14. Data Model Baseline
 

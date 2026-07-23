@@ -1,0 +1,13 @@
+{
+  "name": "identityd-web-assets",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "build:assets": "node ./web/scripts/build-assets.mjs"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.1.0",
+    "htmx.org": "^2.0.0",
+    "tailwindcss": "^4.1.0"
+  }
+}

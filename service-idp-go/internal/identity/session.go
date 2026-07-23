@@ -27,6 +27,13 @@ type LoginResult struct {
 	SessionToken string
 	CSRFToken    string
 	ExpiresAt    time.Time
+	Access       string
+}
+
+type LoginInput struct {
+	Identifier    string
+	Password      string
+	SourceAddress string
 }
 
 type Session struct {
@@ -36,16 +43,30 @@ type Session struct {
 	csrfTokenHash []byte
 }
 
-func Login(ctx context.Context, database *sql.DB, identifier string, passwordValue string, settings SessionSettings) (LoginResult, error) {
+func Login(ctx context.Context, database *sql.DB, input LoginInput, settings SessionSettings, throttleSettings LoginThrottleSettings) (LoginResult, error) {
 	if settings.TTL <= 0 || settings.IdleTTL <= 0 || settings.IdleTTL > settings.TTL {
 		return LoginResult{}, fmt.Errorf("invalid session settings")
 	}
-	normalizedIdentifier, err := normalizeAccountIdentifier(identifier)
-	if err != nil {
-		return LoginResult{}, ErrInvalidCredentials
+	if err := throttleSettings.validate(); err != nil {
+		return LoginResult{}, fmt.Errorf("invalid login throttle settings: %w", err)
 	}
 
 	queries := sqlc.New(database)
+	now := time.Now().UTC()
+	throttleKey := newLoginThrottleKey(throttleSettings, input.Identifier, input.SourceAddress)
+	locked, err := loginThrottleLocked(ctx, queries, throttleKey, now)
+	if err != nil {
+		return LoginResult{}, err
+	}
+	if locked {
+		return LoginResult{}, rejectLogin(ctx, database, throttleSettings, throttleKey, now)
+	}
+
+	normalizedIdentifier, err := normalizeAccountIdentifier(input.Identifier)
+	if err != nil {
+		return LoginResult{}, rejectLogin(ctx, database, throttleSettings, throttleKey, now)
+	}
+
 	credential, err := queries.GetLoginCredentialByNormalizedIdentifier(ctx, sqlc.GetLoginCredentialByNormalizedIdentifierParams{
 		NormalizedValue:   normalizedIdentifier,
 		Status:            "启用",
@@ -53,30 +74,30 @@ func Login(ctx context.Context, database *sql.DB, identifier string, passwordVal
 		IdentifierUsage_2: "辅助登录",
 	})
 	if errors.Is(err, sql.ErrNoRows) {
-		return LoginResult{}, ErrInvalidCredentials
+		return LoginResult{}, rejectLogin(ctx, database, throttleSettings, throttleKey, now)
 	}
 	if err != nil {
 		return LoginResult{}, fmt.Errorf("load login credential: %w", err)
 	}
 	if credential.CredentialStatus == "已作废" {
-		return LoginResult{}, ErrInvalidCredentials
+		return LoginResult{}, rejectLogin(ctx, database, throttleSettings, throttleKey, now)
 	}
 	securityVersion, err := queries.GetEnabledSubjectSecurityVersion(ctx, sqlc.GetEnabledSubjectSecurityVersionParams{
 		ID:     credential.SubjectID,
 		Status: "启用",
 	})
 	if errors.Is(err, sql.ErrNoRows) {
-		return LoginResult{}, ErrInvalidCredentials
+		return LoginResult{}, rejectLogin(ctx, database, throttleSettings, throttleKey, now)
 	}
 	if err != nil {
 		return LoginResult{}, fmt.Errorf("load login subject: %w", err)
 	}
-	matched, err := password.Verify(passwordValue, credential.PasswordHash)
+	matched, err := password.Verify(input.Password, credential.PasswordHash)
 	if err != nil || !matched {
-		return LoginResult{}, ErrInvalidCredentials
+		return LoginResult{}, rejectLogin(ctx, database, throttleSettings, throttleKey, now)
 	}
 
-	now := time.Now().UTC()
+	now = time.Now().UTC()
 	sessionID, err := NewULID(now)
 	if err != nil {
 		return LoginResult{}, err
@@ -105,6 +126,25 @@ func Login(ctx context.Context, database *sql.DB, identifier string, passwordVal
 	}
 	defer transaction.Rollback()
 	transactionQueries := queries.WithTx(transaction)
+	locked, err = loginThrottleLocked(ctx, transactionQueries, throttleKey, now)
+	if err != nil {
+		return LoginResult{}, err
+	}
+	if locked {
+		if err := recordLoginFailureInTransaction(ctx, transactionQueries, throttleSettings, throttleKey, now); err != nil {
+			return LoginResult{}, err
+		}
+		if err := transaction.Commit(); err != nil {
+			return LoginResult{}, fmt.Errorf("commit throttled login transaction: %w", err)
+		}
+		return LoginResult{}, ErrInvalidCredentials
+	}
+	if err := transactionQueries.DeleteLoginThrottle(ctx, sqlc.DeleteLoginThrottleParams{
+		IdentifierHash: throttleKey.identifierHash,
+		SourceHash:     throttleKey.sourceHash,
+	}); err != nil {
+		return LoginResult{}, fmt.Errorf("clear login throttle: %w", err)
+	}
 	if err := transactionQueries.CreateSession(ctx, sqlc.CreateSessionParams{
 		ID:                     sessionID,
 		SubjectID:              credential.SubjectID,
@@ -134,7 +174,7 @@ func Login(ctx context.Context, database *sql.DB, identifier string, passwordVal
 		ActorSubjectID:  sql.NullString{String: credential.SubjectID, Valid: true},
 		TargetSubjectID: sql.NullString{String: credential.SubjectID, Valid: true},
 		RequestID:       sql.NullString{},
-		SourceHash:      nil,
+		SourceHash:      throttleKey.sourceHash,
 		Metadata:        "{}",
 		CreatedAt:       now,
 	}); err != nil {
@@ -144,7 +184,14 @@ func Login(ctx context.Context, database *sql.DB, identifier string, passwordVal
 		return LoginResult{}, fmt.Errorf("commit login transaction: %w", err)
 	}
 
-	return LoginResult{SessionToken: sessionToken, CSRFToken: csrfToken, ExpiresAt: expiresAt}, nil
+	return LoginResult{SessionToken: sessionToken, CSRFToken: csrfToken, ExpiresAt: expiresAt, Access: sessionAccess}, nil
+}
+
+func rejectLogin(ctx context.Context, database *sql.DB, settings LoginThrottleSettings, key loginThrottleKey, now time.Time) error {
+	if err := recordLoginFailure(ctx, database, settings, key, now); err != nil {
+		return fmt.Errorf("record failed login: %w", err)
+	}
+	return ErrInvalidCredentials
 }
 
 func CurrentSession(ctx context.Context, database *sql.DB, rawToken string, settings SessionSettings) (Session, error) {

@@ -41,3 +41,58 @@ func (q *Queries) CreatePasswordCredential(ctx context.Context, arg CreatePasswo
 	)
 	return err
 }
+
+const getPasswordCredentialBySubjectID = `-- name: GetPasswordCredentialBySubjectID :one
+SELECT subject_id,password_hash,password_revision,credential_status
+FROM identity_password_credentials
+WHERE subject_id=?
+`
+
+type GetPasswordCredentialBySubjectIDRow struct {
+	SubjectID        string `json:"subject_id"`
+	PasswordHash     string `json:"password_hash"`
+	PasswordRevision int64  `json:"password_revision"`
+	CredentialStatus string `json:"credential_status"`
+}
+
+func (q *Queries) GetPasswordCredentialBySubjectID(ctx context.Context, subjectID string) (GetPasswordCredentialBySubjectIDRow, error) {
+	row := q.db.QueryRowContext(ctx, getPasswordCredentialBySubjectID, subjectID)
+	var i GetPasswordCredentialBySubjectIDRow
+	err := row.Scan(
+		&i.SubjectID,
+		&i.PasswordHash,
+		&i.PasswordRevision,
+		&i.CredentialStatus,
+	)
+	return i, err
+}
+
+const updatePasswordCredential = `-- name: UpdatePasswordCredential :execrows
+UPDATE identity_password_credentials
+SET password_hash=?,credential_status=?,password_revision=password_revision+1,changed_at=?,updated_at=?
+WHERE subject_id=? AND password_revision=?
+`
+
+type UpdatePasswordCredentialParams struct {
+	PasswordHash     string    `json:"password_hash"`
+	CredentialStatus string    `json:"credential_status"`
+	ChangedAt        time.Time `json:"changed_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
+	SubjectID        string    `json:"subject_id"`
+	PasswordRevision int64     `json:"password_revision"`
+}
+
+func (q *Queries) UpdatePasswordCredential(ctx context.Context, arg UpdatePasswordCredentialParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, updatePasswordCredential,
+		arg.PasswordHash,
+		arg.CredentialStatus,
+		arg.ChangedAt,
+		arg.UpdatedAt,
+		arg.SubjectID,
+		arg.PasswordRevision,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}

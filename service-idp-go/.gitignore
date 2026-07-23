@@ -1,6 +1,7 @@
 .data/
 bin/
 .env
+node_modules/
 logs/
 identityd
 identityd.exe
