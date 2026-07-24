@@ -86,7 +86,7 @@ func (handler Handler) health(responseWriter http.ResponseWriter, request *http.
 		writeProblem(responseWriter, request, http.StatusServiceUnavailable, "service-unavailable", "database unavailable")
 		return
 	}
-	writeJSON(responseWriter, http.StatusOK, map[string]string{"status": "ok"})
+	responseWriter.WriteHeader(http.StatusNoContent)
 }
 
 func (handler Handler) loginPage(responseWriter http.ResponseWriter, request *http.Request) {

@@ -25,7 +25,7 @@ var testLoginThrottle = identity.LoginThrottleSettings{
 	LockoutDuration: time.Hour,
 }
 
-func TestHealthzReturnsOKWhenDatabaseIsAvailable(t *testing.T) {
+func TestHealthzReturnsNoContentWhenDatabaseIsAvailable(t *testing.T) {
 	databaseConnection, err := database.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "identityd.sqlite"))
 	if err != nil {
 		t.Fatalf("open SQLite database: %v", err)
@@ -42,13 +42,13 @@ func TestHealthzReturnsOKWhenDatabaseIsAvailable(t *testing.T) {
 		LoginThrottle:   testLoginThrottle,
 	}).ServeHTTP(response, request)
 
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
 	}
-	if contentType := response.Header().Get("Content-Type"); contentType != "application/json; charset=utf-8" {
+	if contentType := response.Header().Get("Content-Type"); contentType != "" {
 		t.Fatalf("content type = %q", contentType)
 	}
-	if body := response.Body.String(); body != "{\"status\":\"ok\"}\n" {
+	if body := response.Body.String(); body != "" {
 		t.Fatalf("body = %q", body)
 	}
 }

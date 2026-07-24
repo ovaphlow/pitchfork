@@ -4,10 +4,7 @@ plugins {
 
 dependencies {
     implementation(project(":libs:auth"))
-    implementation(project(":libs:settings"))
-    implementation(project(":libs:files"))
     implementation(project(":libs:permissions"))
-    implementation(project(":libs:messages"))
     implementation(project(":libs:users"))
     implementation(project(":libs:knowledge"))
     implementation(project(":libs:skills"))
