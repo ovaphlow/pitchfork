@@ -14,6 +14,11 @@
     "base-url": "http://127.0.0.1:8432"
   },
   "server": {
-    "port": 8422
+    "port": 8422,
+    "cors-origins": [
+      "http://localhost:4324",
+      "http://127.0.0.1:4324",
+      "http://192.168.0.109:4324"
+    ]
   }
 }

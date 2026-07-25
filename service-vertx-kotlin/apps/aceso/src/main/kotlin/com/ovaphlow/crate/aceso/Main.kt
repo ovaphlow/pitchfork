@@ -1,6 +1,5 @@
 package com.ovaphlow.crate.aceso
 
-import com.ovaphlow.crate.auth.AuthRoutes
 import com.ovaphlow.crate.database.DatabaseConfig
 import com.ovaphlow.crate.inventories.InventoriesRoutes
 import com.ovaphlow.crate.log.Log
@@ -12,6 +11,7 @@ import io.vertx.config.ConfigRetrieverOptions
 import io.vertx.config.ConfigStoreOptions
 import io.vertx.core.Vertx
 import io.vertx.core.http.HttpMethod
+import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
 import io.vertx.ext.web.Router
 import io.vertx.ext.web.handler.CorsHandler
@@ -56,14 +56,18 @@ fun main() {
     val pool = DatabaseConfig.createPool(vertx, dbConfig)
 
     val mainRouter = Router.router(vertx)
-    val jwtSecret = requiredEnvironment("PITCHFORK_JWT_SECRET")
 
     // --- CORS ---
+    val corsHandler = CorsHandler.create()
+    val defaultCorsOrigins = JsonArray()
+        .add("http://localhost:4324")
+        .add("http://127.0.0.1:4324")
+    config
+        .getJsonObject("server", JsonObject())
+        .getJsonArray("cors-origins", defaultCorsOrigins)
+        .forEach { origin -> corsHandler.addOrigin(origin.toString()) }
     mainRouter.route().handler(
-        CorsHandler
-            .create()
-            .addOrigin("http://localhost:4324")
-            .addOrigin("http://127.0.0.1:4324")
+        corsHandler
             .allowCredentials(true)
             .allowedMethod(HttpMethod.GET)
             .allowedMethod(HttpMethod.POST)
@@ -79,7 +83,6 @@ fun main() {
     val apiRouter = Router.router(vertx)
     val nexusBaseUrl = config.getJsonObject("nexus", JsonObject()).getString("base-url", "http://127.0.0.1:8433")
     val idpBaseUrl = config.getJsonObject("identity", JsonObject()).getString("base-url", "http://127.0.0.1:8432")
-    apiRouter.route("/auth/v1/*").subRouter(AuthRoutes.create(vertx, pool, jwtSecret))
     apiRouter.route("/identity/v1/*").subRouter(
         ServiceProxyRoutes.create(
             vertx,

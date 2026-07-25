@@ -1,6 +1,7 @@
 package com.ovaphlow.crate.aceso
 
 import io.vertx.core.Vertx
+import io.vertx.core.buffer.Buffer
 import io.vertx.core.http.HttpClientOptions
 import io.vertx.core.json.JsonObject
 import io.vertx.ext.web.Router
@@ -67,20 +68,20 @@ object ServiceProxyRoutes {
                             upstreamRequest.headers().add(header.key, header.value)
                         }
                     }
-                    upstreamRequest.send(ctx.body().buffer())
+                    upstreamRequest.send(ctx.body().buffer() ?: Buffer.buffer())
                         .onSuccess { upstreamResponse ->
-                            ctx.response().setStatusCode(upstreamResponse.statusCode())
-                            upstreamResponse.headers().forEach { header ->
-                                if (header.key.lowercase() !in excludedHeaders) {
-                                    // Set-Cookie may occur more than once and must be preserved verbatim.
-                                    ctx.response().headers().add(header.key, header.value)
+                            upstreamResponse.body()
+                                .onSuccess { body ->
+                                    ctx.response().setStatusCode(upstreamResponse.statusCode())
+                                    upstreamResponse.headers().forEach { header ->
+                                        if (header.key.lowercase() !in excludedHeaders) {
+                                            // Set-Cookie may occur more than once and must be preserved verbatim.
+                                            ctx.response().headers().add(header.key, header.value)
+                                        }
+                                    }
+                                    ctx.response().end(body)
                                 }
-                            }
-                            upstreamResponse.pipeTo(ctx.response())
-                                .onFailure { error ->
-                                    log.error("{} response stream failed", serviceName, error)
-                                    if (!ctx.response().ended()) ctx.response().end()
-                                }
+                                .onFailure { error -> respondUnavailable(ctx, serviceName, unavailableProblemType, error) }
                         }
                         .onFailure { error -> respondUnavailable(ctx, serviceName, unavailableProblemType, error) }
                 }

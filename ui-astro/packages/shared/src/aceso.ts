@@ -56,7 +56,7 @@ export interface DepartmentInput {
 function apiBase(): string {
   const configured = import.meta.env.PUBLIC_API_URL?.trim();
   if (!configured) {
-    throw new Error("PUBLIC_API_URL must be configured for Aceso");
+    throw new Error("Aceso API 地址未配置，请联系系统管理员");
   }
   return configured.replace(/\/$/, "");
 }
@@ -105,6 +105,7 @@ async function request<T>(
   init: RequestInit = {},
   { csrf = false, redirectOnUnauthorized = true }: RequestOptions = {},
 ): Promise<T> {
+  const url = `${apiBase()}${path}`;
   const headers = new Headers(init.headers);
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
@@ -117,7 +118,7 @@ async function request<T>(
 
   let response: Response;
   try {
-    response = await fetch(`${apiBase()}${path}`, {
+    response = await fetch(url, {
       ...init,
       headers,
       credentials: "include",
@@ -134,9 +135,10 @@ export function getCurrentSession(redirectOnUnauthorized = true): Promise<Identi
 
 export async function login(identifier: string, password: string): Promise<IdentitySession> {
   const body = new URLSearchParams({ identifier, password });
+  const url = `${apiBase()}/identity/v1/sessions`;
   let response: Response;
   try {
-    response = await fetch(`${apiBase()}/identity/v1/sessions`, {
+    response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body,

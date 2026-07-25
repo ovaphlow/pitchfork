@@ -185,6 +185,10 @@ func normalizeAccountIdentifier(value string) (string, error) {
 	}
 
 	normalized := strings.ToLower(value)
+	if strings.Contains(normalized, "@") {
+		return normalizeEmailIdentifier(normalized)
+	}
+
 	for _, character := range normalized {
 		if (character >= 'a' && character <= 'z') ||
 			(character >= '0' && character <= '9') ||
@@ -194,4 +198,51 @@ func normalizeAccountIdentifier(value string) (string, error) {
 		return "", fmt.Errorf("account identifier contains an unsupported character")
 	}
 	return normalized, nil
+}
+
+func normalizeEmailIdentifier(value string) (string, error) {
+	if strings.Count(value, "@") != 1 {
+		return "", fmt.Errorf("email account identifier must contain one @")
+	}
+
+	localPart, domain, _ := strings.Cut(value, "@")
+	if !validEmailLocalPart(localPart) || !validEmailDomain(domain) {
+		return "", fmt.Errorf("email account identifier is invalid")
+	}
+	return value, nil
+}
+
+func validEmailLocalPart(value string) bool {
+	if value == "" || strings.HasPrefix(value, ".") || strings.HasSuffix(value, ".") || strings.Contains(value, "..") {
+		return false
+	}
+	for _, character := range value {
+		if (character >= 'a' && character <= 'z') ||
+			(character >= '0' && character <= '9') ||
+			character == '_' || character == '-' || character == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validEmailDomain(value string) bool {
+	labels := strings.Split(value, ".")
+	if len(labels) < 2 {
+		return false
+	}
+	for _, label := range labels {
+		if label == "" || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+			return false
+		}
+		for _, character := range label {
+			if (character >= 'a' && character <= 'z') ||
+				(character >= '0' && character <= '9') || character == '-' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
 }

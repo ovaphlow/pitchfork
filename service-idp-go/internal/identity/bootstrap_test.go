@@ -79,6 +79,46 @@ func TestEnsureBootstrapRequiresCredentialsForEmptyDatabase(t *testing.T) {
 	}
 }
 
+func TestEnsureBootstrapAcceptsAndNormalizesEmailIdentifier(t *testing.T) {
+	databaseConnection := migratedDatabase(t)
+	_, err := identity.EnsureBootstrap(context.Background(), databaseConnection, identity.BootstrapInput{
+		Identifier: "OvaPhlow@Live.Com",
+		Password:   "correct horse battery staple",
+	})
+	if err != nil {
+		t.Fatalf("ensure bootstrap with email identifier: %v", err)
+	}
+
+	var identifier string
+	if err := databaseConnection.QueryRow(`SELECT normalized_value FROM identity_identifiers`).Scan(&identifier); err != nil {
+		t.Fatalf("read normalized email identifier: %v", err)
+	}
+	if identifier != "ovaphlow@live.com" {
+		t.Fatalf("normalized email identifier = %q", identifier)
+	}
+}
+
+func TestEnsureBootstrapRejectsMalformedEmailIdentifiers(t *testing.T) {
+	for _, identifier := range []string{
+		"@live.com",
+		"ovaphlow@",
+		"ovaphlow@@live.com",
+		"ovaphlow@live",
+		"ovaphlow@live..com",
+		"ovaphlow@-live.com",
+	} {
+		t.Run(identifier, func(t *testing.T) {
+			_, err := identity.EnsureBootstrap(context.Background(), migratedDatabase(t), identity.BootstrapInput{
+				Identifier: identifier,
+				Password:   "correct horse battery staple",
+			})
+			if err == nil {
+				t.Fatal("malformed email identifier was accepted")
+			}
+		})
+	}
+}
+
 func migratedDatabase(t *testing.T) *sql.DB {
 	t.Helper()
 	databaseConnection, err := database.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "identityd.sqlite"))
