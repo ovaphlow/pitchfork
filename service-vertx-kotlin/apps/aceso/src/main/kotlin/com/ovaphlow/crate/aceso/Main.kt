@@ -62,7 +62,9 @@ fun main() {
     mainRouter.route().handler(
         CorsHandler
             .create()
-            .addOrigin("*")
+            .addOrigin("http://localhost:4324")
+            .addOrigin("http://127.0.0.1:4324")
+            .allowCredentials(true)
             .allowedMethod(HttpMethod.GET)
             .allowedMethod(HttpMethod.POST)
             .allowedMethod(HttpMethod.PUT)
@@ -70,13 +72,30 @@ fun main() {
             .allowedMethod(HttpMethod.DELETE)
             .allowedMethod(HttpMethod.OPTIONS)
             .allowedHeader("Content-Type")
-            .allowedHeader("Authorization"),
+            .allowedHeader("Authorization")
+            .allowedHeader("X-CSRF-Token"),
     )
 
     val apiRouter = Router.router(vertx)
     val nexusBaseUrl = config.getJsonObject("nexus", JsonObject()).getString("base-url", "http://127.0.0.1:8433")
+    val idpBaseUrl = config.getJsonObject("identity", JsonObject()).getString("base-url", "http://127.0.0.1:8432")
     apiRouter.route("/auth/v1/*").subRouter(AuthRoutes.create(vertx, pool, jwtSecret))
-    apiRouter.route("/shared/v1/*").subRouter(NexusProxyRoutes.create(vertx, nexusBaseUrl))
+    apiRouter.route("/identity/v1/*").subRouter(
+        ServiceProxyRoutes.create(
+            vertx,
+            idpBaseUrl,
+            "identity",
+            "/crate-api/identity/v1/problems/identity-unavailable",
+        ),
+    )
+    apiRouter.route("/shared/v1/*").subRouter(
+        ServiceProxyRoutes.create(
+            vertx,
+            nexusBaseUrl,
+            "nexus",
+            "/crate-api/shared/v1/problems/nexus-unavailable",
+        ),
+    )
     apiRouter.route("/inventories/v1/*").subRouter(InventoriesRoutes.create(vertx, pool))
     apiRouter.route("/nursing/v1/*").subRouter(NursingRoutes.create(vertx, pool))
     apiRouter.route("/pharmacy/v1/*").subRouter(PharmacyRoutes.create(vertx, pool))

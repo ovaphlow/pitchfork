@@ -1,12 +1,13 @@
 import { type FormEvent, useState } from "react";
+import { Button, Input } from "@pitchfork/ui";
 import { login } from "@pitchfork/shared/aceso";
 
 interface Props {
-	onSuccess: (token: string, user: unknown) => void;
+	onSuccess: () => void;
 }
 
 export default function LoginForm({ onSuccess }: Props) {
-	const [email, setEmail] = useState("");
+	const [identifier, setIdentifier] = useState("");
 	const [password, setPassword] = useState("");
 	const [error, setError] = useState("");
 	const [loading, setLoading] = useState(false);
@@ -15,15 +16,15 @@ export default function LoginForm({ onSuccess }: Props) {
 		e.preventDefault();
 		setError("");
 
-		if (!email.trim() || !password.trim()) {
-			setError("邮箱和密码不能为空");
+		if (!identifier.trim() || !password.trim()) {
+			setError("账号和密码不能为空");
 			return;
 		}
 
 		setLoading(true);
 		try {
-			const result = await login(email, password);
-			onSuccess(result.token, result.user);
+			await login(identifier, password);
+			onSuccess();
 		} catch (err) {
 			setError(err instanceof Error ? err.message : "登录失败，请重试");
 		} finally {
@@ -39,51 +40,30 @@ export default function LoginForm({ onSuccess }: Props) {
 				</div>
 			)}
 
-			<div>
-				<label
-					htmlFor="login-email"
-					className="block text-sm font-medium text-fg-muted mb-1.5"
-				>
-					邮箱
-				</label>
-				<input
-					id="login-email"
-					type="email"
-					autoComplete="email"
-					required
-					value={email}
-					onChange={(e) => setEmail(e.target.value)}
-					placeholder="your@email.com"
-					className="w-full rounded-lg border border-border bg-surface px-4 py-2.5 text-sm text-fg placeholder:text-fg-dimmed transition-colors focus:border-accent focus:ring-2 focus:ring-accent/30 focus:outline-none"
-				/>
-			</div>
+			<Input
+				id="login-identifier"
+				label="账号"
+				autoComplete="username"
+				required
+				value={identifier}
+				onChange={(event) => setIdentifier(event.target.value)}
+				placeholder="请输入账号"
+			/>
 
-			<div>
-				<label
-					htmlFor="login-password"
-					className="block text-sm font-medium text-fg-muted mb-1.5"
-				>
-					密码
-				</label>
-				<input
-					id="login-password"
-					type="password"
-					autoComplete="current-password"
-					required
-					value={password}
-					onChange={(e) => setPassword(e.target.value)}
-					placeholder="••••••••"
-					className="w-full rounded-lg border border-border bg-surface px-4 py-2.5 text-sm text-fg placeholder:text-fg-dimmed transition-colors focus:border-accent focus:ring-2 focus:ring-accent/30 focus:outline-none"
-				/>
-			</div>
+			<Input
+				id="login-password"
+				label="密码"
+				type="password"
+				autoComplete="current-password"
+				required
+				value={password}
+				onChange={(event) => setPassword(event.target.value)}
+				placeholder="请输入密码"
+			/>
 
-			<button
-				type="submit"
-				disabled={loading}
-				className="w-full rounded-lg bg-accent px-4 py-2.5 text-sm font-semibold text-white transition-all hover:brightness-110 focus:outline-none focus:ring-2 focus:ring-accent/50 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
-			>
-				{loading ? "登录中..." : "登录"}
-			</button>
+			<Button type="submit" className="w-full" loading={loading}>
+				登录
+			</Button>
 		</form>
 	);
 }

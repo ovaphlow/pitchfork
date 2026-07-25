@@ -1,118 +1,188 @@
-import { useState, useEffect, useCallback } from "react";
-import { listUsers, createUser, updateUser, updateUserStatus, type User } from "@pitchfork/shared/aceso";
-import { Table, type Column, Badge, Card } from "@pitchfork/ui";
+import { useCallback, useEffect, useState } from "react";
+import {
+  createIdentitySubject,
+  disableIdentitySubject,
+  listIdentitySubjects,
+  setIdentityTemporaryPassword,
+  type IdentitySubject,
+} from "@pitchfork/shared/aceso";
+import { Badge, Button, Card, Input, Modal, Table, type Column } from "@pitchfork/ui";
 
-const statusMap: Record<string, { label: string; variant: "success" | "danger" | "default" | "warning" | "info" }> = {
-  ACTIVE: { label: "启用", variant: "success" },
-  INACTIVE: { label: "禁用", variant: "danger" },
-  PENDING: { label: "待审核", variant: "warning" },
+const PAGE_SIZE = 20;
+
+const subjectFormDefaults = {
+  displayName: "",
+  identifier: "",
+  password: "",
 };
 
-export default function UsersPage() {
-  const [users, setUsers] = useState<User[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [search, setSearch] = useState("");
-  const [modalOpen, setModalOpen] = useState(false);
-  const [editTarget, setEditTarget] = useState<User | null>(null);
-  const [form, setForm] = useState({ email: "", password: "", username: "", phone: "" });
-  const [saving, setSaving] = useState(false);
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback;
+}
 
-  const fetch = useCallback(async () => {
+function formatDate(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? value : date.toLocaleString("zh-CN");
+}
+
+export default function UsersPage() {
+  const [subjects, setSubjects] = useState<IdentitySubject[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [loading, setLoading] = useState(true);
+  const [pageError, setPageError] = useState("");
+  const [createOpen, setCreateOpen] = useState(false);
+  const [createForm, setCreateForm] = useState(subjectFormDefaults);
+  const [createError, setCreateError] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [disableTarget, setDisableTarget] = useState<IdentitySubject | null>(null);
+  const [disableError, setDisableError] = useState("");
+  const [disabling, setDisabling] = useState(false);
+  const [temporaryPasswordTarget, setTemporaryPasswordTarget] = useState<IdentitySubject | null>(null);
+  const [temporaryPassword, setTemporaryPassword] = useState("");
+  const [temporaryPasswordError, setTemporaryPasswordError] = useState("");
+  const [settingTemporaryPassword, setSettingTemporaryPassword] = useState(false);
+
+  const load = useCallback(async (targetPage: number) => {
     setLoading(true);
+    setPageError("");
     try {
-      const res = await listUsers({ search }) as User[];
-      setUsers(res ?? []);
-    } catch {
-      // ignore
+      const response = await listIdentitySubjects(targetPage, PAGE_SIZE);
+      setSubjects(response.records);
+      setTotal(response.meta.total);
+      setPage(targetPage);
+    } catch (error) {
+      setPageError(errorMessage(error, "无法加载用户列表"));
     } finally {
       setLoading(false);
     }
-  }, [search]);
+  }, []);
 
-  useEffect(() => { fetch(); }, [fetch]);
+  useEffect(() => {
+    void load(page);
+  }, [load, page]);
 
-  async function toggleStatus(user: User) {
-    const next = user.status === "ACTIVE" ? "INACTIVE" : "ACTIVE";
-    await updateUserStatus(user.id, next);
-    fetch();
+  function openCreate() {
+    setCreateForm(subjectFormDefaults);
+    setCreateError("");
+    setCreateOpen(true);
   }
 
-  function openAdd() {
-    setEditTarget(null);
-    setForm({ email: "", password: "", username: "", phone: "" });
-    setModalOpen(true);
-  }
+  async function handleCreate() {
+    if (!createForm.displayName.trim() || !createForm.identifier.trim() || !createForm.password) {
+      setCreateError("姓名、账号和初始密码均不能为空");
+      return;
+    }
 
-  function openEdit(user: User) {
-    setEditTarget(user);
-    setForm({ email: user.email, password: "", username: user.username, phone: user.phone });
-    setModalOpen(true);
-  }
-
-  async function handleSave() {
-    if (!form.email.trim()) return;
-    setSaving(true);
+    setCreating(true);
+    setCreateError("");
     try {
-      if (editTarget) {
-        await updateUser(editTarget.id, {
-          email: form.email,
-          username: form.username,
-          phone: form.phone,
-        });
-      } else {
-        await createUser({
-          email: form.email,
-          password: form.password || "123456",
-          username: form.username,
-          phone: form.phone,
-        });
-      }
-      setModalOpen(false);
-      fetch();
-    } catch {
-      // ignore
+      await createIdentitySubject({
+        display_name: createForm.displayName.trim(),
+        identifier: createForm.identifier.trim(),
+        password: createForm.password,
+      });
+      setCreateOpen(false);
+      await load(1);
+    } catch (error) {
+      setCreateError(errorMessage(error, "无法创建用户"));
     } finally {
-      setSaving(false);
+      setCreating(false);
     }
   }
 
-  const columns: Column<User>[] = [
-    { key: "username", header: "姓名", className: "min-w-[120px]" },
-    { key: "email", header: "邮箱", className: "min-w-[200px]" },
-    { key: "phone", header: "手机号", className: "min-w-[140px]" },
+  async function handleDisable() {
+    if (!disableTarget) return;
+
+    setDisabling(true);
+    setDisableError("");
+    try {
+      await disableIdentitySubject(disableTarget.id);
+      setDisableTarget(null);
+      await load(page);
+    } catch (error) {
+      setDisableError(errorMessage(error, "无法禁用用户"));
+    } finally {
+      setDisabling(false);
+    }
+  }
+
+  function openTemporaryPassword(subject: IdentitySubject) {
+    setTemporaryPasswordTarget(subject);
+    setTemporaryPassword("");
+    setTemporaryPasswordError("");
+  }
+
+  function openDisable(subject: IdentitySubject) {
+    setDisableTarget(subject);
+    setDisableError("");
+  }
+
+  async function handleTemporaryPassword() {
+    if (!temporaryPasswordTarget) return;
+    if (!temporaryPassword) {
+      setTemporaryPasswordError("临时密码不能为空");
+      return;
+    }
+
+    setSettingTemporaryPassword(true);
+    setTemporaryPasswordError("");
+    try {
+      await setIdentityTemporaryPassword(temporaryPasswordTarget.id, temporaryPassword);
+      setTemporaryPasswordTarget(null);
+      await load(page);
+    } catch (error) {
+      setTemporaryPasswordError(errorMessage(error, "无法设置临时密码"));
+    } finally {
+      setSettingTemporaryPassword(false);
+    }
+  }
+
+  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const columns: Column<IdentitySubject>[] = [
+    {
+      key: "display_name",
+      header: "姓名",
+      className: "min-w-[140px]",
+      render: (row) => row.display_name || "-",
+    },
+    { key: "identifier", header: "账号", className: "min-w-[180px]" },
+    {
+      key: "roles",
+      header: "角色",
+      className: "min-w-[180px]",
+      render: (row) => row.roles.length > 0 ? (
+        <div className="flex flex-wrap gap-1.5">
+          {row.roles.map((role) => <Badge key={role} variant="info">{role}</Badge>)}
+        </div>
+      ) : "-",
+    },
     {
       key: "status",
       header: "状态",
       className: "w-[100px]",
-      render: (row) => {
-        const s = statusMap[row.status] ?? { label: row.status, variant: "default" as const };
-        return <Badge variant={s.variant}>{s.label}</Badge>;
-      },
+      render: (row) => <Badge variant={row.status === "启用" ? "success" : "danger"}>{row.status}</Badge>,
     },
     {
       key: "created_at",
       header: "创建时间",
-      className: "min-w-[160px]",
-      render: (row) => new Date(row.created_at).toLocaleString("zh-CN"),
+      className: "min-w-[180px]",
+      render: (row) => formatDate(row.created_at),
     },
     {
       key: "actions",
       header: "操作",
-      className: "w-[160px]",
+      className: "min-w-[190px]",
       render: (row) => (
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => openEdit(row)}
-            className="text-xs text-fg-muted hover:text-fg cursor-pointer bg-transparent border-none"
-          >
-            编辑
-          </button>
-          <button
-            onClick={() => toggleStatus(row)}
-            className="text-xs text-fg-muted hover:text-fg cursor-pointer bg-transparent border-none"
-          >
-            {row.status === "ACTIVE" ? "禁用" : "启用"}
-          </button>
+        <div className="flex items-center gap-1">
+          <Button variant="ghost" size="sm" onClick={() => openTemporaryPassword(row)}>
+            临时密码
+          </Button>
+          {row.status === "启用" && (
+            <Button variant="ghost" size="sm" onClick={() => openDisable(row)}>
+              禁用
+            </Button>
+          )}
         </div>
       ),
     },
@@ -120,78 +190,94 @@ export default function UsersPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h2 className="text-lg font-semibold text-fg-emphasis">用户管理</h2>
-          <p className="text-sm text-fg-muted mt-1">管理系统用户账号与登录权限</p>
+          <p className="mt-1 text-sm text-fg-muted">管理 IDP 账号、登录状态和临时密码</p>
         </div>
-        <button
-          onClick={openAdd}
-          className="h-9 px-4 rounded-md bg-accent text-white text-sm font-medium hover:brightness-110 cursor-pointer border-none transition-all"
-        >
-          添加用户
-        </button>
+        <Button onClick={openCreate}>添加用户</Button>
       </div>
 
-      <Card>
-        <div className="flex items-center gap-3 mb-4">
-          <input
-            placeholder="搜索姓名 / 邮箱..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="h-9 px-3 rounded-md bg-surface border border-border text-sm text-fg placeholder:text-fg-dimmed w-64 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-          />
-          <span className="text-xs text-fg-dimmed ml-auto">
-            共 {users.length} 条
-          </span>
-        </div>
+      {pageError && <div className="rounded-lg border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">{pageError}</div>}
 
-        <Table
-          columns={columns}
-          data={users}
-          loading={loading}
-          emptyMessage="暂无用户"
-        />
-      </Card>
-
-      {modalOpen && (
-        <div style={{ position: "fixed", inset: 0, zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.6)", padding: "1rem" }} onClick={() => setModalOpen(false)}>
-          <div style={{ background: "var(--color-surface-overlay)", border: "1px solid var(--color-border)", borderRadius: "0.5rem", width: "100%", maxWidth: "32rem", maxHeight: "85vh", overflowY: "auto", boxShadow: "var(--shadow-overlay)" }} onClick={(e) => e.stopPropagation()}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "1.25rem 2rem", borderBottom: "1px solid var(--color-border)" }}>
-              <h3 style={{ fontSize: "1rem", fontWeight: 600, color: "var(--color-fg-emphasis)" }}>{editTarget ? "编辑用户" : "添加用户"}</h3>
-              <button onClick={() => setModalOpen(false)} style={{ width: "2rem", height: "2rem", display: "flex", alignItems: "center", justifyContent: "center", background: "transparent", border: "none", borderRadius: "0.375rem", color: "var(--color-fg-muted)", cursor: "pointer" }}>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-              </button>
-            </div>
-            <div style={{ padding: "2rem" }}>
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-fg-muted mb-1">邮箱 *</label>
-                  <input value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} className="w-full h-10 px-3 rounded-md bg-surface border border-border text-sm text-fg placeholder:text-fg-dimmed focus:outline-none focus-visible:ring-2 focus-visible:ring-accent" />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-fg-muted mb-1">姓名</label>
-                  <input value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} className="w-full h-10 px-3 rounded-md bg-surface border border-border text-sm text-fg placeholder:text-fg-dimmed focus:outline-none focus-visible:ring-2 focus-visible:ring-accent" />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-fg-muted mb-1">手机号</label>
-                  <input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} className="w-full h-10 px-3 rounded-md bg-surface border border-border text-sm text-fg placeholder:text-fg-dimmed focus:outline-none focus-visible:ring-2 focus-visible:ring-accent" />
-                </div>
-                {!editTarget && (
-                  <div>
-                    <label className="block text-sm font-medium text-fg-muted mb-1">密码</label>
-                    <input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="留空默认 123456" className="w-full h-10 px-3 rounded-md bg-surface border border-border text-sm text-fg placeholder:text-fg-dimmed focus:outline-none focus-visible:ring-2 focus-visible:ring-accent" />
-                  </div>
-                )}
-                <div className="flex justify-end gap-3 pt-2">
-                  <button onClick={() => setModalOpen(false)} className="h-9 px-4 rounded-md bg-surface border border-border text-sm text-fg-muted hover:text-fg cursor-pointer border-none">取消</button>
-                  <button onClick={handleSave} disabled={saving || !form.email.trim()} className="h-9 px-4 rounded-md bg-accent text-white text-sm font-medium hover:brightness-110 disabled:opacity-50 cursor-pointer border-none">{saving ? "保存中..." : "保存"}</button>
-                </div>
-              </div>
-            </div>
+      <Card title="用户列表" actions={<span className="text-sm text-fg-dimmed">共 {total} 条</span>}>
+        <Table columns={columns} data={subjects} loading={loading} emptyMessage="暂无用户" />
+        <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
+          <span className="text-sm text-fg-muted">第 {page} / {pageCount} 页</span>
+          <div className="flex items-center gap-2">
+            <Button variant="secondary" size="sm" disabled={page <= 1 || loading} onClick={() => void load(page - 1)}>
+              上一页
+            </Button>
+            <Button variant="secondary" size="sm" disabled={page >= pageCount || loading} onClick={() => void load(page + 1)}>
+              下一页
+            </Button>
           </div>
         </div>
-      )}
+      </Card>
+
+      <Modal open={createOpen} onClose={() => !creating && setCreateOpen(false)} title="添加用户">
+        <div className="space-y-4">
+          {createError && <div className="rounded-lg border border-danger/30 bg-danger-bg px-3 py-2 text-sm text-danger">{createError}</div>}
+          <Input
+            label="姓名"
+            value={createForm.displayName}
+            onChange={(event) => setCreateForm((form) => ({ ...form, displayName: event.target.value }))}
+            placeholder="请输入姓名"
+            autoComplete="name"
+          />
+          <Input
+            label="账号"
+            value={createForm.identifier}
+            onChange={(event) => setCreateForm((form) => ({ ...form, identifier: event.target.value }))}
+            placeholder="请输入登录账号"
+            autoComplete="username"
+          />
+          <Input
+            label="初始密码"
+            type="password"
+            value={createForm.password}
+            onChange={(event) => setCreateForm((form) => ({ ...form, password: event.target.value }))}
+            placeholder="请输入初始密码"
+            autoComplete="new-password"
+          />
+          <div className="flex justify-end gap-3 pt-2">
+            <Button variant="ghost" onClick={() => setCreateOpen(false)} disabled={creating}>取消</Button>
+            <Button onClick={() => void handleCreate()} loading={creating}>创建用户</Button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal open={disableTarget !== null} onClose={() => !disabling && setDisableTarget(null)} title="确认禁用用户">
+        <div className="space-y-5">
+          {disableError && <div className="rounded-lg border border-danger/30 bg-danger-bg px-3 py-2 text-sm text-danger">{disableError}</div>}
+          <p className="text-sm text-fg-muted">
+            禁用后，{disableTarget?.display_name || disableTarget?.identifier} 将无法继续登录。
+          </p>
+          <div className="flex justify-end gap-3">
+            <Button variant="ghost" onClick={() => setDisableTarget(null)} disabled={disabling}>取消</Button>
+            <Button variant="danger" onClick={() => void handleDisable()} loading={disabling}>确认禁用</Button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal open={temporaryPasswordTarget !== null} onClose={() => !settingTemporaryPassword && setTemporaryPasswordTarget(null)} title="设置临时密码">
+        <div className="space-y-4">
+          <p className="text-sm text-fg-muted">用户下次登录时需要完成密码修改。</p>
+          <Input
+            label="临时密码"
+            type="password"
+            value={temporaryPassword}
+            onChange={(event) => setTemporaryPassword(event.target.value)}
+            error={temporaryPasswordError}
+            placeholder="请输入临时密码"
+            autoComplete="new-password"
+          />
+          <div className="flex justify-end gap-3 pt-2">
+            <Button variant="ghost" onClick={() => setTemporaryPasswordTarget(null)} disabled={settingTemporaryPassword}>取消</Button>
+            <Button onClick={() => void handleTemporaryPassword()} loading={settingTemporaryPassword}>保存</Button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }
