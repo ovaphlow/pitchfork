@@ -67,6 +67,7 @@ func NewMux(database *sql.DB, options Options) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET "+identityAssetsPrefix+"/{path...}", http.StripPrefix(identityAssetsPrefix+"/", http.FileServerFS(staticFiles)))
 	mux.HandleFunc("GET "+identityPrefix+"/healthz", handler.health)
+	mux.HandleFunc("GET "+identityPrefix+"/session", handler.getCurrentSession)
 	mux.HandleFunc("GET "+identityPrefix+"/login", handler.loginPage)
 	mux.HandleFunc("POST "+identityPrefix+"/sessions", handler.createSession)
 	mux.HandleFunc("DELETE "+identityPrefix+"/sessions/current", handler.deleteCurrentSession)
@@ -87,6 +88,21 @@ func (handler Handler) health(responseWriter http.ResponseWriter, request *http.
 		return
 	}
 	responseWriter.WriteHeader(http.StatusNoContent)
+}
+
+// getCurrentSession is the service-to-service identity boundary. Downstream
+// services forward the browser Cookie header here instead of interpreting the
+// opaque session token themselves.
+func (handler Handler) getCurrentSession(responseWriter http.ResponseWriter, request *http.Request) {
+	session, err := handler.currentSession(request)
+	if err != nil || session.Access != "完整" {
+		writeProblem(responseWriter, request, http.StatusUnauthorized, "not-authenticated", "not authenticated")
+		return
+	}
+	writeJSON(responseWriter, http.StatusOK, map[string]string{
+		"subject_id": session.SubjectID,
+		"access":     session.Access,
+	})
 }
 
 func (handler Handler) loginPage(responseWriter http.ResponseWriter, request *http.Request) {
@@ -645,16 +661,18 @@ func (handler Handler) currentSession(request *http.Request) (identity.Session, 
 func (handler Handler) setSessionCookies(responseWriter http.ResponseWriter, login identity.LoginResult) {
 	maxAge := int(time.Until(login.ExpiresAt).Seconds())
 	for _, cookie := range []*http.Cookie{
-		{Name: sessionCookieName, Value: login.SessionToken, Path: identityPrefix, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: handler.secureSessionCookie, Expires: login.ExpiresAt, MaxAge: maxAge},
-		{Name: csrfCookieName, Value: login.CSRFToken, Path: identityPrefix, HttpOnly: false, SameSite: http.SameSiteLaxMode, Secure: handler.secureSessionCookie, Expires: login.ExpiresAt, MaxAge: maxAge},
+		{Name: sessionCookieName, Value: login.SessionToken, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: handler.secureSessionCookie, Expires: login.ExpiresAt, MaxAge: maxAge},
+		{Name: csrfCookieName, Value: login.CSRFToken, Path: "/", HttpOnly: false, SameSite: http.SameSiteLaxMode, Secure: handler.secureSessionCookie, Expires: login.ExpiresAt, MaxAge: maxAge},
 	} {
 		http.SetCookie(responseWriter, cookie)
 	}
 }
 
 func (handler Handler) clearSessionCookies(responseWriter http.ResponseWriter) {
-	for _, name := range []string{sessionCookieName, csrfCookieName} {
-		http.SetCookie(responseWriter, &http.Cookie{Name: name, Value: "", Path: identityPrefix, HttpOnly: name == sessionCookieName, SameSite: http.SameSiteLaxMode, Secure: handler.secureSessionCookie, MaxAge: -1, Expires: time.Unix(1, 0)})
+	for _, path := range []string{"/", identityPrefix} {
+		for _, name := range []string{sessionCookieName, csrfCookieName} {
+			http.SetCookie(responseWriter, &http.Cookie{Name: name, Value: "", Path: path, HttpOnly: name == sessionCookieName, SameSite: http.SameSiteLaxMode, Secure: handler.secureSessionCookie, MaxAge: -1, Expires: time.Unix(1, 0)})
+		}
 	}
 }
 

@@ -42,6 +42,7 @@ make run
 The currently available endpoints are:
 
 - `GET /crate-api/identity/v1/healthz`
+- `GET /crate-api/identity/v1/session`
 - `GET /crate-api/identity/v1/login`
 - `POST /crate-api/identity/v1/sessions`
 - `DELETE /crate-api/identity/v1/sessions/current`
@@ -81,6 +82,11 @@ methods, uses RFC 9457 Problem Details with
 phrase, and `instance` is the requested URI (including its query string).
 Problem Details never include the legacy `error` member. Browser form failures
 that intentionally redirect do not send an error body.
+
+`GET /session` requires a `完整` browser session and returns the authenticated
+identity as `{"subject_id":"...","access":"完整"}`. It is the only endpoint
+used by downstream services, such as Nexus: they forward the original Cookie
+header and never inspect the opaque session token themselves.
 
 `GET /subjects` returns its JSON list by default. A browser request with
 `Accept: text/html` receives the server-rendered management page; HTMX requests

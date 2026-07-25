@@ -30,10 +30,7 @@ service-vertx-kotlin/
 │   └── aceso/               # 医疗运营产品入口（8422）
 └── libs/
     ├── auth/                # 登录/注册/JWT
-    ├── settings/            # 部门管理 + KV 配置
-    ├── files/               # 静态文件服务
     ├── permissions/          # RBAC + ReBAC + ABAC
-    ├── messages/            # 通知消息
     ├── users/               # 员工管理
     ├── knowledge/           # Trainova：知识库
     ├── skills/              # Trainova：技能/岗位/证书
@@ -49,6 +46,10 @@ service-vertx-kotlin/
     ├── database/            # DB连接/Flyway/jOOQ codegen
     └── common/              # Ulid, RsaCrypto 工具
 ```
+
+`settings`、`messages`、`files` 已迁移至 `service-nexus-shared`。Aceso 与其他
+业务服务必须通过 Nexus 的 HTTP API（`/crate-api/shared/v1/*`）使用这些能力，
+不得恢复对已删除 Kotlin lib 的依赖。
 
 完整产品边界、配置和迁移策略见 [`../docs/architecture.md`](../docs/architecture.md)。
 

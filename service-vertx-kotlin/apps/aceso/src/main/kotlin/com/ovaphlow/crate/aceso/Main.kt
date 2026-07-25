@@ -74,7 +74,9 @@ fun main() {
     )
 
     val apiRouter = Router.router(vertx)
+    val nexusBaseUrl = config.getJsonObject("nexus", JsonObject()).getString("base-url", "http://127.0.0.1:8433")
     apiRouter.route("/auth/v1/*").subRouter(AuthRoutes.create(vertx, pool, jwtSecret))
+    apiRouter.route("/shared/v1/*").subRouter(NexusProxyRoutes.create(vertx, nexusBaseUrl))
     apiRouter.route("/inventories/v1/*").subRouter(InventoriesRoutes.create(vertx, pool))
     apiRouter.route("/nursing/v1/*").subRouter(NursingRoutes.create(vertx, pool))
     apiRouter.route("/pharmacy/v1/*").subRouter(PharmacyRoutes.create(vertx, pool))

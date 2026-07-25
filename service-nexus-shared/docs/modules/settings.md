@@ -86,7 +86,7 @@ ALTER TABLE settings RENAME COLUMN update_time TO updated_at;
 - **技术栈**: Rust + Axum
 - **迁移**: 使用 `sqlx migrate`，脚本放 `/migrations`
 
-### SQLite 建表建议
+### SQLite 建表
 
 ```sql
 CREATE TABLE IF NOT EXISTS settings (
@@ -103,3 +103,17 @@ CREATE TABLE IF NOT EXISTS settings (
 CREATE INDEX IF NOT EXISTS idx_settings_category ON settings(category);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_settings_category_code ON settings(category, code);
 ```
+
+## Nexus HTTP API
+
+Nexus 使用 `/crate-api/shared/v1/settings` 作为根路径，所有请求均要求 IDP 的 `完整` 会话。
+
+| HTTP 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/` | 列表，支持 `category`、`page`、`page_size` |
+| POST | `/` | 创建设置 |
+| GET | `/:id` | 查询设置 |
+| PUT | `/:id` | 完整替换设置 |
+| DELETE | `/:id` | 物理删除设置 |
+
+创建与替换请求为 `category`、`code`、可选 `root_code`/`parent_code` 以及对象类型的 `payload`。列表直接返回数组；重复的 `(category, code)` 返回 `409 Conflict`。

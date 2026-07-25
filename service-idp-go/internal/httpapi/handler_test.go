@@ -185,6 +185,27 @@ func TestLoginDashboardAndCSRFFlow(t *testing.T) {
 	if sessionCookie == nil || csrfCookie == nil || !sessionCookie.HttpOnly || csrfCookie.HttpOnly {
 		t.Fatalf("invalid login cookies: %#v", cookies)
 	}
+	if sessionCookie.Path != "/" || csrfCookie.Path != "/" {
+		t.Fatalf("login cookie paths = session:%q csrf:%q, want /", sessionCookie.Path, csrfCookie.Path)
+	}
+
+	currentSessionRequest := httptest.NewRequest(http.MethodGet, "/crate-api/identity/v1/session", nil)
+	currentSessionRequest.AddCookie(sessionCookie)
+	currentSessionResponse := httptest.NewRecorder()
+	mux.ServeHTTP(currentSessionResponse, currentSessionRequest)
+	if currentSessionResponse.Code != http.StatusOK {
+		t.Fatalf("current session status = %d, body = %s", currentSessionResponse.Code, currentSessionResponse.Body.String())
+	}
+	var currentSession struct {
+		SubjectID string `json:"subject_id"`
+		Access    string `json:"access"`
+	}
+	if err := json.Unmarshal(currentSessionResponse.Body.Bytes(), &currentSession); err != nil {
+		t.Fatalf("decode current session: %v", err)
+	}
+	if currentSession.SubjectID == "" || currentSession.Access != "完整" {
+		t.Fatalf("current session = %#v", currentSession)
+	}
 
 	dashboardRequest := httptest.NewRequest(http.MethodGet, "/crate-api/identity/v1/dashboard", nil)
 	dashboardRequest.AddCookie(sessionCookie)
@@ -203,6 +224,21 @@ func TestLoginDashboardAndCSRFFlow(t *testing.T) {
 	if logoutResponse.Code != http.StatusNoContent {
 		t.Fatalf("logout status = %d, want %d", logoutResponse.Code, http.StatusNoContent)
 	}
+	clearedCookies := map[string]bool{}
+	for _, cookie := range logoutResponse.Result().Cookies() {
+		if cookie.Name != "identityd_session" && cookie.Name != "identityd_csrf" {
+			continue
+		}
+		if cookie.MaxAge >= 0 {
+			t.Fatalf("cleared cookie = %#v, want MaxAge < 0", cookie)
+		}
+		if cookie.Path == "/" {
+			clearedCookies[cookie.Name] = true
+		}
+	}
+	if !clearedCookies["identityd_session"] || !clearedCookies["identityd_csrf"] {
+		t.Fatalf("logout did not clear root session cookies: %#v", logoutResponse.Result().Cookies())
+	}
 
 	staleDashboardRequest := httptest.NewRequest(http.MethodGet, "/crate-api/identity/v1/dashboard", nil)
 	staleDashboardRequest.AddCookie(sessionCookie)
@@ -211,6 +247,12 @@ func TestLoginDashboardAndCSRFFlow(t *testing.T) {
 	if staleDashboardResponse.Code != http.StatusSeeOther {
 		t.Fatalf("stale dashboard status = %d, want %d", staleDashboardResponse.Code, http.StatusSeeOther)
 	}
+
+	staleSessionRequest := httptest.NewRequest(http.MethodGet, "/crate-api/identity/v1/session", nil)
+	staleSessionRequest.AddCookie(sessionCookie)
+	staleSessionResponse := httptest.NewRecorder()
+	mux.ServeHTTP(staleSessionResponse, staleSessionRequest)
+	assertProblemDetails(t, staleSessionResponse, http.StatusUnauthorized, "not-authenticated", "/crate-api/identity/v1/session")
 }
 
 func TestAdministratorSubjectManagementAPI(t *testing.T) {

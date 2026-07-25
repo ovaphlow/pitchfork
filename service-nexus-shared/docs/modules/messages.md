@@ -87,7 +87,7 @@ PATCH /messages/:id/status
 - **技术栈**: Rust + Axum
 - **迁移**: 使用 `sqlx migrate`，脚本放 `/migrations`
 
-### SQLite 建表建议
+### SQLite 建表
 
 ```sql
 CREATE TABLE IF NOT EXISTS messages (
@@ -109,3 +109,18 @@ CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender_id, sender_typ
 CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(status);
 CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);
 ```
+
+## Nexus HTTP API
+
+Nexus 使用 `/crate-api/shared/v1/messages` 作为根路径，所有请求均要求 IDP 的 `完整` 会话。
+
+| HTTP 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/` | 列表，支持 `message_type`、`sender_id`、`receiver_id`、`status`、`page`、`page_size` |
+| POST | `/` | 创建消息 |
+| GET | `/:id` | 查询消息 |
+| PUT | `/:id` | 更新 `status` 或 `payload` |
+| PATCH | `/:id/status` | 仅更新状态 |
+| DELETE | `/:id` | 物理删除消息 |
+
+创建请求包含 `message_type`、`sender_type`、`receiver_id`、`receiver_type` 与可选对象 `payload`。`sender_id` 永远由已验证的 IDP `subject_id` 填充，客户端不能冒充其他发送者。列表直接返回 JSON 数组。

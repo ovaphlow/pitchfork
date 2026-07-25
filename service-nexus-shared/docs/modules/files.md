@@ -37,9 +37,9 @@ router.delete("/:fileId").handler { ctx ->
 }
 ```
 
-## 建议表结构 (Nexus 新建)
+## Nexus 表结构
 
-根据 CONSTITUTION.md 中的 Files 定义，建议以下表结构。
+根据 CONSTITUTION.md 中的 Files 定义，Nexus 使用以下表结构。
 
 ### 元数据表 (files)
 
@@ -47,14 +47,13 @@ router.delete("/:fileId").handler { ctx ->
 | ------ | ------ | ------ | ------ |
 | `id` | TEXT | PK, NOT NULL | ULID 主键 |
 | `original_name` | TEXT | NOT NULL | 原始文件名 |
-| `stored_name` | TEXT | NOT NULL | 存储文件名（UUID 重命名） |
+| `stored_name` | TEXT | NOT NULL | 服务端生成的 ULID 存储文件名 |
 | `mime_type` | TEXT | NOT NULL | MIME 类型 |
 | `size_bytes` | INTEGER | NOT NULL | 文件大小（字节） |
 | `storage_path` | TEXT | NOT NULL | 存储路径（相对） |
 | `hash_sha256` | TEXT | — | SHA-256 哈希 |
 | `uploaded_by` | TEXT | — | 上传用户 ID |
 | `created_at` | TEXT | NOT NULL DEFAULT (datetime('now')) | 创建时间 |
-| `deleted_at` | TEXT | — | 软删除时间 |
 
 ### 索引建议
 
@@ -63,7 +62,6 @@ router.delete("/:fileId").handler { ctx ->
 | `files_pkey` | `id` | 主键 |
 | `idx_files_uploaded_by` | `uploaded_by` | 按上传用户查询 |
 | `idx_files_hash` | `hash_sha256` | 按哈希去重 |
-| `idx_files_deleted_at` | `deleted_at` | 软删除过滤 |
 
 ## API 路由映射
 
@@ -84,9 +82,9 @@ router.delete("/:fileId").handler { ctx ->
 - **数据库**: SQLite（WAL 模式）
 - **技术栈**: Rust + Axum
 - **迁移**: 使用 `sqlx migrate`，脚本放 `/migrations`
-- **存储**: 仅存储元数据，文件实体通过独立存储服务管理
+- **存储**: 文件实体保存到本地磁盘，元数据保存在 SQLite
 
-### SQLite 建表建议
+### SQLite 建表
 
 ```sql
 CREATE TABLE IF NOT EXISTS files (
@@ -98,11 +96,25 @@ CREATE TABLE IF NOT EXISTS files (
     storage_path  TEXT NOT NULL,
     hash_sha256   TEXT,
     uploaded_by   TEXT,
-    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    deleted_at    TEXT
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_files_uploaded_by ON files(uploaded_by);
 CREATE INDEX IF NOT EXISTS idx_files_hash ON files(hash_sha256);
-CREATE INDEX IF NOT EXISTS idx_files_deleted_at ON files(deleted_at);
 ```
+
+文件实体保存到由 `NEXUS_FILES_DIR` 配置的本地磁盘目录，`stored_name` 由服务端生成 ULID，绝不使用客户端文件名作为路径。删除接口会先物理删除磁盘文件，再删除数据库元数据；不使用软删除。
+
+## Nexus HTTP API
+
+Nexus 使用 `/crate-api/shared/v1/files` 作为根路径，所有请求均要求 IDP 的 `完整` 会话。
+
+| HTTP 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/` | 列表，支持 `uploaded_by`、`page`、`page_size` |
+| POST | `/upload` | 上传 `multipart/form-data` 文件，字段名必须为 `file` |
+| GET | `/:id` | 查询元数据 |
+| GET | `/:id/content` | 下载文件实体 |
+| DELETE | `/:id` | 物理删除文件与元数据 |
+
+`uploaded_by` 从 IDP `subject_id` 获取。上传大小受 `NEXUS_MAX_UPLOAD_BYTES` 限制，服务返回内容 SHA-256 与安全生成的存储名。
