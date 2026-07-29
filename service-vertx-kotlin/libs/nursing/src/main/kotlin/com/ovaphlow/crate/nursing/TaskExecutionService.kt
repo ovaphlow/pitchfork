@@ -18,7 +18,7 @@ class TaskExecutionService(
     private val pool: Pool,
     private val ctx: DSLContext = DatabaseConfig.createDSL()
 ) {
-    private val t = DSL.table("nursing_task_executions")
+    private val t = DSL.table(DSL.name("nursing", "nursing_task_executions"))
 
     private val cId = DSL.field("id", String::class.java)
     private val cTaskId = DSL.field("task_id", String::class.java)

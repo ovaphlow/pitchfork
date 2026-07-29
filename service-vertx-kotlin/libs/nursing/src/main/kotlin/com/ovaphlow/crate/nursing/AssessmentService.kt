@@ -19,7 +19,7 @@ class AssessmentService(
     private val pool: Pool,
     private val ctx: DSLContext = DatabaseConfig.createDSL()
 ) {
-    private val t = DSL.table("nursing_assessments")
+    private val t = DSL.table(DSL.name("nursing", "nursing_assessments"))
 
     private val cId = DSL.field("id", String::class.java)
     private val cEncounterId = DSL.field("encounter_id", String::class.java)

@@ -18,7 +18,7 @@ class TaskService(
     private val pool: Pool,
     private val ctx: DSLContext = DatabaseConfig.createDSL()
 ) {
-    private val t = DSL.table("nursing_tasks")
+    private val t = DSL.table(DSL.name("nursing", "nursing_tasks"))
 
     private val cId = DSL.field("id", String::class.java)
     private val cPeriodId = DSL.field("period_id", String::class.java)

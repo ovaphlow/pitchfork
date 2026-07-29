@@ -18,7 +18,7 @@ class ServicePeriodService(
     private val pool: Pool,
     private val ctx: DSLContext = DatabaseConfig.createDSL()
 ) {
-    private val t = DSL.table("nursing_service_periods")
+    private val t = DSL.table(DSL.name("nursing", "nursing_service_periods"))
 
     private val cId = DSL.field("id", String::class.java)
     private val cPatientId = DSL.field("patient_id", String::class.java)

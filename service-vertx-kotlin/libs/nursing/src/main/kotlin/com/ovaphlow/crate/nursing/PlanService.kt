@@ -18,8 +18,8 @@ class PlanService(
     private val pool: Pool,
     private val ctx: DSLContext = DatabaseConfig.createDSL()
 ) {
-    private val t = DSL.table("nursing_plans")
-    private val ti = DSL.table("nursing_plan_items")
+    private val t = DSL.table(DSL.name("nursing", "nursing_plans"))
+    private val ti = DSL.table(DSL.name("nursing", "nursing_plan_items"))
 
     // plan columns
     private val cId = DSL.field("id", String::class.java)
