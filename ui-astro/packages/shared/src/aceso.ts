@@ -520,6 +520,7 @@ export function listEncounters(params: {
   patient_id?: string;
   encounter_type?: string;
   status?: string;
+  search?: string;
   limit?: number;
   offset?: number;
 } = {}): Promise<EncounterList> {
@@ -527,22 +528,24 @@ export function listEncounters(params: {
   if (params.patient_id?.trim()) query.set("patient_id", params.patient_id.trim());
   if (params.encounter_type?.trim()) query.set("encounter_type", params.encounter_type.trim());
   if (params.status?.trim()) query.set("status", params.status.trim());
+  if (params.search?.trim()) query.set("search", params.search.trim());
   if (params.limit !== undefined) query.set("limit", String(params.limit));
   if (params.offset !== undefined) query.set("offset", String(params.offset));
   const suffix = query.toString() ? `?${query.toString()}` : "";
   return request<EncounterList>(`/healthcare/v1/encounters${suffix}`);
 }
 
-export function listElderlyAdmissions(params: { status?: string; limit?: number; offset?: number } = {}): Promise<EncounterList> {
+export function listElderlyAdmissions(params: { status?: string; search?: string; limit?: number; offset?: number } = {}): Promise<EncounterList> {
   const query = new URLSearchParams();
   if (params.status?.trim()) query.set("status", params.status.trim());
+  if (params.search?.trim()) query.set("search", params.search.trim());
   if (params.limit !== undefined) query.set("limit", String(params.limit));
   if (params.offset !== undefined) query.set("offset", String(params.offset));
   const suffix = query.toString() ? `?${query.toString()}` : "";
   return request<EncounterList>(`/healthcare/v1/elderly-admissions${suffix}`);
 }
 
-export function listActiveElderlyAdmissions(params: { limit?: number; offset?: number } = {}): Promise<EncounterList> {
+export function listActiveElderlyAdmissions(params: { search?: string; limit?: number; offset?: number } = {}): Promise<EncounterList> {
   return listElderlyAdmissions({ status: "ACTIVE", ...params });
 }
 

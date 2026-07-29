@@ -1,7 +1,6 @@
 package com.ovaphlow.crate.trainova
 
 import com.ovaphlow.crate.analytics.AnalyticsRoutes
-import com.ovaphlow.crate.auth.AuthRoutes
 import com.ovaphlow.crate.database.DatabaseConfig
 import com.ovaphlow.crate.exam.ExamRoutes
 import com.ovaphlow.crate.knowledge.KnowledgeRoutes
@@ -9,7 +8,6 @@ import com.ovaphlow.crate.onsite.OnsiteRoutes
 import com.ovaphlow.crate.permission.PermissionRoutes
 import com.ovaphlow.crate.skills.SkillsRoutes
 import com.ovaphlow.crate.training.TrainingRoutes
-import com.ovaphlow.crate.users.UsersRoutes
 import io.vertx.config.ConfigRetriever
 import io.vertx.config.ConfigRetrieverOptions
 import io.vertx.config.ConfigStoreOptions
@@ -93,9 +91,7 @@ fun main() {
         )
 
     val apiRouter = Router.router(vertx)
-    apiRouter.route("/auth/v1/*").subRouter(AuthRoutes.create(vertx, pool, jwtSecret))
     apiRouter.route("/permission/v1/*").subRouter(PermissionRoutes.create(vertx, pool, jwtAuth))
-    apiRouter.route("/users/v1/*").subRouter(UsersRoutes.create(vertx, pool))
     apiRouter.route("/knowledge/v1/*").subRouter(KnowledgeRoutes.create(vertx, pool))
     apiRouter.route("/skills/v1/*").subRouter(SkillsRoutes.create(vertx, pool))
     apiRouter.route("/training/v1/*").subRouter(TrainingRoutes.create(vertx, pool))

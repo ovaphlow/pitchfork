@@ -17,7 +17,7 @@ All backend APIs retain the `/crate-api/<module>/v1/<resource>` prefix. A port i
 
 | Layer | Libraries | Rule |
 |---|---|---|
-| Platform | `auth`, `settings`, `users`, `permissions`, `files`, `messages`, `logging`, `database`, `common` | May be shared when the application needs the capability. |
+| Platform | `permissions`, `logging`, `database`, `common` | May be shared when the application needs the capability. |
 | Trainova domain | `knowledge`, `skills`, `trainings`, `exams`, `onsite`, `analytics` | Mounted only by `apps:trainova`. |
 | Aceso domain | `inventories`, `pharmacy`, `nursing` | Mounted only by `apps:aceso`. |
 | Incubating | `healthcare` | No application may depend on it until it has a service, routes, and a product API contract. |
@@ -57,8 +57,8 @@ Reserved migration bands for new work:
 
 | Band | Owner |
 |---:|---|
-| `V1-V99` | users/platform core |
-| `V100-V199` | settings |
+| `V1-V99` | 已废弃（原 users） |
+| `V100-V199` | 已废弃（原 settings） |
 | `V200-V299` | inventories |
 | `V300-V399` | pharmacy |
 | `V400-V499` | nursing |
@@ -78,6 +78,6 @@ Each frontend requires an explicit `PUBLIC_API_URL`; there is no fallback backen
 | Product | Import path | Permitted API surface |
 |---|---|---|
 | Trainova apps | `@pitchfork/shared/trainova` | Platform and Trainova APIs |
-| Aceso | `@pitchfork/shared/aceso` | Authentication, users and departments currently implemented by Aceso |
+| Aceso | `@pitchfork/shared/aceso` | Aceso domain APIs |
 
 Do not import another product's API client from an app. Add a product-scoped export only after the corresponding backend route is mounted in that product.

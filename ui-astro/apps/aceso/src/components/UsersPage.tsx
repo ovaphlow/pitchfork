@@ -175,13 +175,15 @@ export default function UsersPage() {
       className: "min-w-[190px]",
       render: (row) => (
         <div className="flex items-center gap-1">
-          <Button variant="ghost" size="sm" onClick={() => openTemporaryPassword(row)}>
-            临时密码
-          </Button>
           {row.status === "启用" && (
-            <Button variant="ghost" size="sm" onClick={() => openDisable(row)}>
-              禁用
-            </Button>
+            <>
+              <Button variant="ghost" size="sm" onClick={() => openTemporaryPassword(row)}>
+                重置临时密码
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => openDisable(row)}>
+                禁用
+              </Button>
+            </>
           )}
         </div>
       ),
@@ -193,7 +195,7 @@ export default function UsersPage() {
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h2 className="text-lg font-semibold text-fg-emphasis">用户管理</h2>
-          <p className="mt-1 text-sm text-fg-muted">管理 IDP 账号、登录状态和临时密码</p>
+          <p className="mt-1 text-sm text-fg-muted">管理员核验身份后，可将账号重置为仅能改密的临时密码</p>
         </div>
         <Button onClick={openCreate}>添加用户</Button>
       </div>
@@ -260,9 +262,9 @@ export default function UsersPage() {
         </div>
       </Modal>
 
-      <Modal open={temporaryPasswordTarget !== null} onClose={() => !settingTemporaryPassword && setTemporaryPasswordTarget(null)} title="设置临时密码">
+      <Modal open={temporaryPasswordTarget !== null} onClose={() => !settingTemporaryPassword && setTemporaryPasswordTarget(null)} title="重置为临时密码">
         <div className="space-y-4">
-          <p className="text-sm text-fg-muted">用户下次登录时需要完成密码修改。</p>
+          <p className="text-sm text-fg-muted">请先完成身份核验。保存后会撤销该用户的所有会话，且其下次登录只能设置新密码。</p>
           <Input
             label="临时密码"
             type="password"
@@ -274,7 +276,7 @@ export default function UsersPage() {
           />
           <div className="flex justify-end gap-3 pt-2">
             <Button variant="ghost" onClick={() => setTemporaryPasswordTarget(null)} disabled={settingTemporaryPassword}>取消</Button>
-            <Button onClick={() => void handleTemporaryPassword()} loading={settingTemporaryPassword}>保存</Button>
+            <Button onClick={() => void handleTemporaryPassword()} loading={settingTemporaryPassword}>确认重置</Button>
           </div>
         </div>
       </Modal>

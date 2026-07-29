@@ -255,6 +255,59 @@ func TestLoginDashboardAndCSRFFlow(t *testing.T) {
 	assertProblemDetails(t, staleSessionResponse, http.StatusUnauthorized, "not-authenticated", "/crate-api/identity/v1/session")
 }
 
+func TestJSONLoginReturnsSessionAccessAndCookies(t *testing.T) {
+	databaseConnection, err := database.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "identityd.sqlite"))
+	if err != nil {
+		t.Fatalf("open SQLite database: %v", err)
+	}
+	t.Cleanup(func() {
+		databaseConnection.Close()
+	})
+	if _, err := database.Migrate(context.Background(), databaseConnection, migrations.Files); err != nil {
+		t.Fatalf("migrate database: %v", err)
+	}
+	if _, err := identity.EnsureBootstrap(context.Background(), databaseConnection, identity.BootstrapInput{
+		Identifier: "admin",
+		Password:   "correct horse battery staple",
+	}); err != nil {
+		t.Fatalf("ensure bootstrap: %v", err)
+	}
+
+	mux := httpapi.NewMux(databaseConnection, httpapi.Options{
+		SessionSettings: identity.SessionSettings{TTL: time.Hour, IdleTTL: 30 * time.Minute},
+		LoginThrottle:   testLoginThrottle,
+	})
+	form := url.Values{"identifier": {"admin"}, "password": {"correct horse battery staple"}}
+	loginRequest := httptest.NewRequest(http.MethodPost, "/crate-api/identity/v1/sessions", strings.NewReader(form.Encode()))
+	loginRequest.Header.Set("Accept", "application/json")
+	loginRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	loginResponse := httptest.NewRecorder()
+	mux.ServeHTTP(loginResponse, loginRequest)
+	if loginResponse.Code != http.StatusOK {
+		t.Fatalf("login status = %d, want %d", loginResponse.Code, http.StatusOK)
+	}
+	var loginResult struct {
+		Access string `json:"access"`
+	}
+	if err := json.Unmarshal(loginResponse.Body.Bytes(), &loginResult); err != nil {
+		t.Fatalf("decode login response: %v", err)
+	}
+	if loginResult.Access != "完整" {
+		t.Fatalf("login access = %q, want 完整", loginResult.Access)
+	}
+	if len(loginResponse.Result().Cookies()) != 2 {
+		t.Fatalf("login cookies = %#v, want session and csrf cookies", loginResponse.Result().Cookies())
+	}
+
+	wrongPasswordForm := url.Values{"identifier": {"admin"}, "password": {"wrong password"}}
+	wrongPasswordRequest := httptest.NewRequest(http.MethodPost, "/crate-api/identity/v1/sessions", strings.NewReader(wrongPasswordForm.Encode()))
+	wrongPasswordRequest.Header.Set("Accept", "application/json")
+	wrongPasswordRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	wrongPasswordResponse := httptest.NewRecorder()
+	mux.ServeHTTP(wrongPasswordResponse, wrongPasswordRequest)
+	assertProblemDetails(t, wrongPasswordResponse, http.StatusUnauthorized, "invalid-credentials", "/crate-api/identity/v1/sessions")
+}
+
 func TestAdministratorSubjectManagementAPI(t *testing.T) {
 	databaseConnection, err := database.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "identityd.sqlite"))
 	if err != nil {

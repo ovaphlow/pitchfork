@@ -1,52 +1,92 @@
+import { useState, useEffect } from "react";
+
 interface SidebarProps {
   currentPath: string;
+}
+
+type Domain = "医疗" | "养老" | "儿保";
+
+interface MenuChild {
+  label: string;
+  domainLabels?: Partial<Record<Domain, string>>;
+  path: string;
+  icon: string;
+  domains: Domain[];
 }
 
 interface GroupItem {
   type: "group";
   label: string;
-  children: { label: string; path: string; icon: string }[];
+  domainLabels?: Partial<Record<Domain, string>>;
+  children: MenuChild[];
 }
 
-interface LinkItem {
-  type: "link";
-  label: string;
-  path: string;
-  icon: string;
-}
+type Item = GroupItem;
 
-interface DividerItem {
-  type: "divider";
-}
-
-type Item = GroupItem | LinkItem | DividerItem;
+const STORAGE_KEY = "aceso-domain";
 
 const items: Item[] = [
-  { type: "group", label: "临床业务", children: [
-    { label: "门诊挂号", path: "/dashboard/registration", icon: "📋" },
-    { label: "门诊收费", path: "/dashboard/billing", icon: "💰" },
-    { label: "住院管理", path: "/dashboard/inpatient", icon: "🏥" },
-    { label: "药房管理", path: "/dashboard/pharmacy", icon: "💊" },
-  ]},
-  { type: "group", label: "养老业务", children: [
-    { label: "长者档案", path: "/dashboard/elders", icon: "👴" },
-    { label: "入住管理", path: "/dashboard/admission", icon: "🏠" },
-    { label: "健康监测", path: "/dashboard/health-monitor", icon: "❤️" },
-    { label: "护理管理", path: "/dashboard/nursing", icon: "🩺" },
-    { label: "体检管理", path: "/dashboard/checkup", icon: "🩻" },
-    { label: "随访管理", path: "/dashboard/followup", icon: "📞" },
-    { label: "餐饮管理", path: "/dashboard/dining", icon: "🍱" },
-    { label: "活动管理", path: "/dashboard/activities", icon: "🎯" },
-  ]},
-  { type: "divider" },
-  { type: "group", label: "系统设置", children: [
-    { label: "用户", path: "/users", icon: "👤" },
-    { label: "部门", path: "/dashboard/departments", icon: "🏢" },
-    { label: "角色", path: "/dashboard/roles", icon: "🔐" },
-  ]},
+  {
+    type: "group", label: "居民管理", domainLabels: { 养老: "长者管理", 儿保: "儿童管理" }, children: [
+      { label: "居民档案", domainLabels: { 养老: "长者档案", 儿保: "儿童健康档案" }, path: "/dashboard/elders", icon: "👤", domains: ["医疗", "养老", "儿保"] },
+      { label: "挂号登记",   path: "/dashboard/registration", icon: "📋", domains: ["医疗", "儿保"] },
+      { label: "入院管理", domainLabels: { 养老: "入住管理" }, path: "/dashboard/admission", icon: "🏠", domains: ["医疗", "养老"] },
+      { label: "随访管理", domainLabels: { 儿保: "儿童保健随访" }, path: "/dashboard/followup", icon: "📞", domains: ["医疗", "养老", "儿保"] },
+    ],
+  },
+  {
+    type: "group", label: "诊疗护理", domainLabels: { 养老: "照护服务", 儿保: "儿童保健" }, children: [
+      { label: "住院护理", domainLabels: { 养老: "照护管理" }, path: "/dashboard/inpatient", icon: "🏥", domains: ["医疗", "养老"] },
+      { label: "体检管理",   path: "/dashboard/checkup",      icon: "🩻", domains: ["医疗", "养老", "儿保"] },
+      { label: "药房管理",   path: "/dashboard/pharmacy",     icon: "💊", domains: ["医疗", "养老"] },
+    ],
+  },
+  {
+    type: "group", label: "健康服务", children: [
+      { label: "健康监测",   path: "/dashboard/health-monitor", icon: "❤️", domains: ["养老", "儿保"] },
+      { label: "膳食营养",   path: "/dashboard/dining",        icon: "🍱", domains: ["养老"] },
+      { label: "康复活动",   path: "/dashboard/activities",    icon: "🎯", domains: ["养老"] },
+    ],
+  },
+  {
+    type: "group", label: "财务收费", children: [
+      { label: "门诊收费",   path: "/dashboard/billing",       icon: "💰", domains: ["医疗"] },
+    ],
+  },
+  {
+    type: "group", label: "系统设置", children: [
+      { label: "用户",     path: "/users",                  icon: "👥", domains: ["医疗", "养老", "儿保"] },
+      { label: "部门",     path: "/dashboard/departments",  icon: "🏢", domains: ["医疗", "养老", "儿保"] },
+      { label: "角色",     path: "/dashboard/roles",        icon: "🔐", domains: ["医疗", "养老", "儿保"] },
+    ],
+  },
 ];
 
+function displayLabel(label: string, domainLabels: Partial<Record<Domain, string>> | undefined, domain: Domain): string {
+  return domainLabels?.[domain] ?? label;
+}
+
+function readDomain(): Domain {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (stored === "医疗" || stored === "养老" || stored === "儿保") return stored;
+  } catch { /* SSR */ }
+  return "医疗";
+}
+
 export default function Sidebar({ currentPath }: SidebarProps) {
+  const [domain, setDomain] = useState<Domain>(readDomain);
+
+  useEffect(() => {
+    const handler = () => setDomain(readDomain());
+    window.addEventListener("storage", handler);
+    window.addEventListener("aceso-domain-change", handler);
+    return () => {
+      window.removeEventListener("storage", handler);
+      window.removeEventListener("aceso-domain-change", handler);
+    };
+  }, []);
+
   return (
     <aside className="fixed top-0 left-0 z-40 w-[var(--sidebar-w)] h-screen bg-surface border-r border-border overflow-y-auto flex flex-col">
       {/* Branding */}
@@ -59,50 +99,34 @@ export default function Sidebar({ currentPath }: SidebarProps) {
       </a>
 
       <nav className="flex flex-col gap-1 p-3">
-        {items.map((item, i) => {
-          if (item.type === "divider") {
-            return <div key={i} className="border-t border-border my-1" />;
-          }
-          if (item.type === "group") {
-            return (
-              <div key={i} className="flex flex-col gap-0.5">
-                <span className="px-3 py-2 text-xs font-semibold text-fg-dimmed uppercase tracking-wider">
-                  {item.label}
-                </span>
-                {item.children.map((child) => {
-                  const active = currentPath === child.path;
-                  return (
-                    <a
-                      key={child.path}
-                      href={child.path}
-                      className={`flex items-center gap-2.5 px-3 py-2 rounded-md text-sm transition-all duration-150 ${
-                        active
-                          ? "bg-accent/10 text-accent font-medium"
-                          : "text-fg-muted hover:bg-surface-alt hover:text-fg"
-                      }`}
-                    >
-                      <span className="text-base">{child.icon}</span>
-                      <span>{child.label}</span>
-                    </a>
-                  );
-                })}
-              </div>
-            );
-          }
-          const active = currentPath === item.path;
+        {items.map((group, gi) => {
+          const visibleChildren = group.children.filter((c) => c.domains.includes(domain));
+          if (visibleChildren.length === 0) return null;
+
           return (
-            <a
-              key={item.path}
-              href={item.path}
-              className={`flex items-center gap-2.5 px-3 py-2 rounded-md text-sm transition-all duration-150 ${
-                active
-                  ? "bg-accent/10 text-accent font-medium"
-                  : "text-fg-muted hover:bg-surface-alt hover:text-fg"
-              }`}
-            >
-              <span className="text-base">{item.icon}</span>
-              <span>{item.label}</span>
-            </a>
+            <div key={gi} className="flex flex-col gap-0.5">
+              {gi > 0 && <div className="border-t border-border my-1" />}
+              <span className="px-3 py-2 text-xs font-semibold text-fg-dimmed uppercase tracking-wider">
+                {displayLabel(group.label, group.domainLabels, domain)}
+              </span>
+              {visibleChildren.map((child) => {
+                const active = currentPath === child.path;
+                return (
+                  <a
+                    key={child.path}
+                    href={child.path}
+                    className={`flex items-center gap-2.5 px-3 py-2 rounded-md text-sm transition-all duration-150 ${
+                      active
+                        ? "bg-accent/10 text-accent font-medium"
+                        : "text-fg-muted hover:bg-surface-alt hover:text-fg"
+                    }`}
+                  >
+                    <span className="text-base">{child.icon}</span>
+                    <span>{displayLabel(child.label, child.domainLabels, domain)}</span>
+                  </a>
+                );
+              })}
+            </div>
           );
         })}
       </nav>

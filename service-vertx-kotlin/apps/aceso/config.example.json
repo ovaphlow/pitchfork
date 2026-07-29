@@ -8,10 +8,10 @@
   },
   "console-level": "INFO",
   "nexus": {
-    "base-url": "http://127.0.0.1:8433"
+    "base-url": "http://127.0.0.1:8421"
   },
   "identity": {
-    "base-url": "http://127.0.0.1:8432"
+    "base-url": "http://127.0.0.1:8420"
   },
   "server": {
     "port": 8422,

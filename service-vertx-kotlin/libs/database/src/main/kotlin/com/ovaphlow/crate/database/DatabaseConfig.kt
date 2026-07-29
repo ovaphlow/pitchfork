@@ -25,8 +25,19 @@ object DatabaseConfig {
     }
 
     private fun requiredDatabasePassword(): String {
-        return System.getenv("PITCHFORK_DB_PASSWORD")?.takeIf(String::isNotBlank)
-            ?: error("PITCHFORK_DB_PASSWORD must be set")
+        System.getenv("PITCHFORK_DB_PASSWORD")?.takeIf(String::isNotBlank)?.let { return it }
+        val envFile = java.io.File(".env")
+        if (envFile.isFile) {
+            var password: String? = null
+            envFile.forEachLine { line ->
+                val trimmed = line.trim()
+                if (password == null && trimmed.startsWith("PITCHFORK_DB_PASSWORD=")) {
+                    password = trimmed.removePrefix("PITCHFORK_DB_PASSWORD=").trim('"', '\'')
+                }
+            }
+            if (!password.isNullOrBlank()) return password
+        }
+        error("PITCHFORK_DB_PASSWORD must be set as environment variable or in .env file")
     }
 
     private fun buildJdbcUrl(config: JsonObject): String {
@@ -46,6 +57,7 @@ object DatabaseConfig {
             .dataSource(url, user, password)
             .locations("classpath:db/migration")
             .baselineOnMigrate(true)
+            .ignoreMigrationPatterns("*:missing")
             .load()
             .migrate()
 

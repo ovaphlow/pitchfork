@@ -81,6 +81,11 @@ public class Encounters extends TableImpl<EncountersRecord> {
     public final TableField<EncountersRecord, String> ENCOUNTER_TYPE = createField(DSL.name("encounter_type"), SQLDataType.VARCHAR.nullable(false).defaultValue(DSL.field(DSL.raw("''::character varying"), SQLDataType.VARCHAR)), this, "类型，由各系统字典决定，不强制 CHECK");
 
     /**
+     * The column <code>healthcare.encounters.encounter_no</code>.
+     */
+    public final TableField<EncountersRecord, String> ENCOUNTER_NO = createField(DSL.name("encounter_no"), SQLDataType.VARCHAR(64).nullable(false), this, "");
+
+    /**
      * The column <code>healthcare.encounters.department</code>.
      */
     public final TableField<EncountersRecord, String> DEPARTMENT = createField(DSL.name("department"), SQLDataType.VARCHAR, this, "");
@@ -204,7 +209,7 @@ public class Encounters extends TableImpl<EncountersRecord> {
 
     @Override
     public List<Index> getIndexes() {
-        return Arrays.asList(Indexes.IDX_ENCOUNTERS_ADMIT, Indexes.IDX_ENCOUNTERS_PATIENT, Indexes.IDX_ENCOUNTERS_STATUS);
+        return Arrays.asList(Indexes.IDX_ENCOUNTERS_ADMIT, Indexes.IDX_ENCOUNTERS_PATIENT, Indexes.IDX_ENCOUNTERS_STATUS, Indexes.UQ_ENCOUNTERS_ACTIVE_ELDERLY_CARE);
     }
 
     @Override

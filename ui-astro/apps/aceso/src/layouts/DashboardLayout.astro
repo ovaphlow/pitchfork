@@ -28,10 +28,10 @@ const currentPath = Astro.url.pathname;
     </script>
   </head>
   <body class="h-full bg-bg text-fg antialiased overflow-hidden">
-    <SessionGuard client:load />
+    <SessionGuard client:only="react" />
     <div class="flex h-full flex-col">
       <!-- Sidebar (fixed) -- full viewport height -->
-    <Sidebar client:load currentPath={currentPath} />
+    <Sidebar client:only="react" currentPath={currentPath} />
 
       <!-- Content -->
       <div class="flex flex-1 flex-col ml-[var(--sidebar-w)]">
@@ -47,8 +47,8 @@ const currentPath = Astro.url.pathname;
           </div>
 
           <div class="flex items-center gap-3">
-            <ThemeToggle client:load />
-            <SignOutButton client:load />
+            <ThemeToggle client:only="react" />
+            <SignOutButton client:only="react" />
           </div>
         </header>
 

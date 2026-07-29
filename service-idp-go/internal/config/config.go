@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	defaultAddress          = "127.0.0.1:8432"
+	defaultAddress          = "127.0.0.1:8420"
 	defaultDatabasePath     = ".data/identityd.sqlite"
 	defaultSessionTTL       = 12 * time.Hour
 	defaultSessionIdleTTL   = 30 * time.Minute

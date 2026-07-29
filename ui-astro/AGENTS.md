@@ -4,16 +4,23 @@
 
 Astro + React 19 + Tailwind v4 frontend monorepo for two products: Trainova (manufacturing training) and Aceso (healthcare operations). The UI is dark themed and Chinese first.
 
+## 限制
+
+**开发服务仅限用户操作。** AI agent 不得启动/停止/管理 Astro dev server 进程（`pnpm dev`, `pnpm dev:*`, `pnpm preview`, `astro dev`）。AI agent 仅可执行编译或构建操作：
+
+- `pnpm build` — 全部 apps 构建 (astro check + astro build)
+- `pnpm --filter <app> build` — 单个 app 构建
+
 ## Quick Start
 
 ```bash
 cd ui-astro
 pnpm install
-pnpm dev          # @pitchfork/auth (port 4321)
-pnpm dev:admin    # @pitchfork/admin (port 4322)
-pnpm dev:worker   # @pitchfork/worker (port 4323)
-pnpm dev:aceso    # @pitchfork/aceso (port 4324)
-pnpm build        # 全部 apps 构建 (astro check + astro build)
+pnpm dev          # @pitchfork/auth (port 4321) — 仅用户
+pnpm dev:admin    # @pitchfork/admin (port 4322) — 仅用户
+pnpm dev:worker   # @pitchfork/worker (port 4323) — 仅用户
+pnpm dev:aceso    # @pitchfork/aceso (port 4324) — 仅用户
+pnpm build        # 全部 apps 构建 (AI agent 可执行)
 ```
 
 ## Architecture

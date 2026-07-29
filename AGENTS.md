@@ -136,8 +136,8 @@ Flyway 通过 `classpath:db/migration` 在运行时聚合当前 app 所依赖的
 
 | 号段  | lib         |
 |-------|-------------|
-| V1–99 | 核心（users） |
-| V100+ | settings    |
+| V1–99 | 已废弃（原 users） |
+| V100+ | 已废弃（原 settings） |
 | V200+ | inventories |
 | V300+ | pharmacy    |
 | V400+ | nursing     |
@@ -145,3 +145,31 @@ Flyway 通过 `classpath:db/migration` 在运行时聚合当前 app 所依赖的
 | V600+ | Trainova 领域预留号段（knowledge 起） |
 
 新增 lib 时按最大号段步进 100，避免冲突。完整号段表见 [docs/architecture.md](./docs/architecture.md)。
+
+### CLI 工具 — rtk（Token 优化代理）
+
+`rtk` 是安装在 `~/.local/bin/rtk` 的 CLI 代理，用于包装常见命令以减少 token 消耗。
+**在 `bash` 中执行命令时**，优先使用 `rtk` 包装版本：
+
+| 原始命令 | 替换为 | 效果 |
+|----------|--------|------|
+| `ls` | `rtk ls` | 移除颜色、精简输出 |
+| `git status / diff / log` | `rtk git <sub>` | 紧凑 diff，仅变化的行 |
+| `rg <pattern>` | `rtk rg <pattern>` | 去空白、分组输出 |
+| `cat/head/tail <file>` | `rtk read <file>` | 智能过滤、截断 |
+| `find ...` | `rtk find ...` | 紧凑树状输出 |
+| `go test ...` | `rtk go test ...` | 仅显示失败 |
+| `pnpm run / test` | `rtk pnpm ...` | 精简 npm 日志 |
+| `grep ...` | `rtk grep ...` | 去空白、按文件分组 |
+
+**不替换的场景**：管道组合（`rtk` 不解析管道）、交互式命令、不需要输出的命令。
+**无需记忆**：支持的命令会自动匹配；不匹配时 `rtk` 透传原命令。
+
+### 代码理解工具 — codegraph MCP
+
+`codegraph` 是一个 MCP 插件（`codegraph serve --mcp`），提供 `codegraph_explore` 工具用于代码理解。**对于任何代码理解任务**（架构调查、符号查找、变更影响分析、代码库探索），必须优先使用 `mcp__codegraph__codegraph_explore`，而非内置的 `explore` 子代理工具或手动 `grep`/`read_file` 组合。
+
+**使用规则：**
+- 任何涉及"这个模块怎么工作的"、"这个符号定义在哪里"、"这些文件之间的关系"等代码理解问题 → **先用 codegraph_explore**
+- 仅当 codegraph_explore 返回不充分时，回退到内置 `explore` 子代理或 `grep` + `code_index` 组合
+- codegraph_explore 的返回值视同已读取源码，无需再 `read_file` 打开它返回的文件

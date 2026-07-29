@@ -119,7 +119,12 @@ func (handler Handler) loginPage(responseWriter http.ResponseWriter, request *ht
 }
 
 func (handler Handler) createSession(responseWriter http.ResponseWriter, request *http.Request) {
+	jsonRequest := wantsJSON(request)
 	if err := request.ParseForm(); err != nil {
+		if jsonRequest {
+			writeProblem(responseWriter, request, http.StatusBadRequest, "invalid-request", "invalid login request")
+			return
+		}
 		http.Redirect(responseWriter, request, identityPrefix+"/login?error=1", http.StatusSeeOther)
 		return
 	}
@@ -129,10 +134,18 @@ func (handler Handler) createSession(responseWriter http.ResponseWriter, request
 		SourceAddress: clientSourceAddress(request, handler.trustedProxyPrefixes),
 	}, handler.sessionSettings, handler.loginThrottle)
 	if err != nil {
+		if jsonRequest {
+			writeProblem(responseWriter, request, http.StatusUnauthorized, "invalid-credentials", "账号或密码不正确")
+			return
+		}
 		http.Redirect(responseWriter, request, identityPrefix+"/login?error=1", http.StatusSeeOther)
 		return
 	}
 	handler.setSessionCookies(responseWriter, login)
+	if jsonRequest {
+		writeJSON(responseWriter, http.StatusOK, map[string]string{"access": login.Access})
+		return
+	}
 	destination := identityPrefix + "/dashboard"
 	if login.Access == "仅改密" {
 		destination = identityPrefix + "/password"
@@ -627,6 +640,10 @@ func requestCSRFToken(request *http.Request) string {
 
 func wantsHTML(request *http.Request) bool {
 	return isHTMXRequest(request) || strings.Contains(request.Header.Get("Accept"), "text/html")
+}
+
+func wantsJSON(request *http.Request) bool {
+	return !wantsHTML(request) && strings.Contains(request.Header.Get("Accept"), "application/json")
 }
 
 func isHTMXRequest(request *http.Request) bool {

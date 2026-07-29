@@ -34,8 +34,4 @@ Aceso listens on `8422`.
 
 ## jOOQ
 
-Set `PITCHFORK_DB_PASSWORD` before code generation. The checked-in `jooq-config.xml` files contain only a placeholder; Gradle writes the rendered configuration under `build/tmp`.
-
-```bash
-PITCHFORK_DB_PASSWORD='local-development-password' ./gradlew :libs:users:generateJooq
-```
+Platform `auth`, `users` and `settings` have been migrated to external services (`service-idp-go`, `service-nexus-shared`). The corresponding Kotlin libs (`libs/auth`, `libs/users`) have been removed.

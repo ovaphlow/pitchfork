@@ -31,7 +31,6 @@ service-vertx-kotlin/
 └── libs/
     ├── auth/                # 登录/注册/JWT
     ├── permissions/          # RBAC + ReBAC + ABAC
-    ├── users/               # 员工管理
     ├── knowledge/           # Trainova：知识库
     ├── skills/              # Trainova：技能/岗位/证书
     ├── trainings/           # Trainova：课程/章节/作业

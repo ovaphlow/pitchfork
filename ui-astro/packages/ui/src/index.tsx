@@ -4,7 +4,7 @@ import React, { type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactN
 
 // ─── Button ───────────────────────────────────────────────────────
 
-type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
+type ButtonVariant = "primary" | "secondary" | "functional" | "link" | "danger" | "warning" | "ghost";
 type ButtonSize = "sm" | "md" | "lg";
 
 interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
@@ -17,13 +17,19 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 
 const variantStyles: Record<ButtonVariant, string> = {
   primary:
-    "bg-accent text-white hover:brightness-110 active:brightness-95",
+    "bg-transparent text-accent border border-accent hover:bg-transparent hover:text-accent active:bg-transparent active:text-accent",
   secondary:
     "bg-surface text-fg border border-border hover:bg-surface-alt active:bg-surface-alt",
+  functional:
+    "bg-transparent text-fg-muted hover:bg-surface-alt hover:text-fg",
+  link:
+    "bg-transparent text-accent hover:text-accent hover:underline underline-offset-4",
   ghost:
     "bg-transparent text-fg-muted hover:bg-surface-alt hover:text-fg",
   danger:
     "bg-danger text-white hover:brightness-110 active:brightness-95",
+  warning:
+    "bg-warning text-white hover:brightness-110 active:brightness-95",
 };
 
 const sizeStyles: Record<ButtonSize, string> = {

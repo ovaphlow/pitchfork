@@ -54,6 +54,8 @@ The currently available endpoints are:
 - `GET /crate-api/identity/v1/subjects/{subjectID}`
 - `PATCH /crate-api/identity/v1/subjects/{subjectID}`
 
+登录请求携带 `Accept: application/json` 时返回 JSON，并同时设置浏览器会话 Cookie；省略该请求头时保留浏览器表单的重定向行为。
+
 The subject endpoints require a `完整` browser session whose subject has the
 `identity.admin` role. `POST` and `PATCH` also require the `identityd_csrf`
 cookie value in the `X-CSRF-Token` request header. Create requests contain

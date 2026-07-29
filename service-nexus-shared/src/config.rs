@@ -17,7 +17,7 @@ pub struct Config {
 impl Config {
     pub fn load() -> Result<Self> {
         dotenvy::dotenv().ok();
-        let address = env_or("NEXUS_ADDR", "127.0.0.1:8433")
+        let address = env_or("NEXUS_ADDR", "127.0.0.1:8421")
             .parse()
             .context("parse NEXUS_ADDR")?;
         let max_upload_bytes = env_or("NEXUS_MAX_UPLOAD_BYTES", "20971520")
@@ -26,7 +26,7 @@ impl Config {
         let timeout_ms: u64 = env_or("NEXUS_IDP_TIMEOUT_MS", "1500")
             .parse()
             .context("parse NEXUS_IDP_TIMEOUT_MS")?;
-        let idp_base_url = env_or("NEXUS_IDP_BASE_URL", "http://127.0.0.1:8432")
+        let idp_base_url = env_or("NEXUS_IDP_BASE_URL", "http://127.0.0.1:8420")
             .trim_end_matches('/')
             .to_owned();
 

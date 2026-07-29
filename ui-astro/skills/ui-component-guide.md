@@ -20,7 +20,7 @@ import { Button, Input, Card, Table, Modal, Badge, LoadingSpinner, EmptyState } 
 
 | Prop | Type | Default | Description |
 |------|------|---------|-------------|
-| variant | `primary \| secondary \| ghost \| danger` | `primary` | 样式变体 |
+| variant | `primary \| secondary \| functional \| link \| danger \| warning \| ghost` | `primary` | 主功能、副功能、普通功能、链接、危险、警示；`ghost` 保留用于兼容旧代码 |
 | size | `sm \| md \| lg` | `md` | 按钮尺寸 |
 | loading | `boolean` | `false` | 加载态 (显示 spinner) |
 | disabled | `boolean` | — | 禁用态 |

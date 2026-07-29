@@ -64,6 +64,12 @@ export default function LoginForm({ onSuccess }: Props) {
 			<Button type="submit" className="w-full" loading={loading}>
 				登录
 			</Button>
+
+			<div className="text-right">
+				<a href="/forgot-password" className="text-sm text-accent transition-colors hover:text-fg-emphasis">
+					忘记密码？
+				</a>
+			</div>
 		</form>
 	);
 }

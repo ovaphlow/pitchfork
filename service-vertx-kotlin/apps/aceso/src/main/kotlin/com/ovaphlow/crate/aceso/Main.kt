@@ -1,11 +1,11 @@
 package com.ovaphlow.crate.aceso
 
 import com.ovaphlow.crate.database.DatabaseConfig
+import com.ovaphlow.crate.healthcare.HealthcareRoutes
 import com.ovaphlow.crate.inventories.InventoriesRoutes
 import com.ovaphlow.crate.log.Log
 import com.ovaphlow.crate.nursing.NursingRoutes
 import com.ovaphlow.crate.pharmacy.PharmacyRoutes
-import com.ovaphlow.crate.users.UsersRoutes
 import io.vertx.config.ConfigRetriever
 import io.vertx.config.ConfigRetrieverOptions
 import io.vertx.config.ConfigStoreOptions
@@ -19,13 +19,10 @@ import org.slf4j.LoggerFactory
 
 private val log = Log.getLogger("com.ovaphlow.crate.aceso.MainKt")
 
-private fun requiredEnvironment(name: String): String =
-    System.getenv(name)?.takeIf(String::isNotBlank)
-        ?: error("$name must be set")
-
 fun main() {
     val vertx = Vertx.vertx()
-    val configPath = requiredEnvironment("PITCHFORK_CONFIG")
+    val configPath =
+        System.getenv("PITCHFORK_CONFIG")?.takeIf(String::isNotBlank) ?: "config.json"
 
     val retriever =
         ConfigRetriever.create(
@@ -81,8 +78,8 @@ fun main() {
     )
 
     val apiRouter = Router.router(vertx)
-    val nexusBaseUrl = config.getJsonObject("nexus", JsonObject()).getString("base-url", "http://127.0.0.1:8433")
-    val idpBaseUrl = config.getJsonObject("identity", JsonObject()).getString("base-url", "http://127.0.0.1:8432")
+    val nexusBaseUrl = config.getJsonObject("nexus", JsonObject()).getString("base-url", "http://127.0.0.1:8421")
+    val idpBaseUrl = config.getJsonObject("identity", JsonObject()).getString("base-url", "http://127.0.0.1:8420")
     apiRouter.route("/identity/v1/*").subRouter(
         ServiceProxyRoutes.create(
             vertx,
@@ -100,9 +97,9 @@ fun main() {
         ),
     )
     apiRouter.route("/inventories/v1/*").subRouter(InventoriesRoutes.create(vertx, pool))
+    apiRouter.route("/healthcare/v1/*").subRouter(HealthcareRoutes.create(vertx, pool))
     apiRouter.route("/nursing/v1/*").subRouter(NursingRoutes.create(vertx, pool))
     apiRouter.route("/pharmacy/v1/*").subRouter(PharmacyRoutes.create(vertx, pool))
-    apiRouter.route("/users/v1/*").subRouter(UsersRoutes.create(vertx, pool))
     mainRouter.route("/crate-api/*").subRouter(apiRouter)
 
     mainRouter.route("/health").handler { ctx ->

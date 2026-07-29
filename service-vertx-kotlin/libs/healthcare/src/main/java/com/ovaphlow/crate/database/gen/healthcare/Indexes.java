@@ -43,4 +43,5 @@ public class Indexes {
     public static final Index IDX_PROGRESS_TYPE = Internal.createIndex(DSL.name("idx_progress_type"), ProgressNotes.PROGRESS_NOTES, new OrderField[] { ProgressNotes.PROGRESS_NOTES.NOTE_TYPE }, false);
     public static final Index IDX_RECORDS_ENCOUNTER = Internal.createIndex(DSL.name("idx_records_encounter"), MedicalRecords.MEDICAL_RECORDS, new OrderField[] { MedicalRecords.MEDICAL_RECORDS.ENCOUNTER_ID }, false);
     public static final Index IDX_RECORDS_TYPE = Internal.createIndex(DSL.name("idx_records_type"), MedicalRecords.MEDICAL_RECORDS, new OrderField[] { MedicalRecords.MEDICAL_RECORDS.RECORD_TYPE }, false);
+    public static final Index UQ_ENCOUNTERS_ACTIVE_ELDERLY_CARE = Internal.createIndex(DSL.name("uq_encounters_active_elderly_care"), Encounters.ENCOUNTERS, new OrderField[] { Encounters.ENCOUNTERS.PATIENT_ID }, true);
 }

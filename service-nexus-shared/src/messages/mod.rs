@@ -19,8 +19,8 @@ pub fn router() -> Router<AppState> {
 
 #[derive(Deserialize)]
 struct ListQuery {
-    #[serde(flatten)]
-    page: PageQuery,
+    page: Option<i64>,
+    page_size: Option<i64>,
     message_type: Option<String>,
     sender_id: Option<String>,
     receiver_id: Option<String>,
@@ -99,7 +99,7 @@ async fn list(
     State(state): State<AppState>,
     Query(query): Query<ListQuery>,
 ) -> ApiResult<Json<Vec<Message>>> {
-    let (limit, offset) = query.page.limit_offset()?;
+    let (limit, offset) = PageQuery { page: query.page, page_size: query.page_size }.limit_offset()?;
     let mut builder: QueryBuilder<Sqlite> = QueryBuilder::new(
         "SELECT id, message_type, sender_id, sender_type, receiver_id, receiver_type, status, payload, created_at, updated_at FROM messages WHERE 1 = 1",
     );

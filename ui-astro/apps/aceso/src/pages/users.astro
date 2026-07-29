@@ -4,5 +4,5 @@ import UsersPage from "../components/UsersPage.tsx";
 ---
 
 <DashboardLayout title="用户管理">
-  <UsersPage client:load />
+  <UsersPage client:only="react" />
 </DashboardLayout>

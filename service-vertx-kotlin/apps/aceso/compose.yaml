@@ -4,7 +4,7 @@
 
 services:
   pitchfork-aceso-db:
-    image: docker.1ms.run/library/postgres:17
+    image: postgres:18
     container_name: pitchfork-aceso-db
     restart: unless-stopped
     ports:

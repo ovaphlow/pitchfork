@@ -9,7 +9,7 @@ cp .env.example .env
 cargo run
 ```
 
-默认监听 `127.0.0.1:8433`。首次启动会创建 SQLite 文件、应用 `/migrations` 中的迁移，并创建 `NEXUS_FILES_DIR` 指定的本地文件目录。
+默认监听 `127.0.0.1:8421`。首次启动会创建 SQLite 文件、应用 `/migrations` 中的迁移，并创建 `NEXUS_FILES_DIR` 指定的本地文件目录。
 
 运行前必须启动 IDP。Nexus 会把请求中的 `Cookie` 头转发到 `GET /crate-api/identity/v1/session`；没有有效 `完整` 会话的请求返回 RFC 9457 `401` 响应。Nexus 不解析、不保存浏览器会话 token。
 

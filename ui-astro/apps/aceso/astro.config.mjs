@@ -3,12 +3,10 @@ import react from "@astrojs/react";
 import tailwindcss from "@tailwindcss/vite";
 
 export default defineConfig({
+	output: "static",
 	integrations: [react()],
 	vite: {
 		plugins: [tailwindcss()],
-		ssr: {
-			noExternal: ["@pitchfork/ui", "@pitchfork/shared", "jsencrypt"],
-		},
 	},
 	server: {
 		host: "0.0.0.0",
