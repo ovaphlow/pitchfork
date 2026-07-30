@@ -127,10 +127,11 @@ interface CardProps {
   title?: string;
   children: ReactNode;
   className?: string;
+  bodyClassName?: string;
   actions?: ReactNode;
 }
 
-export function Card({ title, children, className = "", actions }: CardProps) {
+export function Card({ title, children, className = "", bodyClassName = "", actions }: CardProps) {
   return (
     <div
       className={`rounded-lg border border-border bg-surface ${className}`}
@@ -145,7 +146,7 @@ export function Card({ title, children, className = "", actions }: CardProps) {
           {actions && <div className="flex items-center gap-2">{actions}</div>}
         </div>
       )}
-      <div className="p-5">{children}</div>
+      <div className={`p-5 ${bodyClassName}`}>{children}</div>
     </div>
   );
 }

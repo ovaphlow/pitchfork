@@ -27,9 +27,9 @@ const currentPath = Astro.url.pathname;
       })();
     </script>
   </head>
-  <body class="h-full bg-bg text-fg antialiased overflow-hidden">
+  <body class="min-h-screen bg-bg text-fg antialiased overflow-hidden">
     <SessionGuard client:only="react" />
-    <div class="flex h-full flex-col">
+    <div class="flex min-h-screen flex-col">
       <!-- Sidebar (fixed) -- full viewport height -->
     <Sidebar client:only="react" currentPath={currentPath} />
 
@@ -52,7 +52,7 @@ const currentPath = Astro.url.pathname;
           </div>
         </header>
 
-        <main class="flex-1 overflow-y-auto p-6">
+        <main class="flex flex-1 flex-col overflow-y-auto p-6">
           <slot />
         </main>
       </div>

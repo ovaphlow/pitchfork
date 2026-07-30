@@ -552,7 +552,7 @@ export default function NursingPage() {
   ];
 
   return (
-    <div className="space-y-6">
+    <div className="flex flex-1 flex-col space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h2 className="text-lg font-semibold text-fg-emphasis">照护管理</h2>
@@ -593,9 +593,9 @@ export default function NursingPage() {
           description={admissionSearch ? "请尝试姓名、住院号或身份证的其他部分。" : "请先在入住管理为长者办理入住，再开始建立照护记录。"}
         />
       ) : (
-        <div className="grid gap-6 xl:grid-cols-[280px_minmax(0,1fr)]">
-              <Card title="当前入住长者">
-                <div className="space-y-2">
+        <div className="grid min-h-0 flex-1 gap-6 xl:grid-cols-[280px_minmax(0,1fr)]">
+              <Card title="当前入住长者" className="flex flex-col h-full" bodyClassName="flex flex-col min-h-0">
+                <div className="flex-1 space-y-2 overflow-y-auto min-h-0">
                   {admissions.map((admission) => (
                 <button
                   key={admission.id}

@@ -38,7 +38,7 @@ export default function DashboardPage() {
           <p className="text-sm text-fg-muted mt-1">{subtitle[domain]}</p>
         </div>
         <div className="flex items-center gap-1 bg-surface-alt rounded-lg p-0.5">
-          {(["医疗", "养老", "儿保"] as Domain[]).map((d) => (
+          {(["养老", "医疗", "儿保"] as Domain[]).map((d) => (
             <button
               key={d}
               onClick={() => switchDomain(d)}
