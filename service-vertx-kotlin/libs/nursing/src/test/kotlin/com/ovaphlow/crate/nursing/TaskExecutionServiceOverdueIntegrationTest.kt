@@ -126,7 +126,7 @@ class TaskExecutionServiceOverdueIntegrationTest {
     private fun fixtureId(suffix: String): String = "${FIXTURE_PREFIX}${suffix}"
 
     /**
-     * 准备测试 fixture：一个患者 + 照护周期 + 多条执行记录。
+     * 准备测试 fixture：创建必需的依赖表和测试执行记录。
      *
      * 创建以下记录：
      *   - PENDING, 计划时间 2 小时前 → 应逾期
@@ -148,15 +148,28 @@ class TaskExecutionServiceOverdueIntegrationTest {
         val taskId = fixtureId("task")
 
         pool.withTransaction { conn ->
-            // 患者（在 public schema 下使用 encounter 表）
+            // 创建 healthcare schema 和 patients 表
             conn.query("""
-                INSERT INTO public.encounters (id, patient_id, status, ward_area_code, bed_number, admission_date)
-                VALUES ('$patientId', '$patientId', 'ACTIVE', 'WARD-01', '001', CURRENT_DATE)
-                ON CONFLICT (id) DO NOTHING
+                CREATE SCHEMA IF NOT EXISTS healthcare
             """).execute()
                 .compose { conn.query("""
-                    INSERT INTO nursing.nursing_service_periods (id, patient_id, start_date, status)
-                    VALUES ('$periodId', '$patientId', CURRENT_DATE, 'ACTIVE')
+                    CREATE TABLE IF NOT EXISTS healthcare.patients (
+                        id VARCHAR(32) PRIMARY KEY,
+                        name VARCHAR NOT NULL DEFAULT '',
+                        gender VARCHAR NOT NULL DEFAULT '',
+                        status VARCHAR DEFAULT 'ACTIVE',
+                        created_at TIMESTAMPTZ DEFAULT now(),
+                        updated_at TIMESTAMPTZ DEFAULT now()
+                    )
+                """).execute() }
+                .compose { conn.query("""
+                    INSERT INTO healthcare.patients (id, name, status)
+                    VALUES ('$patientId', '逾期测试患者', 'ACTIVE')
+                    ON CONFLICT (id) DO NOTHING
+                """).execute() }
+                .compose { conn.query("""
+                    INSERT INTO nursing.nursing_service_periods (id, patient_id, service_type, start_date, status)
+                    VALUES ('$periodId', '$patientId', 'HOME_CARE', CURRENT_DATE, 'ACTIVE')
                     ON CONFLICT (id) DO NOTHING
                 """).execute() }
                 .compose { conn.query("""

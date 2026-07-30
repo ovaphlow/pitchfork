@@ -4,8 +4,8 @@
 
 | 路径 | 作用 | 继续阅读 |
 |---|---|---|
-| `service-vertx-kotlin/` | Kotlin + Vert.x + jOOQ 后端（Trainova、Aceso） | `service-vertx-kotlin/AGENTS.md` 与相关 `skills/` |
-| `ui-astro/` | Astro + React + Tailwind 前端 | `ui-astro/AGENTS.md` 与相关 `skills/` |
+| `service-vertx-kotlin/` | Kotlin + Vert.x + jOOQ 后端（Trainova、Aceso） | `service-vertx-kotlin/AGENTS.md` |
+| `ui-astro/` | Astro + React + Tailwind 前端 | `ui-astro/AGENTS.md` |
 | `docs/` | 架构、规格和实施计划 | `docs/architecture.md` |
 | `service-core-go-stdlib/` | Go 服务 | 不受本文档覆盖 |
 

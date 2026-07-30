@@ -31,7 +31,7 @@ class TaskExecutionRoutesOverdueTest {
     companion object {
         private const val TEST_DB = "aceso_test"
         private const val TEST_PORT = 18422
-        private val BASE_PATH = "/nursing/v1/executions/today"
+        private val BASE_PATH = "/executions/today"
     }
 
     private var server: io.vertx.core.http.HttpServer? = null

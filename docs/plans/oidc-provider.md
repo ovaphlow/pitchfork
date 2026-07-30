@@ -196,7 +196,7 @@ libs/oidc/
 7. 实现 `OidcRoutes`（所有端点，含 discovery/jwks/userinfo/authorize/sessions/logout）。
 8. **每个需要 OIDC 的 app** 在其 `Main.kt` 挂载：`apiRouter.route("/oidc/v1/*").subRouter(OidcRoutes.create(vertx, pool, authConfig))`，并在 `mainRouter` 层挂载 `/.well-known/openid-configuration`（注意：在 `/crate-api/` 之前匹配，或直接在 `apiRouter` 下挂载 `/crate-api/.well-known/openid-configuration`），注入 `issuer` 配置。`issuer` 取值见 §8。（不限定具体 app，后续新增 app 同理接线即可。）
 9. 修改 `PermissionGuard`：增加 RS256 验签支持，具体方案见 §7。
-10. 在 `SKILLS.md` / AGENTS.md 补充 OIDC 端点；更新 `api-conventions` 若需。
+10. 在适用的 `AGENTS.md` 补充 OIDC 端点与约定。
 11. 加最小冒烟测试（以下为 `curl` 示例，假设后端运行在 `localhost:8421`）：
 
 ```bash

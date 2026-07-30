@@ -1,65 +1,38 @@
-# AGENTS.md — service-vertx-kotlin (Skills Index)
+# Kotlin Backend Work Rules
 
-## Overview
+Root [`../AGENTS.md`](../AGENTS.md) defines the API contract, migration bands and
+database-test safety rules. Product composition and configuration are in
+[`../docs/architecture.md`](../docs/architecture.md).
 
-Vert.x Kotlin monorepo with two independently deployable products: Trainova (manufacturing training) and Aceso (healthcare operations). Shared libraries provide platform capabilities; product-domain libraries are mounted only by their owning application.
+## Product Boundaries
 
-## Tech Stack
+- `apps:trainova` serves Trainova on `8421`; `apps:aceso` serves Aceso on `8422`.
+- A product mounts only its own domain libraries. Do not add a cross-product lib
+  dependency to reuse a table or endpoint.
+- `settings`, `messages` and `files` are Nexus capabilities. Consume their HTTP
+  API at `/crate-api/shared/v1/*`; do not recreate the removed Kotlin libraries.
+- `healthcare` is incubating and may not be depended on by an app until it has a
+  complete product API contract.
 
-| Layer | Technology |
-|-------|-----------|
-| Language | Kotlin 2.3.x |
-| Framework | Vert.x 4.5.x (Web, Config, Auth JWT) |
-| Database | PostgreSQL 17 |
-| DB Access | jOOQ 3.19 + Flyway 版本化迁移 |
-| Build | Gradle 8.14 wrapper (Kotlin DSL) |
-| Auth | JWT (HS256) + RSA 加密密码传输 |
-| Logging | SLF4J + Logback + Logstash JSON encoder |
-| JDK | 21+ (toolchain = 25) |
+## Module Changes
 
-## API Base
+- Find the closest existing module before adding code. Routes are thin and use
+  relative paths; the app `Main.kt` mounts `/crate-api/<module>/v1/*`.
+- Put persistence and business rules in services. Use generated jOOQ tables and
+  execute queries through `pool.preparedQuery(DatabaseConfig.sql(query))` with
+  `DatabaseConfig.tuple(query)`.
+- Raw SQL is limited to genuinely dynamic or PostgreSQL-specific queries and
+  must use Kotlin-safe PostgreSQL parameter placeholders.
+- For nullable jOOQ inserts/updates, omit `.set()` rather than binding `null`;
+  use `ctx.select(listOf(...))` when a large select defeats type inference.
 
-所有 API 统一挂载于 `/crate-api/<module>/v1/<resource>`。Trainova 使用 `8421`，Aceso 使用 `8422`。
+## Schema And Verification
 
-## Architecture
-
-```
-service-vertx-kotlin/
-├── apps/
-│   ├── trainova/            # 培训产品入口（8421）
-│   └── aceso/               # 医疗运营产品入口（8422）
-└── libs/
-    ├── auth/                # 登录/注册/JWT
-    ├── permissions/          # RBAC + ReBAC + ABAC
-    ├── knowledge/           # Trainova：知识库
-    ├── skills/              # Trainova：技能/岗位/证书
-    ├── trainings/           # Trainova：课程/章节/作业
-    ├── exams/               # Trainova：题库/试卷/考试记录
-    ├── onsite/              # Trainova：现场设备扫码/离线缓存
-    ├── analytics/           # Trainova：聚合仪表盘
-    ├── inventories/         # Aceso：物资与批次
-    ├── pharmacy/            # Aceso：药房
-    ├── nursing/             # Aceso：护理
-    ├── healthcare/          # 孵化中；未挂载前不得由 app 依赖
-    ├── logging/              # JSON 结构化日志
-    ├── database/            # DB连接/Flyway/jOOQ codegen
-    └── common/              # Ulid, RsaCrypto 工具
-```
-
-`settings`、`messages`、`files` 已迁移至 `service-nexus-shared`。Aceso 与其他
-业务服务必须通过 Nexus 的 HTTP API（`/crate-api/shared/v1/*`）使用这些能力，
-不得恢复对已删除 Kotlin lib 的依赖。
-
-完整产品边界、配置和迁移策略见 [`../docs/architecture.md`](../docs/architecture.md)。
-
-## Available Skills
-
-| Skill | Description |
-|-------|-------------|
-| [Module Pattern](./skills/module-pattern.md) | Routes.kt / Service.kt 代码规范与模式 |
-| [Build & Deploy](./skills/build-and-deploy.md) | Gradle 构建、运行、JAR 过时问题 |
-| [Adding a Module](./skills/adding-module.md) | 新增模块完整 Checklist |
-| [DB Migration](./skills/db-migration.md) | Flyway + jOOQ codegen 流程 |
-| [API Conventions](./skills/api-conventions.md) | 分页/错误/ULID/JSONB 约定 |
-| [Common Pitfalls](./skills/common-pitfalls.md) | 常见陷阱与解决方案 |
-| [SKILLS.md](./SKILLS.md) | API 端点完整参考（自动生成级） |
+- Place schema changes and the module `jooq-config.xml` with the owning library.
+  After a schema change, run
+  `PITCHFORK_DB_PASSWORD=... ./gradlew :libs:<module>:generateJooq`; never commit
+  rendered configuration from `build/tmp`.
+- Default checks are the narrow module compile and relevant non-database tests,
+  for example `./gradlew :libs:<module>:compileKotlin`.
+- A product distribution embeds library JARs. When a distribution is explicitly
+  needed after library changes, rebuild it with `clean` or `--rerun-tasks`.
