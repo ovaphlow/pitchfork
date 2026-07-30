@@ -1,175 +1,51 @@
-# Pitchfork — Monorepo AI Agent Context
-
-## Monorepo 结构
-
-```
-pitchfork/
-├── service-vertx-kotlin/    # Vert.x Kotlin 后端 — Trainova 与 Aceso API
-│   ├── AGENTS.md             # 后端索引 → skills/
-│   └── skills/               # Kotlin 后端技能文档
-├── ui-astro/                 # Astro + React + Tailwind v4 前端
-│   ├── AGENTS.md             # 前端索引 → skills/
-│   └── skills/               # 前端技能文档
-├── docs/                     # 规划文档与设计规格
-│   ├── plans/                # 实施计划
-│   └── specs/                # 设计规格
-└── service-core-go-stdlib/   # Go 标准库服务（不在此文档覆盖范围）
-```
-
-## 服务端口
-
-| 服务 | 端口 | 说明 |
-|------|------|------|
-| Trainova API (`apps:trainova`) | `8421` | 数据库 `ovaphlow`，路径前缀 `/crate-api/*` |
-| Aceso API (`apps:aceso`) | `8422` | 数据库 `aceso`，路径前缀 `/crate-api/*` |
-| PostgreSQL | `5432` | Aceso Compose 容器名 `pitchfork-aceso-db` |
-
-前端应用按需启动：Trainova 的 auth/admin/worker 使用 `4321`/`4322`/`4323`，Aceso 使用 `4324`。
-
-## 开发环境要求
-
-- **JDK**: 25 (toolchain), Kotlin 2.3.x
-- **Node.js**: 20+ (pnpm workspace)
-- **Database**: PostgreSQL 17（Aceso Compose 容器 `pitchfork-aceso-db`，宿主端口 `5432`）
-- **Container**: Podman / Docker
+# Pitchfork — 工作指引
 
 ## 快速导航
 
-| 目录 | 技术栈 | AGENTS.md | Skills |
-|------|--------|-----------|--------|
-| service-vertx-kotlin/ | Kotlin + Vert.x + jOOQ + PostgreSQL | [AGENTS.md](./service-vertx-kotlin/AGENTS.md) | [skills/](./service-vertx-kotlin/skills/) |
-| ui-astro/ | Astro + React 19 + Tailwind v4 + pnpm | [AGENTS.md](./ui-astro/AGENTS.md) | [skills/](./ui-astro/skills/) |
+| 路径 | 作用 | 继续阅读 |
+|---|---|---|
+| `service-vertx-kotlin/` | Kotlin + Vert.x + jOOQ 后端（Trainova、Aceso） | `service-vertx-kotlin/AGENTS.md` 与相关 `skills/` |
+| `ui-astro/` | Astro + React + Tailwind 前端 | `ui-astro/AGENTS.md` 与相关 `skills/` |
+| `docs/` | 架构、规格和实施计划 | `docs/architecture.md` |
+| `service-core-go-stdlib/` | Go 服务 | 不受本文档覆盖 |
 
-完整的产品边界、端口和配置规则见 [docs/architecture.md](./docs/architecture.md)。
+进入子目录工作前，必须读取其适用的 `AGENTS.md`。完整产品边界、依赖和端口见 `docs/architecture.md`。
 
-## 跨项目约定
+| 服务 | 端口 | 数据库 / 说明 |
+|---|---:|---|
+| Trainova API | `8421` | `ovaphlow`，`/crate-api/*` |
+| Aceso API | `8422` | `aceso`，`/crate-api/*` |
+| Aceso PostgreSQL | `5432` | Compose 容器 `pitchfork-aceso-db` |
+| Aceso UI | `4324` | Astro 开发服务仅由用户管理 |
 
-### API 响应格式
+环境：JDK 25 toolchain、Node.js 20+、PostgreSQL 17、Podman 或 Docker。
 
-**分页列表：**
+## 代码发现与命令
 
-```json
-{
-  "records": [...],
-  "meta": { "total": 123 }
-}
-```
+- 代码定位和调用关系优先使用 `codebase-memory-mcp`：先索引，再依次使用 `search_graph`、`trace_path`、`get_code_snippet`；只有图谱不足、查找字符串字面量或非代码文件时才回退文本搜索。
+- 若仓库存在 `.codegraph/` 且工具可用，在手动读取或 `rg` 前使用 CodeGraph 理解符号、文件和调用路径。
+- Bash 命令优先加 `rtk`，例如 `rtk git status`、`rtk rg`、`rtk read`、`rtk pnpm`；不要为普通代码理解使用未经必要验证的全库扫描。
+- 保留用户已有的未提交改动；不得自行执行破坏性 Git 命令、重置工作区或删除宽泛目录。
 
-- 空结果返回 `{ "records": [], "meta": { "total": 0 } }`
+## 共享 API 与数据约定
 
-**单条记录：** 直接返回 JSON 对象，不需要 `records` 包装。
+- 路由格式：`/crate-api/<module>/v1/<resource>`。
+- 列表响应：`{ "records": [...], "meta": { "total": N } }`；空列表仍返回 `records: []` 与 `total: 0`。单条响应直接返回对象，错误响应为 `{ "error": "<message>" }`。
+- 分页参数使用 `limit`、`offset`；ID 使用 26 位 Crockford Base32 ULID。
+- 时间字段为 `created_at`、`updated_at`，类型为 `OffsetDateTime`；扩展 JSONB 字段命名为 `metadata`。
+- 业务枚举遵循既有中文值；不得擅自引入英文 code 或改写已有 API code。
+- 认证使用 JWT Bearer；前端必须通过产品范围的 `@pitchfork/shared/*` 客户端请求 API，以复用 token 注入、JSON 和 401 处理。
 
-**错误响应：**
+## Flyway 与模块边界
 
-```json
-{ "error": "<message>" }
-```
+- 领域表及迁移归属其 lib：`libs/<module>/src/main/resources/db/migration/`。只有依赖该 lib 的 app 才会获得对应迁移。
+- 迁移版本号按号段隔离：`V200+` inventories、`V300+` pharmacy、`V400+` nursing、`V500+` healthcare、`V600+` Trainova 预留；`apps/trainova` 的 `V5–V7` 是基线，不可移动或复制。
+- 不用全局 Flyway `outOfOrder` 解决顺序问题；先核对现有历史和归属。新增 lib 按最大号段递增 100。
+- 跨产品或跨领域改动必须保持最小范围，不把无关迁移、表、权限或后台任务并入小功能计划。
 
-**HTTP 状态码：**
+## 测试与数据库安全
 
-| 状态码 | 含义 |
-|--------|------|
-| `400` | 请求参数错误 |
-| `401` | 未认证 / Token 过期 |
-| `403` | 无权限 |
-| `404` | 资源不存在 |
-| `500` | 服务器内部错误 |
-
-### ID 生成
-
-所有表 ID 使用 **ULID**（26 位 Crockford Base32）：
-
-```
-01J8Z4Q5W6V7B8N9M0K1L2P3Q4
-```
-
-### 路由前缀
-
-后端 API 统一格式：`/crate-api/<module>/v1/<resource>`
-
-### 认证机制
-
-- JWT（HS256）Bearer token 认证
-- 密码传输使用 **RSA 公钥加密**（前端获取公钥 → `jsencrypt` 加密 → 后端解密）
-- 前端产品作用域的 `@pitchfork/shared/*` 客户端会自动处理：
-  - `Content-Type: application/json`
-  - JWT 从 `localStorage` 注入 `Authorization: Bearer <token>`
-  - 401 响应 → 清除 token → 跳转 `/login`
-
-### 分页参数
-
-- 请求：`limit` / `offset`（URL query params）
-- 响应：`{ records: [...], meta: { total: N } }`
-
-### 时间戳
-
-- 列名：`created_at` / `updated_at`
-- 类型：`OffsetDateTime`（带时区）
-
-### JSONB 列
-
-- 扩展属性列统一命名为 `metadata`，类型 `JSONB`
-
-### 中文枚举值
-
-业务枚举使用全中文（而非英文 code）：
-
-| 业务域 | 枚举值 |
-|--------|--------|
-| 课程类型 | `线上` / `线下实操` |
-| 作业下发 | `手动指派` / `自动触发` |
-| 题目类型 | `单选` / `多选` / `判断` / `填空` / `看图识错` |
-| 状态开关 | `启用` / `禁用` |
-| 反馈评价 | `有用` / `没用` |
-
-### Flyway 迁移文件
-
-每个新增领域表由其所属 lib 独立管理迁移，放在自身模块内：
-
-```
-libs/<module>/src/main/resources/db/migration/
-```
-
-Flyway 通过 `classpath:db/migration` 在运行时聚合当前 app 所依赖的所有 lib jar 中的迁移文件。每个 app 仅执行其 `build.gradle.kts` 中依赖范围内的迁移——不依赖某 lib 的 app 不会收到该 lib 的迁移文件。Trainova 的 `apps/trainova` 中 `V5-V7` 是既有基线，不可移动或复制；后续变更必须归属到对应 lib。
-
-版本号采用 `V{100×n}{2位序号}` 号段隔离：
-
-| 号段  | lib         |
-|-------|-------------|
-| V1–99 | 已废弃（原 users） |
-| V100+ | 已废弃（原 settings） |
-| V200+ | inventories |
-| V300+ | pharmacy    |
-| V400+ | nursing     |
-| V500+ | healthcare  |
-| V600+ | Trainova 领域预留号段（knowledge 起） |
-
-新增 lib 时按最大号段步进 100，避免冲突。完整号段表见 [docs/architecture.md](./docs/architecture.md)。
-
-### CLI 工具 — rtk（Token 优化代理）
-
-`rtk` 是安装在 `~/.local/bin/rtk` 的 CLI 代理，用于包装常见命令以减少 token 消耗。
-**在 `bash` 中执行命令时**，优先使用 `rtk` 包装版本：
-
-| 原始命令 | 替换为 | 效果 |
-|----------|--------|------|
-| `ls` | `rtk ls` | 移除颜色、精简输出 |
-| `git status / diff / log` | `rtk git <sub>` | 紧凑 diff，仅变化的行 |
-| `rg <pattern>` | `rtk rg <pattern>` | 去空白、分组输出 |
-| `cat/head/tail <file>` | `rtk read <file>` | 智能过滤、截断 |
-| `find ...` | `rtk find ...` | 紧凑树状输出 |
-| `go test ...` | `rtk go test ...` | 仅显示失败 |
-| `pnpm run / test` | `rtk pnpm ...` | 精简 npm 日志 |
-| `grep ...` | `rtk grep ...` | 去空白、按文件分组 |
-
-**不替换的场景**：管道组合（`rtk` 不解析管道）、交互式命令、不需要输出的命令。
-**无需记忆**：支持的命令会自动匹配；不匹配时 `rtk` 透传原命令。
-
-### 代码理解工具 — codegraph MCP
-
-`codegraph` 是一个 MCP 插件（`codegraph serve --mcp`），提供 `codegraph_explore` 工具用于代码理解。**对于任何代码理解任务**（架构调查、符号查找、变更影响分析、代码库探索），必须优先使用 `mcp__codegraph__codegraph_explore`，而非内置的 `explore` 子代理工具或手动 `grep`/`read_file` 组合。
-
-**使用规则：**
-- 任何涉及"这个模块怎么工作的"、"这个符号定义在哪里"、"这些文件之间的关系"等代码理解问题 → **先用 codegraph_explore**
-- 仅当 codegraph_explore 返回不充分时，回退到内置 `explore` 子代理或 `grep` + `code_index` 组合
-- codegraph_explore 的返回值视同已读取源码，无需再 `read_file` 打开它返回的文件
+- 默认验证只运行不访问数据库的单元测试、编译和前端构建；不要启动或管理 Astro 开发服务。
+- 数据库集成/E2E 仅在用户明确要求，或已提供可恢复测试环境时执行。使用独立、可销毁的测试数据库（如 `aceso_test`），不得连接共享开发库、业务库或生产库。
+- 集成测试必须自包含或清晰记录：Flyway 迁移、fixture 准备、执行命令、认证方式（不记录 token）、断言结果和清理步骤；不能把手工遗留数据或“构建成功”当作数据库验收。
+- 后续优先维护单命令的测试入口来管理测试数据库生命周期；agent 只调用该入口，不自行猜测或反复操作 PostgreSQL。

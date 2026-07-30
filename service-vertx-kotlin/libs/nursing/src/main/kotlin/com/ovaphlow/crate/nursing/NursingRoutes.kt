@@ -8,7 +8,6 @@ import io.vertx.ext.web.handler.BodyHandler
 import io.vertx.sqlclient.Pool
 import org.slf4j.LoggerFactory
 
-class NotFoundException(message: String) : Exception(message)
 
 object NursingRoutes {
 
@@ -22,6 +21,30 @@ object NursingRoutes {
 
         router.get("/health").handler { ctx ->
             ctx.json(JsonObject().put("status", "ok").put("service", "nursing"))
+        }
+
+        // 时间线路由（静态段必须在 /:id 前注册）
+        val timelineService = NursingTimelineService(mPool)
+        router.get("/timeline").handler { ctx ->
+            val params = ctx.request()
+            val limit = params.getParam("limit")?.toIntOrNull()?.coerceIn(1, 100) ?: 50
+            val offset = params.getParam("offset")?.toIntOrNull()?.coerceAtLeast(0) ?: 0
+            timelineService.listTimeline(
+                periodId = params.getParam("period_id"),
+                encounterId = params.getParam("encounter_id"),
+                dateFrom = params.getParam("date_from"),
+                dateTo = params.getParam("date_to"),
+                eventType = params.getParam("event_type"),
+                limit = limit,
+                offset = offset
+            ).onSuccess { ctx.json(it) }
+                .onFailure {
+                    when (it) {
+                        is NotFoundException -> respond(ctx, 404, it.message)
+                        is IllegalArgumentException -> respond(ctx, 400, it.message)
+                        else -> respondError(ctx, it)
+                    }
+                }
         }
 
         router.route("/periods/*").subRouter(ServicePeriodRoutes.create(vertx, mPool))

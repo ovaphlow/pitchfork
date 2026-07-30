@@ -285,6 +285,8 @@ export interface NursingTaskExecution {
   note: string | null;
   metadata: Record<string, unknown> | null;
   created_at: string;
+  consumption_summary?: NursingConsumptionSummary;
+  consumptions?: NursingExecutionConsumption[];
 }
 
 export interface NursingTaskExecutionInput {
@@ -298,9 +300,36 @@ export interface NursingTaskExecutionInput {
   metadata?: Record<string, unknown>;
 }
 
+/** 今日执行记录 — 包含任务摘要和长者姓名 */
+export interface NursingTodayExecution {
+  id: string;
+  task_id: string;
+  planned_time: string | null;
+  actual_time: string | null;
+  executor: string | null;
+  status: string;
+  stock_operation_detail_id: string | null;
+  quantity: number | null;
+  note: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  /** 任务摘要 */
+  task_description: string | null;
+  task_type: string | null;
+  task_frequency_name: string | null;
+  task_period_id: string | null;
+  /** 长者摘要 */
+  patient_id: string | null;
+  patient_name: string | null;
+  consumption_summary?: NursingConsumptionSummary;
+  /** 逾期派生字段 */
+  is_overdue: boolean;
+  overdue_minutes: number | null;
+}
+
 interface NursingPage<T> {
   records: T[];
-  meta: { total: number };
+  meta: { total: number; overdue_total?: number };
 }
 
 function apiBase(): string {
@@ -583,7 +612,7 @@ export function dischargeEncounter(id: string, dischargeDate?: string): Promise<
   });
 }
 
-function nursingQuery(params: Record<string, string | number | undefined>): string {
+function nursingQuery(params: Record<string, string | number | boolean | undefined>): string {
   const query = new URLSearchParams();
   Object.entries(params).forEach(([key, value]) => {
     if (value !== undefined && value !== "") query.set(key, String(value));
@@ -695,9 +724,269 @@ export function createNursingTaskExecution(input: NursingTaskExecutionInput): Pr
   });
 }
 
-export function updateNursingTaskExecutionStatus(id: string, status: string): Promise<NursingTaskExecution> {
+export function updateNursingTaskExecutionStatus(
+  id: string,
+  status: string,
+  note?: string,
+): Promise<NursingTaskExecution> {
+  const body: Record<string, string> = { status };
+  if (note !== undefined && note.trim()) body.note = note.trim();
   return request<NursingTaskExecution>(`/nursing/v1/executions/${encodeURIComponent(id)}/status`, {
     method: "PATCH",
-    body: JSON.stringify({ status }),
+    body: JSON.stringify(body),
+  });
+}
+
+/** 查询今日待办执行记录（带任务和长者摘要） */
+export function listNursingTodayExecutions(params: {
+  date?: string;
+  period_id?: string;
+  executor?: string;
+  status?: string;
+  overdue?: boolean;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<NursingPage<NursingTodayExecution>> {
+  return request<NursingPage<NursingTodayExecution>>(`/nursing/v1/executions/today${nursingQuery(params)}`);
+}
+
+/** 批量生成指定日期范围的执行记录 */
+export function generateNursingExecutions(input: {
+  date_from: string;
+  date_to: string;
+  period_id?: string;
+}): Promise<{ generated: number; skipped: number; errors: unknown[] }> {
+  return request<{ generated: number; skipped: number; errors: unknown[] }>(
+    "/nursing/v1/executions/generate",
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+// ========================================================================
+//  护理记录 (NURSING_RECORD)
+// ========================================================================
+
+/** 护理记录 */
+export interface NursingRecord {
+  id: string;
+  encounter_id: string;
+  period_id: string | null;
+  record_type: string;
+  record_kind: string | null;
+  title: string;
+  content: string | null;
+  record_time: string | null;
+  record_date: string | null;
+  author: string | null;
+  task_execution_id: string | null;
+  task_id: string | null;
+  corrects_record_id: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string | null;
+  updated_at: string | null;
+  /** 仅 get 详情时返回 */
+  is_corrected?: boolean;
+  correction_count?: number;
+}
+
+export interface NursingRecordInput {
+  period_id: string;
+  encounter_id: string;
+  title: string;
+  content: string;
+  record_time?: string;
+  task_execution_id?: string;
+  author?: string;
+}
+
+export interface NursingRecordCorrectionInput {
+  content: string;
+  record_time?: string;
+  author?: string;
+}
+
+/** 时间线事件 */
+export interface NursingTimelineEvent {
+  id: string;
+  event_type: "ASSESSMENT" | "CARE_PLAN" | "TASK" | "TASK_EXECUTION" | "NURSING_RECORD";
+  occurred_at: string;
+  title: string;
+  summary: string | null;
+  actor: string | null;
+  status?: string;
+  source: { resource: string; id: string };
+  metadata: Record<string, unknown>;
+}
+
+// ========================================================================
+//  Healthcare API — Nursing Records
+// ========================================================================
+
+export function createNursingRecord(input: NursingRecordInput): Promise<NursingRecord> {
+  return request<NursingRecord>("/healthcare/v1/nursing-records", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function listNursingRecords(params: {
+  period_id?: string;
+  encounter_id?: string;
+  date_from?: string;
+  date_to?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<NursingPage<NursingRecord>> {
+  const query = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== "") query.set(key, String(value));
+  });
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<NursingPage<NursingRecord>>(`/healthcare/v1/nursing-records${suffix}`);
+}
+
+export function getNursingRecord(id: string): Promise<NursingRecord> {
+  return request<NursingRecord>(`/healthcare/v1/nursing-records/${encodeURIComponent(id)}`);
+}
+
+export function createNursingRecordCorrection(
+  id: string,
+  input: NursingRecordCorrectionInput,
+): Promise<NursingRecord> {
+  return request<NursingRecord>(
+    `/healthcare/v1/nursing-records/${encodeURIComponent(id)}/corrections`,
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+// ========================================================================
+//  Nursing API — Timeline
+// ========================================================================
+
+export function listNursingTimeline(params: {
+  period_id: string;
+  encounter_id: string;
+  date_from?: string;
+  date_to?: string;
+  event_type?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<NursingPage<NursingTimelineEvent>> {
+  return request<NursingPage<NursingTimelineEvent>>(`/nursing/v1/timeline${nursingQuery(params)}`);
+}
+
+// ========================================================================
+//  Nursing API — Consumptions (耗材)
+// ========================================================================
+
+/** 耗材摘要 */
+export interface NursingConsumptionSummary {
+  count: number;
+  warehouse: string;
+  total_cost: number;
+}
+
+/** 耗材明细 */
+export interface NursingExecutionConsumption {
+  id: string;
+  stock_operation_detail_id: string;
+  stock_id: string;
+  material_id: string;
+  material_name?: string;
+  lot_id: string | null;
+  warehouse: string;
+  quantity: number;
+  unit: string;
+  split_quantity: number | null;
+  unit_cost: number;
+  total_cost: number;
+  created_at: string;
+}
+
+/** 耗材输入项 */
+export interface NursingConsumptionInput {
+  stock_id: string;
+  unit: "PACKAGE" | "SPLIT";
+  quantity?: number;
+  split_quantity?: number;
+}
+
+/** 带耗材的状态更新 */
+export function updateNursingTaskExecutionStatusWithConsumptions(
+  id: string,
+  status: string,
+  note?: string,
+  consumptions?: NursingConsumptionInput[],
+): Promise<NursingTaskExecution> {
+  const body: Record<string, unknown> = { status };
+  if (note !== undefined && note.trim()) body.note = note.trim();
+  if (consumptions !== undefined && consumptions.length > 0) body.consumptions = consumptions;
+  return request<NursingTaskExecution>(`/nursing/v1/executions/${encodeURIComponent(id)}/status`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+/** 查询执行耗材明细 */
+export function listNursingExecutionConsumptions(id: string): Promise<NursingPage<NursingExecutionConsumption>> {
+  return request<NursingPage<NursingExecutionConsumption>>(`/nursing/v1/executions/${encodeURIComponent(id)}/consumptions`);
+}
+
+// ========================================================================
+//  Inventory API — Stocks (库存)
+// ========================================================================
+
+/** 可用库存 */
+export interface InventoryStockAvailability {
+  id: string;
+  warehouse: string;
+  material_id: string;
+  material_code: string;
+  material_name: string;
+  category: string;
+  package_unit: string;
+  split_unit: string | null;
+  split_ratio: number | null;
+  lot_id: string | null;
+  batch_no: string | null;
+  expiry_date: string | null;
+  quantity: number;
+  locked_quantity: number;
+  available_quantity: number;
+  unit_cost: number;
+}
+
+export type InventoryStockPage = NursingPage<InventoryStockAvailability>;
+
+/** 查询可用库存 */
+export function listInventoryStocks(params: {
+  warehouse?: string;
+  material_id?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<InventoryStockPage> {
+  return request<InventoryStockPage>(`/inventories/v1/stocks${nursingQuery(params)}`);
+}
+
+/** 查询可用仓库列表 */
+export function listInventoryWarehouses(): Promise<string[]> {
+  return request<string[]>("/inventories/v1/stocks/warehouses");
+}
+
+/** 确认入库 */
+export function confirmInventoryInbound(input: {
+  warehouse: string;
+  items: Array<{
+    material_id: string;
+    lot_id?: string;
+    quantity: number;
+    unit_cost: number;
+  }>;
+  note?: string;
+}) {
+  return request("/inventories/v1/operations/inbound", {
+    method: "POST",
+    body: JSON.stringify(input),
   });
 }

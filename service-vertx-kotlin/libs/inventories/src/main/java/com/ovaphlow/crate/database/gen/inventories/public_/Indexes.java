@@ -5,6 +5,9 @@ package com.ovaphlow.crate.database.gen.inventories.public_;
 
 
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.Lots;
+import com.ovaphlow.crate.database.gen.inventories.public_.tables.StockOperationDetails;
+import com.ovaphlow.crate.database.gen.inventories.public_.tables.StockOperations;
+import com.ovaphlow.crate.database.gen.inventories.public_.tables.Stocks;
 
 import org.jooq.Index;
 import org.jooq.OrderField;
@@ -24,4 +27,11 @@ public class Indexes {
 
     public static final Index IDX_LOTS_BATCH_NO = Internal.createIndex(DSL.name("idx_lots_batch_no"), Lots.LOTS, new OrderField[] { Lots.LOTS.BATCH_NO }, false);
     public static final Index IDX_LOTS_MATERIAL_ID = Internal.createIndex(DSL.name("idx_lots_material_id"), Lots.LOTS, new OrderField[] { Lots.LOTS.MATERIAL_ID }, false);
+    public static final Index IDX_STOCK_OP_DETAILS_MATERIAL = Internal.createIndex(DSL.name("idx_stock_op_details_material"), StockOperationDetails.STOCK_OPERATION_DETAILS, new OrderField[] { StockOperationDetails.STOCK_OPERATION_DETAILS.MATERIAL_ID }, false);
+    public static final Index IDX_STOCK_OP_DETAILS_OPERATION = Internal.createIndex(DSL.name("idx_stock_op_details_operation"), StockOperationDetails.STOCK_OPERATION_DETAILS, new OrderField[] { StockOperationDetails.STOCK_OPERATION_DETAILS.OPERATION_ID }, false);
+    public static final Index IDX_STOCK_OPS_TYPE_STATUS = Internal.createIndex(DSL.name("idx_stock_ops_type_status"), StockOperations.STOCK_OPERATIONS, new OrderField[] { StockOperations.STOCK_OPERATIONS.OPERATION_TYPE, StockOperations.STOCK_OPERATIONS.STATUS }, false);
+    public static final Index IDX_STOCK_OPS_WAREHOUSE = Internal.createIndex(DSL.name("idx_stock_ops_warehouse"), StockOperations.STOCK_OPERATIONS, new OrderField[] { StockOperations.STOCK_OPERATIONS.WAREHOUSE }, false);
+    public static final Index IDX_STOCKS_WH_MATERIAL = Internal.createIndex(DSL.name("idx_stocks_wh_material"), Stocks.STOCKS, new OrderField[] { Stocks.STOCKS.WAREHOUSE, Stocks.STOCKS.MATERIAL_ID }, true);
+    public static final Index IDX_STOCKS_WH_MATERIAL_LOT = Internal.createIndex(DSL.name("idx_stocks_wh_material_lot"), Stocks.STOCKS, new OrderField[] { Stocks.STOCKS.WAREHOUSE, Stocks.STOCKS.MATERIAL_ID, Stocks.STOCKS.LOT_ID }, true);
+    public static final Index IDX_STOCKS_WH_MATERIAL_QUERY = Internal.createIndex(DSL.name("idx_stocks_wh_material_query"), Stocks.STOCKS, new OrderField[] { Stocks.STOCKS.WAREHOUSE, Stocks.STOCKS.MATERIAL_ID }, false);
 }

@@ -9,6 +9,8 @@ logback = "1.5.15"
 logstash-encoder = "8.0"
 bcrypt = "0.10.2"
 scram = "2.1"
+junit = "5.11.4"
+mockk = "1.13.13"
 
 [libraries]
 vertx-core = { module = "io.vertx:vertx-core", version.ref = "vertx" }
@@ -16,6 +18,7 @@ vertx-web = { module = "io.vertx:vertx-web", version.ref = "vertx" }
 vertx-pg-client = { module = "io.vertx:vertx-pg-client", version.ref = "vertx" }
 vertx-config = { module = "io.vertx:vertx-config", version.ref = "vertx" }
 vertx-auth-jwt = { module = "io.vertx:vertx-auth-jwt", version.ref = "vertx" }
+vertx-junit5 = { module = "io.vertx:vertx-junit5", version.ref = "vertx" }
 jooq = { module = "org.jooq:jooq", version.ref = "jooq" }
 postgresql = { module = "org.postgresql:postgresql", version.ref = "postgresql" }
 slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
@@ -27,6 +30,9 @@ jooq-codegen = { module = "org.jooq:jooq-codegen", version.ref = "jooq" }
 jooq-meta = { module = "org.jooq:jooq-meta", version.ref = "jooq" }
 bcrypt = { module = "at.favre.lib:bcrypt", version.ref = "bcrypt" }
 scram-client = { module = "com.ongres.scram:client", version.ref = "scram" }
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit" }
+mockk = { module = "io.mockk:mockk", version.ref = "mockk" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher", version = "1.11.4" }
 
 [plugins]
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }

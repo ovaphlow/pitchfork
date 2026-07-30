@@ -7,6 +7,9 @@ package com.ovaphlow.crate.database.gen.inventories.public_;
 import com.ovaphlow.crate.database.gen.inventories.DefaultCatalog;
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.Lots;
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.Materials;
+import com.ovaphlow.crate.database.gen.inventories.public_.tables.StockOperationDetails;
+import com.ovaphlow.crate.database.gen.inventories.public_.tables.StockOperations;
+import com.ovaphlow.crate.database.gen.inventories.public_.tables.Stocks;
 
 import java.util.Arrays;
 import java.util.List;
@@ -40,6 +43,21 @@ public class Public extends SchemaImpl {
     public final Materials MATERIALS = Materials.MATERIALS;
 
     /**
+     * The table <code>public.stock_operation_details</code>.
+     */
+    public final StockOperationDetails STOCK_OPERATION_DETAILS = StockOperationDetails.STOCK_OPERATION_DETAILS;
+
+    /**
+     * The table <code>public.stock_operations</code>.
+     */
+    public final StockOperations STOCK_OPERATIONS = StockOperations.STOCK_OPERATIONS;
+
+    /**
+     * The table <code>public.stocks</code>.
+     */
+    public final Stocks STOCKS = Stocks.STOCKS;
+
+    /**
      * No further instances allowed
      */
     private Public() {
@@ -56,7 +74,10 @@ public class Public extends SchemaImpl {
     public final List<Table<?>> getTables() {
         return Arrays.asList(
             Lots.LOTS,
-            Materials.MATERIALS
+            Materials.MATERIALS,
+            StockOperationDetails.STOCK_OPERATION_DETAILS,
+            StockOperations.STOCK_OPERATIONS,
+            Stocks.STOCKS
         );
     }
 }

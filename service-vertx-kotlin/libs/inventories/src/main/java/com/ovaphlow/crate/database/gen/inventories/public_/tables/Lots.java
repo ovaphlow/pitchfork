@@ -8,6 +8,8 @@ import com.ovaphlow.crate.database.gen.inventories.public_.Indexes;
 import com.ovaphlow.crate.database.gen.inventories.public_.Keys;
 import com.ovaphlow.crate.database.gen.inventories.public_.Public;
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.Materials.MaterialsPath;
+import com.ovaphlow.crate.database.gen.inventories.public_.tables.StockOperationDetails.StockOperationDetailsPath;
+import com.ovaphlow.crate.database.gen.inventories.public_.tables.Stocks.StocksPath;
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.records.LotsRecord;
 
 import java.time.LocalDate;
@@ -197,6 +199,32 @@ public class Lots extends TableImpl<LotsRecord> {
             _materials = new MaterialsPath(this, Keys.LOTS__LOTS_MATERIAL_ID_FKEY, null);
 
         return _materials;
+    }
+
+    private transient StockOperationDetailsPath _stockOperationDetails;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>public.stock_operation_details</code> table
+     */
+    public StockOperationDetailsPath stockOperationDetails() {
+        if (_stockOperationDetails == null)
+            _stockOperationDetails = new StockOperationDetailsPath(this, null, Keys.STOCK_OPERATION_DETAILS__STOCK_OPERATION_DETAILS_LOT_ID_FKEY.getInverseKey());
+
+        return _stockOperationDetails;
+    }
+
+    private transient StocksPath _stocks;
+
+    /**
+     * Get the implicit to-many join path to the <code>public.stocks</code>
+     * table
+     */
+    public StocksPath stocks() {
+        if (_stocks == null)
+            _stocks = new StocksPath(this, null, Keys.STOCKS__STOCKS_LOT_ID_FKEY.getInverseKey());
+
+        return _stocks;
     }
 
     @Override

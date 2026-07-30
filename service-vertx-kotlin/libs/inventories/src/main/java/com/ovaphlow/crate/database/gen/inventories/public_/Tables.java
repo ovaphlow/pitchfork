@@ -6,6 +6,9 @@ package com.ovaphlow.crate.database.gen.inventories.public_;
 
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.Lots;
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.Materials;
+import com.ovaphlow.crate.database.gen.inventories.public_.tables.StockOperationDetails;
+import com.ovaphlow.crate.database.gen.inventories.public_.tables.StockOperations;
+import com.ovaphlow.crate.database.gen.inventories.public_.tables.Stocks;
 
 
 /**
@@ -23,4 +26,19 @@ public class Tables {
      * The table <code>public.materials</code>.
      */
     public static final Materials MATERIALS = Materials.MATERIALS;
+
+    /**
+     * The table <code>public.stock_operation_details</code>.
+     */
+    public static final StockOperationDetails STOCK_OPERATION_DETAILS = StockOperationDetails.STOCK_OPERATION_DETAILS;
+
+    /**
+     * The table <code>public.stock_operations</code>.
+     */
+    public static final StockOperations STOCK_OPERATIONS = StockOperations.STOCK_OPERATIONS;
+
+    /**
+     * The table <code>public.stocks</code>.
+     */
+    public static final Stocks STOCKS = Stocks.STOCKS;
 }

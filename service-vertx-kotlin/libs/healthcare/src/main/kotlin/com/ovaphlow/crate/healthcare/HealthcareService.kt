@@ -2,9 +2,11 @@ package com.ovaphlow.crate.healthcare
 
 import com.ovaphlow.crate.common.Ulid
 import com.ovaphlow.crate.database.DatabaseConfig
+import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalRecords
 import com.ovaphlow.crate.database.gen.healthcare.tables.Encounters.ENCOUNTERS
 import com.ovaphlow.crate.database.gen.healthcare.tables.Patients.PATIENTS
 import com.ovaphlow.crate.database.gen.healthcare.tables.records.EncountersRecord
+import com.ovaphlow.crate.database.gen.healthcare.tables.records.MedicalRecordsRecord
 import com.ovaphlow.crate.database.gen.healthcare.tables.records.PatientsRecord
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
@@ -412,6 +414,336 @@ class HealthcareService(
         if (body.containsKey("encounter_no")) throw IllegalArgumentException("encounter_no cannot be modified")
         if (body.containsKey("status")) validStatus(body.getString("status"), encounterStatuses - "DISCHARGED", "encounter status")
         if (body.containsKey("metadata")) jsonObject(body, "metadata", true)
+    }
+
+    // ========================================================================
+    //  护理记录 (NURSING_RECORD)
+    // ========================================================================
+
+    /** 创建日常护理记录 */
+    fun createNursingRecord(body: JsonObject): Future<JsonObject> {
+        val periodId = try { requiredText(body, "period_id") } catch (e: IllegalArgumentException) { return Future.failedFuture(e) }
+        val encounterId = try { requiredText(body, "encounter_id") } catch (e: IllegalArgumentException) { return Future.failedFuture(e) }
+        val title = try { requiredText(body, "title") } catch (e: IllegalArgumentException) { return Future.failedFuture(e) }
+        val content = body.getString("content")?.trim() ?: return Future.failedFuture(IllegalArgumentException("content is required"))
+        if (content.isBlank()) return Future.failedFuture(IllegalArgumentException("content is required"))
+
+        val taskExecId = body.getString("task_execution_id")?.trim()?.takeIf { it.isNotBlank() }
+        val recordTimeStr = body.getString("record_time")
+        val now = OffsetDateTime.now()
+
+        // 验证周期与入住归属
+        return validatePeriodEncounter(periodId, encounterId).compose { (periodPatientId, encounterPatientId) ->
+            if (periodPatientId != encounterPatientId)
+                return@compose Future.failedFuture(IllegalArgumentException("period and encounter belong to different patients"))
+
+            // 验证 task_execution_id 归属（如果提供）
+            if (taskExecId != null) validateTaskExecutionBelonging(taskExecId, periodId, encounterId)
+            else Future.succeededFuture<String?>(null)
+        }.compose { taskId ->
+            // 解析 record_time
+            val recordTime = if (recordTimeStr != null) {
+                try {
+                    val t = OffsetDateTime.parse(recordTimeStr)
+                    if (t.isAfter(OffsetDateTime.now())) return@compose Future.failedFuture(IllegalArgumentException("record_time cannot be in the future"))
+                    t
+                } catch (_: RuntimeException) {
+                    return@compose Future.failedFuture(IllegalArgumentException("record_time must be an ISO-8601 offset date-time"))
+                }
+            } else {
+                OffsetDateTime.now()
+            }
+            val recordDate = recordTime.toLocalDate()
+            val recordKind = if (taskExecId != null) "EXECUTION" else "MANUAL"
+            val author = body.getString("author")?.trim()?.takeIf { it.isNotBlank() } ?: ""
+
+            // 构建受控 metadata
+            val meta = JsonObject()
+                .put("period_id", periodId)
+                .put("record_kind", recordKind)
+                .put("record_time", recordTime.toString())
+            if (taskExecId != null) meta.put("task_execution_id", taskExecId)
+            if (taskId != null) meta.put("task_id", taskId)
+
+            val id = Ulid.generate()
+            val insertQuery = ctx.insertInto(MedicalRecords.MEDICAL_RECORDS)
+                .set(MedicalRecords.MEDICAL_RECORDS.ID, id)
+                .set(MedicalRecords.MEDICAL_RECORDS.ENCOUNTER_ID, encounterId)
+                .set(MedicalRecords.MEDICAL_RECORDS.RECORD_TYPE, "NURSING_RECORD")
+                .set(MedicalRecords.MEDICAL_RECORDS.TITLE, title.take(100))
+                .set(MedicalRecords.MEDICAL_RECORDS.CONTENT, content)
+                .set(MedicalRecords.MEDICAL_RECORDS.CONTENT_BLOCKS, org.jooq.JSONB.valueOf("[]"))
+                .set(MedicalRecords.MEDICAL_RECORDS.PHYSICIAN, author)
+                .set(MedicalRecords.MEDICAL_RECORDS.RECORD_DATE, recordDate)
+                .set(MedicalRecords.MEDICAL_RECORDS.METADATA, org.jooq.JSONB.valueOf(meta.encode()))
+                .set(MedicalRecords.MEDICAL_RECORDS.CREATED_AT, now)
+                .set(MedicalRecords.MEDICAL_RECORDS.UPDATED_AT, now)
+
+            execute(pool, insertQuery).map {
+                nursingRecordResponse(id, encounterId, periodId, recordKind, title, content, recordTime, recordDate, author, taskExecId, taskId, null, now)
+            }.recover { err ->
+                // 唯一索引冲突 → 409
+                val msg = err.message ?: ""
+                if (msg.contains("idx_nursing_record_execution") || msg.contains("duplicate key")) {
+                    Future.failedFuture(DuplicateNursingRecordException("nursing record already exists for task execution"))
+                } else {
+                    Future.failedFuture(err)
+                }
+            }
+        }
+    }
+
+    /** 查询护理记录 */
+    fun listNursingRecords(
+        periodId: String?,
+        encounterId: String?,
+        dateFrom: String?,
+        dateTo: String?,
+        limit: Int,
+        offset: Int,
+    ): Future<JsonObject> {
+        val conditions = mutableListOf<org.jooq.Condition>()
+        conditions.add(MedicalRecords.MEDICAL_RECORDS.RECORD_TYPE.eq("NURSING_RECORD"))
+        encounterId?.takeIf(String::isNotBlank)?.let { conditions.add(MedicalRecords.MEDICAL_RECORDS.ENCOUNTER_ID.eq(it)) }
+
+        val metadataField = MedicalRecords.MEDICAL_RECORDS.METADATA
+        periodId?.takeIf(String::isNotBlank)?.let { pid ->
+            conditions.add(DSL.field("{0} ->> {1}", String::class.java, metadataField, DSL.`val`("period_id")).eq(pid))
+        }
+        dateFrom?.takeIf(String::isNotBlank)?.let { d ->
+            try { conditions.add(MedicalRecords.MEDICAL_RECORDS.RECORD_DATE.ge(LocalDate.parse(d))) }
+            catch (_: Exception) { throw IllegalArgumentException("invalid date_from") }
+        }
+        dateTo?.takeIf(String::isNotBlank)?.let { d ->
+            try { conditions.add(MedicalRecords.MEDICAL_RECORDS.RECORD_DATE.le(LocalDate.parse(d))) }
+            catch (_: Exception) { throw IllegalArgumentException("invalid date_to") }
+        }
+
+        val countQuery = ctx.select(DSL.count().`as`("total"))
+            .from(MedicalRecords.MEDICAL_RECORDS).where(conditions)
+        val dataQuery = ctx.selectFrom(MedicalRecords.MEDICAL_RECORDS)
+            .where(conditions)
+            .orderBy(MedicalRecords.MEDICAL_RECORDS.RECORD_DATE.desc(), MedicalRecords.MEDICAL_RECORDS.CREATED_AT.desc())
+            .limit(limit)
+            .offset(offset)
+
+        return execute(pool, countQuery).compose { countRows ->
+            val total = countRows.iterator().next().getLong("total") ?: 0L
+            execute(pool, dataQuery).map { rows ->
+                JsonObject()
+                    .put("records", JsonArray(rows.map { nursingRecordFromRow(it) }))
+                    .put("meta", JsonObject().put("total", total))
+            }
+        }
+    }
+
+    /** 获取单条护理记录 */
+    fun getNursingRecord(id: String): Future<JsonObject> {
+        val query = ctx.selectFrom(MedicalRecords.MEDICAL_RECORDS)
+            .where(MedicalRecords.MEDICAL_RECORDS.ID.eq(id))
+            .and(MedicalRecords.MEDICAL_RECORDS.RECORD_TYPE.eq("NURSING_RECORD"))
+        return execute(pool, query).compose { rows ->
+            val row = rows.iterator().asSequence().firstOrNull()
+                ?: return@compose Future.failedFuture(HealthcareNotFoundException("nursing record not found: $id"))
+            // 检查更正记录
+            val correctionQuery = ctx.select(DSL.count().`as`("total"))
+                .from(MedicalRecords.MEDICAL_RECORDS)
+                .where(DSL.field("{0} ->> {1}", String::class.java, MedicalRecords.MEDICAL_RECORDS.METADATA, DSL.`val`("corrects_record_id")).eq(id))
+                .and(MedicalRecords.MEDICAL_RECORDS.RECORD_TYPE.eq("NURSING_RECORD"))
+            execute(pool, correctionQuery).map { correctionRows ->
+                val correctionCount = correctionRows.iterator().next().getLong("total") ?: 0L
+                val record = nursingRecordFromRow(row)
+                if (correctionCount > 0) {
+                    record.put("is_corrected", true)
+                    record.put("correction_count", correctionCount)
+                }
+                record
+            }
+        }
+    }
+
+    /** 创建更正记录 */
+    fun createNursingRecordCorrection(recordId: String, body: JsonObject): Future<JsonObject> {
+        val content = body.getString("content")?.trim() ?: return Future.failedFuture(IllegalArgumentException("content is required"))
+        if (content.isBlank()) return Future.failedFuture(IllegalArgumentException("content is required"))
+
+        val recordTimeStr = body.getString("record_time")
+        val now = OffsetDateTime.now()
+
+        return getNursingRecord(recordId).compose { original ->
+            // 只允许更正 NURSING_RECORD
+            if (original.getString("record_type") != "NURSING_RECORD")
+                return@compose Future.failedFuture(IllegalArgumentException("only NURSING_RECORD can be corrected"))
+
+            val encounterId = original.getString("encounter_id")
+            val periodId = original.getJsonObject("metadata")?.getString("period_id")
+            val recordKind = original.getJsonObject("metadata")?.getString("record_kind")
+            val taskExecId = original.getJsonObject("metadata")?.getString("task_execution_id")
+            val taskId = original.getJsonObject("metadata")?.getString("task_id")
+            val originalTitle = original.getString("title") ?: ""
+            val recordTime = if (recordTimeStr != null) {
+                try {
+                    val t = OffsetDateTime.parse(recordTimeStr)
+                    if (t.isAfter(OffsetDateTime.now())) return@compose Future.failedFuture(IllegalArgumentException("record_time cannot be in the future"))
+                    t
+                } catch (_: RuntimeException) {
+                    return@compose Future.failedFuture(IllegalArgumentException("record_time must be an ISO-8601 offset date-time"))
+                }
+            } else {
+                OffsetDateTime.now()
+            }
+            val recordDate = recordTime.toLocalDate()
+
+            // 构建受控 metadata
+            val meta = JsonObject()
+                .put("period_id", periodId ?: "")
+                .put("record_kind", "CORRECTION")
+                .put("record_time", recordTime.toString())
+                .put("corrects_record_id", recordId)
+            if (taskExecId != null) meta.put("task_execution_id", taskExecId)
+            if (taskId != null) meta.put("task_id", taskId)
+
+            val id = Ulid.generate()
+            val author = body.getString("author")?.trim()?.takeIf { it.isNotBlank() } ?: ""
+            val correctionTitle = "更正：${originalTitle}"
+
+            val insertQuery = ctx.insertInto(MedicalRecords.MEDICAL_RECORDS)
+                .set(MedicalRecords.MEDICAL_RECORDS.ID, id)
+                .set(MedicalRecords.MEDICAL_RECORDS.ENCOUNTER_ID, encounterId ?: "")
+                .set(MedicalRecords.MEDICAL_RECORDS.RECORD_TYPE, "NURSING_RECORD")
+                .set(MedicalRecords.MEDICAL_RECORDS.TITLE, correctionTitle.take(100))
+                .set(MedicalRecords.MEDICAL_RECORDS.CONTENT, content)
+                .set(MedicalRecords.MEDICAL_RECORDS.CONTENT_BLOCKS, org.jooq.JSONB.valueOf("[]"))
+                .set(MedicalRecords.MEDICAL_RECORDS.PHYSICIAN, author)
+                .set(MedicalRecords.MEDICAL_RECORDS.RECORD_DATE, recordDate)
+                .set(MedicalRecords.MEDICAL_RECORDS.METADATA, org.jooq.JSONB.valueOf(meta.encode()))
+                .set(MedicalRecords.MEDICAL_RECORDS.CREATED_AT, now)
+                .set(MedicalRecords.MEDICAL_RECORDS.UPDATED_AT, now)
+
+            execute(pool, insertQuery).map {
+                nursingRecordResponse(id, encounterId ?: "", periodId ?: "", "CORRECTION", correctionTitle.take(100), content, recordTime, recordDate, author, taskExecId, taskId, recordId, now)
+            }
+        }
+    }
+
+    // ——— 护理记录私有辅助方法 ———
+
+    private fun nursingRecordResponse(
+        id: String, encounterId: String, periodId: String?, recordKind: String?,
+        title: String, content: String, recordTime: OffsetDateTime, recordDate: LocalDate,
+        author: String, taskExecutionId: String?, taskId: String?,
+        correctsRecordId: String?, now: OffsetDateTime,
+    ): JsonObject {
+        val meta = JsonObject()
+            .put("period_id", periodId)
+            .put("record_kind", recordKind)
+            .put("record_time", recordTime.toString())
+        if (taskExecutionId != null) meta.put("task_execution_id", taskExecutionId)
+        if (taskId != null) meta.put("task_id", taskId)
+        if (correctsRecordId != null) meta.put("corrects_record_id", correctsRecordId)
+
+        return JsonObject()
+            .put("id", id)
+            .put("encounter_id", encounterId)
+            .put("period_id", periodId)
+            .put("record_type", "NURSING_RECORD")
+            .put("record_kind", recordKind)
+            .put("title", title)
+            .put("content", content)
+            .put("record_time", recordTime.toString())
+            .put("record_date", recordDate.toString())
+            .put("author", author)
+            .put("task_execution_id", taskExecutionId)
+            .put("task_id", taskId)
+            .put("corrects_record_id", correctsRecordId)
+            .put("metadata", meta)
+            .put("created_at", now.toString())
+            .put("updated_at", now.toString())
+    }
+
+    private fun nursingRecordFromRow(row: io.vertx.sqlclient.Row): JsonObject {
+        val id = row.getString("id") ?: ""
+        val encounterId = row.getString("encounter_id") ?: ""
+        val title = row.getString("title") ?: ""
+        val content = row.getString("content")
+        val physician = row.getString("physician") ?: ""
+        val recordDate = row.getLocalDate("record_date")
+        val createdAt = row.getOffsetDateTime("created_at")
+        val rowMeta = row.getValue("metadata") as? JsonObject ?: JsonObject()
+
+        val periodId = rowMeta.getString("period_id")
+        val recordKind = rowMeta.getString("record_kind")
+        val recordTimeStr = rowMeta.getString("record_time")
+        val taskExecutionId = rowMeta.getString("task_execution_id")
+        val taskId = rowMeta.getString("task_id")
+        val correctsRecordId = rowMeta.getString("corrects_record_id")
+
+        return JsonObject()
+            .put("id", id)
+            .put("encounter_id", encounterId)
+            .put("period_id", periodId)
+            .put("record_type", "NURSING_RECORD")
+            .put("record_kind", recordKind)
+            .put("title", title)
+            .put("content", content)
+            .put("record_time", recordTimeStr)
+            .put("record_date", recordDate?.toString())
+            .put("author", physician)
+            .put("task_execution_id", taskExecutionId)
+            .put("task_id", taskId)
+            .put("corrects_record_id", correctsRecordId)
+            .put("metadata", rowMeta)
+            .put("created_at", createdAt?.toString())
+            .put("updated_at", row.getOffsetDateTime("updated_at")?.toString())
+    }
+
+    /** 验证 period_id 和 encounter_id 的 patient_id 一致性 */
+    private fun validatePeriodEncounter(periodId: String, encounterId: String): Future<Pair<String?, String?>> {
+        val periodQuery = ctx.select(DSL.field("patient_id"))
+            .from(DSL.table(DSL.name("nursing", "nursing_service_periods")))
+            .where(DSL.field("id").eq(periodId))
+        val encounterQuery = ctx.select(ENCOUNTERS.PATIENT_ID)
+            .from(ENCOUNTERS)
+            .where(ENCOUNTERS.ID.eq(encounterId))
+
+        return execute(pool, periodQuery).compose { periodRows ->
+            val periodRow = periodRows.iterator().asSequence().firstOrNull()
+                ?: return@compose Future.failedFuture(HealthcareNotFoundException("nursing service period not found: $periodId"))
+            val periodPatientId = periodRow.getString("patient_id")
+            execute(pool, encounterQuery).map { encounterRows ->
+                val encounterRow = encounterRows.iterator().asSequence().firstOrNull()
+                    ?: throw HealthcareNotFoundException("encounter not found: $encounterId")
+                val encounterPatientId = encounterRow.getString("patient_id")
+                Pair(periodPatientId, encounterPatientId)
+            }
+        }
+    }
+
+    /** 验证 task_execution_id 归属 */
+    private fun validateTaskExecutionBelonging(taskExecId: String, periodId: String, encounterId: String): Future<String?> {
+        val query = ctx.select(
+            DSL.field("t.id"),
+            DSL.field("t.period_id"),
+            DSL.field("t.encounter_id")
+        )
+            .from(DSL.table(DSL.name("nursing", "nursing_task_executions")).`as`("e"))
+            .join(DSL.table(DSL.name("nursing", "nursing_tasks")).`as`("t"))
+            .on(DSL.field("e.task_id").eq(DSL.field("t.id")))
+            .where(DSL.field("e.id").eq(taskExecId))
+
+        return execute(pool, query).compose { rows ->
+            val row = rows.iterator().asSequence().firstOrNull()
+                ?: return@compose Future.failedFuture(HealthcareNotFoundException("task execution not found: $taskExecId"))
+            val taskId = row.getString("id")
+            val taskPeriodId = row.getString("period_id")
+            val taskEncounterId = row.getString("encounter_id")
+
+            if (taskPeriodId != null && taskPeriodId != periodId)
+                return@compose Future.failedFuture(IllegalArgumentException("task execution does not belong to the specified period"))
+            if (taskEncounterId != null && taskEncounterId != encounterId)
+                return@compose Future.failedFuture(IllegalArgumentException("task execution does not belong to the specified encounter"))
+            return@compose Future.succeededFuture(taskId)
+        }
     }
 
     private fun execute(client: SqlClient, query: Query): Future<RowSet<Row>> =

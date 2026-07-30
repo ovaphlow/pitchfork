@@ -6,8 +6,14 @@ package com.ovaphlow.crate.database.gen.inventories.public_;
 
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.Lots;
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.Materials;
+import com.ovaphlow.crate.database.gen.inventories.public_.tables.StockOperationDetails;
+import com.ovaphlow.crate.database.gen.inventories.public_.tables.StockOperations;
+import com.ovaphlow.crate.database.gen.inventories.public_.tables.Stocks;
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.records.LotsRecord;
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.records.MaterialsRecord;
+import com.ovaphlow.crate.database.gen.inventories.public_.tables.records.StockOperationDetailsRecord;
+import com.ovaphlow.crate.database.gen.inventories.public_.tables.records.StockOperationsRecord;
+import com.ovaphlow.crate.database.gen.inventories.public_.tables.records.StocksRecord;
 
 import org.jooq.ForeignKey;
 import org.jooq.TableField;
@@ -31,10 +37,19 @@ public class Keys {
     public static final UniqueKey<LotsRecord> LOTS_PKEY = Internal.createUniqueKey(Lots.LOTS, DSL.name("lots_pkey"), new TableField[] { Lots.LOTS.ID }, true);
     public static final UniqueKey<MaterialsRecord> MATERIALS_CODE_KEY = Internal.createUniqueKey(Materials.MATERIALS, DSL.name("materials_code_key"), new TableField[] { Materials.MATERIALS.CODE }, true);
     public static final UniqueKey<MaterialsRecord> MATERIALS_PKEY = Internal.createUniqueKey(Materials.MATERIALS, DSL.name("materials_pkey"), new TableField[] { Materials.MATERIALS.ID }, true);
+    public static final UniqueKey<StockOperationDetailsRecord> STOCK_OPERATION_DETAILS_PKEY = Internal.createUniqueKey(StockOperationDetails.STOCK_OPERATION_DETAILS, DSL.name("stock_operation_details_pkey"), new TableField[] { StockOperationDetails.STOCK_OPERATION_DETAILS.ID }, true);
+    public static final UniqueKey<StockOperationsRecord> STOCK_OPERATIONS_ORDER_NO_KEY = Internal.createUniqueKey(StockOperations.STOCK_OPERATIONS, DSL.name("stock_operations_order_no_key"), new TableField[] { StockOperations.STOCK_OPERATIONS.ORDER_NO }, true);
+    public static final UniqueKey<StockOperationsRecord> STOCK_OPERATIONS_PKEY = Internal.createUniqueKey(StockOperations.STOCK_OPERATIONS, DSL.name("stock_operations_pkey"), new TableField[] { StockOperations.STOCK_OPERATIONS.ID }, true);
+    public static final UniqueKey<StocksRecord> STOCKS_PKEY = Internal.createUniqueKey(Stocks.STOCKS, DSL.name("stocks_pkey"), new TableField[] { Stocks.STOCKS.ID }, true);
 
     // -------------------------------------------------------------------------
     // FOREIGN KEY definitions
     // -------------------------------------------------------------------------
 
     public static final ForeignKey<LotsRecord, MaterialsRecord> LOTS__LOTS_MATERIAL_ID_FKEY = Internal.createForeignKey(Lots.LOTS, DSL.name("lots_material_id_fkey"), new TableField[] { Lots.LOTS.MATERIAL_ID }, Keys.MATERIALS_PKEY, new TableField[] { Materials.MATERIALS.ID }, true);
+    public static final ForeignKey<StockOperationDetailsRecord, LotsRecord> STOCK_OPERATION_DETAILS__STOCK_OPERATION_DETAILS_LOT_ID_FKEY = Internal.createForeignKey(StockOperationDetails.STOCK_OPERATION_DETAILS, DSL.name("stock_operation_details_lot_id_fkey"), new TableField[] { StockOperationDetails.STOCK_OPERATION_DETAILS.LOT_ID }, Keys.LOTS_PKEY, new TableField[] { Lots.LOTS.ID }, true);
+    public static final ForeignKey<StockOperationDetailsRecord, MaterialsRecord> STOCK_OPERATION_DETAILS__STOCK_OPERATION_DETAILS_MATERIAL_ID_FKEY = Internal.createForeignKey(StockOperationDetails.STOCK_OPERATION_DETAILS, DSL.name("stock_operation_details_material_id_fkey"), new TableField[] { StockOperationDetails.STOCK_OPERATION_DETAILS.MATERIAL_ID }, Keys.MATERIALS_PKEY, new TableField[] { Materials.MATERIALS.ID }, true);
+    public static final ForeignKey<StockOperationDetailsRecord, StockOperationsRecord> STOCK_OPERATION_DETAILS__STOCK_OPERATION_DETAILS_OPERATION_ID_FKEY = Internal.createForeignKey(StockOperationDetails.STOCK_OPERATION_DETAILS, DSL.name("stock_operation_details_operation_id_fkey"), new TableField[] { StockOperationDetails.STOCK_OPERATION_DETAILS.OPERATION_ID }, Keys.STOCK_OPERATIONS_PKEY, new TableField[] { StockOperations.STOCK_OPERATIONS.ID }, true);
+    public static final ForeignKey<StocksRecord, LotsRecord> STOCKS__STOCKS_LOT_ID_FKEY = Internal.createForeignKey(Stocks.STOCKS, DSL.name("stocks_lot_id_fkey"), new TableField[] { Stocks.STOCKS.LOT_ID }, Keys.LOTS_PKEY, new TableField[] { Lots.LOTS.ID }, true);
+    public static final ForeignKey<StocksRecord, MaterialsRecord> STOCKS__STOCKS_MATERIAL_ID_FKEY = Internal.createForeignKey(Stocks.STOCKS, DSL.name("stocks_material_id_fkey"), new TableField[] { Stocks.STOCKS.MATERIAL_ID }, Keys.MATERIALS_PKEY, new TableField[] { Materials.MATERIALS.ID }, true);
 }

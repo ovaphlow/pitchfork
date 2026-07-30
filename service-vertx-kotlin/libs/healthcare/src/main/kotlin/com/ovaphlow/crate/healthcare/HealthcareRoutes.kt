@@ -9,6 +9,7 @@ import io.vertx.sqlclient.Pool
 import org.slf4j.LoggerFactory
 
 class HealthcareNotFoundException(message: String) : Exception(message)
+class DuplicateNursingRecordException(message: String) : Exception(message)
 
 object HealthcareRoutes {
     private val log = LoggerFactory.getLogger(HealthcareRoutes::class.java)
@@ -97,6 +98,35 @@ object HealthcareRoutes {
                 .onFailure { respondCreateFailure(ctx, it) }
         }
 
+        // ——— 护理记录 (NURSING_RECORD) ———
+        router.post("/nursing-records").handler { ctx ->
+            service.createNursingRecord(body(ctx))
+                .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                .onFailure { respondCreateFailure(ctx, it) }
+        }
+        router.get("/nursing-records").handler { ctx ->
+            val params = ctx.request()
+            service.listNursingRecords(
+                periodId = params.getParam("period_id"),
+                encounterId = params.getParam("encounter_id"),
+                dateFrom = params.getParam("date_from"),
+                dateTo = params.getParam("date_to"),
+                limit = limit(ctx),
+                offset = offset(ctx),
+            ).onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.get("/nursing-records/:id").handler { ctx ->
+            service.getNursingRecord(requiredId(ctx))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.post("/nursing-records/:id/corrections").handler { ctx ->
+            service.createNursingRecordCorrection(requiredId(ctx), body(ctx))
+                .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                .onFailure { respondCreateFailure(ctx, it) }
+        }
+
         return router
     }
 
@@ -127,6 +157,8 @@ object HealthcareRoutes {
         val message = error.message?.lowercase() ?: ""
         if (message.contains("encounter_no") || message.contains("uq_encounters_encounter_no")) {
             respond(ctx, 409, "encounter_no already exists")
+        } else if (error is DuplicateNursingRecordException) {
+            respond(ctx, 409, error.message ?: "nursing record already exists for task execution")
         } else {
             respondFailure(ctx, error)
         }
