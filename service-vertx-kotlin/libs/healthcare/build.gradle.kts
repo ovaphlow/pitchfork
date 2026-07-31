@@ -8,6 +8,7 @@ val jooqCodegen by configurations.registering
 dependencies {
     api(project(":libs:database"))
     api(project(":libs:common"))
+    api(project(":libs:nursing"))
     api(libs.vertx.web)
     api(libs.jooq)
     implementation(libs.slf4j.api)

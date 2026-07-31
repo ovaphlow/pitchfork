@@ -30,10 +30,33 @@ object ServicePeriodRoutes {
                 patientId = params.getParam("patient_id"),
                 serviceType = params.getParam("service_type"),
                 status = params.getParam("status"),
+                encounterId = params.getParam("encounter_id"),
                 limit = params.getParam("limit")?.toIntOrNull() ?: 50,
                 offset = params.getParam("offset")?.toIntOrNull() ?: 0
             ).onSuccess { ctx.json(it) }
                 .onFailure { NursingRoutes.respondError(ctx, it) }
+        }
+
+        // 养老入住补建周期（静态段必须在 /:id 动态路由前注册）
+        router.post("/elderly-admission").handler { ctx ->
+            val b = NursingRoutes.body(ctx)
+            val encounterId = b.getString("encounter_id")
+            if (encounterId.isNullOrBlank()) {
+                NursingRoutes.respond(ctx, 400, "encounter_id is required")
+                return@handler
+            }
+            service.enrollElderlyAdmission(encounterId)
+                .onSuccess { (created, period) ->
+                    ctx.response().setStatusCode(if (created) 201 else 200)
+                    ctx.json(period)
+                }
+                .onFailure {
+                    when (it) {
+                        is IllegalArgumentException -> NursingRoutes.respond(ctx, 400, it.message)
+                        is ConflictException -> NursingRoutes.respond(ctx, 409, it.message)
+                        else -> NursingRoutes.respondError(ctx, it)
+                    }
+                }
         }
 
         router.get("/:id").handler { ctx ->

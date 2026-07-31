@@ -5,9 +5,9 @@ import {
   createNursingPlan,
   createNursingRecord,
   createNursingRecordCorrection,
-  createNursingServicePeriod,
   createNursingTask,
   createNursingTaskExecution,
+  enrollElderlyAdmissionCarePeriod,
   getCurrentSession,
   getNursingPlan,
   getNursingRecord,
@@ -43,6 +43,7 @@ import {
   type NursingConsumptionInput,
   type NursingExecutionConsumption,
 } from "@pitchfork/shared/aceso";
+import NursingExecutionStatisticsPanel from "./NursingExecutionStatisticsPanel";
 
 type Tab = "overview" | "assessments" | "plans" | "tasks" | "timeline";
 type MainView = "today" | "resident";
@@ -266,6 +267,8 @@ export default function NursingPage() {
   const [actionSaving, setActionSaving] = useState(false);
   // 操作弹窗类型：null | "complete" | "skip" | "cancel"
   const [actionModal, setActionModal] = useState<"complete" | "skip" | "cancel" | null>(null);
+  // ——— 统计面板版本号 ———
+  const [statReloadKey, setStatReloadKey] = useState(0);
   // ——— 耗材详情弹窗 ———
   const [consumptionDetailOpen, setConsumptionDetailOpen] = useState(false);
   const [consumptionDetail, setConsumptionDetail] = useState<NursingExecutionConsumption[]>([]);
@@ -315,7 +318,8 @@ export default function NursingPage() {
     setPageError("");
     setActionError("");
     try {
-      const periodResponse = await listNursingServicePeriods({ patient_id: admission.patient_id, status: "ACTIVE", limit: 10 });
+      // 精确加载与所选入住记录绑定的周期，绝不按同一患者的第一条活动周期猜测
+      const periodResponse = await listNursingServicePeriods({ encounter_id: admission.id, limit: 10 });
       const currentPeriod = periodResponse.records[0] ?? null;
       setPeriod(currentPeriod);
       if (!currentPeriod) {
@@ -538,6 +542,7 @@ export default function NursingPage() {
     try {
       await updateNursingTaskExecutionStatus(execution.id, "IN_PROGRESS");
       await loadTodayExecutions();
+      setStatReloadKey((k) => k + 1);
     } catch (error) {
       setActionError(errorMessage(error, "操作失败"));
     } finally {
@@ -607,6 +612,7 @@ export default function NursingPage() {
       setActionTarget(null);
       setActionNote("");
       await loadTodayExecutions();
+      setStatReloadKey((k) => k + 1);
     } catch (error) {
       setActionError(errorMessage(error, "操作失败"));
     } finally {
@@ -673,7 +679,7 @@ export default function NursingPage() {
         <div className="flex flex-wrap items-center gap-1">
           {executionStatusBadge(row.status)}
           {row.is_overdue && row.overdue_minutes != null && (
-            <span className="inline-flex items-center rounded-md bg-red-100 px-1.5 py-0.5 text-xs font-medium text-red-700 whitespace-nowrap">
+            <span className="inline-flex items-center rounded-md bg-red-100 px-1.5 py-0.5 text-xs font-medium text-red-700">
               {formatOverdueMinutes(row.overdue_minutes)}
             </span>
           )}
@@ -732,14 +738,11 @@ export default function NursingPage() {
     setSaving(true);
     setActionError("");
     try {
-      await createNursingServicePeriod({
-        patient_id: selectedAdmission.patient_id,
-        service_type: "COMMUNITY_CARE",
-        start_date: today(),
-      });
+      // 受控恢复：为历史活动入住幂等补建养老照护周期，绝不回退创建社区照护周期
+      await enrollElderlyAdmissionCarePeriod(selectedAdmission.id);
       await loadResidentData(selectedAdmission);
     } catch (error) {
-      setActionError(errorMessage(error, "无法建立照护周期"));
+      setActionError(errorMessage(error, "无法建立养老照护周期"));
     } finally {
       setSaving(false);
     }
@@ -995,13 +998,17 @@ export default function NursingPage() {
               <Input label="日期" type="date" value={todayDate} onChange={(event) => setTodayDate(event.target.value)} />
               <div className="flex flex-col gap-1.5">
                 <label className="text-sm font-medium text-fg-muted" htmlFor="today-status-filter">状态</label>
-                <select id="today-status-filter" className={selectClass} value={todayStatusFilter} onChange={(event) => setTodayStatusFilter(event.target.value)}>
+                <select id="today-status-filter" className={selectClass} value={todayStatusFilter} onChange={(event) => {
+                  const nextStatus = event.target.value;
+                  if (todayOverdueOnly && ["COMPLETED", "SKIPPED", "CANCELLED"].includes(nextStatus)) return;
+                  setTodayStatusFilter(nextStatus);
+                }}>
                   <option value="">全部</option>
                   <option value="PENDING">待执行</option>
                   <option value="IN_PROGRESS">执行中</option>
-                  <option value="COMPLETED">已完成</option>
-                  <option value="SKIPPED">已跳过</option>
-                  <option value="CANCELLED">已取消</option>
+                  <option value="COMPLETED" disabled={todayOverdueOnly}>已完成</option>
+                  <option value="SKIPPED" disabled={todayOverdueOnly}>已跳过</option>
+                  <option value="CANCELLED" disabled={todayOverdueOnly}>已取消</option>
                 </select>
               </div>
               {mounted ? (
@@ -1037,6 +1044,10 @@ export default function NursingPage() {
               )}
             </div>
           </Card>
+
+          {/* ——— 工作量统计面板 ——— */}
+          <NursingExecutionStatisticsPanel subjects={subjects} reloadKey={statReloadKey} />
+
           <Card className="min-w-0 overflow-hidden">
             <Table columns={todayColumns} data={todayExecutions} loading={todayLoading} emptyMessage="今日暂无待执行任务，所有照护任务已处理或尚未到计划时间。" />
           </Card>
@@ -1113,9 +1124,9 @@ export default function NursingPage() {
               <Card>
                 <div className="flex flex-col items-center justify-center py-12 text-center">
                   <span className="text-4xl">🧑‍⚕️</span>
-                  <h3 className="mt-4 text-base font-semibold text-fg-emphasis">尚未建立照护周期</h3>
-                  <p className="mt-2 max-w-md text-sm text-fg-muted">为入住长者建立长期照护周期后，才能保存评估、照护计划和日常任务。</p>
-                  <Button className="mt-5" loading={saving} onClick={() => void handleCreatePeriod()}>建立照护档案</Button>
+                  <h3 className="mt-4 text-base font-semibold text-fg-emphasis">尚未建立养老照护周期</h3>
+                  <p className="mt-2 max-w-md text-sm text-fg-muted">为入住长者建立与本次入住绑定的养老照护周期后，才能保存评估、照护计划和日常任务。</p>
+                  <Button className="mt-5" loading={saving} onClick={() => void handleCreatePeriod()}>建立养老照护周期</Button>
                 </div>
               </Card>
             )}

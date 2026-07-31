@@ -4,6 +4,7 @@ import com.ovaphlow.crate.database.DatabaseConfig
 import io.vertx.core.Vertx
 import io.vertx.core.http.HttpMethod
 import io.vertx.core.json.JsonObject
+import io.vertx.ext.web.Router
 import io.vertx.junit5.VertxExtension
 import io.vertx.junit5.VertxTestContext
 import org.junit.jupiter.api.*
@@ -31,7 +32,7 @@ class TaskExecutionRoutesOverdueTest {
     companion object {
         private const val TEST_DB = "aceso_test"
         private const val TEST_PORT = 18422
-        private val BASE_PATH = "/executions/today"
+        private val BASE_PATH = "/nursing/v1/executions/today"
     }
 
     private var server: io.vertx.core.http.HttpServer? = null
@@ -52,9 +53,12 @@ class TaskExecutionRoutesOverdueTest {
             DatabaseConfig.migrate(dbConfig)
             val pool = DatabaseConfig.createPool(vertx, dbConfig)
 
-            val router = NursingRoutes.create(vertx, pool)
+            val nursingRouter = NursingRoutes.create(vertx, pool)
+            // 挂载到 /nursing/v1/ 子路径下，与生产环境一致
+            val rootRouter = Router.router(vertx)
+            rootRouter.route("/nursing/v1/*").subRouter(nursingRouter)
             vertx.createHttpServer()
-                .requestHandler(router)
+                .requestHandler(rootRouter)
                 .listen(TEST_PORT)
                 .onComplete { ar ->
                     if (ar.succeeded()) {
@@ -180,9 +184,8 @@ class TaskExecutionRoutesOverdueTest {
             .onComplete { ar ->
                 client.close()
                 if (ar.succeeded()) {
-                    val sc = ar.result().statusCode()
                     ctx.verify {
-                        assertTrue(sc in listOf(200, 404), "overdue=true + PENDING 应正常返回，实际为 $sc")
+                        assertEquals(200, ar.result().statusCode(), "overdue=true + PENDING 应返回 200")
                         ctx.completeNow()
                     }
                 } else {
@@ -199,9 +202,8 @@ class TaskExecutionRoutesOverdueTest {
             .onComplete { ar ->
                 client.close()
                 if (ar.succeeded()) {
-                    val sc = ar.result().statusCode()
                     ctx.verify {
-                        assertTrue(sc in listOf(200, 404), "overdue=true + IN_PROGRESS 应正常返回，实际为 $sc")
+                        assertEquals(200, ar.result().statusCode(), "overdue=true + IN_PROGRESS 应返回 200")
                         ctx.completeNow()
                     }
                 } else {

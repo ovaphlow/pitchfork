@@ -1,0 +1,12 @@
+# 项目级 Reasonix 配置（覆盖 ~/.reasonix/config.toml 中的同名项）
+# 优先级: flag > ./reasonix.toml > ~/.reasonix/config.toml > built-in defaults
+# 说明: ~/.reasonix 为只读挂载，无法修改全局配置，故以项目级配置覆盖。
+
+[agent]
+tool_result_snip_ratio = 0.4   # 压缩前将过期工具结果截断到 40%（原全局 0.6），更省 token
+keep                   = ["errors"]   # 压缩时保留错误信息，避免重复失败循环
+recent_keep            = 2   # 压缩时保留最近 2 条消息原文
+output_style           = "concise"   # 输出风格更简短，节省 completion token
+
+[bot]
+max_steps = 5   # bot 网关（IM）步数上限，配置层 max_steps 唯一位置；当前全局 bot.enabled=false

@@ -109,13 +109,7 @@ class TaskExecutionServiceOverdueTest {
         "CANCELLED, false",
     )
     fun `终端状态与逾期组合规则`(status: String, isOverdue: Boolean) {
-        // overdue=true + 终态 => 非法（应返回 400）
-        // overdue=false + 终态 => 合法（非逾期筛选，保留现有列表语义）
-        val terminalStatuses = listOf("COMPLETED", "SKIPPED", "CANCELLED")
-        val isTerminal = status in terminalStatuses
-        val isIllegalCombination = isOverdue && isTerminal
-        // 当 overdue=true 且 status 为终态时为非法组合
-        assertEquals(isOverdue && isTerminal, isIllegalCombination)
+        assertEquals(!isOverdue, TaskExecutionRoutes.isOverdueStatusAllowed(isOverdue, status))
     }
 
     @ParameterizedTest
@@ -126,9 +120,6 @@ class TaskExecutionServiceOverdueTest {
         "IN_PROGRESS, false",
     )
     fun `非终端状态与逾期组合合法`(status: String, isOverdue: Boolean) {
-        // PENDING/IN_PROGRESS 可与 overdue 自由组合
-        val terminalStatuses = listOf("COMPLETED", "SKIPPED", "CANCELLED")
-        val isIllegalCombination = isOverdue && (status in terminalStatuses)
-        assertFalse(isIllegalCombination)
+        assertTrue(TaskExecutionRoutes.isOverdueStatusAllowed(isOverdue, status))
     }
 }

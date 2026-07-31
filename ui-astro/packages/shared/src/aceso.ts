@@ -140,6 +140,8 @@ export interface ElderlyAdmissionInput {
 export interface ElderlyAdmission {
   patient: Patient;
   encounter: Encounter;
+  /** 同事务创建的养老照护周期（ELDERLY_CARE） */
+  nursing_period: NursingServicePeriod;
 }
 
 export interface NursingServicePeriod {
@@ -149,6 +151,8 @@ export interface NursingServicePeriod {
   start_date: string;
   end_date: string | null;
   coordinator: string | null;
+  /** 养老入住周期精确关联的入住记录 ID（ELDERLY_CARE 必有，其它类型为空） */
+  encounter_id: string | null;
   status: string;
   metadata: Record<string, unknown> | null;
   created_at: string;
@@ -624,6 +628,8 @@ export function listNursingServicePeriods(params: {
   patient_id?: string;
   service_type?: string;
   status?: string;
+  /** 精确过滤：只返回关联该入住记录的周期 */
+  encounter_id?: string;
   limit?: number;
   offset?: number;
 } = {}): Promise<NursingPage<NursingServicePeriod>> {
@@ -634,6 +640,14 @@ export function createNursingServicePeriod(input: NursingServicePeriodInput): Pr
   return request<NursingServicePeriod>("/nursing/v1/periods/", {
     method: "POST",
     body: JSON.stringify(input),
+  });
+}
+
+/** 为历史活动养老入住幂等补建养老照护周期；首次 201，重复调用 200 */
+export function enrollElderlyAdmissionCarePeriod(encounterId: string): Promise<NursingServicePeriod> {
+  return request<NursingServicePeriod>("/nursing/v1/periods/elderly-admission", {
+    method: "POST",
+    body: JSON.stringify({ encounter_id: encounterId }),
   });
 }
 
@@ -760,6 +774,57 @@ export function generateNursingExecutions(input: {
     "/nursing/v1/executions/generate",
     { method: "POST", body: JSON.stringify(input) },
   );
+}
+
+// ========================================================================
+//  Nursing API — Statistics (护理员工作量与计划完成率统计)
+// ========================================================================
+
+/** 执行统计记录（按执行人分组） */
+export interface NursingExecutionStatistics {
+  executor: string | null;
+  scheduled_total: number;
+  pending_total: number;
+  in_progress_total: number;
+  completed_total: number;
+  skipped_total: number;
+  cancelled_total: number;
+  due_total: number;
+  completed_due_total: number;
+  overdue_total: number;
+  completion_rate: number | null;
+}
+
+/** 执行统计分页响应 */
+export interface NursingExecutionStatisticsPage {
+  records: NursingExecutionStatistics[];
+  meta: {
+    total: number;
+    date_from: string;
+    date_to: string;
+    scheduled_total: number;
+    pending_total: number;
+    in_progress_total: number;
+    completed_total: number;
+    skipped_total: number;
+    cancelled_total: number;
+    due_total: number;
+    completed_due_total: number;
+    overdue_total: number;
+    completion_rate: number | null;
+  };
+}
+
+/** 查询执行统计 */
+export function listNursingExecutionStatistics(params: {
+  date_from: string;
+  date_to: string;
+  period_id?: string;
+  executor?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<NursingExecutionStatisticsPage> {
+  return request<NursingExecutionStatisticsPage>(`/nursing/v1/executions/statistics${nursingQuery(params)}`);
 }
 
 // ========================================================================

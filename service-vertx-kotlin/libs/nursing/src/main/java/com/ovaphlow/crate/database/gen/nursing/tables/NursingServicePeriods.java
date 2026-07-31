@@ -95,6 +95,11 @@ public class NursingServicePeriods extends TableImpl<NursingServicePeriodsRecord
     public final TableField<NursingServicePeriodsRecord, String> COORDINATOR = createField(DSL.name("coordinator"), SQLDataType.VARCHAR, this, "");
 
     /**
+     * The column <code>nursing.nursing_service_periods.encounter_id</code>.
+     */
+    public final TableField<NursingServicePeriodsRecord, String> ENCOUNTER_ID = createField(DSL.name("encounter_id"), SQLDataType.VARCHAR(32), this, "");
+
+    /**
      * The column <code>nursing.nursing_service_periods.status</code>.
      */
     public final TableField<NursingServicePeriodsRecord, String> STATUS = createField(DSL.name("status"), SQLDataType.VARCHAR.defaultValue(DSL.field(DSL.raw("'ACTIVE'::character varying"), SQLDataType.VARCHAR)), this, "");
@@ -243,7 +248,8 @@ public class NursingServicePeriods extends TableImpl<NursingServicePeriodsRecord
     @Override
     public List<Check<NursingServicePeriodsRecord>> getChecks() {
         return Arrays.asList(
-            Internal.createCheck(this, DSL.name("nursing_service_periods_service_type_check"), "(((service_type)::text = ANY ((ARRAY['HOME_CARE'::character varying, 'COMMUNITY_CARE'::character varying, 'HOSPICE'::character varying])::text[])))", true),
+            Internal.createCheck(this, DSL.name("nursing_service_periods_service_type_check"), "(((service_type)::text = ANY ((ARRAY['HOME_CARE'::character varying, 'COMMUNITY_CARE'::character varying, 'HOSPICE'::character varying, 'ELDERLY_CARE'::character varying])::text[])))", true),
+            Internal.createCheck(this, DSL.name("chk_elderly_care_encounter_link"), "(((service_type = 'ELDERLY_CARE'::character varying) AND (encounter_id IS NOT NULL)) OR ((service_type <> 'ELDERLY_CARE'::character varying) AND (encounter_id IS NULL)))", true),
             Internal.createCheck(this, DSL.name("nursing_service_periods_status_check"), "(((status)::text = ANY ((ARRAY['ACTIVE'::character varying, 'SUSPENDED'::character varying, 'COMPLETED'::character varying, 'CANCELLED'::character varying])::text[])))", true)
         );
     }

@@ -8,6 +8,12 @@
     "dev:aceso": "pnpm --filter @pitchfork/aceso dev",
     "build": "pnpm -r build",
     "preview": "pnpm --filter @pitchfork/auth preview",
-    "preview:aceso": "pnpm --filter @pitchfork/aceso preview"
+    "preview:aceso": "pnpm --filter @pitchfork/aceso preview",
+    "test:e2e": "playwright test",
+    "test:e2e:aceso": "playwright test apps/aceso/e2e/elderly-care-lifecycle.spec.ts --project=chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0",
+    "@types/node": "^22.0.0"
   }
 }

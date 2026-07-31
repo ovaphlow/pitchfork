@@ -114,6 +114,20 @@ public class NursingServicePeriodsRecord extends UpdatableRecordImpl<NursingServ
     }
 
     /**
+     * Setter for <code>nursing.nursing_service_periods.encounter_id</code>.
+     */
+    public void setEncounterId(String value) {
+        set(10, value);
+    }
+
+    /**
+     * Getter for <code>nursing.nursing_service_periods.encounter_id</code>.
+     */
+    public String getEncounterId() {
+        return (String) get(10);
+    }
+
+    /**
      * Getter for <code>nursing.nursing_service_periods.status</code>.
      */
     public String getStatus() {
@@ -185,7 +199,7 @@ public class NursingServicePeriodsRecord extends UpdatableRecordImpl<NursingServ
     /**
      * Create a detached, initialised NursingServicePeriodsRecord
      */
-    public NursingServicePeriodsRecord(String id, String patientId, String serviceType, LocalDate startDate, LocalDate endDate, String coordinator, String status, JSONB metadata, OffsetDateTime createdAt, OffsetDateTime updatedAt) {
+    public NursingServicePeriodsRecord(String id, String patientId, String serviceType, LocalDate startDate, LocalDate endDate, String coordinator, String status, JSONB metadata, OffsetDateTime createdAt, OffsetDateTime updatedAt, String encounterId) {
         super(NursingServicePeriods.NURSING_SERVICE_PERIODS);
 
         setId(id);
@@ -198,6 +212,7 @@ public class NursingServicePeriodsRecord extends UpdatableRecordImpl<NursingServ
         setMetadata(metadata);
         setCreatedAt(createdAt);
         setUpdatedAt(updatedAt);
+        setEncounterId(encounterId);
         resetChangedOnNotNull();
     }
 }

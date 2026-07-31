@@ -1,5 +1,6 @@
 package com.ovaphlow.crate.healthcare
 
+import com.ovaphlow.crate.nursing.ConflictException
 import io.vertx.core.Vertx
 import io.vertx.core.json.JsonObject
 import io.vertx.ext.web.Router
@@ -146,6 +147,7 @@ object HealthcareRoutes {
         when (error) {
             is IllegalArgumentException -> respond(ctx, 400, error.message)
             is HealthcareNotFoundException -> respond(ctx, 404, error.message)
+            is ConflictException -> respond(ctx, 409, error.message)
             else -> {
                 log.error("healthcare route error", error)
                 respond(ctx, 500, "internal error")

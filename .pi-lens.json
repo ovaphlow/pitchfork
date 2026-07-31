@@ -1,0 +1,9 @@
+{
+  "ignoredFolders": [
+    "*/gen/*",
+    "*/database/gen/*",
+    "*/records/*",
+    "*/tables/*"
+  ],
+  "ignoredExtensions": ["*.java", "*.class"]
+}

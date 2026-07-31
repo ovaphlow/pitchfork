@@ -8,6 +8,18 @@ import java.math.BigDecimal
 import java.time.LocalDate
 
 object TaskExecutionRoutes {
+    private val TERMINAL_STATUSES = setOf("COMPLETED", "SKIPPED", "CANCELLED")
+
+    fun parseOverdueParam(value: String?): Boolean? = when {
+        value == null -> null
+        value == "true" -> true
+        value == "false" -> false
+        else -> throw IllegalArgumentException("overdue must be true or false")
+    }
+
+    fun isOverdueStatusAllowed(overdue: Boolean?, status: String?): Boolean =
+        overdue != true || status !in TERMINAL_STATUSES
+
     fun create(vertx: Vertx, pool: Pool): Router {
         val router = Router.router(vertx)
         val service = TaskExecutionService(pool)
@@ -25,19 +37,15 @@ object TaskExecutionRoutes {
                 return@handler
             }
 
-            val overdueParam = params.getParam("overdue")
-            val overdue = when {
-                overdueParam == null -> null
-                overdueParam == "true" -> true
-                overdueParam == "false" -> false
-                else -> {
-                    NursingRoutes.respond(ctx, 400, "overdue must be true or false")
-                    return@handler
-                }
+            val overdue = try {
+                parseOverdueParam(params.getParam("overdue"))
+            } catch (error: IllegalArgumentException) {
+                NursingRoutes.respond(ctx, 400, error.message)
+                return@handler
             }
 
             val status = params.getParam("status")
-            if (overdue == true && status != null && status in listOf("COMPLETED", "SKIPPED", "CANCELLED")) {
+            if (!isOverdueStatusAllowed(overdue, status)) {
                 NursingRoutes.respond(ctx, 400, "overdue cannot be combined with terminal status")
                 return@handler
             }
@@ -64,19 +72,15 @@ object TaskExecutionRoutes {
                 return@handler
             }
 
-            val overdueParam = params.getParam("overdue")
-            val overdue = when {
-                overdueParam == null -> null
-                overdueParam == "true" -> true
-                overdueParam == "false" -> false
-                else -> {
-                    NursingRoutes.respond(ctx, 400, "overdue must be true or false")
-                    return@handler
-                }
+            val overdue = try {
+                parseOverdueParam(params.getParam("overdue"))
+            } catch (error: IllegalArgumentException) {
+                NursingRoutes.respond(ctx, 400, error.message)
+                return@handler
             }
 
             val status = params.getParam("status")
-            if (overdue == true && status != null && status in listOf("COMPLETED", "SKIPPED", "CANCELLED")) {
+            if (!isOverdueStatusAllowed(overdue, status)) {
                 NursingRoutes.respond(ctx, 400, "overdue cannot be combined with terminal status")
                 return@handler
             }
@@ -92,6 +96,74 @@ object TaskExecutionRoutes {
             ).onSuccess { ctx.json(it) }
                 .onFailure { NursingRoutes.respondError(ctx, it) }
         }
+
+        // ——— 执行统计（护理员工作量与计划完成率） ———
+        fun handleStatistics(ctx: io.vertx.ext.web.RoutingContext) {
+            val params = ctx.request()
+            val dateFromStr = params.getParam("date_from")
+            val dateToStr = params.getParam("date_to")
+
+            if (dateFromStr.isNullOrBlank()) {
+                NursingRoutes.respond(ctx, 400, "date_from is required")
+                return
+            }
+            if (dateToStr.isNullOrBlank()) {
+                NursingRoutes.respond(ctx, 400, "date_to is required")
+                return
+            }
+
+            val dateFrom = try { LocalDate.parse(dateFromStr) } catch (_: Exception) {
+                NursingRoutes.respond(ctx, 400, "invalid date format, expected YYYY-MM-DD")
+                return
+            }
+            val dateTo = try { LocalDate.parse(dateToStr) } catch (_: Exception) {
+                NursingRoutes.respond(ctx, 400, "invalid date format, expected YYYY-MM-DD")
+                return
+            }
+
+            if (dateFrom.isAfter(dateTo)) {
+                NursingRoutes.respond(ctx, 400, "date_from must not be after date_to")
+                return
+            }
+
+            val daysBetween = java.time.temporal.ChronoUnit.DAYS.between(dateFrom, dateTo)
+            // 闭区间最多 31 个日历日：date_to - date_from 最大为 30
+            if (daysBetween > 30) {
+                NursingRoutes.respond(ctx, 400, "date range must not exceed 31 days")
+                return
+            }
+
+            val limitParam = params.getParam("limit")
+            val limit = if (limitParam == null) 50 else {
+                val parsed = limitParam.toIntOrNull()
+                if (parsed == null || parsed < 0) {
+                    NursingRoutes.respond(ctx, 400, "limit must be a non-negative integer")
+                    return
+                }
+                parsed
+            }
+            val offsetParam = params.getParam("offset")
+            val offset = if (offsetParam == null) 0 else {
+                val parsed = offsetParam.toIntOrNull()
+                if (parsed == null || parsed < 0) {
+                    NursingRoutes.respond(ctx, 400, "offset must be a non-negative integer")
+                    return
+                }
+                parsed
+            }
+
+            service.executionStatistics(
+                dateFrom = dateFrom,
+                dateTo = dateTo,
+                periodId = params.getParam("period_id"),
+                executor = params.getParam("executor"),
+                limit = limit,
+                offset = offset
+            ).onSuccess { ctx.json(it) }
+                .onFailure { NursingRoutes.respondError(ctx, it) }
+        }
+        router.get("/statistics").handler { handleStatistics(it) }
+        router.get("/statistics/").handler { handleStatistics(it) }
 
         // ——— 批量生成执行记录 ———
         router.post("/generate").handler { ctx ->

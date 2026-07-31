@@ -45,17 +45,15 @@ class TaskExecutionServiceOverdueIntegrationTest {
     companion object {
         private const val TEST_DB = "aceso_test"
         /** fixture 数据统一前缀，用于清理 */
-        private const val FIXTURE_PREFIX = "test-overdue-"
-        /** ULID 格式的时间戳前缀（2026年7月的示例值），仅用于排序 */
-        private val BASE_TIME = OffsetDateTime.of(2026, 7, 30, 8, 0, 0, 0, ZoneOffset.ofHours(8))
+        private const val FIXTURE_PREFIX = "to-"
     }
 
     private lateinit var host: String
     private lateinit var port: String
     private lateinit var user: String
+    private lateinit var password: String
     private lateinit var pool: Pool
     private lateinit var service: TaskExecutionService
-    private var password: String = ""
 
     @BeforeAll
     fun setup(ctx: VertxTestContext) {
@@ -71,8 +69,8 @@ class TaskExecutionServiceOverdueIntegrationTest {
 
         try {
             // 1. 创建测试数据库（如不存在）
-            val jdbcUrl = "jdbc:postgresql://$host:$port/postgres"
-            DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
+            val rootUrl = "jdbc:postgresql://$host:$port/postgres"
+            DriverManager.getConnection(rootUrl, user, password).use { conn ->
                 val rs = conn.createStatement().executeQuery(
                     "SELECT 1 FROM pg_database WHERE datname = '$TEST_DB'"
                 )
@@ -82,6 +80,7 @@ class TaskExecutionServiceOverdueIntegrationTest {
             }
 
             // 2. 在测试数据库上执行 Flyway 迁移
+            val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
             val dbConfig = JsonObject()
                 .put("host", host)
                 .put("port", port.toInt())
@@ -89,11 +88,11 @@ class TaskExecutionServiceOverdueIntegrationTest {
                 .put("user", user)
             DatabaseConfig.migrate(dbConfig)
 
-            // 3. 创建 Vert.x 连接池
-            pool = DatabaseConfig.createPool(
-                Vertx.vertx(),
-                dbConfig
-            )
+            // 3. 用 JDBC 建立依赖表和 fixture 数据
+            setupFixturesJdbc()
+
+            // 4. 创建 Vert.x 连接池和服务
+            pool = DatabaseConfig.createPool(Vertx.vertx(), dbConfig)
             service = TaskExecutionService(pool)
 
             ctx.completeNow()
@@ -104,22 +103,82 @@ class TaskExecutionServiceOverdueIntegrationTest {
 
     @AfterAll
     fun cleanup(ctx: VertxTestContext) {
-        // 清理所有 fixture 数据
-        if (::pool.isInitialized) {
-            pool.withTransaction { conn ->
-                conn.query("DELETE FROM nursing.nursing_task_executions WHERE id LIKE '${FIXTURE_PREFIX}%'").execute()
-                    .compose { conn.query("DELETE FROM nursing.nursing_tasks WHERE id LIKE '${FIXTURE_PREFIX}%'").execute() }
-                    .compose { conn.query("DELETE FROM nursing.nursing_plan_items WHERE id LIKE '${FIXTURE_PREFIX}%'").execute() }
-                    .compose { conn.query("DELETE FROM nursing.nursing_plans WHERE id LIKE '${FIXTURE_PREFIX}%'").execute() }
-                    .compose { conn.query("DELETE FROM nursing.nursing_service_periods WHERE id LIKE '${FIXTURE_PREFIX}%'").execute() }
-                    .compose { conn.query("DELETE FROM nursing.nursing_assessments WHERE id LIKE '${FIXTURE_PREFIX}%'").execute() }
-            }.onComplete { ar ->
-                pool.close()
-                if (ar.succeeded()) ctx.completeNow()
-                else ctx.failNow(ar.cause())
+        try {
+            // 用 JDBC 清理 fixture 数据
+            val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
+            DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
+                val stmt = conn.createStatement()
+                stmt.execute("DELETE FROM nursing.nursing_task_executions WHERE id LIKE '${FIXTURE_PREFIX}%'")
+                stmt.execute("DELETE FROM nursing.nursing_tasks WHERE id LIKE '${FIXTURE_PREFIX}%'")
+                stmt.execute("DELETE FROM nursing.nursing_service_periods WHERE id LIKE '${FIXTURE_PREFIX}%'")
+                stmt.execute("DELETE FROM healthcare.patients WHERE id LIKE '${FIXTURE_PREFIX}%'")
             }
-        } else {
-            ctx.completeNow()
+        } catch (_: Exception) { /* cleanup best effort */ }
+
+        if (::pool.isInitialized) pool.close()
+        ctx.completeNow()
+    }
+
+    private fun jdbcUrl() = "jdbc:postgresql://$host:$port/$TEST_DB"
+
+    /**
+     * 用 JDBC 创建 healthcare.patients 表和 fixture 数据。
+     * 避免 Vert.x reactive 链式调用的失败传播问题。
+     */
+    private fun setupFixturesJdbc() {
+        val now = OffsetDateTime.now()
+        val twoHoursAgo = now.minusHours(2)
+        val oneHourLater = now.plusHours(1)
+        val oneMinuteAgo = now.minusMinutes(1)
+        val patientId = fixtureId("patient")
+        val periodId = fixtureId("period")
+        val taskId = fixtureId("task")
+
+        DriverManager.getConnection(jdbcUrl(), user, password).use { conn ->
+            val stmt = conn.createStatement()
+
+            // 创建 healthcare schema 和 patients 表
+            stmt.execute("CREATE SCHEMA IF NOT EXISTS healthcare")
+            stmt.execute("""
+                CREATE TABLE IF NOT EXISTS healthcare.patients (
+                    id VARCHAR(32) PRIMARY KEY,
+                    name VARCHAR NOT NULL DEFAULT '',
+                    gender VARCHAR NOT NULL DEFAULT '',
+                    status VARCHAR DEFAULT 'ACTIVE',
+                    created_at TIMESTAMPTZ DEFAULT now(),
+                    updated_at TIMESTAMPTZ DEFAULT now()
+                )
+            """)
+
+            // 插入 patient
+            stmt.execute("""
+                INSERT INTO healthcare.patients (id, name, status)
+                VALUES ('$patientId', '逾期测试患者', 'ACTIVE')
+                ON CONFLICT (id) DO NOTHING
+            """)
+
+            // 插入 period（必须提供 service_type）
+            stmt.execute("""
+                INSERT INTO nursing.nursing_service_periods (id, patient_id, service_type, start_date, status)
+                VALUES ('$periodId', '$patientId', 'HOME_CARE', CURRENT_DATE, 'ACTIVE')
+                ON CONFLICT (id) DO NOTHING
+            """)
+
+            // 插入 task
+            stmt.execute("""
+                INSERT INTO nursing.nursing_tasks (id, period_id, task_type, description, frequency_code, start_date, status)
+                VALUES ('$taskId', '$periodId', 'NURSING', '逾期测试任务', 'QD', CURRENT_DATE, 'ACTIVE')
+                ON CONFLICT (id) DO NOTHING
+            """)
+
+            // 执行 1-7（每个计划时间不同，避免 (task_id, planned_time) 唯一索引冲突）
+            stmt.execute("INSERT INTO nursing.nursing_task_executions (id, task_id, planned_time, status) VALUES ('${fixtureId("exec-pending-overdue")}', '$taskId', '${twoHoursAgo}', 'PENDING') ON CONFLICT (id) DO NOTHING")
+            stmt.execute("INSERT INTO nursing.nursing_task_executions (id, task_id, planned_time, status) VALUES ('${fixtureId("exec-in-progress-overdue")}', '$taskId', '${twoHoursAgo.minusSeconds(1)}', 'IN_PROGRESS') ON CONFLICT (id) DO NOTHING")
+            stmt.execute("INSERT INTO nursing.nursing_task_executions (id, task_id, planned_time, status, actual_time) VALUES ('${fixtureId("exec-completed")}', '$taskId', '${twoHoursAgo.minusSeconds(2)}', 'COMPLETED', '$now') ON CONFLICT (id) DO NOTHING")
+            stmt.execute("INSERT INTO nursing.nursing_task_executions (id, task_id, planned_time, status) VALUES ('${fixtureId("exec-skipped")}', '$taskId', '${twoHoursAgo.minusSeconds(3)}', 'SKIPPED') ON CONFLICT (id) DO NOTHING")
+            stmt.execute("INSERT INTO nursing.nursing_task_executions (id, task_id, planned_time, status) VALUES ('${fixtureId("exec-cancelled")}', '$taskId', '${twoHoursAgo.minusSeconds(4)}', 'CANCELLED') ON CONFLICT (id) DO NOTHING")
+            stmt.execute("INSERT INTO nursing.nursing_task_executions (id, task_id, planned_time, status) VALUES ('${fixtureId("exec-pending-future")}', '$taskId', '$oneHourLater', 'PENDING') ON CONFLICT (id) DO NOTHING")
+            stmt.execute("INSERT INTO nursing.nursing_task_executions (id, task_id, planned_time, status) VALUES ('${fixtureId("exec-in-progress-1min")}', '$taskId', '$oneMinuteAgo', 'IN_PROGRESS') ON CONFLICT (id) DO NOTHING")
         }
     }
 
