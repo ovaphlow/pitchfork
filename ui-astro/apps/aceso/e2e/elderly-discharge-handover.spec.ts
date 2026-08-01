@@ -40,11 +40,6 @@ interface HandoverResponse {
   };
 }
 
-interface ApiResult<T> {
-  status: number;
-  body: T;
-}
-
 let databasePool: Pool;
 
 function requiredEnvironment(name: string, value: string | undefined): string {
@@ -54,55 +49,114 @@ function requiredEnvironment(name: string, value: string | undefined): string {
 
 async function cleanupDatabase() {
   const client = await databasePool.connect();
+  const fixturePattern = `${FIXTURE_PREFIX}%`;
   try {
     await client.query("BEGIN");
-    // 按依赖顺序清理
-    await client.query(`DELETE FROM healthcare.medical_records WHERE id LIKE $1`, [`${FIXTURE_PREFIX}%`]);
-    await client.query(`DELETE FROM healthcare.nursing_records WHERE id LIKE $1`, [`${FIXTURE_PREFIX}%`]);
     await client.query(
-      `DELETE FROM nursing.nursing_task_executions WHERE id LIKE $1 OR task_id IN (SELECT id FROM nursing.nursing_tasks WHERE id LIKE $1 OR period_id IN (SELECT id FROM nursing.nursing_service_periods WHERE id LIKE $1 OR encounter_id IN (SELECT id FROM healthcare.encounters WHERE id LIKE $1 OR patient_id IN (SELECT id FROM healthcare.patients WHERE id LIKE $1)))))`,
-      [`${FIXTURE_PREFIX}%`],
+      `DELETE FROM nursing.nursing_visit_schedules schedule
+       USING nursing.nursing_service_periods period
+       LEFT JOIN healthcare.encounters encounter ON encounter.id = period.encounter_id
+       LEFT JOIN healthcare.patients patient ON patient.id = period.patient_id
+       WHERE schedule.period_id = period.id
+         AND (period.id LIKE $1 OR encounter.encounter_no LIKE $1 OR patient.name LIKE $1)`,
+      [fixturePattern],
     );
     await client.query(
-      `DELETE FROM nursing.nursing_tasks WHERE id LIKE $1 OR period_id IN (SELECT id FROM nursing.nursing_service_periods WHERE id LIKE $1 OR encounter_id IN (SELECT id FROM healthcare.encounters WHERE id LIKE $1 OR patient_id IN (SELECT id FROM healthcare.patients WHERE id LIKE $1)))`,
-      [`${FIXTURE_PREFIX}%`],
+      `DELETE FROM nursing.nursing_task_executions execution
+       USING nursing.nursing_tasks task
+       LEFT JOIN nursing.nursing_service_periods period ON period.id = task.period_id
+       LEFT JOIN healthcare.encounters encounter ON encounter.id = task.encounter_id OR encounter.id = period.encounter_id
+       LEFT JOIN healthcare.patients patient ON patient.id = period.patient_id OR patient.id = encounter.patient_id
+       WHERE execution.task_id = task.id
+         AND (task.id LIKE $1 OR task.encounter_id LIKE $1 OR period.id LIKE $1
+              OR encounter.encounter_no LIKE $1 OR patient.name LIKE $1)`,
+      [fixturePattern],
     );
     await client.query(
-      `DELETE FROM nursing.nursing_plan_items WHERE plan_id IN (SELECT id FROM nursing.nursing_plans WHERE id LIKE $1 OR period_id IN (SELECT id FROM nursing.nursing_service_periods WHERE id LIKE $1 OR encounter_id IN (SELECT id FROM healthcare.encounters WHERE id LIKE $1 OR patient_id IN (SELECT id FROM healthcare.patients WHERE id LIKE $1))))`,
-      [`${FIXTURE_PREFIX}%`],
+      `DELETE FROM nursing.nursing_tasks task
+       WHERE task.id LIKE $1 OR task.encounter_id LIKE $1
+          OR task.encounter_id IN (SELECT id FROM healthcare.encounters WHERE encounter_no LIKE $1)
+          OR task.period_id IN (
+            SELECT period.id FROM nursing.nursing_service_periods period
+            WHERE period.id LIKE $1 OR period.encounter_id LIKE $1
+               OR period.encounter_id IN (SELECT id FROM healthcare.encounters WHERE encounter_no LIKE $1)
+               OR period.patient_id IN (SELECT id FROM healthcare.patients WHERE name LIKE $1)
+          )`,
+      [fixturePattern],
     );
     await client.query(
-      `DELETE FROM nursing.nursing_plans WHERE id LIKE $1 OR period_id IN (SELECT id FROM nursing.nursing_service_periods WHERE id LIKE $1 OR encounter_id IN (SELECT id FROM healthcare.encounters WHERE id LIKE $1 OR patient_id IN (SELECT id FROM healthcare.patients WHERE id LIKE $1)))`,
-      [`${FIXTURE_PREFIX}%`],
+      `DELETE FROM nursing.nursing_plan_items item
+       USING nursing.nursing_plans plan
+       JOIN nursing.nursing_service_periods period ON period.id = plan.period_id
+       LEFT JOIN healthcare.encounters encounter ON encounter.id = period.encounter_id
+       LEFT JOIN healthcare.patients patient ON patient.id = period.patient_id
+       WHERE item.plan_id = plan.id
+         AND (plan.id LIKE $1 OR period.id LIKE $1 OR encounter.encounter_no LIKE $1 OR patient.name LIKE $1)`,
+      [fixturePattern],
     );
     await client.query(
-      `DELETE FROM nursing.nursing_assessments WHERE id LIKE $1 OR period_id IN (SELECT id FROM nursing.nursing_service_periods WHERE id LIKE $1 OR encounter_id IN (SELECT id FROM healthcare.encounters WHERE id LIKE $1 OR patient_id IN (SELECT id FROM healthcare.patients WHERE id LIKE $1)))`,
-      [`${FIXTURE_PREFIX}%`],
+      `DELETE FROM nursing.nursing_plans plan
+       USING nursing.nursing_service_periods period
+       LEFT JOIN healthcare.encounters encounter ON encounter.id = period.encounter_id
+       LEFT JOIN healthcare.patients patient ON patient.id = period.patient_id
+       WHERE plan.period_id = period.id
+         AND (plan.id LIKE $1 OR period.id LIKE $1 OR encounter.encounter_no LIKE $1 OR patient.name LIKE $1)`,
+      [fixturePattern],
     );
     await client.query(
-      `DELETE FROM nursing.nursing_service_periods WHERE id LIKE $1 OR encounter_id IN (SELECT id FROM healthcare.encounters WHERE id LIKE $1 OR patient_id IN (SELECT id FROM healthcare.patients WHERE id LIKE $1))`,
-      [`${FIXTURE_PREFIX}%`],
+      `DELETE FROM nursing.nursing_assessments assessment
+       WHERE assessment.id LIKE $1 OR assessment.encounter_id LIKE $1
+          OR assessment.encounter_id IN (SELECT id FROM healthcare.encounters WHERE encounter_no LIKE $1)
+          OR assessment.period_id IN (
+            SELECT period.id FROM nursing.nursing_service_periods period
+            WHERE period.id LIKE $1 OR period.encounter_id LIKE $1
+               OR period.encounter_id IN (SELECT id FROM healthcare.encounters WHERE encounter_no LIKE $1)
+               OR period.patient_id IN (SELECT id FROM healthcare.patients WHERE name LIKE $1)
+          )`,
+      [fixturePattern],
     );
     await client.query(
-      `DELETE FROM healthcare.encounters WHERE id LIKE $1 OR patient_id IN (SELECT id FROM healthcare.patients WHERE id LIKE $1)`,
-      [`${FIXTURE_PREFIX}%`],
+      `DELETE FROM nursing.nursing_service_periods period
+       WHERE period.id LIKE $1 OR period.encounter_id LIKE $1
+          OR period.encounter_id IN (SELECT id FROM healthcare.encounters WHERE encounter_no LIKE $1)
+          OR period.patient_id IN (SELECT id FROM healthcare.patients WHERE name LIKE $1)`,
+      [fixturePattern],
     );
-    await client.query(`DELETE FROM healthcare.patients WHERE id LIKE $1`, [`${FIXTURE_PREFIX}%`]);
+    await client.query(
+      `DELETE FROM healthcare.medical_records record
+       USING healthcare.encounters encounter
+       JOIN healthcare.patients patient ON patient.id = encounter.patient_id
+       WHERE record.encounter_id = encounter.id
+         AND (record.id LIKE $1 OR encounter.encounter_no LIKE $1 OR patient.name LIKE $1)`,
+      [fixturePattern],
+    );
+    await client.query(
+      `DELETE FROM healthcare.encounters encounter
+       USING healthcare.patients patient
+       WHERE encounter.patient_id = patient.id
+         AND (encounter.id LIKE $1 OR encounter.encounter_no LIKE $1 OR patient.name LIKE $1)`,
+      [fixturePattern],
+    );
+    await client.query(
+      `DELETE FROM healthcare.patients
+       WHERE id LIKE $1 OR name LIKE $1`,
+      [fixturePattern],
+    );
 
     const result = await client.query<{ residual: string }>(
       `SELECT (
-        (SELECT count(*) FROM healthcare.medical_records WHERE id LIKE $1) +
-        (SELECT count(*) FROM healthcare.nursing_records WHERE id LIKE $1) +
-        (SELECT count(*) FROM nursing.nursing_task_executions WHERE id LIKE $1) +
-        (SELECT count(*) FROM nursing.nursing_tasks WHERE id LIKE $1) +
-        (SELECT count(*) FROM nursing.nursing_plan_items WHERE id LIKE $1) +
-        (SELECT count(*) FROM nursing.nursing_plans WHERE id LIKE $1) +
-        (SELECT count(*) FROM nursing.nursing_assessments WHERE id LIKE $1) +
-        (SELECT count(*) FROM nursing.nursing_service_periods WHERE id LIKE $1) +
-        (SELECT count(*) FROM healthcare.encounters WHERE id LIKE $1) +
-        (SELECT count(*) FROM healthcare.patients WHERE id LIKE $1)
+        (SELECT count(*) FROM healthcare.patients WHERE id LIKE $1 OR name LIKE $1) +
+        (SELECT count(*) FROM healthcare.encounters encounter LEFT JOIN healthcare.patients patient ON patient.id = encounter.patient_id WHERE encounter.id LIKE $1 OR encounter.encounter_no LIKE $1 OR patient.name LIKE $1) +
+        (SELECT count(*) FROM healthcare.medical_records record WHERE record.id LIKE $1 OR record.encounter_id IN (SELECT encounter.id FROM healthcare.encounters encounter LEFT JOIN healthcare.patients patient ON patient.id = encounter.patient_id WHERE encounter.encounter_no LIKE $1 OR patient.name LIKE $1)) +
+        (SELECT count(*) FROM nursing.nursing_service_periods period LEFT JOIN healthcare.encounters encounter ON encounter.id = period.encounter_id LEFT JOIN healthcare.patients patient ON patient.id = period.patient_id WHERE period.id LIKE $1 OR period.encounter_id LIKE $1 OR encounter.encounter_no LIKE $1 OR patient.name LIKE $1) +
+        (SELECT count(*) FROM nursing.nursing_assessments assessment WHERE assessment.id LIKE $1 OR assessment.encounter_id LIKE $1 OR assessment.period_id IN (SELECT id FROM nursing.nursing_service_periods WHERE id LIKE $1)) +
+        (SELECT count(*) FROM nursing.nursing_plans plan WHERE plan.id LIKE $1 OR plan.period_id IN (SELECT id FROM nursing.nursing_service_periods WHERE id LIKE $1)) +
+        (SELECT count(*) FROM nursing.nursing_plan_items item WHERE item.id LIKE $1 OR item.plan_id IN (SELECT id FROM nursing.nursing_plans WHERE id LIKE $1)) +
+        (SELECT count(*) FROM nursing.nursing_tasks task WHERE task.id LIKE $1 OR task.encounter_id LIKE $1 OR task.period_id IN (SELECT id FROM nursing.nursing_service_periods WHERE id LIKE $1)) +
+        (SELECT count(*) FROM nursing.nursing_task_executions execution WHERE execution.id LIKE $1 OR execution.task_id IN (SELECT id FROM nursing.nursing_tasks WHERE id LIKE $1)) +
+        (SELECT count(*) FROM nursing.nursing_visit_schedules schedule WHERE schedule.id LIKE $1 OR schedule.period_id IN (SELECT id FROM nursing.nursing_service_periods WHERE id LIKE $1))
       )::text AS residual`,
-      [`${FIXTURE_PREFIX}%`],
+      [fixturePattern],
     );
     if (result.rows[0]?.residual !== "0") throw new Error("fixture cleanup left residual data");
     await client.query("COMMIT");
@@ -138,7 +192,7 @@ async function api<T>(page: Page, path: string, options: { method?: string; body
     },
     { baseUrl, path, method: options.method ?? "GET", body: options.body },
   );
-  if (result.status >= 400) throw new Error(`${options.method ?? "GET"} ${path} failed with ${result.status}`);
+  if (result.status >= 400) throw new Error(`${options.method ?? "GET"} ${path} failed with ${result.status}: ${JSON.stringify(result.body)}`);
   return result.body as T;
 }
 
@@ -190,11 +244,8 @@ class AdmissionsPage {
   }
 
   async switchToDischargedTab() {
-    const tab = this.page.getByRole("tab", { name: /已离院|档案/ });
-    if (await tab.isVisible()) {
-      await tab.click();
-      await this.page.waitForLoadState("networkidle");
-    }
+    await this.page.getByRole("button", { name: "已离院档案" }).click();
+    await this.page.waitForLoadState("networkidle");
   }
 
   row(encounterNo: string) {
@@ -207,7 +258,7 @@ class AdmissionsPage {
   }
 
   handoverDialog() {
-    return this.page.getByRole("dialog").filter({ hasText: /交接摘要|归档/ });
+    return this.page.locator("h3").filter({ hasText: "养老照护离院交接摘要" }).locator("..").locator("..");
   }
 
   async generateHandover(author: string, note?: string) {
@@ -217,7 +268,7 @@ class AdmissionsPage {
       const noteInput = this.page.getByLabel(/备注|note/i);
       await noteInput.fill(note);
     }
-    const submitButton = this.page.getByRole("button", { name: /生成|创建|提交/ });
+    const submitButton = this.page.getByRole("button", { name: "生成交接摘要", exact: true });
     await submitButton.click();
     await this.page.waitForLoadState("networkidle");
   }
@@ -252,6 +303,10 @@ test.afterEach(async () => {
 
 test("已离院档案中可定位正确入住并查看只读摘要", async ({ page }) => {
   const admission = await createDischargedAdmission(page, "VIEW");
+  await api(page, `/crate-api/healthcare/v1/elderly-admissions/${admission.encounter.id}/discharge-handover`, {
+    method: "POST",
+    body: { author: "已归档交接人", handover_note: "已归档备注" },
+  });
   const admissionsPage = new AdmissionsPage(page);
 
   await admissionsPage.goto();
@@ -264,9 +319,9 @@ test("已离院档案中可定位正确入住并查看只读摘要", async ({ pa
   await expect(dialog).toBeVisible();
 
   // 验证快照内容
-  await expect(dialog.getByText("归档测试长者VIEW-patient")).toBeVisible();
-  await expect(dialog.getByText("DISCHARGED")).toBeVisible();
-  await expect(dialog.getByText("COMPLETED")).toBeVisible();
+  await expect(dialog.getByText("姓名：pw-dha-VIEW-patient", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("服务类型：ELDERLY_CARE", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("周期起止：2026-07-01 至 2026-07-31", { exact: true })).toBeVisible();
 });
 
 test("未生成摘要的合资格记录可生成一次", async ({ page }) => {
@@ -278,7 +333,7 @@ test("未生成摘要的合资格记录可生成一次", async ({ page }) => {
 
   // 点击查看，应该显示生成表单（404）
   await admissionsPage.openHandover(admission.encounter.encounter_no);
-  const generateForm = page.getByRole("form").filter({ hasText: /生成|创建/ });
+  const generateForm = page.locator('form[aria-label="生成交接摘要"]');
   await expect(generateForm).toBeVisible();
 
   // 生成摘要
@@ -288,7 +343,9 @@ test("未生成摘要的合资格记录可生成一次", async ({ page }) => {
   // 验证摘要已显示
   const dialog = admissionsPage.handoverDialog();
   await expect(dialog).toBeVisible();
-  await expect(dialog.getByText("测试交接人")).toBeVisible();
+  const generated = await api<HandoverResponse>(page, `/crate-api/healthcare/v1/elderly-admissions/${admission.encounter.id}/discharge-handover`);
+  expect(generated.author).toBe("测试交接人");
+  expect(generated.handover_note).toBe("测试备注");
 });
 
 test("重复点击不重复请求", async ({ page }) => {
@@ -298,21 +355,29 @@ test("重复点击不重复请求", async ({ page }) => {
   await admissionsPage.goto();
   await admissionsPage.switchToDischargedTab();
 
-  // 生成摘要
+  // 生成摘要并验证提交期间只发送一次请求
   await admissionsPage.openHandover(admission.encounter.encounter_no);
-  await admissionsPage.generateHandover("幂等测试员");
+  const form = page.locator('form[aria-label="生成交接摘要"]');
+  await form.getByLabel("交接人（必填）").fill("幂等测试员");
+  let postCount = 0;
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url().includes("/discharge-handover")) postCount += 1;
+  });
+  const submitButton = form.getByRole("button", { name: "生成交接摘要" });
+  await submitButton.dblclick();
+  await expect.poll(() => postCount).toBe(1);
 
   // 关闭对话框
-  await page.keyboard.press("Escape");
-  await page.waitForLoadState("networkidle");
+  await admissionsPage.handoverDialog().getByRole("button", { name: "关闭" }).click();
 
   // 再次打开，应该直接显示摘要而非生成表单
   await admissionsPage.openHandover(admission.encounter.encounter_no);
   const dialog = admissionsPage.handoverDialog();
   await expect(dialog).toBeVisible();
-  await expect(dialog.getByText("幂等测试员")).toBeVisible();
+  const existing = await api<HandoverResponse>(page, `/crate-api/healthcare/v1/elderly-admissions/${admission.encounter.id}/discharge-handover`);
+  expect(existing.author).toBe("幂等测试员");
   // 不应该有生成表单
-  await expect(page.getByRole("form").filter({ hasText: /生成|创建/ })).not.toBeVisible();
+  await expect(page.locator('form[aria-label="生成交接摘要"]')).not.toBeVisible();
 });
 
 test("活动入住没有生成入口", async ({ page }) => {
@@ -345,30 +410,41 @@ test("归档后新增护理记录更正不影响已归档快照", async ({ page 
   await admissionsPage.openHandover(admission.encounter.encounter_no);
   await admissionsPage.generateHandover("原始交接人");
   const dialog = admissionsPage.handoverDialog();
-  const originalContent = await dialog.textContent();
-  await page.keyboard.press("Escape");
+  const original = await api<HandoverResponse>(page, `/crate-api/healthcare/v1/elderly-admissions/${admission.encounter.id}/discharge-handover`);
+  await dialog.getByRole("button", { name: "关闭" }).click();
 
   // 通过 API 新增护理记录更正
-  const patientId = admission.encounter.patient_id;
-  await api(page, "/crate-api/healthcare/v1/nursing-records", {
+  const record = await api<{ id: string }>(page, "/crate-api/healthcare/v1/nursing-records", {
     method: "POST",
     body: {
       encounter_id: admission.encounter.id,
+      period_id: admission.nursing_period.id,
       title: "新增更正",
       content: "这是一条新的更正记录",
     },
+  });
+  await api(page, `/crate-api/healthcare/v1/nursing-records/${record.id}/corrections`, {
+    method: "POST",
+    body: { content: "这是一条新的更正内容", record_time: "2026-07-31T12:00:00+08:00" },
   });
 
   // 重新打开摘要，内容应该不变
   await admissionsPage.openHandover(admission.encounter.encounter_no);
   await expect(dialog).toBeVisible();
-  const currentContent = await dialog.textContent();
-  expect(currentContent).toContain("原始交接人");
+  const current = await api<HandoverResponse>(page, `/crate-api/healthcare/v1/elderly-admissions/${admission.encounter.id}/discharge-handover`);
+  expect(current.id).toBe(original.id);
+  expect(current.author).toBe("原始交接人");
+  expect(current.snapshot).toEqual(original.snapshot);
+  await expect(dialog).toContainText("归档后源记录更正不会自动同步此摘要");
 });
 
 test("窄屏下档案切换和查看可操作且文字不重叠", async ({ page }) => {
   await page.setViewportSize({ width: 375, height: 812 });
   const admission = await createDischargedAdmission(page, "MOB");
+  await api(page, `/crate-api/healthcare/v1/elderly-admissions/${admission.encounter.id}/discharge-handover`, {
+    method: "POST",
+    body: { author: "窄屏交接人" },
+  });
   const admissionsPage = new AdmissionsPage(page);
 
   await admissionsPage.goto();
@@ -381,6 +457,14 @@ test("窄屏下档案切换和查看可操作且文字不重叠", async ({ page 
   await expect(dialog).toBeVisible();
 
   // 检查对话框内容可操作
-  const closeButtons = dialog.getByRole("button", { name: /关闭|×/ });
-  await expect(closeButtons.first()).toBeEnabled();
+  await expect(dialog.getByRole("button", { name: "关闭" })).toBeEnabled();
+  const sectionBounds = await dialog.locator("section").evaluateAll((sections) =>
+    sections.map((section) => {
+      const rect = section.getBoundingClientRect();
+      return { top: rect.top, bottom: rect.bottom };
+    }),
+  );
+  for (let index = 1; index < sectionBounds.length; index += 1) {
+    expect(sectionBounds[index].top).toBeGreaterThanOrEqual(sectionBounds[index - 1].bottom - 1);
+  }
 });

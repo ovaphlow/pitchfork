@@ -14,6 +14,7 @@ import com.ovaphlow.crate.nursing.ServicePeriodService
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
+import io.vertx.pgclient.PgException
 import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.RowSet
@@ -25,6 +26,7 @@ import org.jooq.Query
 import org.jooq.impl.DSL
 import java.time.LocalDate
 import java.time.OffsetDateTime
+import java.time.ZoneId
 
 class HealthcareService(
     private val pool: Pool,
@@ -35,6 +37,7 @@ class HealthcareService(
     companion object {
         private val patientStatuses = setOf("ACTIVE", "INACTIVE", "DECEASED")
         private val encounterStatuses = setOf("ACTIVE", "DISCHARGED", "TRANSFERRED")
+        private val businessZone = ZoneId.of("Asia/Shanghai")
 
         private fun patientJson(row: Row): JsonObject =
             JsonObject()
@@ -192,7 +195,7 @@ class HealthcareService(
                 val closePeriodFuture: Future<Void> =
                     if (encounter.getString("encounter_type") == "ELDERLY_CARE") {
                         servicePeriodService
-                            .closeElderlyCarePeriod(connection, id, dischargeDate.toLocalDate(), now)
+                            .closeElderlyCarePeriod(connection, id, businessDate(dischargeDate), now)
                             .map<Void> { null }
                     } else {
                         Future.succeededFuture()
@@ -210,6 +213,9 @@ class HealthcareService(
             }
         }
     }
+
+    private fun businessDate(value: OffsetDateTime): LocalDate =
+        value.atZoneSameInstant(businessZone).toLocalDate()
 
     fun admitElderly(body: JsonObject): Future<JsonObject> {
         val patientId = body.getString("patient_id")?.takeIf(String::isNotBlank)
@@ -853,7 +859,11 @@ class HealthcareService(
             return Future.failedFuture(error)
         }
         val handoverNote = try {
-            body.getString("handover_note")?.trim()?.takeIf(String::isNotBlank)?.let {
+            val noteValue = body.getValue("handover_note")
+            if (noteValue != null && noteValue !is String) {
+                throw IllegalArgumentException("handover_note must be a string")
+            }
+            noteValue?.trim()?.takeIf(String::isNotBlank)?.let {
                 if (it.length > 2000) throw IllegalArgumentException("handover_note must not exceed 2000 characters")
                 it
             }
@@ -924,7 +934,7 @@ class HealthcareService(
             }
 
             servicePeriodService.lockCompletedElderlyCarePeriodForHandover(
-                client, encounterId, dischargeDate.toLocalDate(),
+                client, encounterId, businessDate(dischargeDate),
             ).compose { period ->
                 if (period.getString("patient_id") != encounter.getString("patient_id")) {
                     return@compose Future.failedFuture(
@@ -971,7 +981,7 @@ class HealthcareService(
         val encounterId = requireNotNull(encounter.getString("id"))
         val periodId = requireNotNull(period.getString("id"))
         val patientId = requireNotNull(encounter.getString("patient_id"))
-        val recordDate = OffsetDateTime.parse(dischargeDate).toLocalDate()
+        val recordDate = businessDate(OffsetDateTime.parse(dischargeDate))
         val now = OffsetDateTime.now()
 
         return dischargeHandoverSnapshotService.buildNursingSnapshot(client, periodId)
@@ -1071,6 +1081,7 @@ class HealthcareService(
         periodId: String,
     ): Future<List<JsonObject>> {
         val metadataField = MedicalRecords.MEDICAL_RECORDS.METADATA
+        val recordTimeField = DSL.field("{0} ->> {1}", String::class.java, metadataField, DSL.inline("record_time"))
         val query = ctx.select(
             MedicalRecords.MEDICAL_RECORDS.ID,
             MedicalRecords.MEDICAL_RECORDS.TITLE,
@@ -1087,7 +1098,7 @@ class HealthcareService(
                     .and(DSL.field("{0} ->> {1}", String::class.java, metadataField, DSL.`val`("period_id")).eq(periodId)),
             )
             .orderBy(
-                MedicalRecords.MEDICAL_RECORDS.RECORD_DATE.asc(),
+                recordTimeField.asc().nullsLast(),
                 MedicalRecords.MEDICAL_RECORDS.CREATED_AT.asc(),
                 MedicalRecords.MEDICAL_RECORDS.ID.asc(),
             )
@@ -1150,7 +1161,11 @@ class HealthcareService(
     }
 
     private fun isUniqueViolation(err: Throwable): Boolean {
-        val msg = err.message ?: ""
-        return msg.contains("uq_medical_records_elderly_handover_period") || msg.contains("duplicate key")
+        var current: Throwable? = err
+        while (current != null) {
+            if (current is PgException && current.sqlState == "23505") return true
+            current = current.cause
+        }
+        return false
     }
 }

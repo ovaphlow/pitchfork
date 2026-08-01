@@ -1,3 +1,5 @@
+import { serviceBase } from "./aceso-service-config";
+
 interface ProblemDetails {
   error?: string;
   detail?: string;
@@ -18,6 +20,7 @@ export class ApiRequestError extends Error {
 interface RequestOptions {
   csrf?: boolean;
   redirectOnUnauthorized?: boolean;
+  service?: "aceso" | "identity" | "nexus";
 }
 
 export interface IdentitySession {
@@ -347,14 +350,6 @@ interface NursingPage<T> {
   meta: { total: number; overdue_total?: number };
 }
 
-function apiBase(): string {
-  const configured = import.meta.env.PUBLIC_API_URL?.trim();
-  if (!configured) {
-    throw new Error("Aceso API 地址未配置，请联系系统管理员");
-  }
-  return configured.replace(/\/$/, "");
-}
-
 function cookieValue(name: string): string | undefined {
   if (typeof document === "undefined") return undefined;
   const prefix = `${name}=`;
@@ -400,9 +395,9 @@ async function readResponse<T>(response: Response, redirectOnUnauthorized: boole
 async function request<T>(
   path: string,
   init: RequestInit = {},
-  { csrf = false, redirectOnUnauthorized = true }: RequestOptions = {},
+  { csrf = false, redirectOnUnauthorized = true, service = "aceso" }: RequestOptions = {},
 ): Promise<T> {
-  const url = `${apiBase()}${path}`;
+  const url = `${serviceBase(service)}${path}`;
   const headers = new Headers(init.headers);
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
@@ -427,12 +422,12 @@ async function request<T>(
 }
 
 export function getCurrentSession(redirectOnUnauthorized = true): Promise<IdentitySession> {
-  return request<IdentitySession>("/identity/v1/session", {}, { redirectOnUnauthorized });
+  return request<IdentitySession>("/session", {}, { redirectOnUnauthorized, service: "identity" });
 }
 
 export async function login(identifier: string, password: string): Promise<IdentitySession> {
   const body = new URLSearchParams({ identifier, password });
-  const url = `${apiBase()}/identity/v1/sessions`;
+  const url = `${serviceBase("identity")}/sessions`;
   let response: Response;
   try {
     response = await fetch(url, {
@@ -462,12 +457,12 @@ export async function login(identifier: string, password: string): Promise<Ident
 }
 
 export async function logout(): Promise<void> {
-  await request<void>("/identity/v1/sessions/current", { method: "DELETE" }, { csrf: true, redirectOnUnauthorized: false });
+  await request<void>("/sessions/current", { method: "DELETE" }, { csrf: true, redirectOnUnauthorized: false, service: "identity" });
 }
 
 export function listIdentitySubjects(page: number, pageSize: number): Promise<IdentitySubjectList> {
   const params = new URLSearchParams({ limit: String(pageSize), offset: String((page - 1) * pageSize) });
-  return request<IdentitySubjectList>(`/identity/v1/subjects?${params}`);
+  return request<IdentitySubjectList>(`/subjects?${params}`, {}, { service: "identity" });
 }
 
 export function createIdentitySubject(input: {
@@ -476,31 +471,31 @@ export function createIdentitySubject(input: {
   password: string;
 }): Promise<IdentitySubject> {
   return request<IdentitySubject>(
-    "/identity/v1/subjects",
+    "/subjects",
     { method: "POST", body: JSON.stringify(input) },
-    { csrf: true },
+    { csrf: true, service: "identity" },
   );
 }
 
 export function disableIdentitySubject(id: string): Promise<IdentitySubject> {
   return request<IdentitySubject>(
-    `/identity/v1/subjects/${encodeURIComponent(id)}`,
+    `/subjects/${encodeURIComponent(id)}`,
     { method: "PATCH", body: JSON.stringify({ status: "禁用" }) },
-    { csrf: true },
+    { csrf: true, service: "identity" },
   );
 }
 
 export function setIdentityTemporaryPassword(id: string, temporaryPassword: string): Promise<IdentitySubject> {
   return request<IdentitySubject>(
-    `/identity/v1/subjects/${encodeURIComponent(id)}`,
+    `/subjects/${encodeURIComponent(id)}`,
     { method: "PATCH", body: JSON.stringify({ temporary_password: temporaryPassword }) },
-    { csrf: true },
+    { csrf: true, service: "identity" },
   );
 }
 
 export function listDepartments(): Promise<Department[]> {
   const params = new URLSearchParams({ category: "department", page: "1", page_size: "100" });
-  return request<Department[]>(`/shared/v1/settings?${params}`);
+  return request<Department[]>(`/settings?${params}`, {}, { service: "nexus" });
 }
 
 function settingPayload(input: DepartmentInput): Record<string, unknown> {
@@ -517,21 +512,21 @@ function settingPayload(input: DepartmentInput): Record<string, unknown> {
 }
 
 export function createDepartment(input: DepartmentInput): Promise<Department> {
-  return request<Department>("/shared/v1/settings", {
+  return request<Department>("/settings", {
     method: "POST",
     body: JSON.stringify(settingPayload(input)),
-  });
+  }, { service: "nexus" });
 }
 
 export function updateDepartment(id: string, input: DepartmentInput): Promise<Department> {
-  return request<Department>(`/shared/v1/settings/${encodeURIComponent(id)}`, {
+  return request<Department>(`/settings/${encodeURIComponent(id)}`, {
     method: "PUT",
     body: JSON.stringify(settingPayload(input)),
-  });
+  }, { service: "nexus" });
 }
 
 export async function deleteDepartment(id: string): Promise<void> {
-  await request<void>(`/shared/v1/settings/${encodeURIComponent(id)}`, { method: "DELETE" });
+  await request<void>(`/settings/${encodeURIComponent(id)}`, { method: "DELETE" }, { service: "nexus" });
 }
 
 export function listPatients(params: {

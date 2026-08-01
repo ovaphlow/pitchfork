@@ -118,22 +118,20 @@ class ElderlyDischargeHandoverIntegrationTest {
         val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
         DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
             val stmt = conn.createStatement()
-            // 按依赖顺序清理：摘要 → 护理记录 → 执行 → 任务 → 措施 → 计划 → 评估 → 周期 → encounter → 患者
-            stmt.execute("DELETE FROM healthcare.medical_records WHERE id LIKE '${FIXTURE_PREFIX}%'")
-            stmt.execute("DELETE FROM healthcare.nursing_records WHERE id LIKE '${FIXTURE_PREFIX}%'")
+            // 按依赖顺序清理：文书 → 执行 → 任务 → 措施 → 计划 → 评估 → 周期 → encounter → 患者
+            stmt.execute("DELETE FROM healthcare.medical_records WHERE id LIKE '${FIXTURE_PREFIX}%' OR encounter_id IN (SELECT id FROM healthcare.encounters WHERE id LIKE '${FIXTURE_PREFIX}%' OR patient_id LIKE '${FIXTURE_PREFIX}%')")
             stmt.execute("DELETE FROM nursing.nursing_task_executions WHERE id LIKE '${FIXTURE_PREFIX}%' OR task_id IN (SELECT id FROM nursing.nursing_tasks WHERE id LIKE '${FIXTURE_PREFIX}%' OR period_id IN (SELECT id FROM nursing.nursing_service_periods WHERE id LIKE '${FIXTURE_PREFIX}%' OR encounter_id IN (SELECT id FROM healthcare.encounters WHERE id LIKE '${FIXTURE_PREFIX}%' OR patient_id LIKE '${FIXTURE_PREFIX}%')))")
             stmt.execute("DELETE FROM nursing.nursing_tasks WHERE id LIKE '${FIXTURE_PREFIX}%' OR period_id IN (SELECT id FROM nursing.nursing_service_periods WHERE id LIKE '${FIXTURE_PREFIX}%' OR encounter_id IN (SELECT id FROM healthcare.encounters WHERE id LIKE '${FIXTURE_PREFIX}%' OR patient_id LIKE '${FIXTURE_PREFIX}%'))")
             stmt.execute("DELETE FROM nursing.nursing_plan_items WHERE plan_id IN (SELECT id FROM nursing.nursing_plans WHERE id LIKE '${FIXTURE_PREFIX}%' OR period_id IN (SELECT id FROM nursing.nursing_service_periods WHERE id LIKE '${FIXTURE_PREFIX}%' OR encounter_id IN (SELECT id FROM healthcare.encounters WHERE id LIKE '${FIXTURE_PREFIX}%' OR patient_id LIKE '${FIXTURE_PREFIX}%')))")
-            stmt.execute("DELETE FROM nursing.nursing_plans WHERE id LIKE '${FIXTURE_PREFIX}%' OR period_id IN (SELECT id FROM nursing.nursing_service_periods WHERE id LIKE '${FIXTURE_PREFIX}%' OR encounter_id IN (SELECT id FROM healthcare.encounters WHERE id LIKE '${FIXTURE_PREFIX}%' OR patient_id LIKE '${FIXTURE_PREFIX}%')))")
-            stmt.execute("DELETE FROM nursing.nursing_assessments WHERE id LIKE '${FIXTURE_PREFIX}%' OR period_id IN (SELECT id FROM nursing.nursing_service_periods WHERE id LIKE '${FIXTURE_PREFIX}%' OR encounter_id IN (SELECT id FROM healthcare.encounters WHERE id LIKE '${FIXTURE_PREFIX}%' OR patient_id LIKE '${FIXTURE_PREFIX}%')))")
+            stmt.execute("DELETE FROM nursing.nursing_plans WHERE id LIKE '${FIXTURE_PREFIX}%' OR period_id IN (SELECT id FROM nursing.nursing_service_periods WHERE id LIKE '${FIXTURE_PREFIX}%' OR encounter_id IN (SELECT id FROM healthcare.encounters WHERE id LIKE '${FIXTURE_PREFIX}%' OR patient_id LIKE '${FIXTURE_PREFIX}%'))")
+            stmt.execute("DELETE FROM nursing.nursing_assessments WHERE id LIKE '${FIXTURE_PREFIX}%' OR period_id IN (SELECT id FROM nursing.nursing_service_periods WHERE id LIKE '${FIXTURE_PREFIX}%' OR encounter_id IN (SELECT id FROM healthcare.encounters WHERE id LIKE '${FIXTURE_PREFIX}%' OR patient_id LIKE '${FIXTURE_PREFIX}%'))")
             stmt.execute("DELETE FROM nursing.nursing_service_periods WHERE id LIKE '${FIXTURE_PREFIX}%' OR encounter_id IN (SELECT id FROM healthcare.encounters WHERE id LIKE '${FIXTURE_PREFIX}%' OR patient_id LIKE '${FIXTURE_PREFIX}%')")
             stmt.execute("DELETE FROM healthcare.encounters WHERE id LIKE '${FIXTURE_PREFIX}%' OR patient_id LIKE '${FIXTURE_PREFIX}%'")
             stmt.execute("DELETE FROM healthcare.patients WHERE id LIKE '${FIXTURE_PREFIX}%'")
 
             val residual = stmt.executeQuery("""
                 SELECT (
-                    (SELECT count(*) FROM healthcare.medical_records WHERE id LIKE '${FIXTURE_PREFIX}%') +
-                    (SELECT count(*) FROM healthcare.nursing_records WHERE id LIKE '${FIXTURE_PREFIX}%') +
+                    (SELECT count(*) FROM healthcare.medical_records WHERE id LIKE '${FIXTURE_PREFIX}%' OR encounter_id IN (SELECT id FROM healthcare.encounters WHERE id LIKE '${FIXTURE_PREFIX}%' OR patient_id LIKE '${FIXTURE_PREFIX}%')) +
                     (SELECT count(*) FROM nursing.nursing_task_executions WHERE id LIKE '${FIXTURE_PREFIX}%') +
                     (SELECT count(*) FROM nursing.nursing_tasks WHERE id LIKE '${FIXTURE_PREFIX}%') +
                     (SELECT count(*) FROM nursing.nursing_plan_items WHERE id LIKE '${FIXTURE_PREFIX}%') +
@@ -154,8 +152,8 @@ class ElderlyDischargeHandoverIntegrationTest {
      *   - dha-patient-1 + dha-enc-discharged（ELDERLY_CARE, DISCHARGED + COMPLETED 周期）→ 正常归档
      *   - dha-patient-1 + dha-enc-active（ELDERLY_CARE, ACTIVE）→ 同长者重新入住，验证隔离
      *   - dha-patient-2 + dha-enc-discharged2（ELDERLY_CARE, DISCHARGED + COMPLETED 周期）→ 另一位已离院长者
-     *   - dha-patient-3 + dha-enc-noperiod（ELDERLY_CARE, ACTIVE，无周期）→ 缺周期拒绝
-     *   - dha-patient-4 + dha-enc-notcompleted（ELDERLY_CARE, ACTIVE + ACTIVE 周期）→ 周期未完成拒绝
+     *   - dha-patient-3 + dha-enc-noperiod（ELDERLY_CARE, DISCHARGED，无周期）→ 缺周期拒绝
+     *   - dha-patient-4 + dha-enc-notcompleted（ELDERLY_CARE, DISCHARGED + ACTIVE 周期）→ 周期未完成拒绝
      *   - dha-patient-5 + dha-enc-outpatient（OUTPATIENT, DISCHARGED）→ 非养老拒绝
      *   - dha-patient-6 + dha-enc-datediff（ELDERLY_CARE, DISCHARGED，日期不一致）→ 日期不一致拒绝
      */
@@ -165,14 +163,15 @@ class ElderlyDischargeHandoverIntegrationTest {
             val stmt = conn.createStatement()
 
             // 患者
-            for (i in 1..6) {
+            for (i in 1..7) {
                 stmt.execute("INSERT INTO healthcare.patients (id, name, gender, birth_date, emergency_contact, allergies, past_history, status) VALUES ('${fixtureId("patient-$i")}', '归档测试长者$i', '男', '1940-01-01', '{\"name\":\"联系人$i\",\"phone\":\"1380000000$i\"}', '[{\"allergen\":\"青霉素\"}]', '高血压病史', 'ACTIVE') ON CONFLICT (id) DO NOTHING")
             }
+            stmt.execute("UPDATE healthcare.patients SET id_card_no = 'DHA-ID-CARD-1', address = 'DHA-秘密地址', medical_insurance = 'DHA-医保号', metadata = '{\"private\":\"不得进入快照\"}' WHERE id = '${fixtureId("patient-1")}'")
 
             // 已离院 encounter（正常归档）
             stmt.execute("""
                 INSERT INTO healthcare.encounters (id, patient_id, encounter_type, encounter_no, admit_date, discharge_date, admitting_diagnosis, discharge_diagnosis, attending_physician, status)
-                VALUES ('${fixtureId("enc-discharged")}', '${fixtureId("patient-1")}', 'ELDERLY_CARE', 'DHA-20260731-01', '2026-07-01T00:00:00+08:00', '2026-07-31T00:00:00+08:00', '高血压', '病情稳定', '赵医生', 'DISCHARGED')
+                VALUES ('${fixtureId("enc-discharged")}', '${fixtureId("patient-1")}', 'ELDERLY_CARE', 'DHA-20260731-01', '2026-07-01T00:00:00+08:00', '2026-07-31T00:00:00Z', '高血压', '病情稳定', '赵医生', 'DISCHARGED')
                 ON CONFLICT (id) DO NOTHING
             """)
 
@@ -186,35 +185,35 @@ class ElderlyDischargeHandoverIntegrationTest {
             // 另一位已离院长者
             stmt.execute("""
                 INSERT INTO healthcare.encounters (id, patient_id, encounter_type, encounter_no, admit_date, discharge_date, status)
-                VALUES ('${fixtureId("enc-discharged2")}', '${fixtureId("patient-2")}', 'ELDERLY_CARE', 'DHA-20260731-02', '2026-07-01T00:00:00+08:00', '2026-07-31T00:00:00+08:00', 'DISCHARGED')
+                VALUES ('${fixtureId("enc-discharged2")}', '${fixtureId("patient-2")}', 'ELDERLY_CARE', 'DHA-20260731-02', '2026-07-01T00:00:00+08:00', '2026-07-31T00:00:00Z', 'DISCHARGED')
                 ON CONFLICT (id) DO NOTHING
             """)
 
             // 缺周期 encounter
             stmt.execute("""
-                INSERT INTO healthcare.encounters (id, patient_id, encounter_type, encounter_no, admit_date, status)
-                VALUES ('${fixtureId("enc-noperiod")}', '${fixtureId("patient-3")}', 'ELDERLY_CARE', 'DHA-20260731-03', '2026-07-31T00:00:00+08:00', 'ACTIVE')
+                INSERT INTO healthcare.encounters (id, patient_id, encounter_type, encounter_no, admit_date, discharge_date, status)
+                VALUES ('${fixtureId("enc-noperiod")}', '${fixtureId("patient-3")}', 'ELDERLY_CARE', 'DHA-20260731-03', '2026-07-31T00:00:00+08:00', '2026-07-31T00:00:00Z', 'DISCHARGED')
                 ON CONFLICT (id) DO NOTHING
             """)
 
             // 周期未完成 encounter
             stmt.execute("""
-                INSERT INTO healthcare.encounters (id, patient_id, encounter_type, encounter_no, admit_date, status)
-                VALUES ('${fixtureId("enc-notcompleted")}', '${fixtureId("patient-4")}', 'ELDERLY_CARE', 'DHA-20260731-04', '2026-07-31T00:00:00+08:00', 'ACTIVE')
+                INSERT INTO healthcare.encounters (id, patient_id, encounter_type, encounter_no, admit_date, discharge_date, status)
+                VALUES ('${fixtureId("enc-notcompleted")}', '${fixtureId("patient-4")}', 'ELDERLY_CARE', 'DHA-20260731-04', '2026-07-31T00:00:00+08:00', '2026-07-31T00:00:00Z', 'DISCHARGED')
                 ON CONFLICT (id) DO NOTHING
             """)
 
             // 非养老 encounter
             stmt.execute("""
                 INSERT INTO healthcare.encounters (id, patient_id, encounter_type, encounter_no, admit_date, discharge_date, status)
-                VALUES ('${fixtureId("enc-outpatient")}', '${fixtureId("patient-5")}', 'OUTPATIENT', 'DHA-20260731-05', '2026-07-31T00:00:00+08:00', '2026-07-31T00:00:00+08:00', 'DISCHARGED')
+                VALUES ('${fixtureId("enc-outpatient")}', '${fixtureId("patient-5")}', 'OUTPATIENT', 'DHA-20260731-05', '2026-07-31T00:00:00+08:00', '2026-07-31T00:00:00Z', 'DISCHARGED')
                 ON CONFLICT (id) DO NOTHING
             """)
 
             // 日期不一致 encounter
             stmt.execute("""
                 INSERT INTO healthcare.encounters (id, patient_id, encounter_type, encounter_no, admit_date, discharge_date, status)
-                VALUES ('${fixtureId("enc-datediff")}', '${fixtureId("patient-6")}', 'ELDERLY_CARE', 'DHA-20260731-06', '2026-07-01T00:00:00+08:00', '2026-07-31T00:00:00+08:00', 'DISCHARGED')
+                VALUES ('${fixtureId("enc-datediff")}', '${fixtureId("patient-6")}', 'ELDERLY_CARE', 'DHA-20260731-06', '2026-07-01T00:00:00+08:00', '2026-07-31T00:00:00Z', 'DISCHARGED')
                 ON CONFLICT (id) DO NOTHING
             """)
 
@@ -261,7 +260,7 @@ class ElderlyDischargeHandoverIntegrationTest {
             """)
             stmt.execute("""
                 INSERT INTO nursing.nursing_assessments (id, encounter_id, period_id, assess_type, assess_date, assessor, total_score, result_level)
-                VALUES ('${fixtureId("assess-2")}', '${fixtureId("enc-discharged")}', '${fixtureId("period-discharged")}', 'DISCHARGE', '2026-07-31', '王护士', 8.0, '低')
+                VALUES ('${fixtureId("assess-2")}', '${fixtureId("enc-discharged")}', '${fixtureId("period-discharged")}', 'FALL_RISK', '2026-07-31', '王护士', 8.0, '低')
                 ON CONFLICT (id) DO NOTHING
             """)
 
@@ -273,12 +272,12 @@ class ElderlyDischargeHandoverIntegrationTest {
             """)
             stmt.execute("""
                 INSERT INTO nursing.nursing_plan_items (id, plan_id, action, frequency_code, frequency_name, duration_days, status)
-                VALUES ('${fixtureId("item-1")}', '${fixtureId("plan-1")}', '床栏检查', 'QD', '每日一次', 30, 'COMPLETED')
+                VALUES ('${fixtureId("item-1")}', '${fixtureId("plan-1")}', '床栏检查', 'QD', '每日一次', 30, 'ACTIVE')
                 ON CONFLICT (id) DO NOTHING
             """)
             stmt.execute("""
                 INSERT INTO nursing.nursing_plan_items (id, plan_id, action, frequency_code, frequency_name, duration_days, status)
-                VALUES ('${fixtureId("item-2")}', '${fixtureId("plan-1")}', '夜间巡视', 'QD', '每日一次', 30, 'COMPLETED')
+                VALUES ('${fixtureId("item-2")}', '${fixtureId("plan-1")}', '夜间巡视', 'QD', '每日一次', 30, 'ACTIVE')
                 ON CONFLICT (id) DO NOTHING
             """)
 
@@ -300,10 +299,29 @@ class ElderlyDischargeHandoverIntegrationTest {
             stmt.execute("INSERT INTO nursing.nursing_task_executions (id, task_id, planned_time, status) VALUES ('${fixtureId("exec-skipped")}', '${fixtureId("task-2")}', '2026-07-29T09:00:00+08:00', 'SKIPPED') ON CONFLICT (id) DO NOTHING")
             stmt.execute("INSERT INTO nursing.nursing_task_executions (id, task_id, planned_time, status) VALUES ('${fixtureId("exec-cancelled")}', '${fixtureId("task-2")}', '2026-07-28T09:00:00+08:00', 'CANCELLED') ON CONFLICT (id) DO NOTHING")
 
-            // 护理记录
-            stmt.execute("INSERT INTO healthcare.nursing_records (id, encounter_id, period_id, record_type, record_kind, title, content, record_time, author) VALUES ('${fixtureId("record-1")}', '${fixtureId("enc-discharged")}', '${fixtureId("period-discharged")}', 'NURSING_RECORD', '护理记录', '日常护理记录', '今日长者状态良好', '2026-07-31T10:00:00+08:00', '王护士') ON CONFLICT (id) DO NOTHING")
-            // 更正记录
-            stmt.execute("INSERT INTO healthcare.nursing_records (id, encounter_id, period_id, record_type, record_kind, title, content, record_time, author, corrects_record_id) VALUES ('${fixtureId("record-1-corr")}', '${fixtureId("enc-discharged")}', '${fixtureId("period-discharged")}', 'NURSING_RECORD', '护理记录更正', '日常护理记录（更正）', '今日长者状态良好，已服药', '2026-07-31T11:00:00+08:00', '李护师', '${fixtureId("record-1")}') ON CONFLICT (id) DO NOTHING")
+            stmt.execute("INSERT INTO healthcare.medical_records (id, encounter_id, record_type, title, content, physician, record_date, metadata) VALUES ('${fixtureId("record-1")}', '${fixtureId("enc-discharged")}', 'NURSING_RECORD', '日常护理记录', '今日长者状态良好', '王护士', '2026-07-31', '{\"period_id\":\"${fixtureId("period-discharged")}\",\"record_kind\":\"MANUAL\",\"record_time\":\"2026-07-31T10:00:00+08:00\"}') ON CONFLICT (id) DO NOTHING")
+            stmt.execute("INSERT INTO healthcare.medical_records (id, encounter_id, record_type, title, content, physician, record_date, metadata) VALUES ('${fixtureId("record-1-corr")}', '${fixtureId("enc-discharged")}', 'NURSING_RECORD', '日常护理记录（更正）', '今日长者状态良好，已服药', '李护师', '2026-07-31', '{\"period_id\":\"${fixtureId("period-discharged")}\",\"record_kind\":\"CORRECTION\",\"record_time\":\"2026-07-31T11:00:00+08:00\",\"corrects_record_id\":\"${fixtureId("record-1")}\"}') ON CONFLICT (id) DO NOTHING")
+            stmt.execute("INSERT INTO healthcare.medical_records (id, encounter_id, record_type, title, content, physician, record_date, metadata) VALUES ('${fixtureId("record-unrelated")}', '${fixtureId("enc-discharged")}', 'ADMISSION', '其他医疗文书', '不得进入离院交接快照', '系统', '2026-07-31', '{}') ON CONFLICT (id) DO NOTHING")
+
+            stmt.execute("INSERT INTO nursing.nursing_assessments (id, encounter_id, period_id, assess_type, assess_date, assessor, total_score, result_level) VALUES ('${fixtureId("assess-active")}', '${fixtureId("enc-active")}', '${fixtureId("period-active")}', 'OTHER', '2026-08-01', '诱饵', 1, '低') ON CONFLICT (id) DO NOTHING")
+            stmt.execute("INSERT INTO nursing.nursing_plans (id, period_id, encounter_id, plan_name, status, created_by, start_date) VALUES ('${fixtureId("plan-active")}', '${fixtureId("period-active")}', '${fixtureId("enc-active")}', '其他周期计划', 'ACTIVE', '诱饵', '2026-08-01') ON CONFLICT (id) DO NOTHING")
+            stmt.execute("INSERT INTO nursing.nursing_plan_items (id, plan_id, action, status) VALUES ('${fixtureId("item-active")}', '${fixtureId("plan-active")}', '其他周期措施', 'ACTIVE') ON CONFLICT (id) DO NOTHING")
+            stmt.execute("INSERT INTO nursing.nursing_tasks (id, period_id, encounter_id, task_type, description, start_date, status) VALUES ('${fixtureId("task-active")}', '${fixtureId("period-active")}', '${fixtureId("enc-active")}', 'NURSING', '其他周期任务', '2026-08-01', 'ACTIVE') ON CONFLICT (id) DO NOTHING")
+            stmt.execute("INSERT INTO nursing.nursing_task_executions (id, task_id, planned_time, status) VALUES ('${fixtureId("exec-active")}', '${fixtureId("task-active")}', '2026-08-01T09:00:00+08:00', 'PENDING') ON CONFLICT (id) DO NOTHING")
+            stmt.execute("INSERT INTO healthcare.medical_records (id, encounter_id, record_type, title, content, physician, record_date, metadata) VALUES ('${fixtureId("record-active")}', '${fixtureId("enc-active")}', 'NURSING_RECORD', '其他周期护理记录', '不得进入离院快照', '诱饵', '2026-08-01', '{\"period_id\":\"${fixtureId("period-active")}\",\"record_kind\":\"MANUAL\",\"record_time\":\"2026-08-01T10:00:00+08:00\"}') ON CONFLICT (id) DO NOTHING")
+            stmt.execute("INSERT INTO nursing.nursing_assessments (id, encounter_id, period_id, assess_type, assess_date, assessor, total_score, result_level) VALUES ('${fixtureId("assess-other")}', '${fixtureId("enc-discharged2")}', '${fixtureId("period-discharged2")}', 'OTHER', '2026-07-01', '其他长者', 2, '低') ON CONFLICT (id) DO NOTHING")
+            stmt.execute("INSERT INTO healthcare.medical_records (id, encounter_id, record_type, title, content, physician, record_date, metadata) VALUES ('${fixtureId("record-other")}', '${fixtureId("enc-discharged2")}', 'NURSING_RECORD', '其他长者护理记录', '不得进入本摘要', '其他长者', '2026-07-01', '{\"period_id\":\"${fixtureId("period-discharged2")}\",\"record_kind\":\"MANUAL\",\"record_time\":\"2026-07-01T10:00:00+08:00\"}') ON CONFLICT (id) DO NOTHING")
+
+            stmt.execute("""
+                INSERT INTO healthcare.encounters (id, patient_id, encounter_type, encounter_no, admit_date, discharge_date, status)
+                VALUES ('${fixtureId("enc-mismatch")}', '${fixtureId("patient-7")}', 'ELDERLY_CARE', 'DHA-20260731-07', '2026-07-01T00:00:00+08:00', '2026-07-31T00:00:00Z', 'DISCHARGED')
+                ON CONFLICT (id) DO NOTHING
+            """)
+            stmt.execute("""
+                INSERT INTO nursing.nursing_service_periods (id, patient_id, service_type, encounter_id, start_date, end_date, status)
+                VALUES ('${fixtureId("period-mismatch")}', '${fixtureId("patient-1")}', 'ELDERLY_CARE', '${fixtureId("enc-mismatch")}', '2026-07-01', '2026-07-31', 'COMPLETED')
+                ON CONFLICT (id) DO NOTHING
+            """)
         }
     }
 
@@ -401,13 +419,20 @@ class ElderlyDischargeHandoverIntegrationTest {
 
     @Test
     fun `快照不含另一次入住或另一长者数据`(vertx: Vertx, ctx: VertxTestContext) {
-        // 先为另一位已离院长者创建摘要
         request(
             vertx,
             HttpMethod.POST,
-            "$BASE_PATH/elderly-admissions/${fixtureId("enc-discharged2")}/discharge-handover",
+            "$BASE_PATH/elderly-admissions/${fixtureId("enc-discharged")}/discharge-handover",
             JsonObject().put("author", "测试员"),
         ).compose {
+            // 先为另一位已离院长者创建摘要
+            request(
+                vertx,
+                HttpMethod.POST,
+                "$BASE_PATH/elderly-admissions/${fixtureId("enc-discharged2")}/discharge-handover",
+                JsonObject().put("author", "测试员"),
+            )
+        }.compose {
             // 获取第一位长者的摘要
             request(vertx, HttpMethod.GET, "$BASE_PATH/elderly-admissions/${fixtureId("enc-discharged")}/discharge-handover")
         }.onSuccess { (status, body) ->
@@ -429,6 +454,13 @@ class ElderlyDischargeHandoverIntegrationTest {
                 assertFalse(patientJson.contains("id_card_no"), "快照不得包含身份证号")
                 assertFalse(patientJson.contains("address"), "快照不得包含地址")
                 assertFalse(patientJson.contains("medical_insurance"), "快照不得包含医保号")
+                assertFalse(patientJson.contains("DHA-秘密地址"), "快照不得包含地址值")
+                assertFalse(patientJson.contains("DHA-医保号"), "快照不得包含医保值")
+                assertFalse(patientJson.contains("private"), "快照不得包含患者通用 metadata")
+                assertFalse(body.encode().contains("enc-active"), "快照不得混入同一患者其他入住")
+                assertFalse(body.encode().contains("其他周期"), "快照不得混入其他周期护理事实")
+                assertFalse(body.encode().contains("其他长者"), "快照不得混入其他患者护理事实")
+                assertFalse(body.encode().contains("其他医疗文书"), "快照不得混入其他医疗文书")
 
                 ctx.completeNow()
             }
@@ -439,28 +471,29 @@ class ElderlyDischargeHandoverIntegrationTest {
 
     @Test
     fun `相同请求重试返回同一ID不同输入返回409`(vertx: Vertx, ctx: VertxTestContext) {
-        // 相同请求重试
-        request(
-            vertx,
-            HttpMethod.POST,
-            "$BASE_PATH/elderly-admissions/${fixtureId("enc-discharged")}/discharge-handover",
-            JsonObject().put("author", "王护理师").put("handover_note", "已向家属说明注意事项"),
-        ).compose { (status1, body1) ->
+        val path = "$BASE_PATH/elderly-admissions/${fixtureId("enc-discharged")}/discharge-handover"
+        val sameBody = JsonObject().put("author", "王护理师").put("handover_note", "已向家属说明注意事项")
+        request(vertx, HttpMethod.POST, path, sameBody).compose { (status1, body1) ->
             ctx.verify {
-                assertEquals(200, status1, "相同输入重试必须 200")
+                assertEquals(201, status1, "首次创建必须 201")
                 assertNotNull(body1.getString("id"), "必须返回文书 ID")
             }
-            // 不同输入返回 409
-            request(
-                vertx,
-                HttpMethod.POST,
-                "$BASE_PATH/elderly-admissions/${fixtureId("enc-discharged")}/discharge-handover",
-                JsonObject().put("author", "李护理师").put("handover_note", "不同备注"),
-            )
-        }.onSuccess { (status2, body2) ->
+            request(vertx, HttpMethod.POST, path, sameBody).compose { (status2, body2) ->
+                ctx.verify {
+                    assertEquals(200, status2, "相同输入重试必须 200")
+                    assertEquals(body1.getString("id"), body2.getString("id"), "重试必须返回同一 ID")
+                }
+                request(
+                    vertx,
+                    HttpMethod.POST,
+                    path,
+                    JsonObject().put("author", "李护理师").put("handover_note", "不同备注"),
+                )
+            }
+        }.onSuccess { (status, body) ->
             ctx.verify {
-                assertEquals(409, status2, "不同输入必须 409")
-                assertNotNull(body2.getString("error"), "错误响应必须包含 error 字段")
+                assertEquals(409, status, "不同输入必须 409")
+                assertNotNull(body.getString("error"), "错误响应必须包含 error 字段")
                 ctx.completeNow()
             }
         }.onFailure { ctx.failNow(it) }
@@ -501,6 +534,98 @@ class ElderlyDischargeHandoverIntegrationTest {
     }
 
     @Test
+    fun `缺少精确关联周期返回409`(vertx: Vertx, ctx: VertxTestContext) {
+        request(
+            vertx,
+            HttpMethod.POST,
+            "$BASE_PATH/elderly-admissions/${fixtureId("enc-noperiod")}/discharge-handover",
+            JsonObject().put("author", "王护理师"),
+        ).onSuccess { (status, body) ->
+            ctx.verify {
+                assertEquals(409, status)
+                assertTrue(body.getString("error").contains("care period"), "got: ${body.getString("error")}")
+                ctx.completeNow()
+            }
+        }.onFailure { ctx.failNow(it) }
+    }
+
+    @Test
+    fun `未完成周期返回409`(vertx: Vertx, ctx: VertxTestContext) {
+        request(
+            vertx,
+            HttpMethod.POST,
+            "$BASE_PATH/elderly-admissions/${fixtureId("enc-notcompleted")}/discharge-handover",
+            JsonObject().put("author", "王护理师"),
+        ).onSuccess { (status, body) ->
+            ctx.verify {
+                assertEquals(409, status)
+                assertTrue(body.getString("error").contains("not completed"), "got: ${body.getString("error")}")
+                ctx.completeNow()
+            }
+        }.onFailure { ctx.failNow(it) }
+    }
+
+    @Test
+    fun `周期结束日期不一致返回409`(vertx: Vertx, ctx: VertxTestContext) {
+        request(
+            vertx,
+            HttpMethod.POST,
+            "$BASE_PATH/elderly-admissions/${fixtureId("enc-datediff")}/discharge-handover",
+            JsonObject().put("author", "王护理师"),
+        ).onSuccess { (status, body) ->
+            ctx.verify {
+                assertEquals(409, status)
+                assertTrue(body.getString("error").contains("end date"), "got: ${body.getString("error")}")
+                ctx.completeNow()
+            }
+        }.onFailure { ctx.failNow(it) }
+    }
+
+    @Test
+    fun `周期患者不一致返回409`(vertx: Vertx, ctx: VertxTestContext) {
+        request(
+            vertx,
+            HttpMethod.POST,
+            "$BASE_PATH/elderly-admissions/${fixtureId("enc-mismatch")}/discharge-handover",
+            JsonObject().put("author", "王护理师"),
+        ).onSuccess { (status, body) ->
+            ctx.verify {
+                assertEquals(409, status)
+                assertTrue(body.getString("error").contains("patient_id mismatch"), "got: ${body.getString("error")}")
+                ctx.completeNow()
+            }
+        }.onFailure { ctx.failNow(it) }
+    }
+
+    @Test
+    fun `并发相同请求只创建一条摘要并返回同一ID`(vertx: Vertx, ctx: VertxTestContext) {
+        val path = "$BASE_PATH/elderly-admissions/${fixtureId("enc-discharged")}/discharge-handover"
+        val body = JsonObject().put("author", "并发交接人").put("handover_note", "并发备注")
+        val first = request(vertx, HttpMethod.POST, path, body)
+        val second = request(vertx, HttpMethod.POST, path, body)
+
+        io.vertx.core.CompositeFuture.all(first, second).onSuccess { results ->
+            ctx.verify {
+                val response1 = results.resultAt<Pair<Int, JsonObject>>(0)
+                val response2 = results.resultAt<Pair<Int, JsonObject>>(1)
+                assertTrue(setOf(response1.first, response2.first) == setOf(201, 200), "responses: $response1 / $response2")
+                assertEquals(response1.second.getString("id"), response2.second.getString("id"))
+
+                DriverManager.getConnection("jdbc:postgresql://$host:$port/$TEST_DB", user, password).use { conn ->
+                    conn.prepareStatement("SELECT count(*) FROM healthcare.medical_records WHERE record_type = 'DISCHARGE_SUMMARY' AND encounter_id = ? AND metadata ->> 'is_elderly_discharge_handover' = 'true'").use { statement ->
+                        statement.setString(1, fixtureId("enc-discharged"))
+                        statement.executeQuery().use { rows ->
+                            assertTrue(rows.next())
+                            assertEquals(1, rows.getLong(1))
+                        }
+                    }
+                }
+                ctx.completeNow()
+            }
+        }.onFailure { ctx.failNow(it) }
+    }
+
+    @Test
     fun `不存在encounter返回404`(vertx: Vertx, ctx: VertxTestContext) {
         request(
             vertx,
@@ -528,7 +653,7 @@ class ElderlyDischargeHandoverIntegrationTest {
             val plans = stmt.executeQuery("SELECT count(*) FROM nursing.nursing_plans WHERE period_id = '${fixtureId("period-discharged")}'").use { rs -> if (rs.next()) rs.getLong(1) else 0L }
             val tasks = stmt.executeQuery("SELECT count(*) FROM nursing.nursing_tasks WHERE period_id = '${fixtureId("period-discharged")}'").use { rs -> if (rs.next()) rs.getLong(1) else 0L }
             val executions = stmt.executeQuery("SELECT count(*) FROM nursing.nursing_task_executions WHERE task_id IN (SELECT id FROM nursing.nursing_tasks WHERE period_id = '${fixtureId("period-discharged")}')").use { rs -> if (rs.next()) rs.getLong(1) else 0L }
-            val records = stmt.executeQuery("SELECT count(*) FROM healthcare.nursing_records WHERE encounter_id = '${fixtureId("enc-discharged")}' AND period_id = '${fixtureId("period-discharged")}'").use { rs -> if (rs.next()) rs.getLong(1) else 0L }
+            val records = stmt.executeQuery("SELECT count(*) FROM healthcare.medical_records WHERE record_type = 'NURSING_RECORD' AND encounter_id = '${fixtureId("enc-discharged")}' AND metadata ->> 'period_id' = '${fixtureId("period-discharged")}'").use { rs -> if (rs.next()) rs.getLong(1) else 0L }
             mapOf("assessments" to assessments, "plans" to plans, "tasks" to tasks, "executions" to executions, "records" to records)
         }
 
@@ -546,7 +671,7 @@ class ElderlyDischargeHandoverIntegrationTest {
                 val plans = stmt.executeQuery("SELECT count(*) FROM nursing.nursing_plans WHERE period_id = '${fixtureId("period-discharged")}'").use { rs -> if (rs.next()) rs.getLong(1) else 0L }
                 val tasks = stmt.executeQuery("SELECT count(*) FROM nursing.nursing_tasks WHERE period_id = '${fixtureId("period-discharged")}'").use { rs -> if (rs.next()) rs.getLong(1) else 0L }
                 val executions = stmt.executeQuery("SELECT count(*) FROM nursing.nursing_task_executions WHERE task_id IN (SELECT id FROM nursing.nursing_tasks WHERE period_id = '${fixtureId("period-discharged")}')").use { rs -> if (rs.next()) rs.getLong(1) else 0L }
-                val records = stmt.executeQuery("SELECT count(*) FROM healthcare.nursing_records WHERE encounter_id = '${fixtureId("enc-discharged")}' AND period_id = '${fixtureId("period-discharged")}'").use { rs -> if (rs.next()) rs.getLong(1) else 0L }
+                val records = stmt.executeQuery("SELECT count(*) FROM healthcare.medical_records WHERE record_type = 'NURSING_RECORD' AND encounter_id = '${fixtureId("enc-discharged")}' AND metadata ->> 'period_id' = '${fixtureId("period-discharged")}'").use { rs -> if (rs.next()) rs.getLong(1) else 0L }
                 mapOf("assessments" to assessments, "plans" to plans, "tasks" to tasks, "executions" to executions, "records" to records)
             }
 
@@ -569,17 +694,21 @@ class ElderlyDischargeHandoverIntegrationTest {
         val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
         val originalSnapshotHolder = mutableListOf<String>()
 
-        // 获取现有摘要
-        request(vertx, HttpMethod.GET, "$BASE_PATH/elderly-admissions/${fixtureId("enc-discharged")}/discharge-handover")
-            .compose { (status1, body1) ->
+        // 首次归档并获取冻结快照
+        request(
+            vertx,
+            HttpMethod.POST,
+            "$BASE_PATH/elderly-admissions/${fixtureId("enc-discharged")}/discharge-handover",
+            JsonObject().put("author", "归档测试人"),
+        ).compose { (status1, body1) ->
                 ctx.verify {
-                    assertEquals(200, status1)
+                    assertEquals(201, status1)
                 }
                 originalSnapshotHolder.add(body1.getJsonObject("snapshot").encode())
 
                 // 新增一条护理记录更正
                 DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
-                    conn.createStatement().execute("INSERT INTO healthcare.nursing_records (id, encounter_id, period_id, record_type, record_kind, title, content, record_time, author, corrects_record_id) VALUES ('${fixtureId("record-2-corr")}', '${fixtureId("enc-discharged")}', '${fixtureId("period-discharged")}', 'NURSING_RECORD', '护理记录更正', '补充记录', '新增更正内容', '2026-08-01T10:00:00+08:00', '赵护师', '${fixtureId("record-1")}') ON CONFLICT (id) DO NOTHING")
+                    conn.createStatement().execute("INSERT INTO healthcare.medical_records (id, encounter_id, record_type, title, content, physician, record_date, metadata) VALUES ('${fixtureId("record-2-corr")}', '${fixtureId("enc-discharged")}', 'NURSING_RECORD', '补充记录', '新增更正内容', '赵护师', '2026-08-01', '{\"period_id\":\"${fixtureId("period-discharged")}\",\"record_kind\":\"CORRECTION\",\"record_time\":\"2026-08-01T10:00:00+08:00\",\"corrects_record_id\":\"${fixtureId("record-1")}\"}') ON CONFLICT (id) DO NOTHING")
                 }
 
                 // 重新获取摘要
@@ -599,12 +728,10 @@ class ElderlyDischargeHandoverIntegrationTest {
 
     @Test
     fun `GET无既有摘要返回404`(vertx: Vertx, ctx: VertxTestContext) {
-        request(vertx, HttpMethod.GET, "$BASE_PATH/elderly-admissions/${fixtureId("enc-discharged")}/discharge-handover")
+        request(vertx, HttpMethod.GET, "$BASE_PATH/elderly-admissions/${fixtureId("enc-discharged2")}/discharge-handover")
             .onSuccess { (status, _) ->
                 ctx.verify {
-                    // 注意：如果前面的测试已经创建了摘要，这里会返回 200
-                    // 这个测试依赖 @BeforeEach 的清理
-                    assertTrue(status == 200 || status == 404, "必须返回 200 或 404，got: $status")
+                    assertEquals(404, status)
                     ctx.completeNow()
                 }
             }.onFailure { ctx.failNow(it) }

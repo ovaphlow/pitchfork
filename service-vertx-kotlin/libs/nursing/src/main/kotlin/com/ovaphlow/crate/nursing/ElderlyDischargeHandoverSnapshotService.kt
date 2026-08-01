@@ -1,6 +1,11 @@
 package com.ovaphlow.crate.nursing
 
 import com.ovaphlow.crate.database.DatabaseConfig
+import com.ovaphlow.crate.database.gen.nursing.tables.NursingAssessments
+import com.ovaphlow.crate.database.gen.nursing.tables.NursingPlanItems
+import com.ovaphlow.crate.database.gen.nursing.tables.NursingPlans
+import com.ovaphlow.crate.database.gen.nursing.tables.NursingTaskExecutions
+import com.ovaphlow.crate.database.gen.nursing.tables.NursingTasks
 import io.vertx.core.CompositeFuture
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
@@ -8,7 +13,6 @@ import io.vertx.core.json.JsonObject
 import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.SqlClient
 import org.jooq.DSLContext
-import org.jooq.impl.DSL
 import java.math.BigDecimal
 import java.time.LocalDate
 import java.time.OffsetDateTime
@@ -169,109 +173,115 @@ class ElderlyDischargeHandoverSnapshotService(
     }
 
     private fun loadAssessments(client: SqlClient, periodId: String): Future<List<JsonObject>> {
+        val t = NursingAssessments.NURSING_ASSESSMENTS
         val query = ctx.select(
-            DSL.field("id"),
-            DSL.field("assess_type"),
-            DSL.field("assess_date"),
-            DSL.field("assessor"),
-            DSL.field("total_score"),
-            DSL.field("result_level"),
-            DSL.field("detail"),
-            DSL.field("remark"),
-            DSL.field("created_at"),
+            t.ID,
+            t.ASSESS_TYPE,
+            t.ASSESS_DATE,
+            t.ASSESSOR,
+            t.TOTAL_SCORE,
+            t.RESULT_LEVEL,
+            t.DETAIL,
+            t.REMARK,
+            t.CREATED_AT,
         )
-            .from(DSL.table(DSL.name("nursing", "nursing_assessments")))
-            .where(DSL.field("period_id").eq(periodId))
+            .from(t)
+            .where(t.PERIOD_ID.eq(periodId))
             .orderBy(
-                DSL.field("assess_date").asc(),
-                DSL.field("created_at").asc(),
-                DSL.field("id").asc(),
+                t.ASSESS_DATE.asc(),
+                t.CREATED_AT.asc(),
+                t.ID.asc(),
             )
         return execute(client, query).map { rows -> rows.map { assessmentToJson(it) } }
     }
 
     private fun loadPlans(client: SqlClient, periodId: String): Future<List<JsonObject>> {
+        val t = NursingPlans.NURSING_PLANS
         val query = ctx.select(
-            DSL.field("id"),
-            DSL.field("plan_name"),
-            DSL.field("goals"),
-            DSL.field("status"),
-            DSL.field("created_by"),
-            DSL.field("start_date"),
-            DSL.field("end_date"),
-            DSL.field("created_at"),
+            t.ID,
+            t.PLAN_NAME,
+            t.GOALS,
+            t.STATUS,
+            t.CREATED_BY,
+            t.START_DATE,
+            t.END_DATE,
+            t.CREATED_AT,
         )
-            .from(DSL.table(DSL.name("nursing", "nursing_plans")))
-            .where(DSL.field("period_id").eq(periodId))
+            .from(t)
+            .where(t.PERIOD_ID.eq(periodId))
             .orderBy(
-                DSL.field("created_at").asc(),
-                DSL.field("id").asc(),
+                t.CREATED_AT.asc(),
+                t.ID.asc(),
             )
         return execute(client, query).map { rows -> rows.map { planToJson(it) } }
     }
 
     private fun loadItems(client: SqlClient, planIds: List<String>): Future<List<JsonObject>> {
+        val t = NursingPlanItems.NURSING_PLAN_ITEMS
         val query = ctx.select(
-            DSL.field("id"),
-            DSL.field("plan_id"),
-            DSL.field("action"),
-            DSL.field("frequency_code"),
-            DSL.field("frequency_name"),
-            DSL.field("duration_days"),
-            DSL.field("remark"),
-            DSL.field("status"),
-            DSL.field("created_at"),
+            t.ID,
+            t.PLAN_ID,
+            t.ACTION,
+            t.FREQUENCY_CODE,
+            t.FREQUENCY_NAME,
+            t.DURATION_DAYS,
+            t.REMARK,
+            t.STATUS,
+            t.CREATED_AT,
         )
-            .from(DSL.table(DSL.name("nursing", "nursing_plan_items")))
-            .where(DSL.field("plan_id").`in`(planIds))
+            .from(t)
+            .where(t.PLAN_ID.`in`(planIds))
             .orderBy(
-                DSL.field("created_at").asc(),
-                DSL.field("id").asc(),
+                t.CREATED_AT.asc(),
+                t.ID.asc(),
             )
         return execute(client, query).map { rows -> rows.map { itemToJson(it) } }
     }
 
     private fun loadTasks(client: SqlClient, periodId: String): Future<List<JsonObject>> {
+        val t = NursingTasks.NURSING_TASKS
         val query = ctx.select(
-            DSL.field("id"),
-            DSL.field("description"),
-            DSL.field("task_type"),
-            DSL.field("frequency_code"),
-            DSL.field("frequency_name"),
-            DSL.field("start_date"),
-            DSL.field("end_date"),
-            DSL.field("status"),
-            DSL.field("created_at"),
+            t.ID,
+            t.DESCRIPTION,
+            t.TASK_TYPE,
+            t.FREQUENCY_CODE,
+            t.FREQUENCY_NAME,
+            t.START_DATE,
+            t.END_DATE,
+            t.STATUS,
+            t.CREATED_AT,
         )
-            .from(DSL.table(DSL.name("nursing", "nursing_tasks")))
-            .where(DSL.field("period_id").eq(periodId))
+            .from(t)
+            .where(t.PERIOD_ID.eq(periodId))
             .orderBy(
-                DSL.field("created_at").asc(),
-                DSL.field("id").asc(),
+                t.CREATED_AT.asc(),
+                t.ID.asc(),
             )
         return execute(client, query).map { rows -> rows.map { taskToJson(it) } }
     }
 
     private fun loadExecutions(client: SqlClient, periodId: String): Future<List<JsonObject>> {
+        val e = NursingTaskExecutions.NURSING_TASK_EXECUTIONS
+        val t = NursingTasks.NURSING_TASKS
         val query = ctx.select(
-            DSL.field("e.id"),
-            DSL.field("e.task_id"),
-            DSL.field("e.planned_time"),
-            DSL.field("e.actual_time"),
-            DSL.field("e.executor"),
-            DSL.field("e.status"),
-            DSL.field("e.note"),
-            DSL.field("e.created_at"),
+            e.ID,
+            e.TASK_ID,
+            e.PLANNED_TIME,
+            e.ACTUAL_TIME,
+            e.EXECUTOR,
+            e.STATUS,
+            e.NOTE,
+            e.CREATED_AT,
         )
-            .from(DSL.table(DSL.name("nursing", "nursing_task_executions")).`as`("e"))
-            .join(DSL.table(DSL.name("nursing", "nursing_tasks")).`as`("t"))
-            .on(DSL.field("e.task_id").eq(DSL.field("t.id")))
-            .where(DSL.field("t.period_id").eq(periodId))
+            .from(e)
+            .join(t)
+            .on(e.TASK_ID.eq(t.ID))
+            .where(t.PERIOD_ID.eq(periodId))
             .orderBy(
-                DSL.field("e.actual_time").asc().nullsLast(),
-                DSL.field("e.planned_time").asc().nullsLast(),
-                DSL.field("e.created_at").asc(),
-                DSL.field("e.id").asc(),
+                e.ACTUAL_TIME.asc().nullsLast(),
+                e.PLANNED_TIME.asc().nullsLast(),
+                e.CREATED_AT.asc(),
+                e.ID.asc(),
             )
         return execute(client, query).map { rows -> rows.map { executionToJson(it) } }
     }

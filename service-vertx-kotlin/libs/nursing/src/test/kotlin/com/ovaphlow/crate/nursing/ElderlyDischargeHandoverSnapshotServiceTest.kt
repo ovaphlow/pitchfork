@@ -243,7 +243,8 @@ class ElderlyDischargeHandoverSnapshotServiceTest {
         )
         // 执行通过任务 period_id 关联，不按患者或日期猜测
         org.junit.jupiter.api.Assertions.assertTrue(
-            lowerE.contains("t.period_id") && lowerE.contains("order by") && lowerE.contains("actual_time"),
+            lowerE.contains("join") && lowerE.contains("period_id")
+                && lowerE.contains("order by") && lowerE.contains("actual_time"),
             "执行必须按任务 period_id 关联并稳定排序: $executionsSql",
         )
     }

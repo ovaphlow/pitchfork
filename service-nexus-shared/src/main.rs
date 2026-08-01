@@ -2,10 +2,13 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use http::header::{AUTHORIZATION, CONTENT_TYPE, HeaderName};
+use http::{HeaderValue, Method};
 use nexus_shared::auth::IdentityClient;
 use nexus_shared::config::Config;
 use nexus_shared::{AppState, app};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+use tower_http::cors::CorsLayer;
 use tracing_subscriber::Layer;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::SubscriberExt;
@@ -47,11 +50,36 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(config.address)
         .await
         .context("bind NEXUS_ADDR")?;
+    let cors_origins = config
+        .cors_origins
+        .iter()
+        .map(|origin| HeaderValue::try_from(origin.as_str()))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("parse NEXUS_CORS_ORIGINS")?;
+    let cors_layer = CorsLayer::new()
+        .allow_origin(cors_origins)
+        .allow_credentials(true)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([
+            AUTHORIZATION,
+            CONTENT_TYPE,
+            HeaderName::from_static("x-csrf-token"),
+        ]);
     tracing::info!(address = %config.address, "nexus shared service started");
-    axum::serve(listener, app(state, config.max_upload_bytes))
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("serve HTTP")
+    axum::serve(
+        listener,
+        app(state, config.max_upload_bytes).layer(cors_layer),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .context("serve HTTP")
 }
 
 fn initialize_logging() -> Result<tracing_appender::non_blocking::WorkerGuard> {

@@ -6,8 +6,6 @@ Product boundaries and environment configuration are in
 
 ## Scope And Structure
 
-- Development servers are user-managed. Do not run `pnpm dev`, `pnpm preview` or
-  `astro dev`; use `pnpm --filter <app> build` or `pnpm build` for verification.
 - `apps/*/src/pages/` are thin Astro route and layout wrappers. Put page behavior
   in the app's React `components/` directory.
 - `packages/shared/` owns typed API clients; `packages/ui/` owns reusable,

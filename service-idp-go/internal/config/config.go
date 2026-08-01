@@ -35,6 +35,7 @@ type Config struct {
 	SecureSessionCookie       bool
 	PublicURL                 *url.URL
 	TrustedProxyPrefixes      []netip.Prefix
+	CorsOrigins               []string
 }
 
 func Load() (Config, error) {
@@ -85,6 +86,11 @@ func LoadFromLookup(lookup func(string) string) (Config, error) {
 		return Config{}, err
 	}
 
+	corsOrigins, err := corsOriginsValue(lookup("IDENTITYD_CORS_ORIGINS"))
+	if err != nil {
+		return Config{}, err
+	}
+
 	bootstrapIdentifier := strings.TrimSpace(lookup("IDENTITYD_BOOTSTRAP_IDENTIFIER"))
 	bootstrapPassword := lookup("IDENTITYD_BOOTSTRAP_PASSWORD")
 	if (bootstrapIdentifier == "") != (bootstrapPassword == "") {
@@ -105,7 +111,29 @@ func LoadFromLookup(lookup func(string) string) (Config, error) {
 		SecureSessionCookie:       secureCookie,
 		PublicURL:                 publicURL,
 		TrustedProxyPrefixes:      trustedProxyPrefixes,
+		CorsOrigins:               corsOrigins,
 	}, nil
+}
+
+func corsOriginsValue(value string) ([]string, error) {
+	if strings.TrimSpace(value) == "" {
+		return []string{"http://localhost:4324", "http://127.0.0.1:4324"}, nil
+	}
+
+	parts := strings.Split(value, ",")
+	origins := make([]string, 0, len(parts))
+	for _, part := range parts {
+		origin := strings.TrimSpace(part)
+		parsed, err := url.Parse(origin)
+		if origin == "" || err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.User != nil {
+			return nil, fmt.Errorf("IDENTITYD_CORS_ORIGINS contains an invalid origin")
+		}
+		if parsed.Scheme != "http" && parsed.Scheme != "https" {
+			return nil, fmt.Errorf("IDENTITYD_CORS_ORIGINS contains an unsupported origin scheme")
+		}
+		origins = append(origins, origin)
+	}
+	return origins, nil
 }
 
 func throttleSecretValue(value string) ([]byte, error) {

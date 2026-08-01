@@ -44,6 +44,9 @@ func TestLoadFromLookupUsesDefaults(t *testing.T) {
 	if len(configuration.TrustedProxyPrefixes) != 1 || configuration.TrustedProxyPrefixes[0].String() != defaultTrustedProxyCIDR {
 		t.Fatalf("trusted proxy prefixes = %v", configuration.TrustedProxyPrefixes)
 	}
+	if len(configuration.CorsOrigins) != 2 || configuration.CorsOrigins[0] != "http://localhost:4324" || configuration.CorsOrigins[1] != "http://127.0.0.1:4324" {
+		t.Fatalf("cors origins = %v", configuration.CorsOrigins)
+	}
 }
 
 func TestLoadFromLookupParsesConfiguredValues(t *testing.T) {
@@ -61,6 +64,7 @@ func TestLoadFromLookupParsesConfiguredValues(t *testing.T) {
 		"IDENTITYD_SESSION_SECURE_COOKIE":   "true",
 		"IDENTITYD_PUBLIC_URL":              "https://identity.example.internal/crate-api/identity/v1",
 		"IDENTITYD_TRUSTED_PROXY_CIDRS":     "127.0.0.1/32, 10.0.0.0/8",
+		"IDENTITYD_CORS_ORIGINS":            "http://localhost:4324, http://192.168.0.109:4324",
 	}
 
 	configuration, err := LoadFromLookup(valuesLookup(values))
@@ -94,6 +98,9 @@ func TestLoadFromLookupParsesConfiguredValues(t *testing.T) {
 	}
 	if len(configuration.TrustedProxyPrefixes) != 2 {
 		t.Fatalf("trusted proxy count = %d", len(configuration.TrustedProxyPrefixes))
+	}
+	if len(configuration.CorsOrigins) != 2 || configuration.CorsOrigins[1] != "http://192.168.0.109:4324" {
+		t.Fatalf("cors origins = %v", configuration.CorsOrigins)
 	}
 }
 

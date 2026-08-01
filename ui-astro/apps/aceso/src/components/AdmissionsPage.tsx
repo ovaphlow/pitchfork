@@ -338,6 +338,7 @@ export default function AdmissionsPage() {
   const [handoverData, setHandoverData] = useState<ElderlyDischargeHandover | null>(null);
   const [handoverLoading, setHandoverLoading] = useState(false);
   const [handoverError, setHandoverError] = useState("");
+  const [handoverSubmitError, setHandoverSubmitError] = useState("");
   const [handoverAuthor, setHandoverAuthor] = useState("");
   const [handoverNote, setHandoverNote] = useState("");
   const [handoverSubmitting, setHandoverSubmitting] = useState(false);
@@ -495,6 +496,7 @@ export default function AdmissionsPage() {
     setHandoverAdmission(admission);
     setHandoverData(null);
     setHandoverError("");
+    setHandoverSubmitError("");
     setHandoverAuthor("");
     setHandoverNote("");
     setHandoverLoading(true);
@@ -512,21 +514,22 @@ export default function AdmissionsPage() {
     if (!handoverAdmission) return;
     const author = handoverAuthor.trim();
     if (!author) {
-      setHandoverError("交接人不能为空");
+      setHandoverSubmitError("交接人不能为空");
       return;
     }
     setHandoverSubmitting(true);
-    setHandoverError("");
+    setHandoverSubmitError("");
     try {
       const created = await createElderlyDischargeHandover(handoverAdmission.id, {
         author,
         ...(handoverNote.trim() ? { handover_note: handoverNote.trim() } : {}),
       });
       setHandoverData(created);
+      setHandoverSubmitError("");
       await loadDischarged();
     } catch (error) {
-      // 409/网络/校验失败：保留用户输入并显示独立错误
-      setHandoverError(errorMessage(error, "无法生成交接摘要"));
+      // 409/网络/校验失败：保留表单与用户输入，错误独立展示（6.4.3）
+      setHandoverSubmitError(errorMessage(error, "无法生成交接摘要"));
     } finally {
       setHandoverSubmitting(false);
     }
@@ -537,6 +540,7 @@ export default function AdmissionsPage() {
     setHandoverAdmission(null);
     setHandoverData(null);
     setHandoverError("");
+    setHandoverSubmitError("");
   }
 
   const availablePatients = patients.filter((patient) => !admissions.some((admission) => admission.patient_id === patient.id));
@@ -742,7 +746,7 @@ export default function AdmissionsPage() {
         title={handoverAdmission ? `养老照护离院交接摘要 · ${handoverAdmission.patientName}` : "养老照护离院交接摘要"}
       >
         {handoverLoading && <p className="text-sm text-fg-dimmed">正在读取交接摘要…</p>}
-        {!handoverLoading && handoverError && (
+        {!handoverLoading && handoverData === null && handoverError && (
           <div className="space-y-4">
             <div className="rounded-lg border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">{handoverError}</div>
             <div className="flex justify-end">
@@ -750,12 +754,18 @@ export default function AdmissionsPage() {
             </div>
           </div>
         )}
-        {!handoverLoading && !handoverError && handoverData === null && (
+        {!handoverLoading && handoverData === null && !handoverError && (
           <div className="space-y-4">
             <p className="text-sm text-fg-muted">
               该入住尚未生成交接摘要。归档将把关联照护周期的评估、计划、任务、执行与护理记录封存为不可变快照，之后源记录更正不会自动同步。
             </p>
+            {handoverSubmitError && (
+              <div role="alert" className="rounded-lg border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">
+                {handoverSubmitError}
+              </div>
+            )}
             <form
+              aria-label="生成交接摘要"
               className="space-y-4"
               onSubmit={(event) => {
                 event.preventDefault();

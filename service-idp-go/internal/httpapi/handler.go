@@ -42,6 +42,7 @@ type Options struct {
 	LoginThrottle        identity.LoginThrottleSettings
 	SecureSessionCookie  bool
 	TrustedProxyPrefixes []netip.Prefix
+	CorsOrigins          []string
 }
 
 type Handler struct {
@@ -79,7 +80,7 @@ func NewMux(database *sql.DB, options Options) http.Handler {
 	mux.HandleFunc("POST "+identityPrefix+"/subjects", handler.createSubject)
 	mux.HandleFunc("GET "+identityPrefix+"/subjects/{subjectID}", handler.getSubject)
 	mux.HandleFunc("PATCH "+identityPrefix+"/subjects/{subjectID}", handler.updateSubject)
-	return problemDetailsHandler{next: mux}
+	return corsHandler{next: problemDetailsHandler{next: mux}, allowedOrigins: options.CorsOrigins}
 }
 
 func (handler Handler) health(responseWriter http.ResponseWriter, request *http.Request) {

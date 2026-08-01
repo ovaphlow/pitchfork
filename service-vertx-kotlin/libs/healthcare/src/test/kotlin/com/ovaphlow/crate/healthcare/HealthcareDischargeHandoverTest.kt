@@ -35,10 +35,11 @@ import java.util.function.Function as JavaFunction
  * HealthcareService 养老离院交接摘要（DISCHARGE_SUMMARY）的非数据库测试。
  *
  * 使用 mockk 模拟 Pool.withTransaction 与 SqlConnection/RowSet，不访问数据库：
- *   - 输入校验：author 必填/去空白/长度，handover_note 可选/长度，客户端注入字段被忽略
+ *   - 输入校验：author 必填/去空白/长度，handover_note 可选/类型/长度，客户端注入字段被忽略
  *   - 资格错误映射：不存在 404、非养老 400、未离院/缺周期/周期非 COMPLETED/日期不一致/患者不一致 409
  *   - 幂等：首次 201、相同输入重试 200 同一 ID、不同输入 409
  *   - 快照内容：服务端构建的 content_blocks 为空数组/零计数/最小患者字段，不含敏感身份数据
+ *   - 护理记录快照按业务记录时间（metadata.record_time）稳定排序
  *   - 嵌入式 HTTP 路由：静态路径不被泛型 encounter 路由吞掉，201/200/409/400/404 状态码正确
  */
 @ExtendWith(VertxExtension::class)
@@ -279,6 +280,27 @@ class HealthcareDischargeHandoverTest {
     }
 
     @Test
+    fun `UTC读取的离院时间仍按上海业务日期归档`() {
+        val (_, _, pool) = stubConnection(
+            encounters = rows(encounterRow(mapOf("discharge_date" to OffsetDateTime.parse("2026-07-30T16:00:00Z")))),
+            periods = rows(periodRow()),
+            existingHandover = rowSet(),
+            patients = rows(patientRow()),
+            nursingRecords = rowSet(),
+            readBack = rows(handoverRow()),
+        )
+        val service = HealthcareService(pool)
+
+        val (created, handover) = service.createElderlyDischargeHandover(
+            "enc-1",
+            JsonObject().put("author", "王护理师"),
+        ).toCompletionStage().toCompletableFuture().get()
+
+        assertTrue(created)
+        assertEquals("2026-07-31", handover.getString("record_date"))
+    }
+
+    @Test
     fun `相同输入重试返回200同一ID`() {
         val (_, payloads, pool) = stubConnection(
             encounters = rows(encounterRow()),
@@ -359,6 +381,21 @@ class HealthcareDischargeHandoverTest {
     }
 
     @Test
+    fun `handover_note类型错误返回400`() {
+        val (pool, _) = happyStub()
+        val service = HealthcareService(pool)
+
+        val cause = causeOf(
+            service.createElderlyDischargeHandover(
+                "enc-1",
+                JsonObject().put("author", "王护理师").put("handover_note", 123),
+            ),
+        )
+        assertInstanceOf(IllegalArgumentException::class.java, cause)
+        assertTrue(cause.message?.contains("handover_note must be a string") == true, "got: ${cause.message}")
+    }
+
+    @Test
     fun `客户端注入snapshot或metadata字段被忽略`() {
         val (pool, payloads) = happyStub()
         val service = HealthcareService(pool)
@@ -383,6 +420,57 @@ class HealthcareDischargeHandoverTest {
         val blocks = JsonArray(blocksPayload)
         val snapshot = blocks.getJsonObject(0).getJsonObject("snapshot")
         assertEquals("张三", snapshot.getJsonObject("patient").getString("name"), "快照必须由服务端构建")
+    }
+
+    @Test
+    fun `护理记录快照按业务记录时间优先稳定排序`() {
+        val conn = mockk<SqlConnection>()
+        val queries = mutableListOf<String>()
+        val pq = mockk<PreparedQuery<RowSet<Row>>>()
+        every { conn.preparedQuery(any<String>()) } answers {
+            val sql = normalized(firstArg<String>())
+            queries.add(sql)
+            pq
+        }
+        every { conn.preparedQuery(any<String>(), any()) } answers {
+            val sql = normalized(firstArg<String>())
+            queries.add(sql)
+            pq
+        }
+        every { pq.execute(any<Tuple>()) } answers {
+            val sql = queries.last()
+            val rs = when {
+                sql.contains("nursing_assessments") || sql.contains("nursing_plans") ||
+                    sql.contains("nursing_plan_items") || sql.contains("nursing_tasks") ||
+                    sql.contains("nursing_task_executions") -> rowSet()
+                sql.contains("nursing_service_periods") -> rows(periodRow())
+                sql.contains("from healthcare.patients") -> rows(patientRow())
+                sql.contains("from healthcare.encounters") -> rows(encounterRow())
+                sql.contains("insert into healthcare.medical_records") -> rowSet()
+                sql.contains("from healthcare.medical_records") && sql.contains("for update") -> rowSet()
+                sql.contains("from healthcare.medical_records") && sql.contains("id = $1") -> rows(handoverRow())
+                else -> rowSet()
+            }
+            Future.succeededFuture(rs)
+        }
+        val pool = mockk<Pool>()
+        every { pool.withTransaction<Any>(any()) } answers {
+            val handler = firstArg<JavaFunction<SqlConnection, Future<Any>>>()
+            handler.apply(conn)
+        }
+        val service = HealthcareService(pool)
+
+        service.createElderlyDischargeHandover("enc-1", JsonObject().put("author", "王护理师"))
+            .toCompletionStage().toCompletableFuture().get()
+
+        val recordsSql = queries.last { it.contains("from healthcare.medical_records") && !it.contains("for update") && !it.contains("id = $1") }
+        val orderStart = recordsSql.indexOf("order by")
+        assertTrue(orderStart >= 0, "护理记录查询必须带稳定排序: $recordsSql")
+        val orderClause = recordsSql.substring(orderStart)
+        assertTrue(
+            orderClause.indexOf("record_time") < orderClause.indexOf("created_at"),
+            "护理记录必须按业务记录时间 record_time 优先于 created_at 排序: $recordsSql",
+        )
     }
 
     // ——— 资格错误映射 ———
