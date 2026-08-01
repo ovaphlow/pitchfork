@@ -37,6 +37,7 @@ public class Keys {
 
     public static final UniqueKey<DiagnosesRecord> DIAGNOSES_PKEY = Internal.createUniqueKey(Diagnoses.DIAGNOSES, DSL.name("diagnoses_pkey"), new TableField[] { Diagnoses.DIAGNOSES.ID }, true);
     public static final UniqueKey<EncountersRecord> ENCOUNTERS_PKEY = Internal.createUniqueKey(Encounters.ENCOUNTERS, DSL.name("encounters_pkey"), new TableField[] { Encounters.ENCOUNTERS.ID }, true);
+    public static final UniqueKey<EncountersRecord> UQ_ENCOUNTERS_ENCOUNTER_NO = Internal.createUniqueKey(Encounters.ENCOUNTERS, DSL.name("uq_encounters_encounter_no"), new TableField[] { Encounters.ENCOUNTERS.ENCOUNTER_NO }, true);
     public static final UniqueKey<MedicalOrdersRecord> MEDICAL_ORDERS_PKEY = Internal.createUniqueKey(MedicalOrders.MEDICAL_ORDERS, DSL.name("medical_orders_pkey"), new TableField[] { MedicalOrders.MEDICAL_ORDERS.ID }, true);
     public static final UniqueKey<MedicalRecordsRecord> MEDICAL_RECORDS_PKEY = Internal.createUniqueKey(MedicalRecords.MEDICAL_RECORDS, DSL.name("medical_records_pkey"), new TableField[] { MedicalRecords.MEDICAL_RECORDS.ID }, true);
     public static final UniqueKey<PatientsRecord> PATIENTS_ID_CARD_NO_KEY = Internal.createUniqueKey(Patients.PATIENTS, DSL.name("patients_id_card_no_key"), new TableField[] { Patients.PATIENTS.ID_CARD_NO }, true);

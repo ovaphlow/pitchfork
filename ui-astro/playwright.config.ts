@@ -1,5 +1,9 @@
 import { defineConfig, devices } from '@playwright/test';
 
+const baseURL = process.env.PLAYWRIGHT_BASE_URL;
+if (!baseURL) throw new Error('PLAYWRIGHT_BASE_URL must be set for Aceso browser acceptance tests');
+const executablePath = process.env.PLAYWRIGHT_EXECUTABLE_PATH;
+
 /**
  * Playwright 配置 — Aceso 养老院入住照护周期生命周期验收测试。
  *
@@ -14,7 +18,8 @@ export default defineConfig({
   workers: 1,
   reporter: 'list',
   use: {
-    baseURL: process.env.PLAYWRIGHT_BASE_URL || 'http://localhost:4324',
+    baseURL,
+    launchOptions: executablePath ? { executablePath } : undefined,
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     actionTimeout: 10_000,

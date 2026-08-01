@@ -30,8 +30,10 @@ public class Indexes {
     public static final Index IDX_DIAGNOSES_ENCOUNTER = Internal.createIndex(DSL.name("idx_diagnoses_encounter"), Diagnoses.DIAGNOSES, new OrderField[] { Diagnoses.DIAGNOSES.ENCOUNTER_ID }, false);
     public static final Index IDX_DIAGNOSES_ICD = Internal.createIndex(DSL.name("idx_diagnoses_icd"), Diagnoses.DIAGNOSES, new OrderField[] { Diagnoses.DIAGNOSES.ICD_CODE }, false);
     public static final Index IDX_ENCOUNTERS_ADMIT = Internal.createIndex(DSL.name("idx_encounters_admit"), Encounters.ENCOUNTERS, new OrderField[] { Encounters.ENCOUNTERS.ADMIT_DATE }, false);
+    public static final Index IDX_ENCOUNTERS_ENCOUNTER_NO = Internal.createIndex(DSL.name("idx_encounters_encounter_no"), Encounters.ENCOUNTERS, new OrderField[] { Encounters.ENCOUNTERS.ENCOUNTER_NO }, false);
     public static final Index IDX_ENCOUNTERS_PATIENT = Internal.createIndex(DSL.name("idx_encounters_patient"), Encounters.ENCOUNTERS, new OrderField[] { Encounters.ENCOUNTERS.PATIENT_ID }, false);
     public static final Index IDX_ENCOUNTERS_STATUS = Internal.createIndex(DSL.name("idx_encounters_status"), Encounters.ENCOUNTERS, new OrderField[] { Encounters.ENCOUNTERS.STATUS }, false);
+    public static final Index IDX_MEDICAL_RECORDS_NURSING_QUERY = Internal.createIndex(DSL.name("idx_medical_records_nursing_query"), MedicalRecords.MEDICAL_RECORDS, new OrderField[] { MedicalRecords.MEDICAL_RECORDS.RECORD_TYPE, MedicalRecords.MEDICAL_RECORDS.ENCOUNTER_ID, MedicalRecords.MEDICAL_RECORDS.RECORD_DATE.desc() }, false);
     public static final Index IDX_ORDERS_ENCOUNTER = Internal.createIndex(DSL.name("idx_orders_encounter"), MedicalOrders.MEDICAL_ORDERS, new OrderField[] { MedicalOrders.MEDICAL_ORDERS.ENCOUNTER_ID }, false);
     public static final Index IDX_ORDERS_STATUS = Internal.createIndex(DSL.name("idx_orders_status"), MedicalOrders.MEDICAL_ORDERS, new OrderField[] { MedicalOrders.MEDICAL_ORDERS.STATUS }, false);
     public static final Index IDX_ORDERS_TYPE = Internal.createIndex(DSL.name("idx_orders_type"), MedicalOrders.MEDICAL_ORDERS, new OrderField[] { MedicalOrders.MEDICAL_ORDERS.ORDER_TYPE }, false);

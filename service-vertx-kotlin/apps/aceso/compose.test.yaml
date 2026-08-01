@@ -1,0 +1,23 @@
+# Aceso 集成测试专用 PostgreSQL，不连接或覆盖 compose.yaml 的业务数据库。
+# 默认映射到 localhost:55432，容器删除后临时数据库数据随之消失。
+# 启动：podman compose -f compose.test.yaml up -d
+# 关闭：podman compose -f compose.test.yaml down
+
+services:
+  pitchfork-aceso-test-db:
+    image: postgres:17
+    container_name: pitchfork-aceso-test-db
+    restart: "no"
+    ports:
+      - "127.0.0.1:${PITCHFORK_TEST_DB_PORT:-55432}:5432"
+    environment:
+      POSTGRES_DB: aceso_test
+      POSTGRES_USER: ovaphlow
+      POSTGRES_PASSWORD: "${PITCHFORK_TEST_DB_PASSWORD:-pitchfork-test-only}"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ovaphlow -d aceso_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 15

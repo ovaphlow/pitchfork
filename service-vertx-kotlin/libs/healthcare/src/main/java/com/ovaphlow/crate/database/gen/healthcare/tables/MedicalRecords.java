@@ -186,7 +186,7 @@ public class MedicalRecords extends TableImpl<MedicalRecordsRecord> {
 
     @Override
     public List<Index> getIndexes() {
-        return Arrays.asList(Indexes.IDX_RECORDS_ENCOUNTER, Indexes.IDX_RECORDS_TYPE);
+        return Arrays.asList(Indexes.IDX_MEDICAL_RECORDS_NURSING_QUERY, Indexes.IDX_RECORDS_ENCOUNTER, Indexes.IDX_RECORDS_TYPE);
     }
 
     @Override

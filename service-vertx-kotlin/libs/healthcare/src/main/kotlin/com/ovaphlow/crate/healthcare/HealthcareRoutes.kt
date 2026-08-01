@@ -77,6 +77,20 @@ object HealthcareRoutes {
             ).onSuccess { ctx.json(it) }
                 .onFailure { respondFailure(ctx, it) }
         }
+        // 养老离院交接摘要：静态路径必须位于泛型 encounter 路由之前
+        router.get("/elderly-admissions/:id/discharge-handover").handler { ctx ->
+            service.getElderlyDischargeHandover(requiredId(ctx))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.post("/elderly-admissions/:id/discharge-handover").handler { ctx ->
+            service.createElderlyDischargeHandover(requiredId(ctx), body(ctx))
+                .onSuccess { (created, handover) ->
+                    if (created) ctx.response().setStatusCode(201)
+                    ctx.json(handover)
+                }
+                .onFailure { respondFailure(ctx, it) }
+        }
         router.get("/encounters/:id").handler { ctx ->
             service.getEncounter(requiredId(ctx))
                 .onSuccess { ctx.json(it) }

@@ -22,7 +22,7 @@ import java.sql.DriverManager
  *   - 首次补建 201，重复补建 200（幂等返回同一周期）
  *   - GET /periods?encounter_id= 精确过滤，不匹配同患者其它周期
  *
- * 依赖真实 PostgreSQL（与独立验证者的 aceso_test 共享授权环境），
+ * 依赖真实 PostgreSQL（与测试的 aceso_test 共享授权环境），
  * 通过 -Dintegration.db.* 系统属性启用；默认运行被跳过。
  */
 @ExtendWith(VertxExtension::class)

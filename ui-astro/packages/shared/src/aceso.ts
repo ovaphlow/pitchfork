@@ -4,6 +4,17 @@ interface ProblemDetails {
   title?: string;
 }
 
+/** 带 HTTP 状态码的 API 错误；调用方可据此区分 404 等业务状态 */
+export class ApiRequestError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = status;
+  }
+}
+
 interface RequestOptions {
   csrf?: boolean;
   redirectOnUnauthorized?: boolean;
@@ -378,7 +389,10 @@ async function readResponse<T>(response: Response, redirectOnUnauthorized: boole
       redirectToLogin();
     }
     const problem = body as ProblemDetails | null;
-    throw new Error(problem?.error || problem?.detail || problem?.title || responseText || `请求失败 (${response.status})`);
+    throw new ApiRequestError(
+      response.status,
+      problem?.error || problem?.detail || problem?.title || responseText || `请求失败 (${response.status})`,
+    );
   }
   return body as T;
 }
@@ -580,6 +594,176 @@ export function listElderlyAdmissions(params: { status?: string; search?: string
 
 export function listActiveElderlyAdmissions(params: { search?: string; limit?: number; offset?: number } = {}): Promise<EncounterList> {
   return listElderlyAdmissions({ status: "ACTIVE", ...params });
+}
+
+// ─── 养老离院交接摘要归档 (DISCHARGE_SUMMARY) ──────────────────────────────
+
+export interface ElderlyDischargeHandoverPatient {
+  id: string;
+  name: string;
+  gender: string | null;
+  birth_date: string | null;
+  emergency_contact: Record<string, string> | null;
+  allergies: Record<string, unknown>[] | null;
+  past_history: string | null;
+}
+
+export interface ElderlyDischargeHandoverEncounter {
+  id: string;
+  encounter_no: string | null;
+  department: string | null;
+  ward: string | null;
+  admit_date: string | null;
+  discharge_date: string | null;
+  admitting_diagnosis: string | null;
+  discharge_diagnosis: string | null;
+  attending_physician: string | null;
+  status: string | null;
+}
+
+export interface ElderlyDischargeHandoverCarePeriod {
+  id: string;
+  service_type: string | null;
+  start_date: string | null;
+  end_date: string | null;
+  coordinator: string | null;
+  status: string | null;
+}
+
+export interface ElderlyDischargeHandoverAssessment {
+  id: string;
+  assess_type: string | null;
+  assess_date: string | null;
+  assessor: string | null;
+  total_score: number | null;
+  result_level: string | null;
+  detail: Record<string, unknown> | null;
+  remark: string | null;
+  created_at: string | null;
+}
+
+export interface ElderlyDischargeHandoverPlanItem {
+  id: string;
+  plan_id: string | null;
+  action: string | null;
+  frequency_code: string | null;
+  frequency_name: string | null;
+  duration_days: number | null;
+  remark: string | null;
+  status: string | null;
+  created_at: string | null;
+}
+
+export interface ElderlyDischargeHandoverPlan {
+  id: string;
+  plan_name: string | null;
+  goals: string | null;
+  status: string | null;
+  created_by: string | null;
+  start_date: string | null;
+  end_date: string | null;
+  created_at: string | null;
+  items: ElderlyDischargeHandoverPlanItem[];
+}
+
+export interface ElderlyDischargeHandoverTaskExecution {
+  id: string;
+  task_id: string | null;
+  planned_time: string | null;
+  actual_time: string | null;
+  executor: string | null;
+  status: string | null;
+  note: string | null;
+  created_at: string | null;
+}
+
+export interface ElderlyDischargeHandoverTask {
+  id: string;
+  description: string | null;
+  task_type: string | null;
+  frequency_code: string | null;
+  frequency_name: string | null;
+  start_date: string | null;
+  end_date: string | null;
+  status: string | null;
+  created_at: string | null;
+  executions: ElderlyDischargeHandoverTaskExecution[];
+}
+
+export interface ElderlyDischargeHandoverExecutionSummary {
+  PENDING: number;
+  IN_PROGRESS: number;
+  COMPLETED: number;
+  SKIPPED: number;
+  CANCELLED: number;
+}
+
+export interface ElderlyDischargeHandoverNursingRecord {
+  id: string;
+  record_kind: string | null;
+  title: string | null;
+  content: string | null;
+  record_time: string | null;
+  record_date: string | null;
+  author: string | null;
+  corrects_record_id: string | null;
+  created_at: string | null;
+}
+
+export interface ElderlyDischargeHandoverSnapshot {
+  patient: ElderlyDischargeHandoverPatient;
+  encounter: ElderlyDischargeHandoverEncounter;
+  care_period: ElderlyDischargeHandoverCarePeriod;
+  assessments: ElderlyDischargeHandoverAssessment[];
+  plans: ElderlyDischargeHandoverPlan[];
+  tasks: ElderlyDischargeHandoverTask[];
+  execution_summary: ElderlyDischargeHandoverExecutionSummary;
+  nursing_records: ElderlyDischargeHandoverNursingRecord[];
+}
+
+export interface ElderlyDischargeHandover {
+  id: string;
+  record_type: "DISCHARGE_SUMMARY";
+  title: string;
+  encounter_id: string;
+  period_id: string | null;
+  record_date: string | null;
+  author: string | null;
+  handover_note: string | null;
+  generated_at: string | null;
+  snapshot_version: number;
+  snapshot: ElderlyDischargeHandoverSnapshot;
+}
+
+export interface ElderlyDischargeHandoverInput {
+  author: string;
+  handover_note?: string;
+}
+
+/**
+ * 获取既有交接摘要；符合归档资格但尚未生成时返回 `null`（404），
+ * 资格错误（400/409）与网络错误照常抛出。
+ */
+export async function getElderlyDischargeHandover(encounterId: string): Promise<ElderlyDischargeHandover | null> {
+  try {
+    return await request<ElderlyDischargeHandover>(`/healthcare/v1/elderly-admissions/${encodeURIComponent(encounterId)}/discharge-handover`);
+  } catch (error) {
+    if (error instanceof ApiRequestError && error.status === 404) return null;
+    throw error;
+  }
+}
+
+export function createElderlyDischargeHandover(
+  encounterId: string,
+  input: ElderlyDischargeHandoverInput,
+): Promise<ElderlyDischargeHandover> {
+  return request<ElderlyDischargeHandover>(`/healthcare/v1/elderly-admissions/${encodeURIComponent(encounterId)}/discharge-handover`, {
+    method: "POST",
+    body: JSON.stringify({
+      author: input.author.trim(),
+      ...(input.handover_note?.trim() ? { handover_note: input.handover_note.trim() } : {}),
+    }),
+  });
 }
 
 export function createEncounter(input: EncounterInput): Promise<Encounter> {

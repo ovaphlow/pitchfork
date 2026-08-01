@@ -326,6 +326,35 @@ class ServicePeriodService(
         }
     }
 
+    /**
+     * 锁定并验证已完成、可归档的养老照护周期（供离院交接归档使用）。
+     * 必须在调用方外层事务内执行；只复用 [encounterId] 的精确关联关系，
+     * 不按患者猜测或查找同长者其它入住。
+     * - 关联周期缺失、服务类型非养老、状态非 COMPLETED 或结束日期不等于
+     *   [expectedEndDate] 时返回 [ConflictException]（409）。
+     */
+    fun lockCompletedElderlyCarePeriodForHandover(
+        client: SqlClient,
+        encounterId: String,
+        expectedEndDate: LocalDate,
+    ): Future<JsonObject> {
+        return lockAndGetByEncounterId(client, encounterId).compose { period ->
+            if (period.getString("service_type") != "ELDERLY_CARE")
+                return@compose Future.failedFuture(
+                    ConflictException("nursing care period is not an elderly care period")
+                )
+            if (period.getString("status") != "COMPLETED")
+                return@compose Future.failedFuture(
+                    ConflictException("nursing care period is not completed: ${period.getString("status")}")
+                )
+            if (period.getString("end_date") != expectedEndDate.toString())
+                return@compose Future.failedFuture(
+                    ConflictException("nursing care period end date does not match discharge date")
+                )
+            Future.succeededFuture(period)
+        }
+    }
+
     // ========================================================================
     //  养老周期私有辅助
     // ========================================================================

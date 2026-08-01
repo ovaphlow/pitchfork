@@ -1,6 +1,7 @@
 package com.ovaphlow.crate.healthcare
 
 import com.ovaphlow.crate.database.DatabaseConfig
+import com.ovaphlow.crate.nursing.TaskExecutionService
 import io.vertx.core.Vertx
 import io.vertx.core.http.HttpMethod
 import io.vertx.core.json.JsonObject
@@ -12,6 +13,7 @@ import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty
 import org.junit.jupiter.api.extension.ExtendWith
 import java.sql.DriverManager
+import java.time.LocalDate
 
 /**
  * HealthcareRoutes 养老入住创建与离院收束的嵌入式 HTTP 测试。
@@ -23,7 +25,7 @@ import java.sql.DriverManager
  *   - 正常离院原子收束周期为 COMPLETED 并保留历史执行
  *   - 非养老 encounter 离院保持原行为，重复离院仍冲突
  *
- * 依赖真实 PostgreSQL（与独立验证者的 aceso_test 共享授权环境），
+ * 依赖真实 PostgreSQL（与测试的 aceso_test 共享授权环境），
  * 通过 -Dintegration.db.* 系统属性启用；默认运行被跳过。
  */
 @ExtendWith(VertxExtension::class)
@@ -42,6 +44,8 @@ class HealthcareRoutesElderlyCareDischargeTest {
     private lateinit var port: String
     private lateinit var user: String
     private lateinit var password: String
+    private lateinit var pool: io.vertx.sqlclient.Pool
+    private lateinit var taskExecutionService: TaskExecutionService
     private var server: io.vertx.core.http.HttpServer? = null
 
     private fun fixtureId(suffix: String): String = "${FIXTURE_PREFIX}$suffix"
@@ -58,12 +62,8 @@ class HealthcareRoutesElderlyCareDischargeTest {
 
             val rootUrl = "jdbc:postgresql://$host:$port/postgres"
             DriverManager.getConnection(rootUrl, user, password).use { conn ->
-                val rs = conn.createStatement().executeQuery(
-                    "SELECT 1 FROM pg_database WHERE datname = '$TEST_DB'"
-                )
-                if (!rs.next()) {
-                    conn.createStatement().execute("CREATE DATABASE $TEST_DB")
-                }
+                conn.createStatement().execute("DROP DATABASE IF EXISTS $TEST_DB")
+                conn.createStatement().execute("CREATE DATABASE $TEST_DB")
             }
 
             val dbConfig = JsonObject()
@@ -72,9 +72,8 @@ class HealthcareRoutesElderlyCareDischargeTest {
                 .put("database", TEST_DB)
                 .put("user", user)
             DatabaseConfig.migrate(dbConfig)
-            val pool = DatabaseConfig.createPool(vertx, dbConfig)
-
-            setupFixtures()
+            pool = DatabaseConfig.createPool(vertx, dbConfig)
+            taskExecutionService = TaskExecutionService(pool)
 
             val healthcareRouter = HealthcareRoutes.create(vertx, pool)
             val rootRouter = Router.router(vertx)
@@ -95,23 +94,49 @@ class HealthcareRoutesElderlyCareDischargeTest {
         }
     }
 
+    @BeforeEach
+    fun setupTestFixtures() {
+        cleanupFixtures()
+        setupFixtures()
+    }
+
+    @AfterEach
+    fun cleanupTestFixtures() {
+        cleanupFixtures()
+    }
+
     @AfterAll
     fun teardown(ctx: VertxTestContext) {
-        try {
-            val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
-            DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
-                val stmt = conn.createStatement()
-                stmt.execute("DELETE FROM nursing.nursing_task_executions WHERE id LIKE '${FIXTURE_PREFIX}%'")
-                stmt.execute("DELETE FROM nursing.nursing_tasks WHERE id LIKE '${FIXTURE_PREFIX}%'")
-                stmt.execute("DELETE FROM nursing.nursing_service_periods WHERE id LIKE '${FIXTURE_PREFIX}%'")
-                stmt.execute("DELETE FROM healthcare.encounters WHERE id LIKE '${FIXTURE_PREFIX}%'")
-                stmt.execute("DELETE FROM healthcare.patients WHERE id LIKE '${FIXTURE_PREFIX}%'")
-            }
-        } catch (_: Exception) { /* cleanup best effort */ }
+        cleanupFixtures()
+        if (::pool.isInitialized) pool.close()
 
         server?.close { ar ->
             if (ar.succeeded()) ctx.completeNow()
             else ctx.failNow(ar.cause())
+        }
+    }
+
+    private fun cleanupFixtures() {
+        val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
+        DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
+            val stmt = conn.createStatement()
+            stmt.execute("DELETE FROM nursing.nursing_task_executions WHERE id LIKE '${FIXTURE_PREFIX}%' OR task_id IN (SELECT id FROM nursing.nursing_tasks WHERE id LIKE '${FIXTURE_PREFIX}%' OR period_id IN (SELECT id FROM nursing.nursing_service_periods WHERE id LIKE '${FIXTURE_PREFIX}%' OR encounter_id IN (SELECT id FROM healthcare.encounters WHERE id LIKE '${FIXTURE_PREFIX}%' OR patient_id LIKE '${FIXTURE_PREFIX}%')))")
+            stmt.execute("DELETE FROM nursing.nursing_tasks WHERE id LIKE '${FIXTURE_PREFIX}%' OR period_id IN (SELECT id FROM nursing.nursing_service_periods WHERE id LIKE '${FIXTURE_PREFIX}%' OR encounter_id IN (SELECT id FROM healthcare.encounters WHERE id LIKE '${FIXTURE_PREFIX}%' OR patient_id LIKE '${FIXTURE_PREFIX}%'))")
+            stmt.execute("DELETE FROM nursing.nursing_service_periods WHERE id LIKE '${FIXTURE_PREFIX}%' OR encounter_id IN (SELECT id FROM healthcare.encounters WHERE id LIKE '${FIXTURE_PREFIX}%' OR patient_id LIKE '${FIXTURE_PREFIX}%')")
+            stmt.execute("DELETE FROM healthcare.encounters WHERE id LIKE '${FIXTURE_PREFIX}%' OR patient_id LIKE '${FIXTURE_PREFIX}%'")
+            stmt.execute("DELETE FROM healthcare.patients WHERE id LIKE '${FIXTURE_PREFIX}%'")
+
+            val residual = stmt.executeQuery("""
+                SELECT (
+                    (SELECT count(*) FROM nursing.nursing_task_executions WHERE id LIKE '${FIXTURE_PREFIX}%') +
+                    (SELECT count(*) FROM nursing.nursing_tasks WHERE id LIKE '${FIXTURE_PREFIX}%') +
+                    (SELECT count(*) FROM nursing.nursing_service_periods WHERE id LIKE '${FIXTURE_PREFIX}%' OR encounter_id LIKE '${FIXTURE_PREFIX}%') +
+                    (SELECT count(*) FROM healthcare.encounters WHERE id LIKE '${FIXTURE_PREFIX}%' OR patient_id LIKE '${FIXTURE_PREFIX}%') +
+                    (SELECT count(*) FROM healthcare.patients WHERE id LIKE '${FIXTURE_PREFIX}%')
+                ) AS residual
+            """.trimIndent())
+            residual.next()
+            check(residual.getLong("residual") == 0L) { "fixture cleanup left residual data" }
         }
     }
 
@@ -126,7 +151,7 @@ class HealthcareRoutesElderlyCareDischargeTest {
         val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
         DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
             val stmt = conn.createStatement()
-            for (i in 1..4) {
+            for (i in 1..5) {
                 stmt.execute("INSERT INTO healthcare.patients (id, name, status) VALUES ('${fixtureId("patient-$i")}', '离院测试长者$i', 'ACTIVE') ON CONFLICT (id) DO NOTHING")
             }
             stmt.execute("""
@@ -213,7 +238,7 @@ class HealthcareRoutesElderlyCareDischargeTest {
             HttpMethod.POST,
             "$BASE_PATH/elderly-admissions",
             JsonObject()
-                .put("patient_id", fixtureId("patient-1"))
+                .put("patient_id", fixtureId("patient-5"))
                 .put("encounter_no", "HD-20260801-NEW")
                 .put("admit_date", "2026-08-01T00:00:00+08:00")
         ).onSuccess { (status, body) ->
@@ -282,30 +307,53 @@ class HealthcareRoutesElderlyCareDischargeTest {
     @Test
     fun `正常离院收束周期并保留历史执行`(vertx: Vertx, ctx: VertxTestContext) {
         val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
-        request(
-            vertx,
-            HttpMethod.PATCH,
-            "$BASE_PATH/encounters/${fixtureId("enc-ok")}/discharge",
-            JsonObject().put("discharge_date", "2026-08-10T00:00:00+08:00")
-        ).compose { (status, body) ->
+        taskExecutionService.ensureExecutionsForDateRange(
+            LocalDate.now(),
+            LocalDate.now().plusDays(7),
+            fixtureId("period-ok")
+        ).compose {
+            request(
+                vertx,
+                HttpMethod.PATCH,
+                "$BASE_PATH/encounters/${fixtureId("enc-ok")}/discharge",
+                JsonObject().put("discharge_date", "2026-08-10T00:00:00+08:00")
+            )
+        }.compose { (status, body) ->
             ctx.verify {
                 assertEquals(200, status)
                 assertEquals("DISCHARGED", body.getString("status"))
             }
-            DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
+            val executionCountAfterDischarge = DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
                 val stmt = conn.createStatement()
                 val periodStatus = stmt.executeQuery("SELECT status, end_date FROM nursing.nursing_service_periods WHERE id = '${fixtureId("period-ok")}'")
                     .use { rs -> if (rs.next()) Pair(rs.getString(1), rs.getString(2)) else null }
                 val execCount = stmt.executeQuery("SELECT count(*) FROM nursing.nursing_task_executions WHERE id = '${fixtureId("exec-ok")}'")
                     .use { rs -> if (rs.next()) rs.getLong(1) else 0L }
+                val encounterStatus = stmt.executeQuery("SELECT status FROM healthcare.encounters WHERE id = '${fixtureId("enc-ok")}'")
+                    .use { rs -> if (rs.next()) rs.getString(1) else null }
                 ctx.verify {
                     assertEquals("COMPLETED", periodStatus?.first, "周期必须收束为 COMPLETED")
                     assertEquals("2026-08-10", periodStatus?.second, "结束日期必须等于离院业务日期")
                     assertEquals(1L, execCount, "历史执行必须保留")
+                    assertEquals("DISCHARGED", encounterStatus, "encounter 必须同步收束")
+                }
+                stmt.executeQuery("SELECT count(*) FROM nursing.nursing_task_executions WHERE id LIKE '${FIXTURE_PREFIX}%'")
+                    .use { rs -> if (rs.next()) rs.getLong(1) else 0L }
+            }
+            taskExecutionService.ensureExecutionsForDateRange(
+                LocalDate.now().plusDays(8),
+                LocalDate.now().plusDays(14),
+                fixtureId("period-ok")
+            ).map {
+                val executionCountAfterRetry = DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
+                    conn.createStatement().executeQuery("SELECT count(*) FROM nursing.nursing_task_executions WHERE id LIKE '${FIXTURE_PREFIX}%'")
+                        .use { rs -> if (rs.next()) rs.getLong(1) else 0L }
+                }
+                ctx.verify {
+                    assertEquals(executionCountAfterDischarge, executionCountAfterRetry, "关闭周期不得生成未来执行")
+                    ctx.completeNow()
                 }
             }
-            ctx.completeNow()
-            io.vertx.core.Future.succeededFuture<Unit>(Unit)
         }.onFailure { ctx.failNow(it) }
     }
 
