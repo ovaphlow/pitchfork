@@ -1,8 +1,6 @@
 package com.ovaphlow.crate.nursing
 
 import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.healthcare.HealthcareService
-import com.ovaphlow.crate.nursing.TaskExecutionService
 import io.vertx.core.Vertx
 import io.vertx.core.json.JsonObject
 import io.vertx.junit5.VertxExtension
@@ -45,7 +43,6 @@ class ElderlyCareLifecycleIntegrationTest {
     private lateinit var password: String
     private lateinit var pool: Pool
     private lateinit var servicePeriodService: ServicePeriodService
-    private lateinit var healthcareService: HealthcareService
     private lateinit var taskExecutionService: TaskExecutionService
 
     @BeforeAll
@@ -74,11 +71,8 @@ class ElderlyCareLifecycleIntegrationTest {
                 .put("user", user)
             DatabaseConfig.migrate(dbConfig)
 
-            setupFixtures()
-
             pool = DatabaseConfig.createPool(Vertx.vertx(), dbConfig)
             servicePeriodService = ServicePeriodService(pool)
-            healthcareService = HealthcareService(pool)
             taskExecutionService = TaskExecutionService(pool)
 
             ctx.completeNow()
@@ -87,11 +81,22 @@ class ElderlyCareLifecycleIntegrationTest {
         }
     }
 
+    @BeforeEach
+    fun setupTestFixtures() {
+        setupFixtures()
+    }
+
+    @AfterEach
+    fun cleanupTestFixtures() {
+        cleanupFixtures()
+    }
+
     @AfterAll
     fun cleanup(ctx: VertxTestContext) {
-        cleanupFixtures()
-
-        if (::pool.isInitialized) pool.close()
+        if (::pool.isInitialized) {
+            cleanupFixtures()
+            pool.close()
+        }
         ctx.completeNow()
     }
 
@@ -139,7 +144,7 @@ class ElderlyCareLifecycleIntegrationTest {
             """)
 
             // 清理所有旧 fixture 数据（按依赖顺序）
-            stmt.execute("DELETE FROM nursing.nursing_task_executions WHERE id LIKE '${FIXTURE_PREFIX}%'")
+            stmt.execute("DELETE FROM nursing.nursing_task_executions WHERE id LIKE '${FIXTURE_PREFIX}%' OR task_id IN (SELECT id FROM nursing.nursing_tasks WHERE id LIKE '${FIXTURE_PREFIX}%')")
             stmt.execute("DELETE FROM nursing.nursing_tasks WHERE id LIKE '${FIXTURE_PREFIX}%'")
             stmt.execute("DELETE FROM nursing.nursing_service_periods WHERE id LIKE '${FIXTURE_PREFIX}%' OR encounter_id LIKE '${FIXTURE_PREFIX}%'")
             stmt.execute("DELETE FROM healthcare.encounters WHERE id LIKE '${FIXTURE_PREFIX}%'")
@@ -196,17 +201,26 @@ class ElderlyCareLifecycleIntegrationTest {
     }
 
     private fun cleanupFixtures() {
-        try {
-            DriverManager.getConnection(jdbcUrl(), user, password).use { conn ->
-                val stmt = conn.createStatement()
-                // 按依赖顺序清理：执行 → 任务 → 周期 → encounter → 患者
-                stmt.execute("DELETE FROM nursing.nursing_task_executions WHERE id LIKE '${FIXTURE_PREFIX}%'")
-                stmt.execute("DELETE FROM nursing.nursing_tasks WHERE id LIKE '${FIXTURE_PREFIX}%'")
-                stmt.execute("DELETE FROM nursing.nursing_service_periods WHERE id LIKE '${FIXTURE_PREFIX}%' OR encounter_id LIKE '${FIXTURE_PREFIX}%'")
-                stmt.execute("DELETE FROM healthcare.encounters WHERE id LIKE '${FIXTURE_PREFIX}%'")
-                stmt.execute("DELETE FROM healthcare.patients WHERE id LIKE '${FIXTURE_PREFIX}%'")
-            }
-        } catch (_: Exception) { /* cleanup best effort */ }
+        DriverManager.getConnection(jdbcUrl(), user, password).use { conn ->
+            val stmt = conn.createStatement()
+            stmt.execute("DELETE FROM nursing.nursing_task_executions WHERE id LIKE '${FIXTURE_PREFIX}%' OR task_id IN (SELECT id FROM nursing.nursing_tasks WHERE id LIKE '${FIXTURE_PREFIX}%')")
+            stmt.execute("DELETE FROM nursing.nursing_tasks WHERE id LIKE '${FIXTURE_PREFIX}%'")
+            stmt.execute("DELETE FROM nursing.nursing_service_periods WHERE id LIKE '${FIXTURE_PREFIX}%' OR encounter_id LIKE '${FIXTURE_PREFIX}%'")
+            stmt.execute("DELETE FROM healthcare.encounters WHERE id LIKE '${FIXTURE_PREFIX}%'")
+            stmt.execute("DELETE FROM healthcare.patients WHERE id LIKE '${FIXTURE_PREFIX}%'")
+
+            val residual = stmt.executeQuery("""
+                SELECT (
+                    (SELECT count(*) FROM nursing.nursing_task_executions WHERE id LIKE '${FIXTURE_PREFIX}%') +
+                    (SELECT count(*) FROM nursing.nursing_tasks WHERE id LIKE '${FIXTURE_PREFIX}%') +
+                    (SELECT count(*) FROM nursing.nursing_service_periods WHERE id LIKE '${FIXTURE_PREFIX}%' OR encounter_id LIKE '${FIXTURE_PREFIX}%') +
+                    (SELECT count(*) FROM healthcare.encounters WHERE id LIKE '${FIXTURE_PREFIX}%') +
+                    (SELECT count(*) FROM healthcare.patients WHERE id LIKE '${FIXTURE_PREFIX}%')
+                ) AS residual
+            """.trimIndent())
+            residual.next()
+            check(residual.getLong("residual") == 0L) { "fixture cleanup left residual data" }
+        }
     }
 
     /**
@@ -376,7 +390,7 @@ class ElderlyCareLifecycleIntegrationTest {
     // ========================================================================
 
     @Test
-    fun `正常离院原子收束周期且历史记录不变`(ctx: VertxTestContext) {
+    fun `周期收束后历史记录不变且不再生成未来执行`(ctx: VertxTestContext) {
         val encounterId = createTestEncounter("T5")
         val jdbcUrl = jdbcUrl()
 
@@ -401,9 +415,9 @@ class ElderlyCareLifecycleIntegrationTest {
                     LocalDate.now(),
                     LocalDate.now().plusDays(7),
                     newlyCreatedPeriodId
-                )
+                ).map { newlyCreatedPeriodId }
             }
-            .compose { _ ->
+            .compose { periodId ->
                 // 记录离院前的执行记录数量
                 var execCountBefore = 0L
                 DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
@@ -414,46 +428,29 @@ class ElderlyCareLifecycleIntegrationTest {
                     execCountBefore = rs.getLong(1)
                 }
 
-                // 通过 HealthcareService.dischargeEncounter 执行离院收束
-                val dischargeBody = JsonObject()
-                    .put("discharge_date", OffsetDateTime.now().toString())
-                healthcareService.dischargeEncounter(encounterId, dischargeBody)
-                    .compose { encounterResult ->
-                        // 验证 encounter 状态
-                        assertEquals("DISCHARGED", encounterResult.getString("status"), "encounter 状态应为 DISCHARGED")
-
+                // Healthcare 跨模块事务由 Healthcare 路由集成测试覆盖
+                servicePeriodService.closeElderlyCarePeriod(pool, encounterId, LocalDate.now(), OffsetDateTime.now())
+                    .compose { closedPeriod ->
                         // 验证周期状态
-                        servicePeriodService.getByEncounterId(pool, encounterId)
-                    }
-                    .map { closedPeriod ->
                         assertEquals("COMPLETED", closedPeriod.getString("status"), "周期状态应为 COMPLETED")
                         assertEquals(LocalDate.now().toString(), closedPeriod.getString("end_date"), "结束日期应为今天")
 
-                        // 验证历史执行记录数量不变
-                        var execCountAfter = 0L
-                        DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
-                            val rs = conn.createStatement().executeQuery(
-                                "SELECT COUNT(*) FROM nursing.nursing_task_executions WHERE id LIKE '${FIXTURE_PREFIX}%'"
-                            )
-                            rs.next()
-                            execCountAfter = rs.getLong(1)
+                        taskExecutionService.ensureExecutionsForDateRange(
+                            LocalDate.now().plusDays(8),
+                            LocalDate.now().plusDays(14),
+                            periodId
+                        ).map {
+                            var execCountAfter = 0L
+                            DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
+                                val rs = conn.createStatement().executeQuery(
+                                    "SELECT COUNT(*) FROM nursing.nursing_task_executions WHERE id LIKE '${FIXTURE_PREFIX}%'"
+                                )
+                                rs.next()
+                                execCountAfter = rs.getLong(1)
+                            }
+                            assertEquals(execCountBefore, execCountAfter, "周期收束后不得新增未来执行记录")
+                            closedPeriod
                         }
-                        assertEquals(execCountBefore, execCountAfter, "离院后历史执行记录数量应不变")
-
-                        // 验证不会为该周期生成新的待执行记录
-                        var pendingCount = 0L
-                        DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
-                            val rs = conn.createStatement().executeQuery(
-                                "SELECT COUNT(*) FROM nursing.nursing_task_executions e " +
-                                "JOIN nursing.nursing_tasks t ON e.task_id = t.id " +
-                                "WHERE t.period_id = '$newlyCreatedPeriodId' AND e.status = 'PENDING'"
-                            )
-                            rs.next()
-                            pendingCount = rs.getLong(1)
-                        }
-                        assertEquals(0L, pendingCount, "已关闭周期不应有待执行记录")
-
-                        closedPeriod
                     }
             }
             .onSuccess { ctx.completeNow() }
@@ -465,7 +462,7 @@ class ElderlyCareLifecycleIntegrationTest {
     // ========================================================================
 
     @Test
-    fun `存在执行中记录时离院失败且事务全部回滚`(ctx: VertxTestContext) {
+    fun `存在执行中记录时周期收束失败且无副作用`(ctx: VertxTestContext) {
         val encounterId = createTestEncounter("T6")
         val jdbcUrl = jdbcUrl()
 
@@ -493,17 +490,12 @@ class ElderlyCareLifecycleIntegrationTest {
 
                 // 记录离院前的状态
                 var periodStatusBefore = ""
-                var encounterStatusBefore = ""
                 DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
                     val rs = conn.createStatement().executeQuery(
                         "SELECT status FROM nursing.nursing_service_periods WHERE encounter_id = '$encounterId'"
                     )
                     if (rs.next()) periodStatusBefore = rs.getString("status")
 
-                    val rs2 = conn.createStatement().executeQuery(
-                        "SELECT status FROM healthcare.encounters WHERE id = '$encounterId'"
-                    )
-                    if (rs2.next()) encounterStatusBefore = rs2.getString("status")
                 }
 
                 // 尝试离院（应该失败，因为有 IN_PROGRESS 执行记录）
@@ -514,23 +506,17 @@ class ElderlyCareLifecycleIntegrationTest {
                 ctx.verify {
                     assertTrue(error.message?.contains("in progress") == true || error.message?.contains("conflict") == true)
 
-                    // 验证事务回滚：周期和 encounter 状态不变
+                    // 跨模块事务由 Healthcare 路由集成测试覆盖
                     var periodStatusAfter = ""
-                    var encounterStatusAfter = ""
                     DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
                         val rs = conn.createStatement().executeQuery(
                             "SELECT status FROM nursing.nursing_service_periods WHERE encounter_id = '$encounterId'"
                         )
                         if (rs.next()) periodStatusAfter = rs.getString("status")
 
-                        val rs2 = conn.createStatement().executeQuery(
-                            "SELECT status FROM healthcare.encounters WHERE id = '$encounterId'"
-                        )
-                        if (rs2.next()) encounterStatusAfter = rs2.getString("status")
                     }
 
                     assertEquals("ACTIVE", periodStatusAfter, "周期状态应保持 ACTIVE（事务回滚）")
-                    assertEquals("ACTIVE", encounterStatusAfter, "encounter 状态应保持 ACTIVE（事务回滚）")
                     ctx.completeNow()
                 }
             }

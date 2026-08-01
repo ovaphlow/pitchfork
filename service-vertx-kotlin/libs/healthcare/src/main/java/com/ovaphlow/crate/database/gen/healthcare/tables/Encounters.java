@@ -81,11 +81,6 @@ public class Encounters extends TableImpl<EncountersRecord> {
     public final TableField<EncountersRecord, String> ENCOUNTER_TYPE = createField(DSL.name("encounter_type"), SQLDataType.VARCHAR.nullable(false).defaultValue(DSL.field(DSL.raw("''::character varying"), SQLDataType.VARCHAR)), this, "类型，由各系统字典决定，不强制 CHECK");
 
     /**
-     * The column <code>healthcare.encounters.encounter_no</code>.
-     */
-    public final TableField<EncountersRecord, String> ENCOUNTER_NO = createField(DSL.name("encounter_no"), SQLDataType.VARCHAR(64).nullable(false), this, "");
-
-    /**
      * The column <code>healthcare.encounters.department</code>.
      */
     public final TableField<EncountersRecord, String> DEPARTMENT = createField(DSL.name("department"), SQLDataType.VARCHAR, this, "");
@@ -139,6 +134,11 @@ public class Encounters extends TableImpl<EncountersRecord> {
      * The column <code>healthcare.encounters.updated_at</code>.
      */
     public final TableField<EncountersRecord, OffsetDateTime> UPDATED_AT = createField(DSL.name("updated_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6).defaultValue(DSL.field(DSL.raw("now()"), SQLDataType.TIMESTAMPWITHTIMEZONE)), this, "");
+
+    /**
+     * The column <code>healthcare.encounters.encounter_no</code>.
+     */
+    public final TableField<EncountersRecord, String> ENCOUNTER_NO = createField(DSL.name("encounter_no"), SQLDataType.VARCHAR(64).nullable(false), this, "");
 
     private Encounters(Name alias, Table<EncountersRecord> aliased) {
         this(alias, aliased, (Field<?>[]) null, null);
@@ -209,12 +209,17 @@ public class Encounters extends TableImpl<EncountersRecord> {
 
     @Override
     public List<Index> getIndexes() {
-        return Arrays.asList(Indexes.IDX_ENCOUNTERS_ADMIT, Indexes.IDX_ENCOUNTERS_PATIENT, Indexes.IDX_ENCOUNTERS_STATUS, Indexes.UQ_ENCOUNTERS_ACTIVE_ELDERLY_CARE);
+        return Arrays.asList(Indexes.IDX_ENCOUNTERS_ADMIT, Indexes.IDX_ENCOUNTERS_ENCOUNTER_NO, Indexes.IDX_ENCOUNTERS_PATIENT, Indexes.IDX_ENCOUNTERS_STATUS, Indexes.UQ_ENCOUNTERS_ACTIVE_ELDERLY_CARE);
     }
 
     @Override
     public UniqueKey<EncountersRecord> getPrimaryKey() {
         return Keys.ENCOUNTERS_PKEY;
+    }
+
+    @Override
+    public List<UniqueKey<EncountersRecord>> getUniqueKeys() {
+        return Arrays.asList(Keys.UQ_ENCOUNTERS_ENCOUNTER_NO);
     }
 
     @Override

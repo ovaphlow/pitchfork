@@ -1115,7 +1115,7 @@ export default function NursingPage() {
                     <p className="mt-2 text-sm text-fg-muted">住院号 {selectedAdmission.encounter_no} · 入住 {formatDate(selectedAdmission.admit_date)}</p>
                     <p className="mt-1 text-sm text-fg-muted">{selectedAdmission.department || "未设置照护单元"} · {selectedAdmission.ward || "未设置房间床位"}</p>
                   </div>
-                  {period && <div className="text-right text-sm text-fg-muted"><p>照护周期</p><p className="mt-1 text-fg-emphasis">{formatDate(period.start_date)} 起 · {period.status === "ACTIVE" ? "进行中" : period.status}</p></div>}
+                  {period && <div data-period-summary data-period-id={period.id} className="text-right text-sm text-fg-muted"><p>照护周期</p><p className="mt-1 text-fg-emphasis">{formatDate(period.start_date)} 起 · {period.status === "ACTIVE" ? "进行中" : period.status}</p><p className="mt-1">服务类型：{period.service_type}</p><p className="mt-1">关联入住：{selectedAdmission.encounter_no}</p></div>}
                 </div>
               </Card>
             )}

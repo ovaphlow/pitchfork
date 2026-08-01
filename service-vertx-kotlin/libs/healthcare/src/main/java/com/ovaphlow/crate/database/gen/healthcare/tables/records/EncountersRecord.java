@@ -66,171 +66,171 @@ public class EncountersRecord extends UpdatableRecordImpl<EncountersRecord> {
     }
 
     /**
-     * Setter for <code>healthcare.encounters.encounter_no</code>.
-     */
-    public void setEncounterNo(String value) {
-        set(3, value);
-    }
-
-    /**
-     * Getter for <code>healthcare.encounters.encounter_no</code>.
-     */
-    public String getEncounterNo() {
-        return (String) get(3);
-    }
-
-    /**
      * Setter for <code>healthcare.encounters.department</code>.
      */
     public void setDepartment(String value) {
-        set(4, value);
+        set(3, value);
     }
 
     /**
      * Getter for <code>healthcare.encounters.department</code>.
      */
     public String getDepartment() {
-        return (String) get(4);
+        return (String) get(3);
     }
 
     /**
      * Setter for <code>healthcare.encounters.ward</code>.
      */
     public void setWard(String value) {
-        set(5, value);
+        set(4, value);
     }
 
     /**
      * Getter for <code>healthcare.encounters.ward</code>.
      */
     public String getWard() {
-        return (String) get(5);
+        return (String) get(4);
     }
 
     /**
      * Setter for <code>healthcare.encounters.admit_date</code>.
      */
     public void setAdmitDate(OffsetDateTime value) {
-        set(6, value);
+        set(5, value);
     }
 
     /**
      * Getter for <code>healthcare.encounters.admit_date</code>.
      */
     public OffsetDateTime getAdmitDate() {
-        return (OffsetDateTime) get(6);
+        return (OffsetDateTime) get(5);
     }
 
     /**
      * Setter for <code>healthcare.encounters.discharge_date</code>.
      */
     public void setDischargeDate(OffsetDateTime value) {
-        set(7, value);
+        set(6, value);
     }
 
     /**
      * Getter for <code>healthcare.encounters.discharge_date</code>.
      */
     public OffsetDateTime getDischargeDate() {
-        return (OffsetDateTime) get(7);
+        return (OffsetDateTime) get(6);
     }
 
     /**
      * Setter for <code>healthcare.encounters.admitting_diagnosis</code>.
      */
     public void setAdmittingDiagnosis(String value) {
-        set(8, value);
+        set(7, value);
     }
 
     /**
      * Getter for <code>healthcare.encounters.admitting_diagnosis</code>.
      */
     public String getAdmittingDiagnosis() {
-        return (String) get(8);
+        return (String) get(7);
     }
 
     /**
      * Setter for <code>healthcare.encounters.discharge_diagnosis</code>.
      */
     public void setDischargeDiagnosis(String value) {
-        set(9, value);
+        set(8, value);
     }
 
     /**
      * Getter for <code>healthcare.encounters.discharge_diagnosis</code>.
      */
     public String getDischargeDiagnosis() {
-        return (String) get(9);
+        return (String) get(8);
     }
 
     /**
      * Setter for <code>healthcare.encounters.attending_physician</code>.
      */
     public void setAttendingPhysician(String value) {
-        set(10, value);
+        set(9, value);
     }
 
     /**
      * Getter for <code>healthcare.encounters.attending_physician</code>.
      */
     public String getAttendingPhysician() {
-        return (String) get(10);
+        return (String) get(9);
     }
 
     /**
      * Setter for <code>healthcare.encounters.status</code>. 当前周期状态
      */
     public void setStatus(String value) {
-        set(11, value);
+        set(10, value);
     }
 
     /**
      * Getter for <code>healthcare.encounters.status</code>. 当前周期状态
      */
     public String getStatus() {
-        return (String) get(11);
+        return (String) get(10);
     }
 
     /**
      * Setter for <code>healthcare.encounters.metadata</code>.
      */
     public void setMetadata(JSONB value) {
-        set(12, value);
+        set(11, value);
     }
 
     /**
      * Getter for <code>healthcare.encounters.metadata</code>.
      */
     public JSONB getMetadata() {
-        return (JSONB) get(12);
+        return (JSONB) get(11);
     }
 
     /**
      * Setter for <code>healthcare.encounters.created_at</code>.
      */
     public void setCreatedAt(OffsetDateTime value) {
-        set(13, value);
+        set(12, value);
     }
 
     /**
      * Getter for <code>healthcare.encounters.created_at</code>.
      */
     public OffsetDateTime getCreatedAt() {
-        return (OffsetDateTime) get(13);
+        return (OffsetDateTime) get(12);
     }
 
     /**
      * Setter for <code>healthcare.encounters.updated_at</code>.
      */
     public void setUpdatedAt(OffsetDateTime value) {
-        set(14, value);
+        set(13, value);
     }
 
     /**
      * Getter for <code>healthcare.encounters.updated_at</code>.
      */
     public OffsetDateTime getUpdatedAt() {
-        return (OffsetDateTime) get(14);
+        return (OffsetDateTime) get(13);
+    }
+
+    /**
+     * Setter for <code>healthcare.encounters.encounter_no</code>.
+     */
+    public void setEncounterNo(String value) {
+        set(14, value);
+    }
+
+    /**
+     * Getter for <code>healthcare.encounters.encounter_no</code>.
+     */
+    public String getEncounterNo() {
+        return (String) get(14);
     }
 
     // -------------------------------------------------------------------------
@@ -256,13 +256,12 @@ public class EncountersRecord extends UpdatableRecordImpl<EncountersRecord> {
     /**
      * Create a detached, initialised EncountersRecord
      */
-    public EncountersRecord(String id, String patientId, String encounterType, String encounterNo, String department, String ward, OffsetDateTime admitDate, OffsetDateTime dischargeDate, String admittingDiagnosis, String dischargeDiagnosis, String attendingPhysician, String status, JSONB metadata, OffsetDateTime createdAt, OffsetDateTime updatedAt) {
+    public EncountersRecord(String id, String patientId, String encounterType, String department, String ward, OffsetDateTime admitDate, OffsetDateTime dischargeDate, String admittingDiagnosis, String dischargeDiagnosis, String attendingPhysician, String status, JSONB metadata, OffsetDateTime createdAt, OffsetDateTime updatedAt, String encounterNo) {
         super(Encounters.ENCOUNTERS);
 
         setId(id);
         setPatientId(patientId);
         setEncounterType(encounterType);
-        setEncounterNo(encounterNo);
         setDepartment(department);
         setWard(ward);
         setAdmitDate(admitDate);
@@ -274,6 +273,7 @@ public class EncountersRecord extends UpdatableRecordImpl<EncountersRecord> {
         setMetadata(metadata);
         setCreatedAt(createdAt);
         setUpdatedAt(updatedAt);
+        setEncounterNo(encounterNo);
         resetChangedOnNotNull();
     }
 }

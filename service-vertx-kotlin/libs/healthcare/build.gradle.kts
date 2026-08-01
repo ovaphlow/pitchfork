@@ -23,6 +23,10 @@ dependencies {
 
 tasks.withType<Test> {
     useJUnitPlatform()
+    System.getProperties().stringPropertyNames()
+        .filter { it.startsWith("integration.db.") }
+        .forEach { key -> systemProperty(key, System.getProperty(key)) }
+    environment("PITCHFORK_DB_PASSWORD", System.getenv("PITCHFORK_DB_PASSWORD") ?: "")
 }
 
 val generateJooq by tasks.registering(JavaExec::class) {

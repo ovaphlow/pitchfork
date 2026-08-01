@@ -8,6 +8,8 @@ import com.ovaphlow.crate.database.gen.healthcare.tables.Patients.PATIENTS
 import com.ovaphlow.crate.database.gen.healthcare.tables.records.EncountersRecord
 import com.ovaphlow.crate.database.gen.healthcare.tables.records.MedicalRecordsRecord
 import com.ovaphlow.crate.database.gen.healthcare.tables.records.PatientsRecord
+import com.ovaphlow.crate.nursing.ConflictException
+import com.ovaphlow.crate.nursing.ElderlyDischargeHandoverSnapshotService
 import com.ovaphlow.crate.nursing.ServicePeriodService
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
@@ -29,6 +31,7 @@ class HealthcareService(
     private val ctx: org.jooq.DSLContext = DatabaseConfig.createDSL(),
 ) {
     private val servicePeriodService = ServicePeriodService(pool)
+    private val dischargeHandoverSnapshotService = ElderlyDischargeHandoverSnapshotService()
     companion object {
         private val patientStatuses = setOf("ACTIVE", "INACTIVE", "DECEASED")
         private val encounterStatuses = setOf("ACTIVE", "DISCHARGED", "TRANSFERRED")
@@ -816,5 +819,338 @@ class HealthcareService(
         val value = body.getValue(key)
         if (value == null && !required) return null
         return value as? JsonArray ?: throw IllegalArgumentException("$key must be a JSON array")
+    }
+
+    // ========================================================================
+    //  养老离院交接摘要归档 (DISCHARGE_SUMMARY)
+    // ========================================================================
+
+    private val handoverTitle = "养老照护离院交接摘要"
+
+    /** 获取既有交接摘要；资格错误按 4.1 返回 400/409，无文书返回 404 */
+    fun getElderlyDischargeHandover(id: String): Future<JsonObject> {
+        return pool.withTransaction<JsonObject> { connection ->
+            validateHandoverEligibility(connection, id).compose { (encounter, period) ->
+                val periodId = requireNotNull(period.getString("id"))
+                lockExistingHandover(connection, encounter.getString("id"), periodId).compose { row ->
+                    if (row == null) {
+                        Future.failedFuture(HealthcareNotFoundException("elderly discharge handover not found"))
+                    } else {
+                        Future.succeededFuture(handoverFromRow(row))
+                    }
+                }
+            }
+        }
+    }
+
+    /** 创建或幂等读取交接摘要；首次 201，相同规范化输入重试 200，不同输入 409 */
+    fun createElderlyDischargeHandover(id: String, body: JsonObject): Future<Pair<Boolean, JsonObject>> {
+        val author = try {
+            val value = requiredText(body, "author")
+            if (value.length > 100) throw IllegalArgumentException("author must not exceed 100 characters")
+            value
+        } catch (error: IllegalArgumentException) {
+            return Future.failedFuture(error)
+        }
+        val handoverNote = try {
+            body.getString("handover_note")?.trim()?.takeIf(String::isNotBlank)?.let {
+                if (it.length > 2000) throw IllegalArgumentException("handover_note must not exceed 2000 characters")
+                it
+            }
+        } catch (error: IllegalArgumentException) {
+            return Future.failedFuture(error)
+        }
+
+        return pool.withTransaction<Pair<Boolean, JsonObject>> { connection ->
+            validateHandoverEligibility(connection, id).compose { (encounter, period) ->
+                val encounterId = requireNotNull(encounter.getString("id"))
+                val periodId = requireNotNull(period.getString("id"))
+                val dischargeDate = requireNotNull(encounter.getString("discharge_date"))
+
+                lockExistingHandover(connection, encounterId, periodId).compose { existing ->
+                    if (existing != null) {
+                        return@compose compareHandoverExisting(existing, author, handoverNote)
+                    }
+                    buildAndInsertHandover(connection, encounter, period, author, handoverNote, dischargeDate)
+                        .map { handover -> Pair(true, handover) }
+                        .recover { err ->
+                            // 唯一索引竞争：重新锁读既有行后按输入比较，不泄漏数据库约束文本
+                            if (!isUniqueViolation(err)) return@recover Future.failedFuture(err)
+                            lockExistingHandover(connection, encounterId, periodId).compose { row ->
+                                if (row == null) Future.failedFuture(err)
+                                else compareHandoverExisting(row, author, handoverNote)
+                            }
+                        }
+                }
+            }
+        }
+    }
+
+    /** 已存在摘要时的幂等比较：相同返回 200 原文书，不同返回 409 */
+    private fun compareHandoverExisting(
+        row: Row,
+        author: String,
+        handoverNote: String?,
+    ): Future<Pair<Boolean, JsonObject>> {
+        val sameAuthor = row.getString("physician") == author
+        val sameNote = (row.getString("content") ?: null) == handoverNote
+        if (sameAuthor && sameNote) {
+            return Future.succeededFuture(Pair(false, handoverFromRow(row)))
+        }
+        return Future.failedFuture(
+            ConflictException("elderly discharge handover already exists with different author or handover note")
+        )
+    }
+
+    /** 第 4.1 节资格校验：锁定 encounter → 校验养老/离院/离院日期 → 锁定精确关联已完成周期 → 患者一致 */
+    private fun validateHandoverEligibility(
+        client: SqlClient,
+        encounterId: String,
+    ): Future<Pair<JsonObject, JsonObject>> {
+        return lockEncounter(client, encounterId).compose { encounter ->
+            if (encounter.getString("encounter_type") != "ELDERLY_CARE") {
+                return@compose Future.failedFuture(IllegalArgumentException("encounter is not an elderly admission"))
+            }
+            val dischargeDateStr = encounter.getString("discharge_date")
+            if (encounter.getString("status") != "DISCHARGED" || dischargeDateStr == null) {
+                return@compose Future.failedFuture(
+                    ConflictException("encounter is not discharged; complete the discharge flow first")
+                )
+            }
+            val dischargeDate = try {
+                OffsetDateTime.parse(dischargeDateStr)
+            } catch (_: RuntimeException) {
+                return@compose Future.failedFuture(ConflictException("encounter has no valid discharge date"))
+            }
+
+            servicePeriodService.lockCompletedElderlyCarePeriodForHandover(
+                client, encounterId, dischargeDate.toLocalDate(),
+            ).compose { period ->
+                if (period.getString("patient_id") != encounter.getString("patient_id")) {
+                    return@compose Future.failedFuture(
+                        ConflictException("patient_id mismatch between period and encounter")
+                    )
+                }
+                Future.succeededFuture(Pair(encounter, period))
+            }
+        }
+    }
+
+    /** 锁读既有本计划归档文书；无则返回 null */
+    private fun lockExistingHandover(
+        client: SqlClient,
+        encounterId: String,
+        periodId: String,
+    ): Future<Row?> {
+        val metadataField = MedicalRecords.MEDICAL_RECORDS.METADATA
+        val query = ctx.selectFrom(MedicalRecords.MEDICAL_RECORDS)
+            .where(
+                MedicalRecords.MEDICAL_RECORDS.RECORD_TYPE.eq("DISCHARGE_SUMMARY")
+                    .and(MedicalRecords.MEDICAL_RECORDS.ENCOUNTER_ID.eq(encounterId))
+                    .and(DSL.field("{0} ->> {1}", String::class.java, metadataField, DSL.`val`("period_id")).eq(periodId))
+                    .and(
+                        DSL.field("{0} ->> {1}", String::class.java, metadataField, DSL.`val`("is_elderly_discharge_handover"))
+                            .eq("true")
+                    ),
+            )
+            .forUpdate()
+        return execute(client, query).map { rows ->
+            rows.iterator().asSequence().firstOrNull()
+        }
+    }
+
+    /** 组装快照、受控 metadata 并写入单条 DISCHARGE_SUMMARY，随后读取返回 */
+    private fun buildAndInsertHandover(
+        client: SqlClient,
+        encounter: JsonObject,
+        period: JsonObject,
+        author: String,
+        handoverNote: String?,
+        dischargeDate: String,
+    ): Future<JsonObject> {
+        val encounterId = requireNotNull(encounter.getString("id"))
+        val periodId = requireNotNull(period.getString("id"))
+        val patientId = requireNotNull(encounter.getString("patient_id"))
+        val recordDate = OffsetDateTime.parse(dischargeDate).toLocalDate()
+        val now = OffsetDateTime.now()
+
+        return dischargeHandoverSnapshotService.buildNursingSnapshot(client, periodId)
+            .compose { nursing ->
+                loadPatientHandoverData(client, patientId).compose { patient ->
+                    loadHandoverNursingRecords(client, encounterId, periodId).compose { records ->
+                        val snapshot = JsonObject()
+                            .put("patient", patient)
+                            .put("encounter", handoverEncounterJson(encounter))
+                            .put("care_period", handoverCarePeriodJson(period))
+                            .put("assessments", nursing.getJsonArray("assessments"))
+                            .put("plans", nursing.getJsonArray("plans"))
+                            .put("tasks", nursing.getJsonArray("tasks"))
+                            .put("execution_summary", nursing.getJsonObject("execution_summary"))
+                            .put("nursing_records", JsonArray(records))
+
+                        val plans = nursing.getJsonArray("plans")
+                        val tasks = nursing.getJsonArray("tasks")
+                        val planItems = plans.sumOf { (it as JsonObject).getJsonArray("items").size() }
+                        val taskExecutions = tasks.sumOf { (it as JsonObject).getJsonArray("executions").size() }
+                        val sourceCounts = JsonObject()
+                            .put("assessments", nursing.getJsonArray("assessments").size())
+                            .put("plans", plans.size())
+                            .put("plan_items", planItems)
+                            .put("tasks", tasks.size())
+                            .put("executions", taskExecutions)
+                            .put("nursing_records", records.size)
+
+                        val contentBlocks = JsonArray().add(
+                            JsonObject().put("snapshot_version", 1).put("snapshot", snapshot)
+                        )
+                        val meta = JsonObject()
+                            .put("is_elderly_discharge_handover", true)
+                            .put("period_id", periodId)
+                            .put("snapshot_version", 1)
+                            .put("generated_at", now.toString())
+                            .put("source_counts", sourceCounts)
+
+                        val id = Ulid.generate()
+                        var insert = ctx.insertInto(MedicalRecords.MEDICAL_RECORDS)
+                            .set(MedicalRecords.MEDICAL_RECORDS.ID, id)
+                            .set(MedicalRecords.MEDICAL_RECORDS.ENCOUNTER_ID, encounterId)
+                            .set(MedicalRecords.MEDICAL_RECORDS.RECORD_TYPE, "DISCHARGE_SUMMARY")
+                            .set(MedicalRecords.MEDICAL_RECORDS.TITLE, handoverTitle)
+                            .set(MedicalRecords.MEDICAL_RECORDS.CONTENT_BLOCKS, org.jooq.JSONB.valueOf(contentBlocks.encode()))
+                            .set(MedicalRecords.MEDICAL_RECORDS.PHYSICIAN, author)
+                            .set(MedicalRecords.MEDICAL_RECORDS.RECORD_DATE, recordDate)
+                            .set(MedicalRecords.MEDICAL_RECORDS.METADATA, org.jooq.JSONB.valueOf(meta.encode()))
+                            .set(MedicalRecords.MEDICAL_RECORDS.CREATED_AT, now)
+                            .set(MedicalRecords.MEDICAL_RECORDS.UPDATED_AT, now)
+                        if (handoverNote != null) {
+                            insert = insert.set(MedicalRecords.MEDICAL_RECORDS.CONTENT, handoverNote)
+                        }
+
+                        execute(client, insert).compose {
+                            val read = ctx.selectFrom(MedicalRecords.MEDICAL_RECORDS)
+                                .where(MedicalRecords.MEDICAL_RECORDS.ID.eq(id))
+                            execute(client, read).map { rows ->
+                                handoverFromRow(rows.iterator().next())
+                            }
+                        }
+                    }
+                }
+            }
+    }
+
+    private fun loadPatientHandoverData(client: SqlClient, patientId: String): Future<JsonObject> {
+        val query = ctx.select(
+            PATIENTS.ID,
+            PATIENTS.NAME,
+            PATIENTS.GENDER,
+            PATIENTS.BIRTH_DATE,
+            PATIENTS.EMERGENCY_CONTACT,
+            PATIENTS.ALLERGIES,
+            PATIENTS.PAST_HISTORY,
+        )
+            .from(PATIENTS)
+            .where(PATIENTS.ID.eq(patientId))
+        return execute(client, query).map { rows ->
+            val row = rows.iterator().asSequence().firstOrNull()
+                ?: throw HealthcareNotFoundException("patient not found: $patientId")
+            JsonObject()
+                .put("id", row.getString("id"))
+                .put("name", row.getString("name"))
+                .put("gender", row.getString("gender"))
+                .put("birth_date", row.getLocalDate("birth_date")?.toString())
+                .put("emergency_contact", row.getValue("emergency_contact"))
+                .put("allergies", row.getValue("allergies"))
+                .put("past_history", row.getString("past_history"))
+        }
+    }
+
+    /** 同时限制 encounter_id 与 metadata.period_id 的原始 NURSING_RECORD 及其更正记录 */
+    private fun loadHandoverNursingRecords(
+        client: SqlClient,
+        encounterId: String,
+        periodId: String,
+    ): Future<List<JsonObject>> {
+        val metadataField = MedicalRecords.MEDICAL_RECORDS.METADATA
+        val query = ctx.select(
+            MedicalRecords.MEDICAL_RECORDS.ID,
+            MedicalRecords.MEDICAL_RECORDS.TITLE,
+            MedicalRecords.MEDICAL_RECORDS.CONTENT,
+            MedicalRecords.MEDICAL_RECORDS.PHYSICIAN,
+            MedicalRecords.MEDICAL_RECORDS.RECORD_DATE,
+            MedicalRecords.MEDICAL_RECORDS.METADATA,
+            MedicalRecords.MEDICAL_RECORDS.CREATED_AT,
+        )
+            .from(MedicalRecords.MEDICAL_RECORDS)
+            .where(
+                MedicalRecords.MEDICAL_RECORDS.RECORD_TYPE.eq("NURSING_RECORD")
+                    .and(MedicalRecords.MEDICAL_RECORDS.ENCOUNTER_ID.eq(encounterId))
+                    .and(DSL.field("{0} ->> {1}", String::class.java, metadataField, DSL.`val`("period_id")).eq(periodId)),
+            )
+            .orderBy(
+                MedicalRecords.MEDICAL_RECORDS.RECORD_DATE.asc(),
+                MedicalRecords.MEDICAL_RECORDS.CREATED_AT.asc(),
+                MedicalRecords.MEDICAL_RECORDS.ID.asc(),
+            )
+        return execute(client, query).map { rows ->
+            rows.map { row ->
+                val meta = row.getValue("metadata") as? JsonObject ?: JsonObject()
+                JsonObject()
+                    .put("id", row.getString("id"))
+                    .put("record_kind", meta.getString("record_kind"))
+                    .put("title", row.getString("title"))
+                    .put("content", row.getString("content"))
+                    .put("record_time", meta.getString("record_time"))
+                    .put("record_date", row.getLocalDate("record_date")?.toString())
+                    .put("author", row.getString("physician"))
+                    .put("corrects_record_id", meta.getString("corrects_record_id"))
+                    .put("created_at", row.getOffsetDateTime("created_at")?.toString())
+            }
+        }
+    }
+
+    private fun handoverEncounterJson(encounter: JsonObject): JsonObject =
+        JsonObject()
+            .put("id", encounter.getString("id"))
+            .put("encounter_no", encounter.getString("encounter_no"))
+            .put("department", encounter.getString("department"))
+            .put("ward", encounter.getString("ward"))
+            .put("admit_date", encounter.getString("admit_date"))
+            .put("discharge_date", encounter.getString("discharge_date"))
+            .put("admitting_diagnosis", encounter.getString("admitting_diagnosis"))
+            .put("discharge_diagnosis", encounter.getString("discharge_diagnosis"))
+            .put("attending_physician", encounter.getString("attending_physician"))
+            .put("status", encounter.getString("status"))
+
+    private fun handoverCarePeriodJson(period: JsonObject): JsonObject =
+        JsonObject()
+            .put("id", period.getString("id"))
+            .put("service_type", period.getString("service_type"))
+            .put("start_date", period.getString("start_date"))
+            .put("end_date", period.getString("end_date"))
+            .put("coordinator", period.getString("coordinator"))
+            .put("status", period.getString("status"))
+
+    /** 从 medical_records 行映射为 API 对象（解包 content_blocks[0].snapshot 与受控 metadata） */
+    private fun handoverFromRow(row: Row): JsonObject {
+        val rowMeta = row.getValue("metadata") as? JsonObject ?: JsonObject()
+        val contentBlocks = row.getValue("content_blocks") as? JsonArray ?: JsonArray()
+        val snapshot = if (contentBlocks.size() > 0) contentBlocks.getJsonObject(0).getJsonObject("snapshot") else JsonObject()
+        return JsonObject()
+            .put("id", row.getString("id"))
+            .put("record_type", row.getString("record_type"))
+            .put("title", row.getString("title"))
+            .put("encounter_id", row.getString("encounter_id"))
+            .put("period_id", rowMeta.getString("period_id"))
+            .put("record_date", row.getLocalDate("record_date")?.toString())
+            .put("author", row.getString("physician"))
+            .put("handover_note", row.getString("content"))
+            .put("generated_at", rowMeta.getString("generated_at"))
+            .put("snapshot_version", rowMeta.getInteger("snapshot_version") ?: 1)
+            .put("snapshot", snapshot)
+    }
+
+    private fun isUniqueViolation(err: Throwable): Boolean {
+        val msg = err.message ?: ""
+        return msg.contains("uq_medical_records_elderly_handover_period") || msg.contains("duplicate key")
     }
 }

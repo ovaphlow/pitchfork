@@ -1,427 +1,449 @@
-import { test, expect, type Page } from '@playwright/test';
+import { Pool } from "pg";
+import { expect, test, type Page } from "@playwright/test";
 
-/**
- * Aceso 养老院入住照护周期生命周期 — Playwright 浏览器验收测试。
- *
- * 覆盖计划文档第 7.3 节五组验收：
- *   1. 创建养老入住后，护理工作台立即显示与该入住编号匹配的养老照护周期
- *   2. 存在历史未绑定活动入住时，恢复动作只建立一次正确周期
- *   3. 无执行中任务时离院成功，入住从活动列表消失
- *   4. 存在执行中任务时离院失败，页面保留入住和护理数据并展示可理解的错误
- *   5. 窄屏下入住选择、周期状态、恢复动作和离院错误均可操作，文本不重叠
- *
- * 使用独立 aceso_test fixture 和用户授权的测试账户；
- * 凭据从环境变量读取，不得记录密码、JWT 或连接密钥。
- */
+const FIXTURE_PREFIX = "pw-";
+const API_BASE_URL = process.env.PLAYWRIGHT_API_BASE_URL;
+const LOGIN_IDENTIFIER = process.env.PLAYWRIGHT_USERNAME;
+const LOGIN_PASSWORD = process.env.PLAYWRIGHT_PASSWORD;
 
-// 测试数据前缀，用于隔离和清理
-const FIXTURE_PREFIX = 'pw-';
-const TEST_TIMESTAMP = Date.now();
+interface Encounter {
+  id: string;
+  encounter_no: string;
+  patient_id: string;
+}
 
-// 清理 fixture 数据的辅助函数
-async function cleanupFixtures(page: Page) {
-  await page.evaluate(async () => {
-    const token = localStorage.getItem('token');
-    const baseUrl = import.meta.env.PUBLIC_API_URL || '';
+interface AdmissionResponse {
+  encounter: Encounter;
+  nursing_period: { id: string; encounter_id: string; service_type: string };
+}
 
-    // 删除测试创建的任务执行记录、任务、周期、encounter、患者
-    const prefixes = ['pw-'];
-    for (const prefix of prefixes) {
+interface PeriodResponse {
+  records: Array<{ id: string; encounter_id: string; service_type: string; status: string }>;
+}
+
+interface TaskResponse {
+  id: string;
+}
+
+interface ExecutionResponse {
+  id: string;
+}
+
+interface ApiResult<T> {
+  status: number;
+  body: T;
+}
+
+let databasePool: Pool;
+
+function requiredEnvironment(name: string, value: string | undefined): string {
+  if (!value) throw new Error(`${name} must be set for the Aceso lifecycle tests`);
+  return value;
+}
+
+async function cleanupDatabase() {
+  const client = await databasePool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `DELETE FROM nursing.nursing_task_executions
+       WHERE id LIKE $1
+          OR task_id IN (
+            SELECT id
+            FROM nursing.nursing_tasks
+            WHERE id LIKE $1
+               OR period_id IN (
+                 SELECT id
+                 FROM nursing.nursing_service_periods
+                 WHERE id LIKE $1
+                    OR encounter_id IN (
+                      SELECT id
+                      FROM healthcare.encounters
+                      WHERE id LIKE $1
+                         OR encounter_no LIKE $1
+                         OR patient_id IN (
+                           SELECT id
+                           FROM healthcare.patients
+                           WHERE id LIKE $1 OR name LIKE $1
+                         )
+                    )
+               )
+               OR encounter_id IN (
+                 SELECT id
+                 FROM healthcare.encounters
+                 WHERE id LIKE $1
+                    OR encounter_no LIKE $1
+                    OR patient_id IN (
+                      SELECT id
+                      FROM healthcare.patients
+                      WHERE id LIKE $1 OR name LIKE $1
+                    )
+               )
+          )`,
+      [`${FIXTURE_PREFIX}%`],
+    );
+    await client.query(
+      `DELETE FROM nursing.nursing_tasks
+       WHERE id LIKE $1
+          OR period_id IN (
+            SELECT id
+            FROM nursing.nursing_service_periods
+            WHERE id LIKE $1
+               OR encounter_id IN (
+                 SELECT id
+                 FROM healthcare.encounters
+                 WHERE id LIKE $1
+                    OR encounter_no LIKE $1
+                    OR patient_id IN (
+                      SELECT id
+                      FROM healthcare.patients
+                      WHERE id LIKE $1 OR name LIKE $1
+                    )
+               )
+          )
+          OR encounter_id IN (
+            SELECT id
+            FROM healthcare.encounters
+            WHERE id LIKE $1
+               OR encounter_no LIKE $1
+               OR patient_id IN (
+                 SELECT id
+                 FROM healthcare.patients
+                 WHERE id LIKE $1 OR name LIKE $1
+               )
+          )`,
+      [`${FIXTURE_PREFIX}%`],
+    );
+    await client.query(
+      `DELETE FROM nursing.nursing_service_periods
+       WHERE id LIKE $1
+          OR encounter_id IN (
+            SELECT id
+            FROM healthcare.encounters
+            WHERE id LIKE $1
+               OR encounter_no LIKE $1
+               OR patient_id IN (
+                 SELECT id
+                 FROM healthcare.patients
+                 WHERE id LIKE $1 OR name LIKE $1
+               )
+          )`,
+      [`${FIXTURE_PREFIX}%`],
+    );
+    const childResult = await client.query<{ residual: string }>(`
+      SELECT (
+        (SELECT count(*) FROM nursing.nursing_task_executions WHERE id LIKE $1) +
+        (SELECT count(*) FROM nursing.nursing_tasks WHERE id LIKE $1) +
+        (SELECT count(*) FROM nursing.nursing_service_periods WHERE id LIKE $1 OR encounter_id IN (SELECT id FROM healthcare.encounters WHERE id LIKE $1 OR encounter_no LIKE $1 OR patient_id IN (SELECT id FROM healthcare.patients WHERE id LIKE $1 OR name LIKE $1)))
+      )::text AS residual
+    `, [`${FIXTURE_PREFIX}%`]);
+    if (childResult.rows[0]?.residual !== "0") throw new Error("fixture cleanup left residual nursing data");
+    await client.query(
+      `DELETE FROM healthcare.encounters
+       WHERE id LIKE $1
+          OR encounter_no LIKE $1
+          OR patient_id IN (
+            SELECT id
+            FROM healthcare.patients
+            WHERE id LIKE $1 OR name LIKE $1
+          )`,
+      [`${FIXTURE_PREFIX}%`],
+    );
+    await client.query(
+      "DELETE FROM healthcare.patients WHERE id LIKE $1 OR name LIKE $1",
+      [`${FIXTURE_PREFIX}%`],
+    );
+    const result = await client.query<{ residual: string }>(`
+      SELECT (
+        (SELECT count(*) FROM nursing.nursing_task_executions WHERE id LIKE $1) +
+        (SELECT count(*) FROM nursing.nursing_tasks WHERE id LIKE $1) +
+        (SELECT count(*) FROM nursing.nursing_service_periods WHERE id LIKE $1 OR encounter_id LIKE $1) +
+        (SELECT count(*) FROM healthcare.encounters WHERE id LIKE $1 OR encounter_no LIKE $1) +
+        (SELECT count(*) FROM healthcare.patients WHERE id LIKE $1 OR name LIKE $1)
+      )::text AS residual
+    `, [`${FIXTURE_PREFIX}%`]);
+    if (result.rows[0]?.residual !== "0") throw new Error("fixture cleanup left residual data");
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function api<T>(page: Page, path: string, options: { method?: string; body?: unknown } = {}): Promise<T> {
+  const baseUrl = requiredEnvironment("PLAYWRIGHT_API_BASE_URL", API_BASE_URL);
+  const result = await page.evaluate(
+    async ({ baseUrl: requestBaseUrl, path: requestPath, method, body }) => {
+      const token = localStorage.getItem("token");
+      const response = await fetch(`${requestBaseUrl}${requestPath}`, {
+        method,
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      const text = await response.text();
+      let parsed: unknown = {};
       try {
-        await fetch(`${baseUrl}/crate-api/nursing/v1/task-executions?prefix=${prefix}`, {
-          method: 'DELETE',
-          headers: { 'Authorization': `Bearer ${token}` },
-        });
-        await fetch(`${baseUrl}/crate-api/nursing/v1/tasks?prefix=${prefix}`, {
-          method: 'DELETE',
-          headers: { 'Authorization': `Bearer ${token}` },
-        });
-        await fetch(`${baseUrl}/crate-api/nursing/v1/periods?prefix=${prefix}`, {
-          method: 'DELETE',
-          headers: { 'Authorization': `Bearer ${token}` },
-        });
-        await fetch(`${baseUrl}/crate-api/healthcare/v1/encounters?prefix=${prefix}`, {
-          method: 'DELETE',
-          headers: { 'Authorization': `Bearer ${token}` },
-        });
-        await fetch(`${baseUrl}/crate-api/healthcare/v1/patients?prefix=${prefix}`, {
-          method: 'DELETE',
-          headers: { 'Authorization': `Bearer ${token}` },
-        });
-      } catch (e) {
-        console.warn('Cleanup failed for prefix:', prefix, e);
+        parsed = text ? JSON.parse(text) : {};
+      } catch {
+        parsed = { raw: text };
       }
-    }
+      return { status: response.status, body: parsed };
+    },
+    { baseUrl, path, method: options.method ?? "GET", body: options.body },
+  ) as ApiResult<T>;
+  if (result.status >= 400) throw new Error(`${options.method ?? "GET"} ${path} failed with ${result.status}`);
+  return result.body;
+}
+
+async function ensureAuthenticated(page: Page) {
+  await page.goto("/dashboard/admission", { waitUntil: "networkidle" });
+  if (!page.url().includes("/login")) return;
+  const identifier = requiredEnvironment("PLAYWRIGHT_USERNAME", LOGIN_IDENTIFIER);
+  const password = requiredEnvironment("PLAYWRIGHT_PASSWORD", LOGIN_PASSWORD);
+  await page.getByLabel("账号").fill(identifier);
+  await page.getByLabel("密码").fill(password);
+  await Promise.all([
+    page.waitForURL(/\/dashboard/),
+    page.getByRole("button", { name: "登录" }).click(),
+  ]);
+}
+
+async function createPatient(page: Page, suffix: string): Promise<string> {
+  const patient = await api<{ id: string }>(page, "/crate-api/healthcare/v1/patients", {
+    method: "POST",
+    body: { name: `${FIXTURE_PREFIX}${suffix}` },
+  });
+  return patient.id;
+}
+
+async function createUnboundAdmission(page: Page, suffix: string, admitDate: string): Promise<Encounter> {
+  const patientId = await createPatient(page, `${suffix}-patient`);
+  return api<Encounter>(page, "/crate-api/healthcare/v1/encounters", {
+    method: "POST",
+    body: {
+      patient_id: patientId,
+      encounter_type: "ELDERLY_CARE",
+      encounter_no: `${FIXTURE_PREFIX}${suffix}`,
+      admit_date: `${admitDate}T00:00:00+08:00`,
+    },
   });
 }
 
-// Page Object: 入住管理页面
+async function createBoundAdmission(page: Page, suffix: string, admitDate: string): Promise<AdmissionResponse> {
+  const patientId = await createPatient(page, `${suffix}-patient`);
+  return api<AdmissionResponse>(page, "/crate-api/healthcare/v1/elderly-admissions", {
+    method: "POST",
+    body: {
+      patient_id: patientId,
+      encounter_no: `${FIXTURE_PREFIX}${suffix}`,
+      admit_date: `${admitDate}T00:00:00+08:00`,
+    },
+  });
+}
+
+async function createBusyAdmission(page: Page, suffix: string): Promise<Encounter> {
+  const encounter = await createUnboundAdmission(page, suffix, "2026-07-31");
+  const period = await api<{ id: string }>(page, "/crate-api/nursing/v1/periods/elderly-admission", {
+    method: "POST",
+    body: { encounter_id: encounter.id },
+  });
+  const task = await api<TaskResponse>(page, "/crate-api/nursing/v1/tasks/", {
+    method: "POST",
+    body: {
+      period_id: period.id,
+      encounter_id: encounter.id,
+      task_type: "NURSING",
+      description: "执行中测试任务",
+      frequency_code: "QD",
+      start_date: "2026-07-31",
+    },
+  });
+  const execution = await api<ExecutionResponse>(page, "/crate-api/nursing/v1/executions/", {
+    method: "POST",
+    body: {
+      task_id: task.id,
+      planned_time: "2026-08-01T09:00:00+08:00",
+      executor: "test-executor",
+    },
+  });
+  await api(page, `/crate-api/nursing/v1/executions/${execution.id}/status`, {
+    method: "PATCH",
+    body: { status: "IN_PROGRESS" },
+  });
+  return encounter;
+}
+
 class AdmissionsPage {
-  constructor(private page: Page) {}
+  constructor(private readonly page: Page) {}
 
   async goto() {
-    await this.page.goto('/aceso/admissions');
-    await this.page.waitForLoadState('networkidle');
+    await this.page.goto("/dashboard/admission");
+    await this.page.waitForLoadState("networkidle");
   }
 
-  async createAdmission(data: {
-    patientName: string;
-    encounterNo: string;
-    admitDate: string;
-  }) {
-    // 点击新建入住按钮
-    await this.page.getByRole('button', { name: /新建入住|新增入住|创建入住/i }).click();
+  row(encounterNo: string) {
+    return this.page.getByRole("row").filter({ hasText: encounterNo });
+  }
 
-    // 填写表单
-    await this.page.getByLabel(/姓名|患者姓名/i).fill(data.patientName);
-    await this.page.getByLabel(/住院号|入住编号/i).fill(data.encounterNo);
-    await this.page.getByLabel(/入院日期|入住日期/i).fill(data.admitDate);
-
-    // 提交表单
-    await this.page.getByRole('button', { name: /提交|保存|确认/i }).click();
-
-    // 等待成功响应
-    await this.page.waitForResponse(
-      (response) => response.url().includes('/healthcare/v1/elderly-admissions') && response.status() === 201
+  async discharge(encounterNo: string): Promise<number> {
+    const responsePromise = this.page.waitForResponse(
+      (response) => response.url().includes("/encounters/") && response.url().includes("/discharge"),
     );
-  }
-
-  async getAdmissionByEncounterNo(encounterNo: string) {
-    const row = this.page.getByRole('row').filter({ hasText: encounterNo });
-    return row;
-  }
-
-  async dischargeAdmission(encounterNo: string) {
-    const row = await this.getAdmissionByEncounterNo(encounterNo);
-    await row.getByRole('button', { name: /离院|出院/i }).click();
-
-    // 确认离院对话框
-    await this.page.getByRole('button', { name: /确认|确定/i }).click();
-
-    // 等待成功响应
-    await this.page.waitForResponse(
-      (response) => response.url().includes('/encounters/') && response.url().includes('/discharge')
-    );
-  }
-
-  async isAdmissionVisible(encounterNo: string): Promise<boolean> {
-    const row = this.page.getByRole('row').filter({ hasText: encounterNo });
-    return await row.isVisible();
+    const dialogPromise = this.page.waitForEvent("dialog").then((dialog) => dialog.accept());
+    await this.row(encounterNo).getByRole("button", { name: /办理离院/ }).click();
+    await dialogPromise;
+    return (await responsePromise).status();
   }
 }
 
-// Page Object: 护理工作台页面
 class NursingPage {
-  constructor(private page: Page) {}
+  constructor(private readonly page: Page) {}
 
   async goto() {
-    await this.page.goto('/aceso/nursing');
-    await this.page.waitForLoadState('networkidle');
+    await this.page.goto("/dashboard/inpatient");
+    await this.page.waitForLoadState("networkidle");
+    await this.page.getByRole("button", { name: "长者照护档案" }).click();
+    await this.page.waitForLoadState("networkidle");
   }
 
   async selectAdmission(encounterNo: string) {
-    // 从入住选择器中选择指定入住
-    await this.page.getByRole('combobox').click();
-    await this.page.getByRole('option', { name: new RegExp(encounterNo) }).click();
+    await this.page.getByRole("button").filter({ hasText: encounterNo }).click();
   }
 
-  async getServicePeriodInfo(): Promise<{
-    serviceType: string | null;
-    encounterId: string | null;
-    status: string | null;
-    periodId: string | null;
-  }> {
-    const serviceType = await this.page.getByText(/服务类型|护理类型/i).locator('..').textContent();
-    const encounterId = await this.page.getByText(/入住编号|关联入住/i).locator('..').textContent();
-    const status = await this.page.getByText(/状态|周期状态/i).locator('..').textContent();
-
-    // 尝试从页面提取周期 ID（如果存在）
-    let periodId: string | null = null;
-    const periodIdElement = this.page.locator('[data-period-id]');
-    if (await periodIdElement.count() > 0) {
-      periodId = await periodIdElement.getAttribute('data-period-id');
-    }
-
+  async periodInfo() {
+    const summary = this.page.locator("[data-period-summary]");
+    await expect(summary).toBeVisible();
+    const paragraphs = await summary.locator("p").allTextContents();
+    const periodStatus = paragraphs[1] ?? "";
+    const serviceType = paragraphs.find((paragraph) => paragraph.startsWith("服务类型：")) ?? "";
+    const encounter = paragraphs.find((paragraph) => paragraph.startsWith("关联入住：")) ?? "";
     return {
-      serviceType: serviceType?.replace(/服务类型|护理类型/, '').trim() || null,
-      encounterId: encounterId?.replace(/入住编号|关联入住/, '').trim() || null,
-      status: status?.replace(/状态|周期状态/, '').trim() || null,
-      periodId,
+      serviceType: serviceType.replace("服务类型：", "").trim() || null,
+      encounterNo: encounter.replace("关联入住：", "").trim() || null,
+      status: periodStatus.includes("进行中") ? "ACTIVE" : null,
+      periodId: await summary.getAttribute("data-period-id"),
     };
   }
 
-  async clickRecoverButton() {
-    await this.page.getByRole('button', { name: /建立养老照护周期|恢复周期|补建/i }).click();
-  }
-
-  async getErrorMessage(): Promise<string | null> {
-    const errorElement = this.page.getByRole('alert').or(this.page.locator('.error-message'));
-    if (await errorElement.isVisible()) {
-      return await errorElement.textContent();
-    }
-    return null;
+  recoverButton() {
+    return this.page.getByRole("button", { name: "建立养老照护周期" });
   }
 }
 
-test.describe('养老院入住照护周期生命周期验收', () => {
-  let admissionsPage: AdmissionsPage;
-  let nursingPage: NursingPage;
+test.describe.configure({ mode: "serial" });
 
-  test.beforeEach(async ({ page }) => {
-    admissionsPage = new AdmissionsPage(page);
-    nursingPage = new NursingPage(page);
+test.beforeAll(async () => {
+  databasePool = new Pool({
+    host: process.env.PLAYWRIGHT_DB_HOST ?? "localhost",
+    port: Number(process.env.PLAYWRIGHT_DB_PORT ?? "5432"),
+    database: process.env.PLAYWRIGHT_DB_DATABASE ?? "aceso_test",
+    user: process.env.PLAYWRIGHT_DB_USER ?? "ovaphlow",
+    password: requiredEnvironment("PITCHFORK_DB_PASSWORD", process.env.PITCHFORK_DB_PASSWORD),
   });
+  await cleanupDatabase();
+});
 
-  test.afterEach(async ({ page }) => {
-    await cleanupFixtures(page);
+test.afterAll(async () => {
+  await cleanupDatabase();
+  await databasePool.end();
+});
+
+test.beforeEach(async ({ page }) => {
+  await ensureAuthenticated(page);
+  await cleanupDatabase();
+});
+
+test.afterEach(async () => {
+  await cleanupDatabase();
+});
+
+test("创建养老入住后护理工作台显示匹配的养老照护周期", async ({ page }) => {
+  const admission = await createBoundAdmission(page, "ENC", "2026-07-31");
+  const admissionsPage = new AdmissionsPage(page);
+  const nursingPage = new NursingPage(page);
+
+  await admissionsPage.goto();
+  await expect(admissionsPage.row(admission.encounter.encounter_no)).toBeVisible();
+  await nursingPage.goto();
+  await nursingPage.selectAdmission(admission.encounter.encounter_no);
+
+  await expect.poll(async () => (await nursingPage.periodInfo()).periodId).toBe(admission.nursing_period.id);
+  const periodInfo = await nursingPage.periodInfo();
+  expect(periodInfo.serviceType).toBe("ELDERLY_CARE");
+  expect(periodInfo.encounterNo).toBe(admission.encounter.encounter_no);
+  expect(periodInfo.status).toBe("ACTIVE");
+});
+
+test("历史未绑定活动入住恢复动作只建立一次正确周期", async ({ page }) => {
+  const encounter = await createUnboundAdmission(page, "HIST", "2026-07-01");
+  const nursingPage = new NursingPage(page);
+  await nursingPage.goto();
+  await nursingPage.selectAdmission(encounter.encounter_no);
+
+  await expect(nursingPage.recoverButton()).toBeVisible();
+  const firstResponse = page.waitForResponse(
+    (response) => response.url().includes("/periods/elderly-admission") && response.status() === 201,
+  );
+  await nursingPage.recoverButton().click();
+  await firstResponse;
+  await expect(nursingPage.recoverButton()).not.toBeVisible();
+
+  const firstPeriod = await api<PeriodResponse>(page, `/crate-api/nursing/v1/periods/?encounter_id=${encounter.id}`);
+  expect(firstPeriod.records).toHaveLength(1);
+  const retryResponse = page.waitForResponse(
+    (response) => response.url().includes("/periods/elderly-admission") && response.status() === 200,
+  );
+  await api(page, "/crate-api/nursing/v1/periods/elderly-admission", {
+    method: "POST",
+    body: { encounter_id: encounter.id },
   });
+  await retryResponse;
+  const secondPeriod = await api<PeriodResponse>(page, `/crate-api/nursing/v1/periods/?encounter_id=${encounter.id}`);
+  expect(secondPeriod.records).toHaveLength(1);
+  expect(secondPeriod.records[0]?.id).toBe(firstPeriod.records[0]?.id);
+});
 
-  // ========================================================================
-  //  验收 1：创建养老入住后，护理工作台立即显示与该入住编号匹配的养老照护周期
-  // ========================================================================
+test("无执行中任务时离院成功且入住从活动列表消失", async ({ page }) => {
+  const admission = await createBoundAdmission(page, "DIS", "2026-07-31");
+  const admissionsPage = new AdmissionsPage(page);
+  await admissionsPage.goto();
+  expect(await admissionsPage.discharge(admission.encounter.encounter_no)).toBe(200);
+  await expect(admissionsPage.row(admission.encounter.encounter_no)).not.toBeVisible();
+});
 
-  test('创建养老入住后护理工作台显示匹配的养老照护周期', async ({ page }) => {
-    const encounterNo = `${FIXTURE_PREFIX}ENC-${TEST_TIMESTAMP}`;
-    const patientName = `${FIXTURE_PREFIX}测试长者-${TEST_TIMESTAMP}`;
+test("存在执行中任务时离院失败并展示可理解的错误", async ({ page }) => {
+  const encounter = await createBusyAdmission(page, "INP");
+  const admissionsPage = new AdmissionsPage(page);
+  await admissionsPage.goto();
+  expect(await admissionsPage.discharge(encounter.encounter_no)).toBe(409);
+  await expect(admissionsPage.row(encounter.encounter_no)).toBeVisible();
+  await expect(page.getByText(/执行中|in progress|cannot discharge/i)).toBeVisible();
+});
 
-    // 1. 创建养老入住
-    await admissionsPage.goto();
-    await admissionsPage.createAdmission({
-      patientName,
-      encounterNo,
-      admitDate: '2026-07-31',
-    });
+test("窄屏下周期信息和恢复动作可操作且文本不重叠", async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 812 });
+  const encounter = await createUnboundAdmission(page, "MOB", "2026-07-01");
+  const nursingPage = new NursingPage(page);
+  await nursingPage.goto();
+  await nursingPage.selectAdmission(encounter.encounter_no);
+  await expect(nursingPage.recoverButton()).toBeVisible();
+  await expect(nursingPage.recoverButton()).toBeEnabled();
 
-    // 2. 验证入住创建成功
-    const admissionRow = await admissionsPage.getAdmissionByEncounterNo(encounterNo);
-    await expect(admissionRow).toBeVisible();
-
-    // 3. 进入护理工作台
-    await nursingPage.goto();
-
-    // 4. 选择刚创建的入住
-    await nursingPage.selectAdmission(encounterNo);
-
-    // 5. 验证护理工作台显示正确的养老照护周期
-    const periodInfo = await nursingPage.getServicePeriodInfo();
-    expect(periodInfo.serviceType).toContain('ELDERLY_CARE');
-    expect(periodInfo.encounterId).toContain(encounterNo);
-    expect(periodInfo.status).toContain('ACTIVE');
-  });
-
-  // ========================================================================
-  //  验收 2：存在历史未绑定活动入住时，恢复动作只建立一次正确周期
-  // ========================================================================
-
-  test('历史未绑定活动入住恢复动作只建立一次正确周期', async ({ page }) => {
-    const encounterNo = `${FIXTURE_PREFIX}HIST-${TEST_TIMESTAMP}`;
-    const patientName = `${FIXTURE_PREFIX}历史长者-${TEST_TIMESTAMP}`;
-
-    // 1. 创建一个历史入住（模拟未绑定周期的情况）
-    await admissionsPage.goto();
-    await admissionsPage.createAdmission({
-      patientName,
-      encounterNo,
-      admitDate: '2026-07-01',
-    });
-
-    // 2. 进入护理工作台
-    await nursingPage.goto();
-
-    // 3. 选择历史入住
-    await nursingPage.selectAdmission(encounterNo);
-
-    // 4. 验证恢复按钮可见并点击建立周期
-    const recoverButton = page.getByRole('button', { name: /建立养老照护周期|恢复周期|补建/i });
-    await expect(recoverButton).toBeVisible();
-    await recoverButton.click();
-
-    // 等待周期建立成功
-    await page.waitForResponse(
-      (response) => response.url().includes('/periods/elderly-admission') && response.status() === 201
-    );
-
-    // 5. 验证恢复按钮不再显示（周期已建立）
-    await expect(recoverButton).not.toBeVisible();
-
-    // 6. 验证周期信息正确显示
-    const periodInfo = await nursingPage.getServicePeriodInfo();
-    expect(periodInfo.serviceType).toContain('ELDERLY_CARE');
-    expect(periodInfo.encounterId).toContain(encounterNo);
-  });
-
-  // ========================================================================
-  //  验收 3：无执行中任务时离院成功，入住从活动列表消失
-  // ========================================================================
-
-  test('无执行中任务时离院成功且入住从活动列表消失', async ({ page }) => {
-    const encounterNo = `${FIXTURE_PREFIX}DIS-${TEST_TIMESTAMP}`;
-    const patientName = `${FIXTURE_PREFIX}离院长者-${TEST_TIMESTAMP}`;
-
-    // 1. 创建入住
-    await admissionsPage.goto();
-    await admissionsPage.createAdmission({
-      patientName,
-      encounterNo,
-      admitDate: '2026-07-31',
-    });
-
-    // 2. 验证入住在活动列表中
-    await expect(await admissionsPage.getAdmissionByEncounterNo(encounterNo)).toBeVisible();
-
-    // 3. 执行离院
-    await admissionsPage.dischargeAdmission(encounterNo);
-
-    // 4. 验证入住从活动列表消失
-    const isStillVisible = await admissionsPage.isAdmissionVisible(encounterNo);
-    expect(isStillVisible).toBe(false);
-  });
-
-  // ========================================================================
-  //  验收 4：存在执行中任务时离院失败，页面保留入住和护理数据并展示可理解的错误
-  // ========================================================================
-
-  test('存在执行中任务时离院失败并展示可理解的错误', async ({ page }) => {
-    const encounterNo = `${FIXTURE_PREFIX}INP-${TEST_TIMESTAMP}`;
-    const patientName = `${FIXTURE_PREFIX}执行中长者-${TEST_TIMESTAMP}`;
-
-    // 1. 创建入住
-    await admissionsPage.goto();
-    await admissionsPage.createAdmission({
-      patientName,
-      encounterNo,
-      admitDate: '2026-07-31',
-    });
-
-    // 2. 进入护理工作台并补建周期
-    await nursingPage.goto();
-    await nursingPage.selectAdmission(encounterNo);
-
-    // 等待周期建立
-    await page.waitForResponse(
-      (response) => response.url().includes('/periods/elderly-admission') && response.status() === 200
-    );
-
-    // 3. 通过 API 获取周期 ID 并创建执行中任务和执行记录
-    await page.evaluate(async ({ encounterNo }) => {
-      const token = localStorage.getItem('token');
-      const baseUrl = import.meta.env.PUBLIC_API_URL || '';
-
-      // 获取周期 ID
-      const periodsResponse = await fetch(`${baseUrl}/crate-api/nursing/v1/periods?encounter_id=${encounterNo}`, {
-        headers: { 'Authorization': `Bearer ${token}` },
-      });
-      const periods = await periodsResponse.json();
-      const periodId = periods.records?.[0]?.id;
-
-      if (!periodId) {
-        throw new Error('No period found for encounter');
-      }
-
-      // 创建任务
-      const taskResponse = await fetch(`${baseUrl}/crate-api/nursing/v1/tasks`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          period_id: periodId,
-          task_type: 'NURSING',
-          description: '执行中测试任务',
-          frequency_code: 'QD',
-          start_date: new Date().toISOString().split('T')[0],
-        }),
-      });
-      const task = await taskResponse.json();
-
-      // 创建执行中记录
-      await fetch(`${baseUrl}/crate-api/nursing/v1/task-executions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          task_id: task.id,
-          planned_time: new Date().toISOString(),
-          status: 'IN_PROGRESS',
-          executor: 'test-executor',
-        }),
-      });
-    }, { encounterNo });
-
-    // 4. 尝试离院（应该失败）
-    await admissionsPage.goto();
-    const row = await admissionsPage.getAdmissionByEncounterNo(encounterNo);
-
-    // 监听离院失败的响应
-    const dischargeResponsePromise = page.waitForResponse(
-      (response) => response.url().includes('/encounters/') && response.url().includes('/discharge')
-    );
-
-    await row.getByRole('button', { name: /离院|出院/i }).click();
-    await page.getByRole('button', { name: /确认|确定/i }).click();
-
-    const dischargeResponse = await dischargeResponsePromise;
-    expect(dischargeResponse.status()).toBe(409);
-
-    // 5. 验证页面保留入住和护理数据
-    await expect(await admissionsPage.getAdmissionByEncounterNo(encounterNo)).toBeVisible();
-
-    // 6. 验证显示可理解的错误信息
-    const errorMessage = await nursingPage.getErrorMessage();
-    expect(errorMessage).toBeTruthy();
-  });
-
-  // ========================================================================
-  //  验收 5：窄屏下入住选择、周期状态、恢复动作和离院错误均可操作，文本不重叠
-  // ========================================================================
-
-  test('窄屏下所有操作均可操作且文本不重叠', async ({ page }) => {
-    // 设置窄屏 viewport
-    await page.setViewportSize({ width: 375, height: 812 });
-
-    const encounterNo = `${FIXTURE_PREFIX}MOB-${TEST_TIMESTAMP}`;
-    const patientName = `${FIXTURE_PREFIX}移动端长者-${TEST_TIMESTAMP}`;
-
-    // 1. 创建入住
-    await admissionsPage.goto();
-    await admissionsPage.createAdmission({
-      patientName,
-      encounterNo,
-      admitDate: '2026-07-31',
-    });
-
-    // 2. 验证入住在窄屏下可见
-    await expect(await admissionsPage.getAdmissionByEncounterNo(encounterNo)).toBeVisible();
-
-    // 3. 进入护理工作台
-    await nursingPage.goto();
-
-    // 4. 验证入住选择器在窄屏下可操作
-    const combobox = page.getByRole('combobox');
-    await expect(combobox).toBeVisible();
-
-    // 5. 选择入住
-    await nursingPage.selectAdmission(encounterNo);
-
-    // 6. 验证周期状态信息在窄屏下可见且不重叠
-    const periodInfo = await nursingPage.getServicePeriodInfo();
-    expect(periodInfo.serviceType).toBeTruthy();
-
-    // 7. 验证恢复按钮（如果显示）在窄屏下可操作
-    const recoverButton = page.getByRole('button', { name: /建立养老照护周期|恢复周期|补建/i });
-    if (await recoverButton.isVisible()) {
-      await expect(recoverButton).toBeEnabled();
-    }
-
-    // 8. 验证离院按钮在窄屏下可操作
-    await admissionsPage.goto();
-    const row = await admissionsPage.getAdmissionByEncounterNo(encounterNo);
-    const dischargeButton = row.getByRole('button', { name: /离院|出院/i });
-    if (await dischargeButton.isVisible()) {
-      await expect(dischargeButton).toBeEnabled();
-    }
-  });
+  const summary = page.locator("[data-period-summary]");
+  await nursingPage.recoverButton().click();
+  await expect(summary).toBeVisible();
+  const boxes = await summary.locator("p").evaluateAll((elements) =>
+    elements.map((element) => {
+      const rect = element.getBoundingClientRect();
+      return { top: rect.top, bottom: rect.bottom };
+    }),
+  );
+  for (let index = 1; index < boxes.length; index += 1) {
+    expect(boxes[index]?.top).toBeGreaterThanOrEqual(boxes[index - 1]?.bottom ?? 0);
+  }
 });

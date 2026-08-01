@@ -57,7 +57,7 @@ object DatabaseConfig {
             .dataSource(url, user, password)
             .locations("classpath:db/migration")
             .baselineOnMigrate(true)
-            .ignoreMigrationPatterns("*:missing")
+            .ignoreMigrationPatterns("*:missing", "*:ignored")
             .load()
             .migrate()
 
