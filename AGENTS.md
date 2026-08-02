@@ -16,7 +16,7 @@
 | Trainova API | `8421` | `ovaphlow`，`/crate-api/*` |
 | Aceso API | `8422` | `aceso`，`/crate-api/*` |
 | Aceso PostgreSQL | `5432` | Compose 容器 `pitchfork-aceso-db` |
-| Aceso UI | `4324` | Astro 开发服务仅由用户管理 |
+| Aceso UI | `4324` | Astro 开发服务（AI agent 已获用户授权可启动/停止，2026-08-02） |
 
 环境：JDK 25 toolchain、Node.js 20+、PostgreSQL 17、Podman 或 Docker。
 
