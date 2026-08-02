@@ -247,4 +247,56 @@ class InventoryConsumptionServiceTest {
         assertEquals("PACKAGE", result.unit)
         assertEquals(8.5, result.unitCost.toDouble(), 0.001)
     }
+
+    @Test
+    fun `validateConsumptionItem rejects conflicting units`() {
+        val error = service.validateConsumptionItem(
+            InventoryConsumptionService.ConsumptionItem(
+                stockId = "stock-1",
+                unit = "PACKAGE",
+                quantity = BigDecimal.ONE,
+                splitQuantity = BigDecimal.ONE,
+            ),
+        )
+        assertEquals("split_quantity is not allowed for PACKAGE unit", error)
+    }
+
+    @Test
+    fun `split quantity converts to package quantity with safe precision`() {
+        val packageQuantity = service.calculateSplitPackageQuantity(
+            splitQuantity = BigDecimal.ONE,
+            splitRatio = BigDecimal.valueOf(3),
+        )
+        assertEquals(0, packageQuantity.compareTo(BigDecimal("0.3334")))
+    }
+
+    @Test
+    fun `sameConsumptionItems compares stock unit and original quantity`() {
+        val existing = listOf(
+            InventoryConsumptionService.DetailResult(
+                detailId = "detail-1",
+                stockId = "stock-1",
+                materialId = "mat-1",
+                lotId = null,
+                quantity = BigDecimal("1.0000"),
+                unit = "PACKAGE",
+                splitQuantity = null,
+                unitCost = BigDecimal.TEN,
+                totalCost = BigDecimal.TEN,
+                warehouse = "一号护理站",
+            ),
+        )
+        val same = listOf(
+            InventoryConsumptionService.ConsumptionItem(
+                stockId = "stock-1",
+                unit = "PACKAGE",
+                quantity = BigDecimal.ONE,
+                splitQuantity = null,
+            ),
+        )
+        val different = same.map { it.copy(quantity = BigDecimal("2")) }
+
+        assertTrue(service.sameConsumptionItems(existing, same))
+        assertFalse(service.sameConsumptionItems(existing, different))
+    }
 }

@@ -1140,6 +1140,7 @@ export interface NursingExecutionConsumption {
   material_id: string;
   material_name?: string;
   lot_id: string | null;
+  batch_no?: string | null;
   warehouse: string;
   quantity: number;
   unit: string;

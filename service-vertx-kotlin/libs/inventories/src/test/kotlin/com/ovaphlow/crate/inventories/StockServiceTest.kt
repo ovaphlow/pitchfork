@@ -79,6 +79,22 @@ class StockServiceTest {
         assertTrue(captured.isNotEmpty())
     }
 
+    @Test
+    fun `confirmInbound rejects invalid item before opening transaction`() {
+        val command = StockService.InboundCommand(
+            warehouse = "一号护理站",
+            items = listOf(
+                StockService.InboundItem("mat-1", null, BigDecimal.ZERO, BigDecimal.TEN),
+            ),
+            note = null,
+        )
+        val result = service.confirmInbound(command)
+        val captured = mutableListOf<Throwable>()
+        result.onFailure { captured.add(it) }
+        assertEquals(1, captured.size)
+        assertTrue(captured.single().message?.contains("quantity") == true)
+    }
+
     // ========================================================================
     //  InboundItem 数据类校验
     // ========================================================================

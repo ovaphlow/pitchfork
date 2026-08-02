@@ -20,6 +20,12 @@ import java.time.Duration
 import java.time.LocalDate
 import java.time.OffsetDateTime
 
+private fun nursingNumericDouble(value: Any?): Double? = when (value) {
+    null -> null
+    is Number -> value.toDouble()
+    else -> value.toString().toDoubleOrNull()
+}
+
 class TaskExecutionService(
     private val pool: Pool,
     private val ctx: DSLContext = DatabaseConfig.createDSL(),
@@ -156,7 +162,7 @@ class TaskExecutionService(
                 .put("executor", row.getValue("executor")?.toString())
                 .put("status", row.getValue("status")?.toString())
                 .put("stock_operation_detail_id", row.getValue("stock_operation_detail_id")?.toString())
-                .put("quantity", (row.getValue("quantity") as? BigDecimal)?.toDouble())
+                .put("quantity", nursingNumericDouble(row.getValue("quantity")))
                 .put("note", row.getValue("note")?.toString())
                 .put("metadata", row.getValue("metadata") as? JsonObject)
                 .put("created_at", row.getValue("created_at")?.toString())
@@ -392,13 +398,12 @@ class TaskExecutionService(
         if (consumptions.isEmpty()) {
             return updateStatus(id, "COMPLETED", note)
         }
+        if (consumptions.map { it.stockId }.distinct().size != consumptions.size) {
+            return Future.failedFuture(IllegalArgumentException("duplicate stock_id"))
+        }
 
-        return get(id).flatMap { existing ->
-            val now = OffsetDateTime.now()
-            val taskId = existing.getString("task_id") ?: return@flatMap Future.failedFuture(IllegalArgumentException("task_id missing"))
-
-            // 在事务中执行
-            pool.withTransaction { connection ->
+        val now = OffsetDateTime.now()
+        return pool.withTransaction { connection ->
                 // 锁定执行记录
                 val lockExec = ctx.selectFrom(t).where(cId.eq(id)).forUpdate()
                 connection
@@ -411,6 +416,8 @@ class TaskExecutionService(
 
                         val lockedRow = lockedRows.iterator().next()
                         val execStatus = lockedRow.getValue("status")?.toString() ?: ""
+                        val taskId = lockedRow.getValue("task_id")?.toString()
+                            ?: return@compose Future.failedFuture(IllegalArgumentException("task_id missing"))
 
                         // === 幂等重试处理 ===
                         if (execStatus == "COMPLETED") {
@@ -438,8 +445,8 @@ class TaskExecutionService(
                                                     } else {
                                                         obj.getDouble("quantity") ?: 0.0
                                                     }
-                                                obj.getString("stock_id") to (unit to qty)
-                                            }.toSet()
+                                                "${obj.getString("stock_id")}|$unit|${BigDecimal.valueOf(qty).stripTrailingZeros()}"
+                                            }.sorted()
                                     val newSummary =
                                         consumptions
                                             .map {
@@ -450,8 +457,8 @@ class TaskExecutionService(
                                                     } else {
                                                         it.quantity?.toDouble() ?: 0.0
                                                     }
-                                                it.stockId to (unit to qty)
-                                            }.toSet()
+                                                "${it.stockId}|$unit|${BigDecimal.valueOf(qty).stripTrailingZeros()}"
+                                            }.sorted()
 
                                     if (existingSummary == newSummary) {
                                         // 完全相同 → 返回既有结果
@@ -466,7 +473,7 @@ class TaskExecutionService(
                         }
 
                         // 状态校验：必须是可转为 COMPLETED 的状态
-                        val currentStatus = existing.getString("status")
+                        val currentStatus = execStatus
                         val allowedNext = VALID_STATUS_TRANSITIONS[currentStatus] ?: emptyList()
                         if ("COMPLETED" !in allowedNext) {
                             return@compose Future.failedFuture(
@@ -477,8 +484,8 @@ class TaskExecutionService(
                         // 查询任务和周期信息
                         val taskInfo =
                             ctx
-                                .select(ctPeriodId)
-                                .from(taskTable)
+                                .select(DSL.field("t.period_id").`as`("t_period_id"))
+                                .from(taskTable.`as`("t"))
                                 .where(DSL.field("t.id").eq(taskId))
                         connection
                             .preparedQuery(DatabaseConfig.sql(taskInfo))
@@ -497,7 +504,11 @@ class TaskExecutionService(
                                         null
                                     }
 
-                                val periodQuery = ctx.select(cpPatientId).from(periodTable).where(DSL.field("p.id").eq(periodId))
+                                val periodQuery =
+                                    ctx
+                                        .select(DSL.field("p.patient_id").`as`("p_patient_id"))
+                                        .from(periodTable.`as`("p"))
+                                        .where(DSL.field("p.id").eq(periodId))
                                 connection
                                     .preparedQuery(DatabaseConfig.sql(periodQuery))
                                     .execute(DatabaseConfig.tuple(periodQuery))
@@ -558,8 +569,7 @@ class TaskExecutionService(
                                     }
                             }
                     }
-            }
-        }
+        }.map { result: JsonObject? -> result ?: throw IllegalStateException("completion transaction returned no execution") }
     }
 
     /** 加载已有完成的执行及其耗材 */
@@ -587,6 +597,7 @@ class TaskExecutionService(
                             DSL.field("cc.material_id").`as`("material_id"),
                             DSL.field("mat.name").`as`("material_name"),
                             DSL.field("cc.lot_id").`as`("lot_id"),
+                            DSL.field("lot.batch_no").`as`("batch_no"),
                             DSL.field("cc.warehouse").`as`("warehouse"),
                             DSL.field("cc.quantity").`as`("quantity"),
                             DSL.field("cc.unit").`as`("unit"),
@@ -596,6 +607,8 @@ class TaskExecutionService(
                         ).from(DSL.table(DSL.name("nursing", "nursing_task_execution_consumptions")).`as`("cc"))
                         .leftJoin(DSL.table(DSL.name("public", "materials")).`as`("mat"))
                         .on(DSL.field("cc.material_id").eq(DSL.field("mat.id")))
+                        .leftJoin(DSL.table(DSL.name("public", "lots")).`as`("lot"))
+                        .on(DSL.field("cc.lot_id").eq(DSL.field("lot.id")))
                         .leftJoin(DSL.table(DSL.name("public", "stock_operation_details")).`as`("sod"))
                         .on(DSL.field("cc.stock_operation_detail_id").eq(DSL.field("sod.id")))
                         .where(DSL.field("cc.task_execution_id").eq(id))
@@ -616,15 +629,16 @@ class TaskExecutionService(
                                     .put("material_id", cr.getValue("material_id")?.toString())
                                     .put("material_name", cr.getValue("material_name")?.toString())
                                     .put("lot_id", cr.getValue("lot_id")?.toString())
+                                    .put("batch_no", cr.getValue("batch_no")?.toString())
                                     .put("warehouse", cr.getValue("warehouse")?.toString())
-                                    .put("quantity", (cr.getValue("quantity") as? java.math.BigDecimal)?.toDouble())
+                                    .put("quantity", nursingNumericDouble(cr.getValue("quantity")))
                                     .put("unit", cr.getValue("unit")?.toString())
-                                    .put("split_quantity", (cr.getValue("split_quantity") as? java.math.BigDecimal)?.toDouble())
-                                    .put("unit_cost", (cr.getValue("unit_cost") as? java.math.BigDecimal)?.toDouble())
-                                    .put("total_cost", (cr.getValue("total_cost") as? java.math.BigDecimal)?.toDouble())
+                                    .put("split_quantity", nursingNumericDouble(cr.getValue("split_quantity")))
+                                    .put("unit_cost", nursingNumericDouble(cr.getValue("unit_cost")))
+                                    .put("total_cost", nursingNumericDouble(cr.getValue("total_cost")))
                             consumptions.add(c)
                             warehouse = cr.getValue("warehouse")?.toString() ?: ""
-                            totalCost += (cr.getValue("total_cost") as? java.math.BigDecimal)?.toDouble() ?: 0.0
+                            totalCost += nursingNumericDouble(cr.getValue("total_cost")) ?: 0.0
                         }
                         record.put("consumptions", consumptions)
                         record.put(
@@ -791,7 +805,7 @@ class TaskExecutionService(
                         JsonObject()
                             .put("count", row.getValue("cnt") as? Long ?: 0L)
                             .put("warehouse", row.getValue("warehouse")?.toString())
-                            .put("total_cost", (row.getValue("total_cost") as? BigDecimal)?.toDouble() ?: 0.0)
+                            .put("total_cost", nursingNumericDouble(row.getValue("total_cost")) ?: 0.0)
                 }
                 result
             }
@@ -822,7 +836,7 @@ class TaskExecutionService(
                     JsonObject()
                         .put("count", row.getValue("cnt") as? Long ?: 0L)
                         .put("warehouse", row.getValue("warehouse")?.toString())
-                        .put("total_cost", (row.getValue("total_cost") as? BigDecimal)?.toDouble() ?: 0.0)
+                        .put("total_cost", nursingNumericDouble(row.getValue("total_cost")) ?: 0.0)
                 }
             }
     }
@@ -837,6 +851,7 @@ class TaskExecutionService(
                     DSL.field("cc.stock_id").`as`("stock_id"),
                     DSL.field("cc.material_id").`as`("material_id"),
                     DSL.field("cc.lot_id").`as`("lot_id"),
+                    DSL.field("lot.batch_no").`as`("batch_no"),
                     DSL.field("cc.warehouse").`as`("warehouse"),
                     DSL.field("cc.quantity").`as`("quantity"),
                     DSL.field("cc.unit").`as`("unit"),
@@ -848,6 +863,8 @@ class TaskExecutionService(
                 ).from(consTable.`as`("cc"))
                 .leftJoin(materialsTable.`as`("mat"))
                 .on(DSL.field("cc.material_id").eq(DSL.field("mat.id")))
+                .leftJoin(DSL.table(DSL.name("public", "lots")).`as`("lot"))
+                .on(DSL.field("cc.lot_id").eq(DSL.field("lot.id")))
                 .leftJoin(sod.`as`("sod"))
                 .on(DSL.field("cc.stock_operation_detail_id").eq(DSL.field("sod.id")))
                 .where(DSL.field("cc.task_execution_id").eq(executionId))
@@ -867,12 +884,13 @@ class TaskExecutionService(
                             .put("material_id", row.getValue("material_id")?.toString())
                             .put("material_name", row.getValue("material_name")?.toString())
                             .put("lot_id", row.getValue("lot_id")?.toString())
+                            .put("batch_no", row.getValue("batch_no")?.toString())
                             .put("warehouse", row.getValue("warehouse")?.toString())
-                            .put("quantity", (row.getValue("quantity") as? BigDecimal)?.toDouble())
+                            .put("quantity", nursingNumericDouble(row.getValue("quantity")))
                             .put("unit", row.getValue("unit")?.toString())
-                            .put("split_quantity", (row.getValue("split_quantity") as? BigDecimal)?.toDouble())
-                            .put("unit_cost", (row.getValue("unit_cost") as? BigDecimal)?.toDouble())
-                            .put("total_cost", (row.getValue("total_cost") as? BigDecimal)?.toDouble())
+                            .put("split_quantity", nursingNumericDouble(row.getValue("split_quantity")))
+                            .put("unit_cost", nursingNumericDouble(row.getValue("unit_cost")))
+                            .put("total_cost", nursingNumericDouble(row.getValue("total_cost")))
                             .put("created_at", row.getValue("created_at")?.toString()),
                     )
                 }

@@ -311,7 +311,9 @@ object TaskExecutionRoutes {
                     .onFailure {
                         when (it) {
                             is NotFoundException -> NursingRoutes.respond(ctx, 404, it.message)
+                            is com.ovaphlow.crate.inventories.NotFoundException -> NursingRoutes.respond(ctx, 404, it.message)
                             is ConflictException -> NursingRoutes.respond(ctx, 409, it.message)
+                            is com.ovaphlow.crate.inventories.ConflictException -> NursingRoutes.respond(ctx, 409, it.message)
                             is IllegalArgumentException -> NursingRoutes.respond(ctx, 400, it.message)
                             else -> NursingRoutes.respondError(ctx, it)
                         }

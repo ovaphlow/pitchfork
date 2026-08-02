@@ -13,7 +13,7 @@ services:
     environment:
       POSTGRES_DB: aceso_test
       POSTGRES_USER: ovaphlow
-      POSTGRES_PASSWORD: "${PITCHFORK_TEST_DB_PASSWORD:pitchfork-test-only}"
+      POSTGRES_PASSWORD: "${PITCHFORK_TEST_DB_PASSWORD:-pitchfork-test-only}"
     tmpfs:
       - /var/lib/postgresql/data
     healthcheck:

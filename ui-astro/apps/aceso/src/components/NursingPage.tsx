@@ -89,6 +89,19 @@ interface TaskForm {
   endDate: string;
 }
 
+interface ConsumptionDraft {
+  stock_id: string;
+  unit: "PACKAGE" | "SPLIT";
+  quantity: number;
+  split_quantity: number;
+  material_name: string;
+  material_id: string;
+  package_unit: string;
+  split_unit: string | null;
+  split_ratio: number | null;
+  available_quantity: number;
+}
+
 interface ExecutionForm {
   plannedTime: string;
   executor: string;
@@ -279,7 +292,7 @@ export default function NursingPage() {
   const [consumeWarehouse, setConsumeWarehouse] = useState("");
   const [consumeWarehouses, setConsumeWarehouses] = useState<string[]>([]);
   const [consumeStocks, setConsumeStocks] = useState<InventoryStockAvailability[]>([]);
-  const [consumeItems, setConsumeItems] = useState<Array<{ stock_id: string; unit: "PACKAGE" | "SPLIT"; quantity: number; split_quantity: number; material_name: string; material_id: string }>>([]);
+  const [consumeItems, setConsumeItems] = useState<ConsumptionDraft[]>([]);
 
   const subjectMap = useMemo(() => {
     const map = new Map<string, string>();
@@ -593,6 +606,15 @@ export default function NursingPage() {
         : actionModal === "skip" ? "SKIPPED" : "CANCELLED";
 
       if (actionModal === "complete" && consumeEnabled && consumeItems.length > 0) {
+        const invalidItem = consumeItems.find((item) => {
+          if (item.unit === "PACKAGE") return item.quantity <= 0 || item.quantity > item.available_quantity;
+          if (!item.split_unit || !item.split_ratio || item.split_ratio <= 0 || item.split_quantity <= 0) return true;
+          return item.split_quantity / item.split_ratio > item.available_quantity;
+        });
+        if (invalidItem) {
+          setActionError("耗材数量必须大于零且不能超过当前可用库存；拆零物资还必须支持有效换算率");
+          return;
+        }
         // 带耗材完成
         const consumptions: NursingConsumptionInput[] = consumeItems.map((item) => ({
           stock_id: item.stock_id,
@@ -629,10 +651,10 @@ export default function NursingPage() {
     }
   }
 
-  async function loadConsumeStocks() {
-    if (!consumeWarehouse) return;
+  async function loadConsumeStocks(warehouse = consumeWarehouse) {
+    if (!warehouse) return;
     try {
-      const response = await listInventoryStocks({ warehouse: consumeWarehouse, limit: 200 });
+      const response = await listInventoryStocks({ warehouse, limit: 200 });
       setConsumeStocks(response.records);
     } catch {
       setActionError("无法加载可用库存");
@@ -653,8 +675,19 @@ export default function NursingPage() {
         split_quantity: 1,
         material_name: stock.material_name,
         material_id: stock.material_id,
+        package_unit: stock.package_unit,
+        split_unit: stock.split_unit,
+        split_ratio: stock.split_ratio,
+        available_quantity: stock.available_quantity,
       },
     ]);
+  }
+
+  function packageQuantityPreview(item: ConsumptionDraft): number {
+    if (item.unit === "PACKAGE") return item.quantity;
+    if (!item.split_ratio || item.split_ratio <= 0) return 0;
+    const rawQuantity = item.split_quantity / item.split_ratio;
+    return Math.ceil((rawQuantity - Number.EPSILON) * 10000) / 10000;
   }
 
   function removeConsumeItem(stockId: string) {
@@ -1299,7 +1332,7 @@ export default function NursingPage() {
                   <div className="mt-3 space-y-3">
                     <div className="flex flex-col gap-1.5">
                       <label className="text-xs text-fg-muted" htmlFor="consume-warehouse">护理站/仓库</label>
-                      <select id="consume-warehouse" className={selectClass} value={consumeWarehouse} onChange={(event) => { setConsumeWarehouse(event.target.value); setConsumeStocks([]); setConsumeItems([]); }}>
+                      <select id="consume-warehouse" className={selectClass} value={consumeWarehouse} onChange={(event) => { const warehouse = event.target.value; setConsumeWarehouse(warehouse); setConsumeStocks([]); setConsumeItems([]); if (warehouse) void loadConsumeStocks(warehouse); }}>
                         <option value="">选择护理站</option>
                         {consumeWarehouses.map((wh) => <option key={wh} value={wh}>{wh}</option>)}
                       </select>
@@ -1308,14 +1341,14 @@ export default function NursingPage() {
                       <div className="flex flex-col gap-1.5">
                         <div className="flex items-center justify-between">
                           <label className="text-xs text-fg-muted">可用耗材</label>
-                          <button type="button" className="text-xs text-accent hover:underline" onClick={() => void loadConsumeStocks()}>查询</button>
+                          <button type="button" className="text-xs text-accent hover:underline" onClick={() => void loadConsumeStocks()}>刷新</button>
                         </div>
                         {consumeStocks.length > 0 && (
                           <div className="max-h-40 overflow-y-auto space-y-1">
                             {consumeStocks.map((stock) => (
                               <div key={stock.id} className="flex items-center justify-between rounded bg-surface-alt px-2 py-1 text-xs">
-                                <span className="truncate max-w-[200px]">{stock.material_name}{stock.batch_no ? ` (${stock.batch_no})` : ""}</span>
-                                <span className="text-fg-dimmed">可用 {stock.available_quantity} {stock.package_unit}</span>
+                                <span className="min-w-0 truncate">{stock.material_name}{stock.batch_no ? ` (${stock.batch_no})` : ""}</span>
+                                <span className="shrink-0 text-fg-dimmed">可用 {stock.available_quantity} {stock.package_unit}{stock.expiry_date ? ` · ${stock.expiry_date} 到期` : ""}</span>
                                 <button type="button" className="ml-2 text-accent hover:underline" onClick={() => addConsumeItem(stock)}>添加</button>
                               </div>
                             ))}
@@ -1331,10 +1364,10 @@ export default function NursingPage() {
                             <span className="min-w-[80px] truncate">{item.material_name}</span>
                             <select className="rounded border border-border px-1 py-0.5 text-xs" value={item.unit} onChange={(event) => updateConsumeItem(item.stock_id, "unit", event.target.value)}>
                               <option value="PACKAGE">包装</option>
-                              <option value="SPLIT">拆零</option>
+                              <option value="SPLIT" disabled={!item.split_unit || !item.split_ratio || item.split_ratio <= 0}>拆零</option>
                             </select>
                             <input
-                              type="number" min={0.01} step={item.unit === "PACKAGE" ? 1 : 0.01}
+                              type="number" min={0.0001} step={item.unit === "PACKAGE" ? 0.0001 : 0.01}
                               className="w-20 rounded border border-border px-1 py-0.5 text-xs"
                               value={item.unit === "PACKAGE" ? item.quantity : item.split_quantity}
                               onChange={(event) => {
@@ -1343,7 +1376,13 @@ export default function NursingPage() {
                                 else updateConsumeItem(item.stock_id, "split_quantity", val > 0 ? val : 1);
                               }}
                             />
-                            <span className="text-fg-dimmed">{item.unit === "PACKAGE" ? "包装单位" : "拆零数量"}</span>
+                            <span className="text-fg-dimmed">{item.unit === "PACKAGE" ? item.package_unit : item.split_unit ?? "拆零数量"}</span>
+                            <span className="w-full text-fg-dimmed sm:w-auto">
+                              扣减 {packageQuantityPreview(item).toFixed(4)} {item.package_unit}
+                            </span>
+                            {packageQuantityPreview(item) > item.available_quantity && (
+                              <span className="w-full text-danger sm:w-auto">超过可用库存 {item.available_quantity} {item.package_unit}</span>
+                            )}
                             <button type="button" className="text-danger hover:underline" onClick={() => removeConsumeItem(item.stock_id)}>移除</button>
                           </div>
                         ))}
@@ -1360,6 +1399,7 @@ export default function NursingPage() {
               {actionModal === "complete" ? "确认完成" : actionModal === "skip" ? "确认跳过" : "确认取消"}
             </Button>
           </div>
+          {actionError && <p className="text-sm text-danger">{actionError}</p>}
         </form>
       </Modal>
 
@@ -1384,9 +1424,9 @@ export default function NursingPage() {
                   </div>
                   <div className="text-right text-xs text-fg-muted">
                     <div>
-                      {item.unit === "SPLIT" ? `${item.split_quantity ?? item.quantity} ` : `${item.quantity} `}
-                      单位
+                      {item.unit === "SPLIT" ? `${item.split_quantity ?? item.quantity} 拆零单位` : `${item.quantity} 包装单位`}
                     </div>
+                    {item.batch_no && <div className="mt-0.5">批次：{item.batch_no}</div>}
                     {item.total_cost != null && <div className="mt-0.5">￥{item.total_cost.toFixed(2)}</div>}
                   </div>
                 </div>

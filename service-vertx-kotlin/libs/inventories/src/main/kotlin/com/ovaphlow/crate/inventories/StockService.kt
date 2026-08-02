@@ -22,6 +22,16 @@ import java.math.BigDecimal
 import java.math.RoundingMode
 import java.time.OffsetDateTime
 
+private fun stockDecimalValue(value: Any?): BigDecimal =
+    stockDecimalValueOrNull(value) ?: BigDecimal.ZERO
+
+private fun stockDecimalValueOrNull(value: Any?): BigDecimal? = when (value) {
+    null -> null
+    is BigDecimal -> value
+    is Number -> value.toString().toBigDecimalOrNull()
+    else -> value.toString().toBigDecimalOrNull()
+}
+
 class StockService(
     private val pool: Pool,
     private val ctx: DSLContext = DatabaseConfig.createDSL()
@@ -50,6 +60,13 @@ class StockService(
             return Future.failedFuture(IllegalArgumentException("warehouse is required"))
         if (command.items.isEmpty())
             return Future.failedFuture(IllegalArgumentException("at least one item is required"))
+        command.items.firstOrNull { item ->
+            item.materialId.isBlank() || item.quantity <= BigDecimal.ZERO || item.unitCost < BigDecimal.ZERO
+        }?.let { item ->
+            return Future.failedFuture(
+                IllegalArgumentException("invalid inbound item: material_id, quantity (>0) and unit_cost (>=0) required"),
+            )
+        }
 
         val now = OffsetDateTime.now()
         val opId = Ulid.generate()
@@ -73,7 +90,7 @@ class StockService(
                 .execute(DatabaseConfig.tuple(insertOp))
                 .compose { processInboundItems(connection, command, opId, now) }
                 .compose { loadOperation(connection, opId) }
-        }
+        }.map { result: JsonObject? -> result ?: throw IllegalStateException("inbound transaction returned no operation") }
     }
 
     private fun processInboundItems(
@@ -90,7 +107,7 @@ class StockService(
 
             val item = command.items[index]
             // 验证批次管控 — 融入 compose 链，不嵌套
-            val batchCtrlQuery = ctx.select(Materials.MATERIALS.ENABLE_BATCH_CONTROL)
+            val batchCtrlQuery = ctx.select(Materials.MATERIALS.ENABLE_BATCH_CONTROL.`as`("material_batch_control"))
                 .from(Materials.MATERIALS)
                 .where(Materials.MATERIALS.ID.eq(item.materialId))
 
@@ -100,7 +117,7 @@ class StockService(
                     if (rows.size() == 0)
                         throw NotFoundException("material not found: ${item.materialId}")
 
-                    val batchCtrl = rows.iterator().next().getValue("enable_batch_control") as? Boolean ?: false
+                    val batchCtrl = rows.iterator().next().getValue(0) as? Boolean ?: false
                     if (batchCtrl && item.lotId == null)
                         throw IllegalArgumentException("material ${item.materialId} requires batch control, lot_id is required")
                     if (!batchCtrl && item.lotId != null)
@@ -157,7 +174,12 @@ class StockService(
     ): Future<Void?> {
         val now = OffsetDateTime.now()
 
-        val findQuery = ctx.selectFrom(Stocks.STOCKS)
+        val findQuery = ctx.select(
+            Stocks.STOCKS.ID.`as`("stock_id"),
+            Stocks.STOCKS.QUANTITY.`as`("stock_quantity"),
+            Stocks.STOCKS.TOTAL_COST.`as`("stock_total_cost"),
+        )
+            .from(Stocks.STOCKS)
             .where(Stocks.STOCKS.WAREHOUSE.eq(warehouse)
                 .and(Stocks.STOCKS.MATERIAL_ID.eq(materialId)))
             .let { q ->
@@ -170,9 +192,9 @@ class StockService(
             .compose { rows ->
                 if (rows.size() > 0) {
                     val row = rows.iterator().next()
-                    val oldQty = row.getValue("quantity") as? BigDecimal ?: BigDecimal.ZERO
-                    val oldCost = row.getValue("total_cost") as? BigDecimal ?: BigDecimal.ZERO
-                    val stockId = row.getValue("id")?.toString()
+                    val stockId = row.getValue(0)?.toString()
+                    val oldQty = stockDecimalValue(row.getValue(1))
+                    val oldCost = stockDecimalValue(row.getValue(2))
 
                     val updateQ = ctx.update(Stocks.STOCKS)
                         .set(Stocks.STOCKS.QUANTITY, oldQty.add(addQty))
@@ -286,10 +308,17 @@ class StockService(
     }
 
     fun listAvailableWarehouses(): Future<List<String>> {
-        val query = ctx.selectDistinct(Stocks.STOCKS.WAREHOUSE)
-            .from(Stocks.STOCKS)
-            .where(Stocks.STOCKS.QUANTITY.gt(Stocks.STOCKS.LOCKED_QUANTITY))
-            .orderBy(Stocks.STOCKS.WAREHOUSE.asc())
+        val s = Stocks.STOCKS.`as`("s")
+        val m = Materials.MATERIALS.`as`("m")
+        val l = Lots.LOTS.`as`("l")
+        val query = ctx.selectDistinct(s.WAREHOUSE)
+            .from(s)
+            .join(m).on(s.MATERIAL_ID.eq(m.ID))
+            .leftJoin(l).on(s.LOT_ID.eq(l.ID))
+            .where(s.QUANTITY.gt(s.LOCKED_QUANTITY))
+            .and(m.STATUS.eq("ACTIVE"))
+            .and(DSL.or(l.EXPIRY_DATE.isNull, l.EXPIRY_DATE.ge(java.time.LocalDate.now())))
+            .orderBy(s.WAREHOUSE.asc())
 
         return pool.preparedQuery(DatabaseConfig.sql(query))
             .execute(DatabaseConfig.tuple(query))
@@ -329,10 +358,10 @@ class StockService(
 
     companion object {
         fun availableStockToJson(row: Row): JsonObject {
-            val qty = row.getValue("quantity") as? BigDecimal ?: BigDecimal.ZERO
-            val locked = row.getValue("locked_quantity") as? BigDecimal ?: BigDecimal.ZERO
+            val qty = stockDecimalValue(row.getValue("quantity"))
+            val locked = stockDecimalValue(row.getValue("locked_quantity"))
             val available = qty.subtract(locked)
-            val totalCost = row.getValue("total_cost") as? BigDecimal ?: BigDecimal.ZERO
+            val totalCost = stockDecimalValue(row.getValue("total_cost"))
             val unitCost = if (qty.compareTo(BigDecimal.ZERO) > 0)
                 totalCost.divide(qty, 4, RoundingMode.HALF_UP)
             else BigDecimal.ZERO
@@ -346,7 +375,7 @@ class StockService(
                 .put("category", row.getValue("material_category")?.toString())
                 .put("package_unit", row.getValue("package_unit")?.toString())
                 .put("split_unit", row.getValue("split_unit")?.toString())
-                .put("split_ratio", (row.getValue("split_ratio") as? BigDecimal)?.toDouble())
+                .put("split_ratio", stockDecimalValueOrNull(row.getValue("split_ratio"))?.toDouble())
                 .put("lot_id", row.getValue("lot_id")?.toString())
                 .put("batch_no", row.getValue("batch_no")?.toString())
                 .put("expiry_date", row.getValue("expiry_date")?.toString())
@@ -374,12 +403,13 @@ class StockService(
                 .put("operation_id", row.getValue("operation_id")?.toString())
                 .put("material_id", row.getValue("material_id")?.toString())
                 .put("lot_id", row.getValue("lot_id")?.toString())
-                .put("quantity", (row.getValue("quantity") as? BigDecimal)?.toDouble())
+                .put("quantity", stockDecimalValueOrNull(row.getValue("quantity"))?.toDouble())
                 .put("unit", row.getValue("unit")?.toString())
-                .put("split_quantity", (row.getValue("split_quantity") as? BigDecimal)?.toDouble())
-                .put("unit_cost", (row.getValue("unit_cost") as? BigDecimal)?.toDouble())
-                .put("total_cost", (row.getValue("total_cost") as? BigDecimal)?.toDouble())
+                .put("split_quantity", stockDecimalValueOrNull(row.getValue("split_quantity"))?.toDouble())
+                .put("unit_cost", stockDecimalValueOrNull(row.getValue("unit_cost"))?.toDouble())
+                .put("total_cost", stockDecimalValueOrNull(row.getValue("total_cost"))?.toDouble())
                 .put("created_at", row.getValue("created_at")?.toString())
         }
     }
+
 }
