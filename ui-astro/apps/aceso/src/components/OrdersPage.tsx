@@ -515,6 +515,7 @@ export default function OrdersPage() {
       <Modal open={editorOpen} onClose={() => !saving && setEditorOpen(false)} title="开立医嘱">
         <form
           className="space-y-5"
+          noValidate
           onSubmit={(event) => {
             event.preventDefault();
             void handleSave();

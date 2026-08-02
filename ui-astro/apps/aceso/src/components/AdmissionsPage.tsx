@@ -889,6 +889,7 @@ export default function AdmissionsPage() {
           <form
             aria-label="办理去世"
             className="space-y-4"
+            noValidate
             onSubmit={(event) => {
               event.preventDefault();
               void handleDeath();
