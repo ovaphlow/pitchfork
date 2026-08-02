@@ -140,6 +140,16 @@ public class Encounters extends TableImpl<EncountersRecord> {
      */
     public final TableField<EncountersRecord, String> ENCOUNTER_NO = createField(DSL.name("encounter_no"), SQLDataType.VARCHAR(64).nullable(false), this, "");
 
+    /**
+     * The column <code>healthcare.encounters.death_date</code>.
+     */
+    public final TableField<EncountersRecord, OffsetDateTime> DEATH_DATE = createField(DSL.name("death_date"), SQLDataType.TIMESTAMPWITHTIMEZONE(6), this, "");
+
+    /**
+     * The column <code>healthcare.encounters.death_cause</code>.
+     */
+    public final TableField<EncountersRecord, String> DEATH_CAUSE = createField(DSL.name("death_cause"), SQLDataType.CLOB, this, "");
+
     private Encounters(Name alias, Table<EncountersRecord> aliased) {
         this(alias, aliased, (Field<?>[]) null, null);
     }

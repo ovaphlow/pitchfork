@@ -11,6 +11,7 @@ import com.ovaphlow.crate.database.gen.healthcare.tables.records.PatientsRecord
 import com.ovaphlow.crate.nursing.ConflictException
 import com.ovaphlow.crate.nursing.ElderlyDischargeHandoverSnapshotService
 import com.ovaphlow.crate.nursing.ServicePeriodService
+import com.ovaphlow.crate.nursing.TaskService
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
@@ -34,6 +35,8 @@ class HealthcareService(
 ) {
     private val servicePeriodService = ServicePeriodService(pool)
     private val dischargeHandoverSnapshotService = ElderlyDischargeHandoverSnapshotService()
+    private val taskService = TaskService(pool)
+    private val medicalOrderService = MedicalOrderService(pool, taskService)
     companion object {
         private val patientStatuses = setOf("ACTIVE", "INACTIVE", "DECEASED")
         private val encounterStatuses = setOf("ACTIVE", "DISCHARGED", "TRANSFERRED")
@@ -67,6 +70,8 @@ class HealthcareService(
                 .put("ward", row.getString("ward"))
                 .put("admit_date", row.getOffsetDateTime("admit_date")?.toString())
                 .put("discharge_date", row.getOffsetDateTime("discharge_date")?.toString())
+                .put("death_date", row.getOffsetDateTime("death_date")?.toString())
+                .put("death_cause", row.getString("death_cause"))
                 .put("admitting_diagnosis", row.getString("admitting_diagnosis"))
                 .put("discharge_diagnosis", row.getString("discharge_diagnosis"))
                 .put("attending_physician", row.getString("attending_physician"))
@@ -194,9 +199,14 @@ class HealthcareService(
                 // 养老入住必须在同一事务中收束精确关联的照护周期
                 val closePeriodFuture: Future<Void> =
                     if (encounter.getString("encounter_type") == "ELDERLY_CARE") {
-                        servicePeriodService
-                            .closeElderlyCarePeriod(connection, id, businessDate(dischargeDate), now)
+                        medicalOrderService
+                            .terminateEncounterOrders(connection, id, dischargeDate)
                             .map<Void> { null }
+                            .compose {
+                                servicePeriodService
+                                    .closeElderlyCarePeriod(connection, id, businessDate(dischargeDate), now)
+                                    .map<Void> { null }
+                            }
                     } else {
                         Future.succeededFuture()
                     }
@@ -214,8 +224,83 @@ class HealthcareService(
         }
     }
 
+    fun deathEncounter(id: String, body: JsonObject): Future<JsonObject> {
+        val deathDate = try {
+            offsetDateTime(requiredText(body, "death_date"), "death_date")
+        } catch (error: IllegalArgumentException) {
+            return Future.failedFuture(error)
+        }
+        val deathCause = try {
+            body.getValue("death_cause")?.let { value ->
+                if (value !is String) throw IllegalArgumentException("death_cause must be a string")
+                value.trim().takeIf { it.isNotBlank() }?.let { trimmed ->
+                    if (trimmed.length > 500) throw IllegalArgumentException("death_cause must not exceed 500 characters")
+                    trimmed
+                }
+            }
+        } catch (error: IllegalArgumentException) {
+            return Future.failedFuture(error)
+        }
+
+        return pool.withTransaction<JsonObject> { connection ->
+            lockEncounter(connection, id).compose { encounter ->
+                if (encounter.getString("encounter_type") != "ELDERLY_CARE") {
+                    return@compose Future.failedFuture(IllegalArgumentException("encounter is not an elderly admission"))
+                }
+                if (encounter.getString("status") != "ACTIVE") {
+                    return@compose Future.failedFuture(ConflictException("encounter is not active"))
+                }
+
+                val patientId = requireNotNull(encounter.getString("patient_id"))
+                val now = OffsetDateTime.now()
+                ensureNoOtherActiveElderlyAdmission(connection, patientId, id)
+                    .compose {
+                        medicalOrderService.terminateEncounterOrders(connection, id, deathDate)
+                    }
+                    .compose {
+                        servicePeriodService.closeElderlyCarePeriod(connection, id, businessDate(deathDate), now)
+                    }
+                    .compose {
+                        var query = ctx.update(ENCOUNTERS)
+                            .set(ENCOUNTERS.DEATH_DATE, deathDate)
+                            .set(ENCOUNTERS.STATUS, "DECEASED")
+                            .set(ENCOUNTERS.UPDATED_AT, now)
+                        if (deathCause != null) query = query.set(ENCOUNTERS.DEATH_CAUSE, deathCause)
+                        execute(connection, query.where(ENCOUNTERS.ID.eq(id)))
+                    }
+                    .compose {
+                        val patientQuery = ctx.update(PATIENTS)
+                            .set(PATIENTS.STATUS, "DECEASED")
+                            .set(PATIENTS.UPDATED_AT, now)
+                            .where(PATIENTS.ID.eq(patientId))
+                        execute(connection, patientQuery)
+                    }
+                    .compose {
+                        getEncounter(connection, id)
+                    }
+            }
+        }
+    }
+
     private fun businessDate(value: OffsetDateTime): LocalDate =
         value.atZoneSameInstant(businessZone).toLocalDate()
+
+    // ——— 医嘱读取/创建/状态机委托（实现位于 MedicalOrderService） ———
+    fun createOrder(encounterId: String, body: JsonObject): Future<JsonObject> =
+        medicalOrderService.createOrder(encounterId, body)
+
+    fun listOrders(
+        encounterId: String,
+        orderType: String? = null,
+        status: String? = null,
+        limit: Int = 50,
+        offset: Int = 0,
+    ): Future<JsonObject> = medicalOrderService.listOrders(encounterId, orderType, status, limit, offset)
+
+    fun getOrder(id: String): Future<JsonObject> = medicalOrderService.getOrder(id)
+
+    fun updateOrderStatus(id: String, body: JsonObject): Future<JsonObject> =
+        medicalOrderService.updateOrderStatus(id, body)
 
     fun admitElderly(body: JsonObject): Future<JsonObject> {
         val patientId = body.getString("patient_id")?.takeIf(String::isNotBlank)
@@ -295,6 +380,25 @@ class HealthcareService(
         return execute(client, query).compose { rows ->
             if (rows.size() == 0) Future.succeededFuture()
             else Future.failedFuture(IllegalArgumentException("patient already has an active elderly admission"))
+        }
+    }
+
+    private fun ensureNoOtherActiveElderlyAdmission(
+        client: SqlClient,
+        patientId: String,
+        excludeEncounterId: String,
+    ): Future<Void> {
+        val query = ctx.selectOne()
+            .from(ENCOUNTERS)
+            .where(
+                ENCOUNTERS.PATIENT_ID.eq(patientId)
+                    .and(ENCOUNTERS.ENCOUNTER_TYPE.eq("ELDERLY_CARE"))
+                    .and(ENCOUNTERS.STATUS.eq("ACTIVE"))
+                    .and(ENCOUNTERS.ID.ne(excludeEncounterId)),
+            )
+        return execute(client, query).compose { rows ->
+            if (rows.size() == 0) Future.succeededFuture()
+            else Future.failedFuture(ConflictException("patient already has another active elderly admission"))
         }
     }
 

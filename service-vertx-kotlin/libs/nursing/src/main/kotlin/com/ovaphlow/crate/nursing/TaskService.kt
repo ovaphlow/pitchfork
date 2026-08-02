@@ -2,11 +2,14 @@ package com.ovaphlow.crate.nursing
 
 import com.ovaphlow.crate.common.Ulid
 import com.ovaphlow.crate.database.DatabaseConfig
+import com.ovaphlow.crate.database.gen.nursing.tables.NursingTasks.NURSING_TASKS
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
 import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
+import io.vertx.sqlclient.RowSet
+import io.vertx.sqlclient.SqlClient
 import org.jooq.DSLContext
 import org.jooq.JSONB
 import org.jooq.impl.DSL
@@ -38,6 +41,8 @@ class TaskService(
 
     companion object {
         private val VALID_TASK_TYPES = setOf("NURSING", "REHABILITATION", "LIVING_CARE", "HEALTH_EDUCATION", "OTHER")
+        private val ORDER_TASK_TYPES = setOf("MEDICATION", "TREATMENT")
+        private val ORDER_TERMINAL_STATUSES = setOf("CANCELLED", "COMPLETED")
         private val VALID_STATUS_TRANSITIONS = mapOf(
             "ACTIVE" to listOf("COMPLETED", "CANCELLED"),
             "COMPLETED" to emptyList(),
@@ -188,4 +193,106 @@ class TaskService(
                 .flatMap { get(id) }
         }
     }
+
+    // ========================================================================
+    //  医嘱派生护理任务 — 连接绑定内部协作（仅供 Healthcare 在同一事务内调用）
+    // ========================================================================
+
+    data class OrderTaskInput(
+        val periodId: String,
+        val encounterId: String,
+        val orderItemId: String,
+        val taskType: String,
+        val description: String,
+        val frequencyCode: String?,
+        val frequencyName: String?,
+        val startDate: LocalDate?,
+        val endDate: LocalDate?,
+    )
+
+    fun createOrderTask(client: SqlClient, input: OrderTaskInput): Future<JsonObject> {
+        if (input.taskType !in ORDER_TASK_TYPES) {
+            return Future.failedFuture(
+                IllegalArgumentException("invalid order task_type, must be MEDICATION or TREATMENT")
+            )
+        }
+        if (input.orderItemId.isBlank()) {
+            return Future.failedFuture(IllegalArgumentException("order_item_id is required"))
+        }
+        if (input.description.isBlank()) {
+            return Future.failedFuture(IllegalArgumentException("description is required"))
+        }
+
+        val id = Ulid.generate()
+        val now = OffsetDateTime.now()
+
+        var insertQuery = ctx.insertInto(NURSING_TASKS)
+            .set(NURSING_TASKS.ID, id)
+            .set(NURSING_TASKS.PERIOD_ID, input.periodId)
+            .set(NURSING_TASKS.ENCOUNTER_ID, input.encounterId)
+            .set(NURSING_TASKS.ORDER_ITEM_ID, input.orderItemId)
+            .set(NURSING_TASKS.TASK_TYPE, input.taskType)
+            .set(NURSING_TASKS.DESCRIPTION, input.description)
+            .set(NURSING_TASKS.STATUS, "ACTIVE")
+            .set(NURSING_TASKS.CREATED_AT, now)
+            .set(NURSING_TASKS.UPDATED_AT, now)
+        input.frequencyCode?.let { insertQuery = insertQuery.set(NURSING_TASKS.FREQUENCY_CODE, it) }
+        input.frequencyName?.let { insertQuery = insertQuery.set(NURSING_TASKS.FREQUENCY_NAME, it) }
+        input.startDate?.let { insertQuery = insertQuery.set(NURSING_TASKS.START_DATE, it) }
+        input.endDate?.let { insertQuery = insertQuery.set(NURSING_TASKS.END_DATE, it) }
+
+        return execute(client, insertQuery).map {
+            JsonObject()
+                .put("id", id)
+                .put("period_id", input.periodId)
+                .put("encounter_id", input.encounterId)
+                .put("order_item_id", input.orderItemId)
+                .put("task_type", input.taskType)
+                .put("description", input.description)
+                .put("frequency_code", input.frequencyCode)
+                .put("frequency_name", input.frequencyName)
+                .put("start_date", input.startDate?.toString())
+                .put("end_date", input.endDate?.toString())
+                .put("status", "ACTIVE")
+                .put("created_at", now.toString())
+                .put("updated_at", now.toString())
+        }
+    }
+
+    fun lockOrderTask(client: SqlClient, orderItemId: String): Future<JsonObject?> {
+        val query = ctx.selectFrom(NURSING_TASKS)
+            .where(NURSING_TASKS.ORDER_ITEM_ID.eq(orderItemId))
+            .forUpdate()
+        return execute(client, query).map { rows ->
+            rows.iterator().asSequence().firstOrNull()?.let { toJson(it) }
+        }
+    }
+
+    fun terminateOrderTask(client: SqlClient, orderItemId: String, targetStatus: String): Future<Void> {
+        if (targetStatus !in ORDER_TERMINAL_STATUSES) {
+            return Future.failedFuture(
+                IllegalArgumentException("invalid target status, must be CANCELLED or COMPLETED")
+            )
+        }
+        return lockOrderTask(client, orderItemId).compose { task ->
+            if (task == null) {
+                return@compose Future.failedFuture(ConflictException("order has no linked task: $orderItemId"))
+            }
+            val currentStatus = task.getString("status")
+            if (currentStatus != "ACTIVE") {
+                return@compose Future.failedFuture(
+                    ConflictException("order task is in unexpected status: $currentStatus")
+                )
+            }
+            val now = OffsetDateTime.now()
+            val updateQuery = ctx.update(NURSING_TASKS)
+                .set(NURSING_TASKS.STATUS, targetStatus)
+                .set(NURSING_TASKS.UPDATED_AT, now)
+                .where(NURSING_TASKS.ID.eq(requireNotNull(task.getString("id"))))
+            execute(client, updateQuery).map<Void> { null }
+        }
+    }
+
+    private fun execute(client: SqlClient, query: org.jooq.Query): Future<RowSet<Row>> =
+        client.preparedQuery(DatabaseConfig.sql(query)).execute(DatabaseConfig.tuple(query))
 }

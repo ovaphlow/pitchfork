@@ -8,6 +8,7 @@ import {
   listActiveElderlyAdmissions,
   listElderlyAdmissions,
   listPatients,
+  markEncounterDeath,
   type ElderlyAdmissionInput,
   type ElderlyDischargeHandover,
   type ElderlyDischargeHandoverSnapshot,
@@ -343,6 +344,13 @@ export default function AdmissionsPage() {
   const [handoverNote, setHandoverNote] = useState("");
   const [handoverSubmitting, setHandoverSubmitting] = useState(false);
 
+  // 办理去世弹窗状态
+  const [deathAdmission, setDeathAdmission] = useState<AdmissionRow | null>(null);
+  const [deathDate, setDeathDate] = useState("");
+  const [deathCause, setDeathCause] = useState("");
+  const [deathError, setDeathError] = useState("");
+  const [deathSubmitting, setDeathSubmitting] = useState(false);
+
   const load = useCallback(async () => {
     setLoading(true);
     setPageError("");
@@ -491,6 +499,48 @@ export default function AdmissionsPage() {
     }
   }
 
+  function openDeath(admission: AdmissionRow) {
+    setDeathAdmission(admission);
+    setDeathDate("");
+    setDeathCause("");
+    setDeathError("");
+    setDeathSubmitting(false);
+  }
+
+  async function handleDeath() {
+    if (!deathAdmission) return;
+    const deathDateValue = deathDate.trim();
+    if (!deathDateValue) {
+      setDeathError("去世时间不能为空");
+      return;
+    }
+    setDeathSubmitting(true);
+    setDeathError("");
+    try {
+      await markEncounterDeath(deathAdmission.id, {
+        death_date: `${deathDateValue}:00+08:00`,
+        ...(deathCause.trim() ? { death_cause: deathCause.trim() } : {}),
+      });
+      setDeathAdmission(null);
+      setDeathDate("");
+      setDeathCause("");
+      await load();
+    } catch (error) {
+      // 409/网络/校验失败：保留表单输入，错误独立展示（不得用错误面板替换输入表单）
+      setDeathError(errorMessage(error, "无法办理去世"));
+    } finally {
+      setDeathSubmitting(false);
+    }
+  }
+
+  function closeDeath() {
+    if (deathSubmitting) return;
+    setDeathAdmission(null);
+    setDeathDate("");
+    setDeathCause("");
+    setDeathError("");
+  }
+
   /** 打开已离院档案弹窗：先单次 GET 摘要，404 时展示受控生成表单 */
   async function openHandover(admission: AdmissionRow) {
     setHandoverAdmission(admission);
@@ -555,16 +605,33 @@ export default function AdmissionsPage() {
     {
       key: "actions",
       header: "操作",
-      className: "w-[110px]",
+      className: "w-[240px]",
       render: (row) => (
-        <Button
-          variant="link"
-          size="sm"
-          disabled={dischargingId === row.id}
-          onClick={() => void handleDischarge(row)}
-        >
-          {dischargingId === row.id ? "处理中" : "办理离院"}
-        </Button>
+        <div className="flex items-center gap-3">
+          <a
+            href={`/dashboard/orders?encounter_id=${row.id}`}
+            className="text-sm text-accent hover:underline underline-offset-4"
+          >
+            医嘱
+          </a>
+          <Button
+            variant="link"
+            size="sm"
+            disabled={dischargingId === row.id}
+            onClick={() => void handleDischarge(row)}
+          >
+            {dischargingId === row.id ? "处理中" : "办理离院"}
+          </Button>
+          <Button
+            variant="link"
+            size="sm"
+            className="text-danger!"
+            disabled={dischargingId === row.id}
+            onClick={() => openDeath(row)}
+          >
+            办理去世
+          </Button>
+        </div>
       ),
     },
   ];
@@ -802,6 +869,57 @@ export default function AdmissionsPage() {
             </div>
           </>
         )}
+      </Modal>
+
+      {/* 办理去世弹窗 */}
+      <Modal
+        open={deathAdmission !== null}
+        onClose={closeDeath}
+        title={deathAdmission ? `办理去世 · ${deathAdmission.patientName}` : "办理去世"}
+      >
+        <div className="space-y-4">
+          <p className="rounded-lg border border-info/30 bg-info-bg px-4 py-3 text-sm text-info">
+            办理去世将收束该入住全部医嘱、任务与照护周期，并关闭患者档案。此操作不可撤销，请确认后再提交。
+          </p>
+          {deathError && (
+            <div role="alert" className="rounded-lg border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">
+              {deathError}
+            </div>
+          )}
+          <form
+            aria-label="办理去世"
+            className="space-y-4"
+            noValidate
+            onSubmit={(event) => {
+              event.preventDefault();
+              void handleDeath();
+            }}
+          >
+            <Input
+              label="去世时间（必填）"
+              type="datetime-local"
+              value={deathDate}
+              onChange={(event) => setDeathDate(event.target.value)}
+              required
+            />
+            <div className="flex flex-col gap-1.5">
+              <label className="text-sm font-medium text-fg-muted" htmlFor="death-cause">去世原因（可选）</label>
+              <textarea
+                id="death-cause"
+                value={deathCause}
+                onChange={(event) => setDeathCause(event.target.value)}
+                maxLength={500}
+                rows={3}
+                placeholder="如：自然死亡、疾病恶化等"
+                className="w-full resize-none rounded-md border border-border bg-surface px-3 py-2 text-sm text-fg placeholder:text-fg-dimmed focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              />
+            </div>
+            <div className="flex justify-end gap-3 pt-1">
+              <Button type="button" variant="ghost" onClick={closeDeath} disabled={deathSubmitting}>取消</Button>
+              <Button type="submit" variant="danger" loading={deathSubmitting} disabled={deathSubmitting}>确认办理去世</Button>
+            </div>
+          </form>
+        </div>
       </Modal>
     </div>
   );
