@@ -1,0 +1,8 @@
+---
+import DashboardLayout from "../../layouts/DashboardLayout.astro";
+import OrdersPage from "../../components/OrdersPage";
+---
+
+<DashboardLayout title="医嘱管理">
+  <OrdersPage client:only="react" />
+</DashboardLayout>

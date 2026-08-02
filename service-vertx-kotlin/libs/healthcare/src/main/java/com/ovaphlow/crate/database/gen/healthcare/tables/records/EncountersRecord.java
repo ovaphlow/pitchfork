@@ -233,6 +233,34 @@ public class EncountersRecord extends UpdatableRecordImpl<EncountersRecord> {
         return (String) get(14);
     }
 
+    /**
+     * Setter for <code>healthcare.encounters.death_date</code>.
+     */
+    public void setDeathDate(OffsetDateTime value) {
+        set(15, value);
+    }
+
+    /**
+     * Getter for <code>healthcare.encounters.death_date</code>.
+     */
+    public OffsetDateTime getDeathDate() {
+        return (OffsetDateTime) get(15);
+    }
+
+    /**
+     * Setter for <code>healthcare.encounters.death_cause</code>.
+     */
+    public void setDeathCause(String value) {
+        set(16, value);
+    }
+
+    /**
+     * Getter for <code>healthcare.encounters.death_cause</code>.
+     */
+    public String getDeathCause() {
+        return (String) get(16);
+    }
+
     // -------------------------------------------------------------------------
     // Primary key information
     // -------------------------------------------------------------------------
@@ -256,7 +284,7 @@ public class EncountersRecord extends UpdatableRecordImpl<EncountersRecord> {
     /**
      * Create a detached, initialised EncountersRecord
      */
-    public EncountersRecord(String id, String patientId, String encounterType, String department, String ward, OffsetDateTime admitDate, OffsetDateTime dischargeDate, String admittingDiagnosis, String dischargeDiagnosis, String attendingPhysician, String status, JSONB metadata, OffsetDateTime createdAt, OffsetDateTime updatedAt, String encounterNo) {
+    public EncountersRecord(String id, String patientId, String encounterType, String department, String ward, OffsetDateTime admitDate, OffsetDateTime dischargeDate, String admittingDiagnosis, String dischargeDiagnosis, String attendingPhysician, String status, JSONB metadata, OffsetDateTime createdAt, OffsetDateTime updatedAt, String encounterNo, OffsetDateTime deathDate, String deathCause) {
         super(Encounters.ENCOUNTERS);
 
         setId(id);
@@ -274,6 +302,8 @@ public class EncountersRecord extends UpdatableRecordImpl<EncountersRecord> {
         setCreatedAt(createdAt);
         setUpdatedAt(updatedAt);
         setEncounterNo(encounterNo);
+        setDeathDate(deathDate);
+        setDeathCause(deathCause);
         resetChangedOnNotNull();
     }
 }

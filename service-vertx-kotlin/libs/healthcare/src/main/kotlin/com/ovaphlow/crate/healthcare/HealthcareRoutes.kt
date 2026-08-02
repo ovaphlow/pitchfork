@@ -91,6 +91,37 @@ object HealthcareRoutes {
                 }
                 .onFailure { respondFailure(ctx, it) }
         }
+        // 医嘱与去世路由：静态/具体路径必须位于泛型 encounter 路由之前
+        router.post("/encounters/:id/orders").handler { ctx ->
+            service.createOrder(requiredId(ctx), body(ctx))
+                .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                .onFailure { respondCreateFailure(ctx, it) }
+        }
+        router.get("/encounters/:id/orders").handler { ctx ->
+            service.listOrders(
+                encounterId = requiredId(ctx),
+                orderType = ctx.request().getParam("order_type"),
+                status = ctx.request().getParam("status"),
+                limit = limit(ctx),
+                offset = offset(ctx),
+            ).onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.get("/orders/:id").handler { ctx ->
+            service.getOrder(requiredId(ctx))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.patch("/orders/:id/status").handler { ctx ->
+            service.updateOrderStatus(requiredId(ctx), body(ctx))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.patch("/encounters/:id/death").handler { ctx ->
+            service.deathEncounter(requiredId(ctx), body(ctx))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
         router.get("/encounters/:id").handler { ctx ->
             service.getEncounter(requiredId(ctx))
                 .onSuccess { ctx.json(it) }

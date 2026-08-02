@@ -114,6 +114,8 @@ export interface Encounter {
   ward: string | null;
   admit_date: string | null;
   discharge_date: string | null;
+  death_date: string | null;
+  death_cause: string | null;
   admitting_diagnosis: string | null;
   discharge_diagnosis: string | null;
   attending_physician: string | null;
@@ -1231,6 +1233,84 @@ export function confirmInventoryInbound(input: {
 }) {
   return request("/inventories/v1/operations/inbound", {
     method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+// ─── 医嘱 (Medical Orders) ─────────────────────────────────────────────
+export interface MedicalOrderExecutionSummary {
+  PENDING: number;
+  IN_PROGRESS: number;
+  COMPLETED: number;
+  SKIPPED: number;
+  CANCELLED: number;
+}
+
+export interface MedicalOrder {
+  id: string;
+  encounter_id: string;
+  order_type: string;
+  order_content: string;
+  order_details: Record<string, unknown>;
+  start_time: string | null;
+  end_time: string | null;
+  doctor: string;
+  status: string;
+  task_id: string | null;
+  execution_summary?: MedicalOrderExecutionSummary;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MedicalOrderList {
+  records: MedicalOrder[];
+  meta: { total: number };
+}
+
+export interface MedicalOrderInput {
+  order_type: string;
+  order_content: string;
+  doctor: string;
+  start_time: string;
+  order_details?: Record<string, unknown>;
+}
+
+export interface DeathInput {
+  death_date: string;
+  death_cause?: string;
+}
+
+export function createMedicalOrder(encounterId: string, input: MedicalOrderInput): Promise<MedicalOrder> {
+  return request<MedicalOrder>(`/healthcare/v1/encounters/${encodeURIComponent(encounterId)}/orders`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function listMedicalOrders(encounterId: string, params: { order_type?: string; status?: string; limit?: number; offset?: number } = {}): Promise<MedicalOrderList> {
+  const query = new URLSearchParams();
+  if (params.order_type?.trim()) query.set("order_type", params.order_type.trim());
+  if (params.status?.trim()) query.set("status", params.status.trim());
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<MedicalOrderList>(`/healthcare/v1/encounters/${encodeURIComponent(encounterId)}/orders${suffix}`);
+}
+
+export function getMedicalOrder(id: string): Promise<MedicalOrder> {
+  return request<MedicalOrder>(`/healthcare/v1/orders/${encodeURIComponent(id)}`);
+}
+
+export function updateMedicalOrderStatus(id: string, status: string): Promise<MedicalOrder> {
+  return request<MedicalOrder>(`/healthcare/v1/orders/${encodeURIComponent(id)}/status`, {
+    method: "PATCH",
+    body: JSON.stringify({ status }),
+  });
+}
+
+export function markEncounterDeath(encounterId: string, input: DeathInput): Promise<Encounter> {
+  return request<Encounter>(`/healthcare/v1/encounters/${encodeURIComponent(encounterId)}/death`, {
+    method: "PATCH",
     body: JSON.stringify(input),
   });
 }
