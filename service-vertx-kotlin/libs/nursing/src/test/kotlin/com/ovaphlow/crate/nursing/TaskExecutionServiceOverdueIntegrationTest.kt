@@ -104,19 +104,42 @@ class TaskExecutionServiceOverdueIntegrationTest {
     @AfterAll
     fun cleanup(ctx: VertxTestContext) {
         try {
-            // 用 JDBC 清理 fixture 数据
             val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
             DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
+                conn.autoCommit = false
                 val stmt = conn.createStatement()
-                stmt.execute("DELETE FROM nursing.nursing_task_executions WHERE id LIKE '${FIXTURE_PREFIX}%'")
+                stmt.execute("DELETE FROM nursing.nursing_task_execution_consumptions WHERE task_execution_id IN (SELECT id FROM nursing.nursing_task_executions WHERE id LIKE '${FIXTURE_PREFIX}%')")
+                stmt.execute("DELETE FROM nursing.nursing_visit_schedules WHERE period_id IN (SELECT id FROM nursing.nursing_service_periods WHERE id LIKE '${FIXTURE_PREFIX}%')")
+                stmt.execute("DELETE FROM nursing.nursing_task_executions WHERE id LIKE '${FIXTURE_PREFIX}%' OR task_id IN (SELECT id FROM nursing.nursing_tasks WHERE id LIKE '${FIXTURE_PREFIX}%')")
                 stmt.execute("DELETE FROM nursing.nursing_tasks WHERE id LIKE '${FIXTURE_PREFIX}%'")
                 stmt.execute("DELETE FROM nursing.nursing_service_periods WHERE id LIKE '${FIXTURE_PREFIX}%'")
                 stmt.execute("DELETE FROM healthcare.patients WHERE id LIKE '${FIXTURE_PREFIX}%'")
+                val remaining = stmt.executeQuery(
+                    """
+                    SELECT (
+                        (SELECT count(*) FROM healthcare.patients WHERE id LIKE '${FIXTURE_PREFIX}%') +
+                        (SELECT count(*) FROM nursing.nursing_service_periods WHERE id LIKE '${FIXTURE_PREFIX}%') +
+                        (SELECT count(*) FROM nursing.nursing_tasks WHERE id LIKE '${FIXTURE_PREFIX}%') +
+                        (SELECT count(*) FROM nursing.nursing_task_executions WHERE id LIKE '${FIXTURE_PREFIX}%')
+                    )
+                    """.trimIndent()
+                ).use { result ->
+                    result.next()
+                    result.getLong(1)
+                }
+                check(remaining == 0L) { "fixture cleanup left $remaining rows" }
+                conn.commit()
             }
-        } catch (_: Exception) { /* cleanup best effort */ }
-
-        if (::pool.isInitialized) pool.close()
-        ctx.completeNow()
+            if (::pool.isInitialized) {
+                pool.close().onComplete { ar ->
+                    if (ar.succeeded()) ctx.completeNow() else ctx.failNow(ar.cause())
+                }
+            } else {
+                ctx.completeNow()
+            }
+        } catch (e: Exception) {
+            ctx.failNow(e)
+        }
     }
 
     private fun jdbcUrl() = "jdbc:postgresql://$host:$port/$TEST_DB"
@@ -196,97 +219,13 @@ class TaskExecutionServiceOverdueIntegrationTest {
      *   - PENDING, 计划时间 1 小时后 → 不应逾期
      *   - IN_PROGRESS, 计划时间刚过 1 分钟 → 应逾期 1 分钟
      */
-    private fun insertFixtures(ctx: VertxTestContext) {
-        val now = OffsetDateTime.now()
-        val twoHoursAgo = now.minusHours(2)
-        val oneHourLater = now.plusHours(1)
-        val oneMinuteAgo = now.minusMinutes(1)
-
-        val patientId = fixtureId("patient")
-        val periodId = fixtureId("period")
-        val taskId = fixtureId("task")
-
-        pool.withTransaction { conn ->
-            // 创建 healthcare schema 和 patients 表
-            conn.query("""
-                CREATE SCHEMA IF NOT EXISTS healthcare
-            """).execute()
-                .compose { conn.query("""
-                    CREATE TABLE IF NOT EXISTS healthcare.patients (
-                        id VARCHAR(32) PRIMARY KEY,
-                        name VARCHAR NOT NULL DEFAULT '',
-                        gender VARCHAR NOT NULL DEFAULT '',
-                        status VARCHAR DEFAULT 'ACTIVE',
-                        created_at TIMESTAMPTZ DEFAULT now(),
-                        updated_at TIMESTAMPTZ DEFAULT now()
-                    )
-                """).execute() }
-                .compose { conn.query("""
-                    INSERT INTO healthcare.patients (id, name, status)
-                    VALUES ('$patientId', '逾期测试患者', 'ACTIVE')
-                    ON CONFLICT (id) DO NOTHING
-                """).execute() }
-                .compose { conn.query("""
-                    INSERT INTO nursing.nursing_service_periods (id, patient_id, service_type, start_date, status)
-                    VALUES ('$periodId', '$patientId', 'HOME_CARE', CURRENT_DATE, 'ACTIVE')
-                    ON CONFLICT (id) DO NOTHING
-                """).execute() }
-                .compose { conn.query("""
-                    INSERT INTO nursing.nursing_tasks (id, period_id, task_type, description, frequency_code, start_date, status)
-                    VALUES ('$taskId', '$periodId', 'NURSING', '逾期测试任务', 'QD', CURRENT_DATE, 'ACTIVE')
-                    ON CONFLICT (id) DO NOTHING
-                """).execute() }
-                // 执行 1: PENDING + 2小时前 → 逾期
-                .compose { conn.query("""
-                    INSERT INTO nursing.nursing_task_executions (id, task_id, planned_time, status)
-                    VALUES ('${fixtureId("exec-pending-overdue")}', '$taskId', '${twoHoursAgo}', 'PENDING')
-                    ON CONFLICT (id) DO NOTHING
-                """).execute() }
-                // 执行 2: IN_PROGRESS + 2小时前 → 逾期
-                .compose { conn.query("""
-                    INSERT INTO nursing.nursing_task_executions (id, task_id, planned_time, status)
-                    VALUES ('${fixtureId("exec-in-progress-overdue")}', '$taskId', '${twoHoursAgo}', 'IN_PROGRESS')
-                    ON CONFLICT (id) DO NOTHING
-                """).execute() }
-                // 执行 3: COMPLETED + 2小时前 → 不逾期
-                .compose { conn.query("""
-                    INSERT INTO nursing.nursing_task_executions (id, task_id, planned_time, status, actual_time)
-                    VALUES ('${fixtureId("exec-completed")}', '$taskId', '${twoHoursAgo}', 'COMPLETED', '$now')
-                    ON CONFLICT (id) DO NOTHING
-                """).execute() }
-                // 执行 4: SKIPPED + 2小时前 → 不逾期
-                .compose { conn.query("""
-                    INSERT INTO nursing.nursing_task_executions (id, task_id, planned_time, status)
-                    VALUES ('${fixtureId("exec-skipped")}', '$taskId', '${twoHoursAgo}', 'SKIPPED')
-                    ON CONFLICT (id) DO NOTHING
-                """).execute() }
-                // 执行 5: CANCELLED + 2小时前 → 不逾期
-                .compose { conn.query("""
-                    INSERT INTO nursing.nursing_task_executions (id, task_id, planned_time, status)
-                    VALUES ('${fixtureId("exec-cancelled")}', '$taskId', '${twoHoursAgo}', 'CANCELLED')
-                    ON CONFLICT (id) DO NOTHING
-                """).execute() }
-                // 执行 6: PENDING + 1小时后 → 不逾期
-                .compose { conn.query("""
-                    INSERT INTO nursing.nursing_task_executions (id, task_id, planned_time, status)
-                    VALUES ('${fixtureId("exec-pending-future")}', '$taskId', '${oneHourLater}', 'PENDING')
-                    ON CONFLICT (id) DO NOTHING
-                """).execute() }
-                // 执行 7: IN_PROGRESS + 1分钟前 → 逾期 1 分钟
-                .compose { conn.query("""
-                    INSERT INTO nursing.nursing_task_executions (id, task_id, planned_time, status)
-                    VALUES ('${fixtureId("exec-in-progress-1min")}', '$taskId', '${oneMinuteAgo}', 'IN_PROGRESS')
-                    ON CONFLICT (id) DO NOTHING
-                """).execute() }
-        }.onComplete { ar ->
-            if (ar.succeeded()) ctx.completeNow()
-            else ctx.failNow(ar.cause())
-        }
+    private fun insertFixtures() {
+        setupFixturesJdbc()
     }
 
     @Test
     fun `逾期字段在SQL结果中存在且派生正确`(ctx: VertxTestContext) {
-        insertFixtures(ctx)
+        insertFixtures()
 
         // 等待 fixture 插入完成后再执行查询
         // 使用 VertxTestContext 的延迟完成机制
@@ -360,7 +299,7 @@ class TaskExecutionServiceOverdueIntegrationTest {
 
     @Test
     fun `overdue筛选只返回逾期记录且overdue_total不受status影响`(ctx: VertxTestContext) {
-        insertFixtures(ctx)
+        insertFixtures()
 
         val today = LocalDate.now()
 
@@ -408,7 +347,7 @@ class TaskExecutionServiceOverdueIntegrationTest {
 
     @Test
     fun `分页第二页不改变overdue_total`(ctx: VertxTestContext) {
-        insertFixtures(ctx)
+        insertFixtures()
 
         val today = LocalDate.now()
 
@@ -430,23 +369,41 @@ class TaskExecutionServiceOverdueIntegrationTest {
 
     @Test
     fun `指定日期范围不影响overdue_total存在性`(ctx: VertxTestContext) {
-        insertFixtures(ctx)
+        insertFixtures()
 
         // 用今天的日期
         val today = LocalDate.now()
 
         service.todayExecutions(date = today, limit = 100, offset = 0)
+            .compose { fullResult ->
+                val fullOverdueTotal = fullResult.getJsonObject("meta")?.getInteger("overdue_total") ?: -1
+                assertTrue(fullOverdueTotal >= 0, "全量 overdue_total 应 >= 0")
+
+                service.todayExecutions(date = today.plusDays(1), limit = 100)
+                    .compose { nextDayResult ->
+                        assertEquals(0, nextDayResult.getJsonObject("meta")?.getInteger("overdue_total"),
+                            "无 fixture 的日期 overdue_total 应为 0")
+
+                        service.todayExecutions(date = today, periodId = fixtureId("period"), limit = 100)
+                            .compose { matchingPeriodResult ->
+                                assertEquals(fullOverdueTotal, matchingPeriodResult.getJsonObject("meta")?.getInteger("overdue_total"),
+                                    "匹配周期的 overdue_total 应保持不变")
+
+                                service.todayExecutions(date = today, periodId = fixtureId("missing-period"), limit = 100)
+                                    .compose { missingPeriodResult ->
+                                        assertEquals(0, missingPeriodResult.getJsonObject("meta")?.getInteger("overdue_total"),
+                                            "不匹配周期的 overdue_total 应为 0")
+
+                                        service.todayExecutions(date = today, executor = fixtureId("executor"), limit = 100)
+                                    }
+                            }
+                    }
+            }
             .onSuccess { result ->
-                try {
-                    val meta = result.getJsonObject("meta")
-                    assertNotNull(meta, "meta 应为非 null")
-                    val overdueTotal = meta?.getInteger("overdue_total")
-                    assertNotNull(overdueTotal, "overdue_total 应为非 null")
-                    assertTrue(overdueTotal!! >= 0, "overdue_total 应 >= 0")
-                    ctx.completeNow()
-                } catch (e: Exception) {
-                    ctx.failNow(e)
-                }
-            }.onFailure { ctx.failNow(it) }
+                assertEquals(0, result.getJsonObject("meta")?.getInteger("overdue_total"),
+                    "不匹配执行人的 overdue_total 应为 0")
+                ctx.completeNow()
+            }
+            .onFailure { ctx.failNow(it) }
     }
 }

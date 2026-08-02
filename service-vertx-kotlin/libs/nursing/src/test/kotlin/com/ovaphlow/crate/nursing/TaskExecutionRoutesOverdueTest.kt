@@ -51,6 +51,7 @@ class TaskExecutionRoutesOverdueTest {
                 .put("database", TEST_DB)
                 .put("user", user)
             DatabaseConfig.migrate(dbConfig)
+            ensureHealthcarePatientsTable(host, port, user)
             val pool = DatabaseConfig.createPool(vertx, dbConfig)
 
             val nursingRouter = NursingRoutes.create(vertx, pool)
@@ -91,6 +92,23 @@ class TaskExecutionRoutesOverdueTest {
             if (!rs.next()) {
                 conn.createStatement().execute("CREATE DATABASE $TEST_DB")
             }
+        }
+    }
+
+    private fun ensureHealthcarePatientsTable(host: String, port: String, user: String) {
+        val password = System.getenv("PITCHFORK_DB_PASSWORD") ?: ""
+        val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
+        DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
+            conn.createStatement().execute("CREATE SCHEMA IF NOT EXISTS healthcare")
+            conn.createStatement().execute(
+                """
+                CREATE TABLE IF NOT EXISTS healthcare.patients (
+                    id VARCHAR(32) PRIMARY KEY,
+                    name VARCHAR NOT NULL DEFAULT '',
+                    status VARCHAR DEFAULT 'ACTIVE'
+                )
+                """.trimIndent()
+            )
         }
     }
 
@@ -184,10 +202,13 @@ class TaskExecutionRoutesOverdueTest {
             .onComplete { ar ->
                 client.close()
                 if (ar.succeeded()) {
-                    ctx.verify {
-                        assertEquals(200, ar.result().statusCode(), "overdue=true + PENDING 应返回 200")
-                        ctx.completeNow()
-                    }
+                    val resp = ar.result()
+                    resp.body().onSuccess { body ->
+                        ctx.verify {
+                            assertEquals(200, resp.statusCode(), "overdue=true + PENDING 应返回 200，响应：$body")
+                            ctx.completeNow()
+                        }
+                    }.onFailure { ctx.failNow(it) }
                 } else {
                     ctx.failNow(ar.cause())
                 }
@@ -202,10 +223,13 @@ class TaskExecutionRoutesOverdueTest {
             .onComplete { ar ->
                 client.close()
                 if (ar.succeeded()) {
-                    ctx.verify {
-                        assertEquals(200, ar.result().statusCode(), "overdue=true + IN_PROGRESS 应返回 200")
-                        ctx.completeNow()
-                    }
+                    val resp = ar.result()
+                    resp.body().onSuccess { body ->
+                        ctx.verify {
+                            assertEquals(200, resp.statusCode(), "overdue=true + IN_PROGRESS 应返回 200，响应：$body")
+                            ctx.completeNow()
+                        }
+                    }.onFailure { ctx.failNow(it) }
                 } else {
                     ctx.failNow(ar.cause())
                 }
@@ -224,7 +248,7 @@ class TaskExecutionRoutesOverdueTest {
                     val resp = ar.result()
                     resp.body().onSuccess { body ->
                         ctx.verify {
-                            assertEquals(200, resp.statusCode(), "正常请求应返回 200")
+                            assertEquals(200, resp.statusCode(), "正常请求应返回 200，响应：$body")
                             val json = JsonObject(body)
                             val meta = json.getJsonObject("meta")
                             assertNotNull(meta, "meta 应为非 null")
@@ -247,10 +271,13 @@ class TaskExecutionRoutesOverdueTest {
             .onComplete { ar ->
                 client.close()
                 if (ar.succeeded()) {
-                    ctx.verify {
-                        assertEquals(200, ar.result().statusCode(), "overdue=false 应返回 200")
-                        ctx.completeNow()
-                    }
+                    val resp = ar.result()
+                    resp.body().onSuccess { body ->
+                        ctx.verify {
+                            assertEquals(200, resp.statusCode(), "overdue=false 应返回 200，响应：$body")
+                            ctx.completeNow()
+                        }
+                    }.onFailure { ctx.failNow(it) }
                 } else {
                     ctx.failNow(ar.cause())
                 }
