@@ -6,3 +6,5 @@ node_modules/
 .pi-lens/
 
 .codebase-memory/
+.hermes/loop/
+.hermes/kanban-loop.lock
