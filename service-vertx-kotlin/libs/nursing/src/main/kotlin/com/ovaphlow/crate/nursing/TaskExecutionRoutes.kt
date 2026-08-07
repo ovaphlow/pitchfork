@@ -272,37 +272,56 @@ object TaskExecutionRoutes {
                 for (i in 0 until consumptionsJson.size()) {
                     val item = consumptionsJson.getJsonObject(i)
                     val stockId = item.getString("stock_id")
+                    if (stockId.isNullOrBlank()) {
+                        NursingRoutes.respond(ctx, 400, "invalid consumption at index $i: stock_id required")
+                        return@handler
+                    }
+
+                    // 计划 015 新契约：unit_spec_id + input_quantity（按规格精确换算）；
+                    // 旧契约 unit=PACKAGE/SPLIT 仅过渡兼容，两种形式互斥。
+                    val unitSpecId = item.getString("unit_spec_id")
+                    val inputQuantity = item.getValue("input_quantity")?.toString()?.toBigDecimalOrNull()
                     val unit = item.getString("unit")
-                    if (stockId.isNullOrBlank() || unit.isNullOrBlank()) {
-                        NursingRoutes.respond(ctx, 400, "invalid consumption at index $i: stock_id and unit required")
-                        return@handler
-                    }
-                    if (unit !in setOf("PACKAGE", "SPLIT")) {
-                        NursingRoutes.respond(ctx, 400, "invalid unit at index $i: must be PACKAGE or SPLIT")
-                        return@handler
-                    }
+                    val qty = item.getValue("quantity")?.toString()?.toBigDecimalOrNull()
+                    val splitQty = item.getValue("split_quantity")?.toString()?.toBigDecimalOrNull()
 
-                    val qty = item.getDouble("quantity")
-                    val splitQty = item.getDouble("split_quantity")
-
-                    if (unit == "PACKAGE" && (qty == null || qty <= 0)) {
-                        NursingRoutes.respond(ctx, 400, "invalid consumption at index $i: quantity must be > 0 for PACKAGE unit")
-                        return@handler
+                    val hasNew = unitSpecId != null || inputQuantity != null
+                    val hasOld = unit != null || item.containsKey("quantity") || item.containsKey("split_quantity")
+                    val invalid = when {
+                        hasNew && hasOld ->
+                            "must not mix unit_spec_id/input_quantity with legacy unit/quantity"
+                        hasNew && unitSpecId == null ->
+                            "unit_spec_id required when input_quantity is provided"
+                        hasNew && inputQuantity == null ->
+                            "input_quantity required when unit_spec_id is provided"
+                        hasNew && inputQuantity!! <= BigDecimal.ZERO ->
+                            "input_quantity must be > 0"
+                        !hasNew && unit.isNullOrBlank() ->
+                            "unit required (PACKAGE/SPLIT legacy) or unit_spec_id+input_quantity"
+                        unit !in setOf("PACKAGE", "SPLIT") ->
+                            "unit must be PACKAGE or SPLIT"
+                        unit == "PACKAGE" && (qty == null || qty <= BigDecimal.ZERO) ->
+                            "quantity must be > 0 for PACKAGE unit"
+                        unit == "PACKAGE" && item.containsKey("split_quantity") ->
+                            "split_quantity not allowed for PACKAGE unit"
+                        unit == "SPLIT" && (splitQty == null || splitQty <= BigDecimal.ZERO) ->
+                            "split_quantity must be > 0 for SPLIT unit"
+                        unit == "SPLIT" && item.containsKey("quantity") ->
+                            "quantity not allowed for SPLIT unit"
+                        else -> null
                     }
-                    if (unit == "SPLIT" && (splitQty == null || splitQty <= 0)) {
-                        NursingRoutes.respond(ctx, 400, "invalid consumption at index $i: split_quantity must be > 0 for SPLIT unit")
-                        return@handler
-                    }
-                    if (unit == "SPLIT" && item.containsKey("quantity")) {
-                        NursingRoutes.respond(ctx, 400, "invalid consumption at index $i: quantity not allowed for SPLIT unit")
+                    if (invalid != null) {
+                        NursingRoutes.respond(ctx, 400, "invalid consumption at index $i: $invalid")
                         return@handler
                     }
 
                     consumptions.add(TaskExecutionService.ConsumptionInput(
                         stockId = stockId,
+                        unitSpecId = unitSpecId,
+                        inputQuantity = inputQuantity,
                         unit = unit,
-                        quantity = qty?.let { BigDecimal.valueOf(it) },
-                        splitQuantity = splitQty?.let { BigDecimal.valueOf(it) }
+                        quantity = qty,
+                        splitQuantity = splitQty
                     ))
                 }
 

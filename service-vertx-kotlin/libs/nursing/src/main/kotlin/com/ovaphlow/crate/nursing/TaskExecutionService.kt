@@ -26,6 +26,10 @@ private fun nursingNumericDouble(value: Any?): Double? = when (value) {
     else -> value.toString().toDoubleOrNull()
 }
 
+/** 十进制文本规范化（去除尾零与小数位差异），用于幂等比较键，不经过 Double */
+private fun decimalNorm(value: Any?): String =
+    value?.toString()?.toBigDecimalOrNull()?.stripTrailingZeros()?.toPlainString() ?: ""
+
 class TaskExecutionService(
     private val pool: Pool,
     private val ctx: DSLContext = DatabaseConfig.createDSL(),
@@ -378,11 +382,14 @@ class TaskExecutionService(
     //  带耗材的完成任务
     // ========================================================================
 
+    /** 计划 015 新契约：unit_spec_id + input_quantity；旧 unit/quantity/splitQuantity 仅过渡兼容 */
     data class ConsumptionInput(
         val stockId: String,
-        val unit: String,
-        val quantity: BigDecimal?,
-        val splitQuantity: BigDecimal?,
+        val unitSpecId: String? = null,
+        val inputQuantity: BigDecimal? = null,
+        val unit: String? = null,
+        val quantity: BigDecimal? = null,
+        val splitQuantity: BigDecimal? = null,
     )
 
     /**
@@ -433,31 +440,45 @@ class TaskExecutionService(
                                             ),
                                         )
                                     }
-                                    // 比较耗材清单 — 按单位类型规范化 quantity
+                                    // V407：迁移后标记为只读的旧耗材（无换算快照）不可再被状态更新覆盖
+                                    val migrationReadOnly =
+                                        existingConsumptions.any {
+                                            (it as JsonObject).getString("migration_status") == "READ_ONLY"
+                                        }
+                                    if (migrationReadOnly) {
+                                        return@compose Future.failedFuture(
+                                            ConflictException(
+                                                "execution consumptions are migration read-only; refresh and resolve manually",
+                                            ),
+                                        )
+                                    }
+                                    // 比较耗材清单 — 新契约按规格+输入数量快照，旧契约按投影列，
+                                    // 数值一律以十进制文本规范化（不经过 Double，避免二进制尾差）
                                     val existingSummary =
                                         existingConsumptions
                                             .map {
                                                 val obj = it as JsonObject
-                                                val unit = obj.getString("unit") ?: "PACKAGE"
-                                                val qty =
-                                                    if (unit == "SPLIT") {
-                                                        obj.getDouble("split_quantity") ?: 0.0
-                                                    } else {
-                                                        obj.getDouble("quantity") ?: 0.0
-                                                    }
-                                                "${obj.getString("stock_id")}|$unit|${BigDecimal.valueOf(qty).stripTrailingZeros()}"
+                                                val specId = obj.getString("unit_spec_id")
+                                                if (specId != null) {
+                                                    "${obj.getString("stock_id")}|SPEC|$specId|${decimalNorm(obj.getValue("input_quantity"))}"
+                                                } else {
+                                                    val unit = obj.getString("unit") ?: "PACKAGE"
+                                                    val qty =
+                                                        if (unit == "SPLIT") obj.getValue("split_quantity") else obj.getValue("quantity")
+                                                    "${obj.getString("stock_id")}|$unit|${decimalNorm(qty)}"
+                                                }
                                             }.sorted()
                                     val newSummary =
                                         consumptions
                                             .map {
-                                                val unit = it.unit
-                                                val qty =
-                                                    if (unit == "SPLIT") {
-                                                        it.splitQuantity?.toDouble() ?: 0.0
-                                                    } else {
-                                                        it.quantity?.toDouble() ?: 0.0
-                                                    }
-                                                "${it.stockId}|$unit|${BigDecimal.valueOf(qty).stripTrailingZeros()}"
+                                                if (it.unitSpecId != null) {
+                                                    "${it.stockId}|SPEC|${it.unitSpecId}|${decimalNorm(it.inputQuantity)}"
+                                                } else {
+                                                    val unit = it.unit
+                                                    val qty =
+                                                        if (unit == "SPLIT") it.splitQuantity else it.quantity
+                                                    "${it.stockId}|$unit|${decimalNorm(qty)}"
+                                                }
                                             }.sorted()
 
                                     if (existingSummary == newSummary) {
@@ -534,6 +555,8 @@ class TaskExecutionService(
                                                     consumptions.map { ci ->
                                                         InventoryConsumptionService.ConsumptionItem(
                                                             stockId = ci.stockId,
+                                                            unitSpecId = ci.unitSpecId,
+                                                            inputQuantity = ci.inputQuantity,
                                                             unit = ci.unit,
                                                             quantity = ci.quantity,
                                                             splitQuantity = ci.splitQuantity,
@@ -604,6 +627,16 @@ class TaskExecutionService(
                             DSL.field("cc.split_quantity").`as`("split_quantity"),
                             DSL.field("sod.unit_cost").`as`("unit_cost"),
                             DSL.field("sod.total_cost").`as`("total_cost"),
+                            // V407 快照列（cc 表为权威，避免 join 缺失）
+                            DSL.field("cc.unit_spec_id").`as`("unit_spec_id"),
+                            DSL.field("cc.input_quantity").`as`("input_quantity"),
+                            DSL.field("cc.input_unit").`as`("input_unit"),
+                            DSL.field("cc.conversion_ratio").`as`("conversion_ratio"),
+                            DSL.field("cc.base_quantity").`as`("base_quantity"),
+                            DSL.field("cc.base_unit").`as`("base_unit"),
+                            DSL.field("cc.input_unit_cost").`as`("input_unit_cost"),
+                            DSL.field("cc.base_unit_cost").`as`("base_unit_cost"),
+                            DSL.field("cc.migration_status").`as`("migration_status"),
                         ).from(DSL.table(DSL.name("nursing", "nursing_task_execution_consumptions")).`as`("cc"))
                         .leftJoin(DSL.table(DSL.name("public", "materials")).`as`("mat"))
                         .on(DSL.field("cc.material_id").eq(DSL.field("mat.id")))
@@ -636,6 +669,15 @@ class TaskExecutionService(
                                     .put("split_quantity", nursingNumericDouble(cr.getValue("split_quantity")))
                                     .put("unit_cost", nursingNumericDouble(cr.getValue("unit_cost")))
                                     .put("total_cost", nursingNumericDouble(cr.getValue("total_cost")))
+                                    .put("unit_spec_id", cr.getValue("unit_spec_id")?.toString())
+                                    .put("input_quantity", nursingNumericDouble(cr.getValue("input_quantity")))
+                                    .put("input_unit", cr.getValue("input_unit")?.toString())
+                                    .put("conversion_ratio", nursingNumericDouble(cr.getValue("conversion_ratio")))
+                                    .put("base_quantity", nursingNumericDouble(cr.getValue("base_quantity")))
+                                    .put("base_unit", cr.getValue("base_unit")?.toString())
+                                    .put("input_unit_cost", nursingNumericDouble(cr.getValue("input_unit_cost")))
+                                    .put("base_unit_cost", nursingNumericDouble(cr.getValue("base_unit_cost")))
+                                    .put("migration_status", cr.getValue("migration_status")?.toString())
                             consumptions.add(c)
                             warehouse = cr.getValue("warehouse")?.toString() ?: ""
                             totalCost += nursingNumericDouble(cr.getValue("total_cost")) ?: 0.0
@@ -689,7 +731,16 @@ class TaskExecutionService(
                             .put("unit", dr.unit)
                             .put("split_quantity", dr.splitQuantity?.toDouble())
                             .put("unit_cost", dr.unitCost.toDouble())
-                            .put("total_cost", dr.totalCost.toDouble()),
+                            .put("total_cost", dr.totalCost.toDouble())
+                            // V407 快照：保留历史字段的同时返回基础数量与输入快照
+                            .put("unit_spec_id", dr.unitSpecId)
+                            .put("input_quantity", dr.inputQuantity?.toDouble())
+                            .put("input_unit", dr.inputUnit)
+                            .put("conversion_ratio", dr.conversionRatio?.toDouble())
+                            .put("base_quantity", dr.baseQuantity?.toDouble())
+                            .put("base_unit", dr.baseUnit)
+                            .put("input_unit_cost", dr.inputUnitCost?.toDouble())
+                            .put("base_unit_cost", dr.baseUnitCost?.toDouble()),
                     )
                 }
                 record.put("consumption_summary", summary)
@@ -726,6 +777,16 @@ class TaskExecutionService(
                     .set(DSL.field("quantity"), dr.quantity)
                     .set(DSL.field("unit"), dr.unit)
                     .set(DSL.field("split_quantity"), dr.splitQuantity)
+                    // V407 快照列：与库存操作明细一致，回放/查询以基础数量为权威
+                    .set(DSL.field("unit_spec_id"), dr.unitSpecId)
+                    .set(DSL.field("input_quantity"), dr.inputQuantity)
+                    .set(DSL.field("input_unit"), dr.inputUnit)
+                    .set(DSL.field("conversion_ratio"), dr.conversionRatio)
+                    .set(DSL.field("base_quantity"), dr.baseQuantity)
+                    .set(DSL.field("base_unit"), dr.baseUnit)
+                    .set(DSL.field("input_unit_cost"), dr.inputUnitCost)
+                    .set(DSL.field("base_unit_cost"), dr.baseUnitCost)
+                    .set(DSL.field("migration_status"), "OK")
                     .set(DSL.field("created_at"), now)
 
             return connection
@@ -860,6 +921,14 @@ class TaskExecutionService(
                     DSL.field("mat.name").`as`("material_name"),
                     DSL.field("sod.unit_cost").`as`("unit_cost"),
                     DSL.field("sod.total_cost").`as`("total_cost"),
+                    DSL.field("cc.unit_spec_id").`as`("unit_spec_id"),
+                    DSL.field("cc.input_quantity").`as`("input_quantity"),
+                    DSL.field("cc.input_unit").`as`("input_unit"),
+                    DSL.field("cc.conversion_ratio").`as`("conversion_ratio"),
+                    DSL.field("cc.base_quantity").`as`("base_quantity"),
+                    DSL.field("cc.base_unit").`as`("base_unit"),
+                    DSL.field("cc.input_unit_cost").`as`("input_unit_cost"),
+                    DSL.field("cc.base_unit_cost").`as`("base_unit_cost"),
                 ).from(consTable.`as`("cc"))
                 .leftJoin(materialsTable.`as`("mat"))
                 .on(DSL.field("cc.material_id").eq(DSL.field("mat.id")))
@@ -891,6 +960,14 @@ class TaskExecutionService(
                             .put("split_quantity", nursingNumericDouble(row.getValue("split_quantity")))
                             .put("unit_cost", nursingNumericDouble(row.getValue("unit_cost")))
                             .put("total_cost", nursingNumericDouble(row.getValue("total_cost")))
+                            .put("unit_spec_id", row.getValue("unit_spec_id")?.toString())
+                            .put("input_quantity", nursingNumericDouble(row.getValue("input_quantity")))
+                            .put("input_unit", row.getValue("input_unit")?.toString())
+                            .put("conversion_ratio", nursingNumericDouble(row.getValue("conversion_ratio")))
+                            .put("base_quantity", nursingNumericDouble(row.getValue("base_quantity")))
+                            .put("base_unit", row.getValue("base_unit")?.toString())
+                            .put("input_unit_cost", nursingNumericDouble(row.getValue("input_unit_cost")))
+                            .put("base_unit_cost", nursingNumericDouble(row.getValue("base_unit_cost")))
                             .put("created_at", row.getValue("created_at")?.toString()),
                     )
                 }

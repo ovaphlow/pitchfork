@@ -11,9 +11,17 @@ dependencies {
     api(libs.vertx.web)
     api(libs.jooq)
     implementation(libs.slf4j.api)
+    testImplementation(libs.junit.jupiter)
+    testImplementation(libs.junit.platform.launcher)
+    testImplementation(libs.mockk)
+    testImplementation(libs.vertx.junit5)
     jooqCodegen(libs.jooq.codegen)
     jooqCodegen(libs.jooq.meta)
     jooqCodegen(libs.postgresql)
+}
+
+tasks.withType<Test> {
+    useJUnitPlatform()
 }
 
 val generateJooq by tasks.registering(JavaExec::class) {

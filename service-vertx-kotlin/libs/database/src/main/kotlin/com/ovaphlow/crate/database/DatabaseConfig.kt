@@ -58,6 +58,10 @@ object DatabaseConfig {
             .locations("classpath:db/migration")
             .baselineOnMigrate(true)
             .ignoreMigrationPatterns("*:missing", "*:ignored")
+            // 各模块按独立号段（inventories V2xx、pharmacy V3xx、nursing V4xx、
+            // healthcare V5xx）共享一个 schema history；全局 current 由任一模块
+            // 推进后，其他模块的 pending 迁移版本号低于 current，必须乱序执行。
+            .outOfOrder(true)
             .load()
             .migrate()
 

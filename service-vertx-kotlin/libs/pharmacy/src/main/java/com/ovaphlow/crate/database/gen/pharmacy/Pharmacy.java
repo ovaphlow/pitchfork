@@ -6,6 +6,10 @@ package com.ovaphlow.crate.database.gen.pharmacy;
 
 import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyDispenseItems;
 import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyDispenses;
+import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyPurchaseOrderItems;
+import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyPurchaseOrders;
+import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyPurchaseReceiptItems;
+import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyPurchaseReceipts;
 import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyRequisitionItems;
 import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyRequisitions;
 import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyReturnItems;
@@ -41,6 +45,26 @@ public class Pharmacy extends SchemaImpl {
      * The table <code>pharmacy.pharmacy_dispenses</code>.
      */
     public final PharmacyDispenses PHARMACY_DISPENSES = PharmacyDispenses.PHARMACY_DISPENSES;
+
+    /**
+     * The table <code>pharmacy.pharmacy_purchase_order_items</code>.
+     */
+    public final PharmacyPurchaseOrderItems PHARMACY_PURCHASE_ORDER_ITEMS = PharmacyPurchaseOrderItems.PHARMACY_PURCHASE_ORDER_ITEMS;
+
+    /**
+     * The table <code>pharmacy.pharmacy_purchase_orders</code>.
+     */
+    public final PharmacyPurchaseOrders PHARMACY_PURCHASE_ORDERS = PharmacyPurchaseOrders.PHARMACY_PURCHASE_ORDERS;
+
+    /**
+     * The table <code>pharmacy.pharmacy_purchase_receipt_items</code>.
+     */
+    public final PharmacyPurchaseReceiptItems PHARMACY_PURCHASE_RECEIPT_ITEMS = PharmacyPurchaseReceiptItems.PHARMACY_PURCHASE_RECEIPT_ITEMS;
+
+    /**
+     * The table <code>pharmacy.pharmacy_purchase_receipts</code>.
+     */
+    public final PharmacyPurchaseReceipts PHARMACY_PURCHASE_RECEIPTS = PharmacyPurchaseReceipts.PHARMACY_PURCHASE_RECEIPTS;
 
     /**
      * The table <code>pharmacy.pharmacy_requisition_items</code>.
@@ -80,6 +104,10 @@ public class Pharmacy extends SchemaImpl {
         return Arrays.asList(
             PharmacyDispenseItems.PHARMACY_DISPENSE_ITEMS,
             PharmacyDispenses.PHARMACY_DISPENSES,
+            PharmacyPurchaseOrderItems.PHARMACY_PURCHASE_ORDER_ITEMS,
+            PharmacyPurchaseOrders.PHARMACY_PURCHASE_ORDERS,
+            PharmacyPurchaseReceiptItems.PHARMACY_PURCHASE_RECEIPT_ITEMS,
+            PharmacyPurchaseReceipts.PHARMACY_PURCHASE_RECEIPTS,
             PharmacyRequisitionItems.PHARMACY_REQUISITION_ITEMS,
             PharmacyRequisitions.PHARMACY_REQUISITIONS,
             PharmacyReturnItems.PHARMACY_RETURN_ITEMS,

@@ -104,6 +104,28 @@ public class PharmacyRequisitionItems extends TableImpl<PharmacyRequisitionItems
      */
     public final TableField<PharmacyRequisitionItemsRecord, JSONB> METADATA = createField(DSL.name("metadata"), SQLDataType.JSONB, this, "");
 
+    /**
+     * The column <code>pharmacy.pharmacy_requisition_items.unit</code>.
+     */
+    public final TableField<PharmacyRequisitionItemsRecord, String> UNIT = createField(DSL.name("unit"), SQLDataType.VARCHAR, this, "");
+
+    /**
+     * The column <code>pharmacy.pharmacy_requisition_items.lot_id</code>.
+     */
+    public final TableField<PharmacyRequisitionItemsRecord, String> LOT_ID = createField(DSL.name("lot_id"), SQLDataType.VARCHAR, this, "");
+
+    /**
+     * The column
+     * <code>pharmacy.pharmacy_requisition_items.outbound_stock_operation_detail_id</code>.
+     */
+    public final TableField<PharmacyRequisitionItemsRecord, String> OUTBOUND_STOCK_OPERATION_DETAIL_ID = createField(DSL.name("outbound_stock_operation_detail_id"), SQLDataType.VARCHAR, this, "");
+
+    /**
+     * The column
+     * <code>pharmacy.pharmacy_requisition_items.inbound_stock_operation_detail_id</code>.
+     */
+    public final TableField<PharmacyRequisitionItemsRecord, String> INBOUND_STOCK_OPERATION_DETAIL_ID = createField(DSL.name("inbound_stock_operation_detail_id"), SQLDataType.VARCHAR, this, "");
+
     private PharmacyRequisitionItems(Name alias, Table<PharmacyRequisitionItemsRecord> aliased) {
         this(alias, aliased, (Field<?>[]) null, null);
     }

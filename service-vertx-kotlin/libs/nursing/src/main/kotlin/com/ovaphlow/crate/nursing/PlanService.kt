@@ -2,11 +2,15 @@ package com.ovaphlow.crate.nursing
 
 import com.ovaphlow.crate.common.Ulid
 import com.ovaphlow.crate.database.DatabaseConfig
+import com.ovaphlow.crate.database.gen.nursing.tables.NursingPlanItems.NURSING_PLAN_ITEMS
+import com.ovaphlow.crate.database.gen.nursing.tables.NursingPlans.NURSING_PLANS
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
 import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
+import io.vertx.sqlclient.RowSet
+import io.vertx.sqlclient.SqlClient
 import org.jooq.DSLContext
 import org.jooq.JSONB
 import org.jooq.impl.DSL
@@ -93,6 +97,24 @@ class PlanService(
         if (planName.isNullOrBlank())
             return Future.failedFuture(IllegalArgumentException("plan_name is required"))
 
+        // 通用入口只允许初次计划：该 period 已有活动计划时必须走 Healthcare 复评修订接口
+        val activeCheckQuery = ctx.select(DSL.field("id"))
+            .from(t)
+            .where(cPeriodId.eq(periodId))
+            .and(cStatus.eq("ACTIVE"))
+        return pool.preparedQuery(DatabaseConfig.sql(activeCheckQuery))
+            .execute(DatabaseConfig.tuple(activeCheckQuery))
+            .compose { activeRows ->
+                if (activeRows.size() > 0) {
+                    return@compose Future.failedFuture(
+                        ConflictException("period already has an active plan; create a new plan version via care plan revision")
+                    )
+                }
+                doCreate(body, periodId, planName)
+            }
+    }
+
+    private fun doCreate(body: JsonObject, periodId: String, planName: String): Future<JsonObject> {
         val id = Ulid.generate()
         val now = OffsetDateTime.now()
 
@@ -252,4 +274,166 @@ class PlanService(
                 .flatMap { get(id) }
         }
     }
+
+    // ========================================================================
+    //  复评计划修订 — 连接绑定内部协作（仅供 Healthcare 在同一事务内调用）
+    // ========================================================================
+
+    data class PlanItemInput(
+        val action: String,
+        val frequencyCode: String?,
+        val frequencyName: String?,
+        val durationDays: Int?,
+        val remark: String?,
+    )
+
+    data class PlanCreateInput(
+        val periodId: String,
+        val encounterId: String,
+        val planName: String,
+        val goals: String?,
+        val createdBy: String?,
+        val startDate: LocalDate?,
+        val endDate: LocalDate?,
+        val items: List<PlanItemInput>,
+    )
+
+    /**
+     * 锁定该 period 的活动计划；返回恰好一个活动计划，否则以 [ConflictException] 拒绝。
+     * 必须在调用方外层事务内执行。
+     */
+    fun lockActivePlan(client: SqlClient, periodId: String): Future<JsonObject> {
+        val query = ctx.selectFrom(NURSING_PLANS)
+            .where(NURSING_PLANS.PERIOD_ID.eq(periodId))
+            .and(NURSING_PLANS.STATUS.eq("ACTIVE"))
+            .forUpdate()
+        return execute(client, query).compose { rows ->
+            val active = rows.map { planToJson(it) }
+            when {
+                active.isEmpty() -> Future.failedFuture(
+                    ConflictException("period has no active plan; create the initial plan first")
+                )
+                active.size > 1 -> Future.failedFuture(
+                    ConflictException("period has multiple active plans; data needs manual consolidation")
+                )
+                else -> Future.succeededFuture(active[0])
+            }
+        }
+    }
+
+    /**
+     * 在同一连接上创建新计划及其措施（供复评修订使用，不做活动计划冲突检查）。
+     */
+    fun createPlanWithItems(client: SqlClient, input: PlanCreateInput): Future<JsonObject> {
+        val planId = Ulid.generate()
+        val now = OffsetDateTime.now()
+        var insertQuery = ctx.insertInto(NURSING_PLANS)
+            .set(NURSING_PLANS.ID, planId)
+            .set(NURSING_PLANS.PERIOD_ID, input.periodId)
+            .set(NURSING_PLANS.ENCOUNTER_ID, input.encounterId)
+            .set(NURSING_PLANS.PLAN_NAME, input.planName)
+            .set(NURSING_PLANS.STATUS, "ACTIVE")
+            .set(NURSING_PLANS.CREATED_AT, now)
+            .set(NURSING_PLANS.UPDATED_AT, now)
+        input.goals?.let { insertQuery = insertQuery.set(NURSING_PLANS.GOALS, it) }
+        input.createdBy?.let { insertQuery = insertQuery.set(NURSING_PLANS.CREATED_BY, it) }
+        input.startDate?.let { insertQuery = insertQuery.set(NURSING_PLANS.START_DATE, it) }
+        input.endDate?.let { insertQuery = insertQuery.set(NURSING_PLANS.END_DATE, it) }
+
+        return execute(client, insertQuery).compose {
+            insertPlanItems(client, planId, input.items, now)
+        }.map { created ->
+            val plan = JsonObject()
+                .put("id", planId)
+                .put("period_id", input.periodId)
+                .put("encounter_id", input.encounterId)
+                .put("plan_name", input.planName)
+                .put("goals", input.goals)
+                .put("status", "ACTIVE")
+                .put("created_by", input.createdBy)
+                .put("start_date", input.startDate?.toString())
+                .put("end_date", input.endDate?.toString())
+                .put("metadata", null)
+                .put("created_at", now.toString())
+                .put("updated_at", now.toString())
+            plan.put("items", created)
+            plan
+        }
+    }
+
+    /**
+     * 收束旧计划：计划与活动措施均转为 `DISCONTINUED`。必须在调用方外层事务内执行。
+     */
+    fun terminatePlan(client: SqlClient, planId: String): Future<Void> {
+        val now = OffsetDateTime.now()
+        val planUpdate = ctx.update(NURSING_PLANS)
+            .set(NURSING_PLANS.STATUS, "DISCONTINUED")
+            .set(NURSING_PLANS.UPDATED_AT, now)
+            .where(NURSING_PLANS.ID.eq(planId))
+        val itemUpdate = ctx.update(NURSING_PLAN_ITEMS)
+            .set(NURSING_PLAN_ITEMS.STATUS, "DISCONTINUED")
+            .where(NURSING_PLAN_ITEMS.PLAN_ID.eq(planId))
+            .and(NURSING_PLAN_ITEMS.STATUS.eq("ACTIVE"))
+        return execute(client, planUpdate).compose { execute(client, itemUpdate).map<Void> { null } }
+    }
+
+    /** 锁定旧计划的全部活动措施，返回措施列表。必须在调用方外层事务内执行。 */
+    fun lockActivePlanItems(client: SqlClient, planId: String): Future<List<JsonObject>> {
+        val query = ctx.selectFrom(NURSING_PLAN_ITEMS)
+            .where(NURSING_PLAN_ITEMS.PLAN_ID.eq(planId))
+            .and(NURSING_PLAN_ITEMS.STATUS.eq("ACTIVE"))
+            .forUpdate()
+        return execute(client, query).map { rows ->
+            val items = mutableListOf<JsonObject>()
+            for (row in rows) items.add(itemToJson(row))
+            items
+        }
+    }
+
+    private fun insertPlanItems(
+        client: SqlClient,
+        planId: String,
+        items: List<PlanItemInput>,
+        now: OffsetDateTime,
+    ): Future<List<JsonObject>> {
+        fun loop(index: Int, acc: List<JsonObject>): Future<List<JsonObject>> {
+            if (index >= items.size) return Future.succeededFuture(acc)
+            val item = items[index]
+            val itemId = Ulid.generate()
+            var insert = ctx.insertInto(NURSING_PLAN_ITEMS)
+                .set(NURSING_PLAN_ITEMS.ID, itemId)
+                .set(NURSING_PLAN_ITEMS.PLAN_ID, planId)
+                .set(NURSING_PLAN_ITEMS.ACTION, item.action)
+                .set(NURSING_PLAN_ITEMS.STATUS, "ACTIVE")
+                .set(NURSING_PLAN_ITEMS.CREATED_AT, now)
+            item.frequencyCode?.let { insert = insert.set(NURSING_PLAN_ITEMS.FREQUENCY_CODE, it) }
+            item.frequencyName?.let { insert = insert.set(NURSING_PLAN_ITEMS.FREQUENCY_NAME, it) }
+            item.durationDays?.let { insert = insert.set(NURSING_PLAN_ITEMS.DURATION_DAYS, it) }
+            item.remark?.let { insert = insert.set(NURSING_PLAN_ITEMS.REMARK, it) }
+
+            return execute(client, insert).compose {
+                val updated = ArrayList<JsonObject>(acc.size + 1)
+                updated.addAll(acc)
+                updated.add(itemJson(itemId, planId, item, now))
+                loop(index + 1, updated)
+            }
+        }
+        return loop(0, emptyList())
+    }
+
+    private fun itemJson(itemId: String, planId: String, item: PlanItemInput, now: OffsetDateTime): JsonObject =
+        JsonObject()
+            .put("id", itemId)
+            .put("plan_id", planId)
+            .put("action", item.action)
+            .put("frequency_code", item.frequencyCode)
+            .put("frequency_name", item.frequencyName)
+            .put("duration_days", item.durationDays)
+            .put("remark", item.remark)
+            .put("status", "ACTIVE")
+            .put("metadata", null)
+            .put("created_at", now.toString())
+
+    private fun execute(client: SqlClient, query: org.jooq.Query): Future<RowSet<Row>> =
+        client.preparedQuery(DatabaseConfig.sql(query)).execute(DatabaseConfig.tuple(query))
 }

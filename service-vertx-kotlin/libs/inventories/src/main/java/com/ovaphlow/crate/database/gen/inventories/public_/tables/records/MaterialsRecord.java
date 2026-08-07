@@ -204,6 +204,62 @@ public class MaterialsRecord extends UpdatableRecordImpl<MaterialsRecord> {
         return (OffsetDateTime) get(12);
     }
 
+    /**
+     * Setter for <code>public.materials.base_unit</code>.
+     */
+    public void setBaseUnit(String value) {
+        set(13, value);
+    }
+
+    /**
+     * Getter for <code>public.materials.base_unit</code>.
+     */
+    public String getBaseUnit() {
+        return (String) get(13);
+    }
+
+    /**
+     * Setter for <code>public.materials.base_quantity_scale</code>.
+     */
+    public void setBaseQuantityScale(Short value) {
+        set(14, value);
+    }
+
+    /**
+     * Getter for <code>public.materials.base_quantity_scale</code>.
+     */
+    public Short getBaseQuantityScale() {
+        return (Short) get(14);
+    }
+
+    /**
+     * Setter for <code>public.materials.unit_model_status</code>.
+     */
+    public void setUnitModelStatus(String value) {
+        set(15, value);
+    }
+
+    /**
+     * Getter for <code>public.materials.unit_model_status</code>.
+     */
+    public String getUnitModelStatus() {
+        return (String) get(15);
+    }
+
+    /**
+     * Setter for <code>public.materials.updated_at</code>.
+     */
+    public void setUpdatedAt(OffsetDateTime value) {
+        set(16, value);
+    }
+
+    /**
+     * Getter for <code>public.materials.updated_at</code>.
+     */
+    public OffsetDateTime getUpdatedAt() {
+        return (OffsetDateTime) get(16);
+    }
+
     // -------------------------------------------------------------------------
     // Primary key information
     // -------------------------------------------------------------------------
@@ -227,7 +283,7 @@ public class MaterialsRecord extends UpdatableRecordImpl<MaterialsRecord> {
     /**
      * Create a detached, initialised MaterialsRecord
      */
-    public MaterialsRecord(String id, String code, String name, String category, String spec, String packageUnit, String splitUnit, BigDecimal splitRatio, Boolean enableBatchControl, String costMethod, JSONB metadata, String status, OffsetDateTime createdAt) {
+    public MaterialsRecord(String id, String code, String name, String category, String spec, String packageUnit, String splitUnit, BigDecimal splitRatio, Boolean enableBatchControl, String costMethod, JSONB metadata, String status, OffsetDateTime createdAt, String baseUnit, Short baseQuantityScale, String unitModelStatus, OffsetDateTime updatedAt) {
         super(Materials.MATERIALS);
 
         setId(id);
@@ -243,6 +299,10 @@ public class MaterialsRecord extends UpdatableRecordImpl<MaterialsRecord> {
         setMetadata(metadata);
         setStatus(status);
         setCreatedAt(createdAt);
+        setBaseUnit(baseUnit);
+        setBaseQuantityScale(baseQuantityScale);
+        setUnitModelStatus(unitModelStatus);
+        setUpdatedAt(updatedAt);
         resetChangedOnNotNull();
     }
 }

@@ -4,6 +4,7 @@ node_modules/
 .pi-subagents/
 .superpowers/
 .pi-lens/
+.pi-lens.json
 
 .codebase-memory/
 .hermes/loop/

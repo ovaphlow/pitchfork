@@ -118,6 +118,11 @@ public class PharmacyDispenses extends TableImpl<PharmacyDispensesRecord> {
      */
     public final TableField<PharmacyDispensesRecord, OffsetDateTime> DISPENSED_AT = createField(DSL.name("dispensed_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6), this, "");
 
+    /**
+     * The column <code>pharmacy.pharmacy_dispenses.warehouse</code>.
+     */
+    public final TableField<PharmacyDispensesRecord, String> WAREHOUSE = createField(DSL.name("warehouse"), SQLDataType.VARCHAR, this, "");
+
     private PharmacyDispenses(Name alias, Table<PharmacyDispensesRecord> aliased) {
         this(alias, aliased, (Field<?>[]) null, null);
     }

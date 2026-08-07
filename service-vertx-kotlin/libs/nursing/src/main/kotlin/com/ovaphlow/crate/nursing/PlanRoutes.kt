@@ -19,6 +19,7 @@ object PlanRoutes {
                 .onFailure {
                     when (it) {
                         is IllegalArgumentException -> NursingRoutes.respond(ctx, 400, it.message)
+                        is ConflictException -> NursingRoutes.respond(ctx, 409, it.message)
                         else -> NursingRoutes.respondError(ctx, it)
                     }
                 }

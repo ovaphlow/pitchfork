@@ -27,7 +27,10 @@ object InventoriesRoutes {
         router.route("/lots/*").subRouter(LotRoutes.create(vertx, mPool))
         router.route("/stocks/*").subRouter(StockRoutes.create(vertx, mPool))
 
-        // ——— 手工确认入库 ———
+        // ——— 手工确认入库（计划 015 新契约） ———
+        // 每个明细提交 material_id、可选 lot_id、unit_spec_id、input_quantity 与
+        // input_unit_cost；旧 quantity/unit_cost 形式仅过渡映射当前默认包装规格
+        // （StockService 记录弃用日志）。两种形式互斥，混合返回 400。
         router.post("/operations/inbound").handler { ctx ->
             val b = body(ctx)
             val warehouse = b.getString("warehouse")
@@ -47,19 +50,57 @@ object InventoriesRoutes {
             for (i in 0 until itemsJson.size()) {
                 val item = itemsJson.getJsonObject(i)
                 val materialId = item.getString("material_id")
-                val quantity = item.getDouble("quantity")
-                val unitCost = item.getDouble("unit_cost")
+                if (materialId.isNullOrBlank()) {
+                    respond(ctx, 400, "invalid item at index $i: material_id required")
+                    return@handler
+                }
 
-                if (materialId.isNullOrBlank() || quantity == null || quantity <= 0 || unitCost == null || unitCost < 0) {
-                    respond(ctx, 400, "invalid item at index $i: material_id, quantity (>0) and unit_cost (>=0) required")
+                val unitSpecId = item.getString("unit_spec_id")
+                val inputQuantity = jsonDecimal(item.getValue("input_quantity"))
+                val quantity = jsonDecimal(item.getValue("quantity"))
+                val unitCost = jsonDecimal(item.getValue("unit_cost")) ?: jsonDecimal(item.getValue("input_unit_cost"))
+                val hasLegacyCost = item.containsKey("unit_cost")
+
+                // 契约互斥与字段级校验
+                val contractError = when {
+                    unitSpecId != null && inputQuantity == null ->
+                        "input_quantity required when unit_spec_id is provided"
+                    unitSpecId == null && inputQuantity != null ->
+                        "unit_spec_id required when input_quantity is provided"
+                    unitSpecId != null && quantity != null ->
+                        "must not mix unit_spec_id/input_quantity with quantity"
+                    unitSpecId == null && inputQuantity == null && quantity == null ->
+                        "quantity (legacy) or unit_spec_id+input_quantity (new contract) required"
+                    unitSpecId != null && hasLegacyCost ->
+                        "unit_cost is not supported with the new contract"
+                    unitSpecId == null && item.containsKey("input_unit_cost") ->
+                        "input_unit_cost requires unit_spec_id"
+                    else -> null
+                }
+                if (contractError != null) {
+                    respond(ctx, 400, "invalid item at index $i: $contractError")
+                    return@handler
+                }
+                if (quantity != null && quantity <= BigDecimal.ZERO) {
+                    respond(ctx, 400, "invalid item at index $i: quantity must be positive")
+                    return@handler
+                }
+                if (inputQuantity != null && inputQuantity <= BigDecimal.ZERO) {
+                    respond(ctx, 400, "invalid item at index $i: input_quantity must be positive")
+                    return@handler
+                }
+                if (unitCost == null || unitCost < BigDecimal.ZERO) {
+                    respond(ctx, 400, "invalid item at index $i: input_unit_cost (>=0) required")
                     return@handler
                 }
 
                 items.add(StockService.InboundItem(
                     materialId = materialId,
                     lotId = item.getString("lot_id"),
-                    quantity = BigDecimal.valueOf(quantity),
-                    unitCost = BigDecimal.valueOf(unitCost)
+                    unitSpecId = unitSpecId,
+                    inputQuantity = inputQuantity,
+                    quantity = quantity,
+                    unitCost = unitCost
                 ))
             }
 
@@ -68,13 +109,7 @@ object InventoriesRoutes {
                 items = items,
                 note = b.getString("note")
             )).onSuccess { ctx.json(it) }
-                .onFailure {
-                    when (it) {
-                        is IllegalArgumentException -> respond(ctx, 400, it.message)
-                        is NotFoundException -> respond(ctx, 404, it.message)
-                        else -> respondError(ctx, it)
-                    }
-                }
+                .onFailure { respondFailure(ctx, it) }
         }
 
         return router
@@ -87,6 +122,16 @@ object InventoriesRoutes {
         ctx.response().setStatusCode(status)
             .putHeader("Content-Type", "application/json")
             .end(JsonObject().put("error", message).encode())
+    }
+
+    /** 计划 015 统一错误映射：400 参数/精度、404 不存在、409 状态/不可变/库存不足 */
+    internal fun respondFailure(ctx: RoutingContext, err: Throwable?) {
+        when (err) {
+            is IllegalArgumentException -> respond(ctx, 400, err.message)
+            is NotFoundException -> respond(ctx, 404, err.message)
+            is ConflictException -> respond(ctx, 409, err.message)
+            else -> respondError(ctx, err)
+        }
     }
 
     internal fun respondError(ctx: RoutingContext, err: Throwable?) {

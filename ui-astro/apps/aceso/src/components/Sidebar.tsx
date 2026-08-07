@@ -37,9 +37,10 @@ const items: Item[] = [
   {
     type: "group", label: "诊疗护理", domainLabels: { 养老: "照护服务", 儿保: "儿童保健" }, children: [
       { label: "住院护理", domainLabels: { 养老: "照护管理" }, path: "/dashboard/inpatient", icon: "🏥", domains: ["医疗", "养老"] },
-      { label: "医嘱", path: "/dashboard/orders", icon: "📝", domains: ["养老"] },
+      { label: "医生诊疗", path: "/dashboard/orders", icon: "📝", domains: ["养老"] },
       { label: "体检管理",   path: "/dashboard/checkup",      icon: "🩻", domains: ["医疗", "养老", "儿保"] },
       { label: "药房管理",   path: "/dashboard/pharmacy",     icon: "💊", domains: ["医疗", "养老"] },
+      { label: "库存计量",   path: "/dashboard/inventory",    icon: "📦", domains: ["医疗", "养老"] },
     ],
   },
   {

@@ -2,6 +2,7 @@ package com.ovaphlow.crate.nursing
 
 import com.ovaphlow.crate.common.Ulid
 import com.ovaphlow.crate.database.DatabaseConfig
+import com.ovaphlow.crate.database.gen.nursing.tables.NursingPlanItems.NURSING_PLAN_ITEMS
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingTasks.NURSING_TASKS
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
@@ -291,6 +292,102 @@ class TaskService(
                 .where(NURSING_TASKS.ID.eq(requireNotNull(task.getString("id"))))
             execute(client, updateQuery).map<Void> { null }
         }
+    }
+
+    // ========================================================================
+    //  复评计划修订 — 计划任务协作（仅供 Healthcare 在同一事务内调用）
+    // ========================================================================
+
+    data class PlanTaskInput(
+        val periodId: String,
+        val encounterId: String,
+        val planItemId: String,
+        val description: String,
+        val frequencyCode: String?,
+        val frequencyName: String?,
+        val startDate: LocalDate?,
+        val endDate: LocalDate?,
+    )
+
+    /**
+     * 为一条计划措施派生 `NURSING` 任务，精确写入 plan_item_id / period_id / encounter_id。
+     * 必须在调用方外层事务内执行。
+     */
+    fun createPlanTask(client: SqlClient, input: PlanTaskInput): Future<JsonObject> {
+        if (input.planItemId.isBlank()) {
+            return Future.failedFuture(IllegalArgumentException("plan_item_id is required"))
+        }
+        if (input.description.isBlank()) {
+            return Future.failedFuture(IllegalArgumentException("description is required"))
+        }
+
+        val id = Ulid.generate()
+        val now = OffsetDateTime.now()
+        var insertQuery = ctx.insertInto(NURSING_TASKS)
+            .set(NURSING_TASKS.ID, id)
+            .set(NURSING_TASKS.PERIOD_ID, input.periodId)
+            .set(NURSING_TASKS.ENCOUNTER_ID, input.encounterId)
+            .set(NURSING_TASKS.PLAN_ITEM_ID, input.planItemId)
+            .set(NURSING_TASKS.TASK_TYPE, "NURSING")
+            .set(NURSING_TASKS.DESCRIPTION, input.description)
+            .set(NURSING_TASKS.STATUS, "ACTIVE")
+            .set(NURSING_TASKS.CREATED_AT, now)
+            .set(NURSING_TASKS.UPDATED_AT, now)
+        input.frequencyCode?.let { insertQuery = insertQuery.set(NURSING_TASKS.FREQUENCY_CODE, it) }
+        input.frequencyName?.let { insertQuery = insertQuery.set(NURSING_TASKS.FREQUENCY_NAME, it) }
+        input.startDate?.let { insertQuery = insertQuery.set(NURSING_TASKS.START_DATE, it) }
+        input.endDate?.let { insertQuery = insertQuery.set(NURSING_TASKS.END_DATE, it) }
+
+        return execute(client, insertQuery).map {
+            JsonObject()
+                .put("id", id)
+                .put("period_id", input.periodId)
+                .put("encounter_id", input.encounterId)
+                .put("plan_item_id", input.planItemId)
+                .put("order_item_id", null)
+                .put("task_type", "NURSING")
+                .put("description", input.description)
+                .put("frequency_code", input.frequencyCode)
+                .put("frequency_name", input.frequencyName)
+                .put("start_date", input.startDate?.toString())
+                .put("end_date", input.endDate?.toString())
+                .put("status", "ACTIVE")
+                .put("metadata", null)
+                .put("created_at", now.toString())
+                .put("updated_at", now.toString())
+        }
+    }
+
+    /**
+     * 锁定某计划（经 plan_item_id）的全部活动任务。必须在调用方外层事务内执行。
+     */
+    fun lockActivePlanTasks(client: SqlClient, planId: String): Future<List<JsonObject>> {
+        val query = ctx.select(NURSING_TASKS.fields().toList())
+            .from(NURSING_TASKS)
+            .join(NURSING_PLAN_ITEMS).on(NURSING_TASKS.PLAN_ITEM_ID.eq(NURSING_PLAN_ITEMS.ID))
+            .where(NURSING_PLAN_ITEMS.PLAN_ID.eq(planId))
+            .and(NURSING_TASKS.STATUS.eq("ACTIVE"))
+            .forUpdate()
+        return execute(client, query).map { rows ->
+            val tasks = mutableListOf<JsonObject>()
+            for (row in rows) tasks.add(toJson(row))
+            tasks
+        }
+    }
+
+    /**
+     * 批量将活动任务收束为 `CANCELLED`（只作用于仍为 ACTIVE 的任务）。
+     * 必须在调用方外层事务内执行。
+     */
+    fun cancelPlanTasks(client: SqlClient, taskIds: List<String>): Future<Void> {
+        if (taskIds.isEmpty()) return Future.succeededFuture()
+        val now = OffsetDateTime.now()
+        val updateQuery = ctx.update(NURSING_TASKS)
+            .set(NURSING_TASKS.STATUS, "CANCELLED")
+            .set(NURSING_TASKS.UPDATED_AT, now)
+            .where(NURSING_TASKS.ID.`in`(taskIds))
+            .and(NURSING_TASKS.STATUS.eq("ACTIVE"))
+        return execute(client, updateQuery).map<Void> { null }
     }
 
     private fun execute(client: SqlClient, query: org.jooq.Query): Future<RowSet<Row>> =

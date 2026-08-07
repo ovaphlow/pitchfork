@@ -147,6 +147,164 @@ public class PharmacyRequisitionsRecord extends UpdatableRecordImpl<PharmacyRequ
         return (OffsetDateTime) get(8);
     }
 
+    /**
+     * Setter for
+     * <code>pharmacy.pharmacy_requisitions.destination_warehouse</code>.
+     */
+    public void setDestinationWarehouse(String value) {
+        set(9, value);
+    }
+
+    /**
+     * Getter for
+     * <code>pharmacy.pharmacy_requisitions.destination_warehouse</code>.
+     */
+    public String getDestinationWarehouse() {
+        return (String) get(9);
+    }
+
+    /**
+     * Setter for <code>pharmacy.pharmacy_requisitions.requester_id</code>.
+     */
+    public void setRequesterId(String value) {
+        set(10, value);
+    }
+
+    /**
+     * Getter for <code>pharmacy.pharmacy_requisitions.requester_id</code>.
+     */
+    public String getRequesterId() {
+        return (String) get(10);
+    }
+
+    /**
+     * Setter for <code>pharmacy.pharmacy_requisitions.approved_by</code>.
+     */
+    public void setApprovedBy(String value) {
+        set(11, value);
+    }
+
+    /**
+     * Getter for <code>pharmacy.pharmacy_requisitions.approved_by</code>.
+     */
+    public String getApprovedBy() {
+        return (String) get(11);
+    }
+
+    /**
+     * Setter for <code>pharmacy.pharmacy_requisitions.approved_at</code>.
+     */
+    public void setApprovedAt(OffsetDateTime value) {
+        set(12, value);
+    }
+
+    /**
+     * Getter for <code>pharmacy.pharmacy_requisitions.approved_at</code>.
+     */
+    public OffsetDateTime getApprovedAt() {
+        return (OffsetDateTime) get(12);
+    }
+
+    /**
+     * Setter for <code>pharmacy.pharmacy_requisitions.dispensed_by</code>.
+     */
+    public void setDispensedBy(String value) {
+        set(13, value);
+    }
+
+    /**
+     * Getter for <code>pharmacy.pharmacy_requisitions.dispensed_by</code>.
+     */
+    public String getDispensedBy() {
+        return (String) get(13);
+    }
+
+    /**
+     * Setter for <code>pharmacy.pharmacy_requisitions.cancelled_by</code>.
+     */
+    public void setCancelledBy(String value) {
+        set(14, value);
+    }
+
+    /**
+     * Getter for <code>pharmacy.pharmacy_requisitions.cancelled_by</code>.
+     */
+    public String getCancelledBy() {
+        return (String) get(14);
+    }
+
+    /**
+     * Setter for <code>pharmacy.pharmacy_requisitions.cancelled_at</code>.
+     */
+    public void setCancelledAt(OffsetDateTime value) {
+        set(15, value);
+    }
+
+    /**
+     * Getter for <code>pharmacy.pharmacy_requisitions.cancelled_at</code>.
+     */
+    public OffsetDateTime getCancelledAt() {
+        return (OffsetDateTime) get(15);
+    }
+
+    /**
+     * Setter for <code>pharmacy.pharmacy_requisitions.cancel_reason</code>.
+     */
+    public void setCancelReason(String value) {
+        set(16, value);
+    }
+
+    /**
+     * Getter for <code>pharmacy.pharmacy_requisitions.cancel_reason</code>.
+     */
+    public String getCancelReason() {
+        return (String) get(16);
+    }
+
+    /**
+     * Setter for <code>pharmacy.pharmacy_requisitions.idempotency_key</code>.
+     */
+    public void setIdempotencyKey(String value) {
+        set(17, value);
+    }
+
+    /**
+     * Getter for <code>pharmacy.pharmacy_requisitions.idempotency_key</code>.
+     */
+    public String getIdempotencyKey() {
+        return (String) get(17);
+    }
+
+    /**
+     * Setter for
+     * <code>pharmacy.pharmacy_requisitions.request_fingerprint</code>.
+     */
+    public void setRequestFingerprint(String value) {
+        set(18, value);
+    }
+
+    /**
+     * Getter for
+     * <code>pharmacy.pharmacy_requisitions.request_fingerprint</code>.
+     */
+    public String getRequestFingerprint() {
+        return (String) get(18);
+    }
+
+    /**
+     * Setter for <code>pharmacy.pharmacy_requisitions.updated_at</code>.
+     */
+    public void setUpdatedAt(OffsetDateTime value) {
+        set(19, value);
+    }
+
+    /**
+     * Getter for <code>pharmacy.pharmacy_requisitions.updated_at</code>.
+     */
+    public OffsetDateTime getUpdatedAt() {
+        return (OffsetDateTime) get(19);
+    }
+
     // -------------------------------------------------------------------------
     // Primary key information
     // -------------------------------------------------------------------------
@@ -170,7 +328,7 @@ public class PharmacyRequisitionsRecord extends UpdatableRecordImpl<PharmacyRequ
     /**
      * Create a detached, initialised PharmacyRequisitionsRecord
      */
-    public PharmacyRequisitionsRecord(String id, String requisitionNo, String warehouse, String requester, String department, String status, JSONB metadata, OffsetDateTime createdAt, OffsetDateTime dispensedAt) {
+    public PharmacyRequisitionsRecord(String id, String requisitionNo, String warehouse, String requester, String department, String status, JSONB metadata, OffsetDateTime createdAt, OffsetDateTime dispensedAt, String destinationWarehouse, String requesterId, String approvedBy, OffsetDateTime approvedAt, String dispensedBy, String cancelledBy, OffsetDateTime cancelledAt, String cancelReason, String idempotencyKey, String requestFingerprint, OffsetDateTime updatedAt) {
         super(PharmacyRequisitions.PHARMACY_REQUISITIONS);
 
         setId(id);
@@ -182,6 +340,17 @@ public class PharmacyRequisitionsRecord extends UpdatableRecordImpl<PharmacyRequ
         setMetadata(metadata);
         setCreatedAt(createdAt);
         setDispensedAt(dispensedAt);
+        setDestinationWarehouse(destinationWarehouse);
+        setRequesterId(requesterId);
+        setApprovedBy(approvedBy);
+        setApprovedAt(approvedAt);
+        setDispensedBy(dispensedBy);
+        setCancelledBy(cancelledBy);
+        setCancelledAt(cancelledAt);
+        setCancelReason(cancelReason);
+        setIdempotencyKey(idempotencyKey);
+        setRequestFingerprint(requestFingerprint);
+        setUpdatedAt(updatedAt);
         resetChangedOnNotNull();
     }
 }

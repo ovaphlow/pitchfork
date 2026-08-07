@@ -4,6 +4,7 @@ import com.ovaphlow.crate.common.Ulid
 import com.ovaphlow.crate.database.DatabaseConfig
 import com.ovaphlow.crate.database.gen.healthcare.tables.Encounters.ENCOUNTERS
 import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalOrders.MEDICAL_ORDERS
+import com.ovaphlow.crate.database.gen.healthcare.tables.Patients.PATIENTS
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingServicePeriods.NURSING_SERVICE_PERIODS
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingTaskExecutions.NURSING_TASK_EXECUTIONS
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingTasks.NURSING_TASKS
@@ -33,6 +34,7 @@ class MedicalOrderService(
 ) {
     companion object {
         val VALID_ORDER_TYPES = setOf("MEDICATION", "THERAPY", "EXAMINATION", "LAB_TEST")
+        val VALID_ORDER_CLASSES = setOf("LONG_TERM", "TEMPORARY")
         val VALID_ORDER_STATUSES = setOf("ACTIVE", "DISCONTINUED", "CANCELLED", "COMPLETED")
         val STATUS_TRANSITIONS = mapOf(
             "ACTIVE" to listOf("DISCONTINUED", "CANCELLED", "COMPLETED"),
@@ -46,11 +48,22 @@ class MedicalOrderService(
             "EXAMINATION" to "TREATMENT",
             "LAB_TEST" to "TREATMENT",
         )
+        // 只读展示标签：不参与查询、状态机或模块联动
+        val ORDER_TYPE_LABELS = mapOf(
+            "MEDICATION" to "用药医嘱",
+            "THERAPY" to "治疗医嘱",
+            "EXAMINATION" to "检查医嘱",
+            "LAB_TEST" to "检验医嘱",
+        )
+        val ORDER_CLASS_LABELS = mapOf(
+            "LONG_TERM" to "长期医嘱",
+            "TEMPORARY" to "临时医嘱",
+        )
         val DETAIL_WHITELIST = mapOf(
             "MEDICATION" to setOf("drug_name", "dose", "unit", "route", "frequency_code", "frequency_name", "duration_days", "remark"),
             "THERAPY" to setOf("treatment_item", "frequency_code", "frequency_name", "duration_days", "remark"),
-            "EXAMINATION" to setOf("item_name", "remark"),
-            "LAB_TEST" to setOf("item_name", "remark"),
+            "EXAMINATION" to setOf("item_name", "body_part", "priority", "clinical_note", "frequency_code", "frequency_name", "duration_days", "remark"),
+            "LAB_TEST" to setOf("item_name", "specimen_type", "priority", "fasting", "clinical_note", "frequency_code", "frequency_name", "duration_days", "remark"),
         )
         val REQUIRED_DETAIL_KEY = mapOf(
             "MEDICATION" to "drug_name",
@@ -90,10 +103,11 @@ class MedicalOrderService(
 
                     val orderId = Ulid.generate()
                     val now = OffsetDateTime.now()
-                    val insertQuery = ctx.insertInto(MEDICAL_ORDERS)
+                    var insertQuery = ctx.insertInto(MEDICAL_ORDERS)
                         .set(MEDICAL_ORDERS.ID, orderId)
                         .set(MEDICAL_ORDERS.ENCOUNTER_ID, encounterId)
                         .set(MEDICAL_ORDERS.ORDER_TYPE, input.orderType)
+                        .set(MEDICAL_ORDERS.ORDER_CLASS, input.orderClass)
                         .set(MEDICAL_ORDERS.ORDER_CONTENT, input.orderContent)
                         .set(MEDICAL_ORDERS.ORDER_DETAILS, JSONB.valueOf(input.orderDetails.encode()))
                         .set(MEDICAL_ORDERS.START_TIME, input.startTime)
@@ -101,13 +115,16 @@ class MedicalOrderService(
                         .set(MEDICAL_ORDERS.STATUS, "ACTIVE")
                         .set(MEDICAL_ORDERS.CREATED_AT, now)
                         .set(MEDICAL_ORDERS.UPDATED_AT, now)
+                    input.endTime?.let { insertQuery = insertQuery.set(MEDICAL_ORDERS.END_TIME, it) }
 
                     execute(connection, insertQuery).compose {
                         val startDate = businessDate(input.startTime)
-                        val endDate = if (input.orderDetails.containsKey("duration_days")) {
+                        val endDate = input.endTime?.let(::businessDate) ?: if (input.orderDetails.containsKey("duration_days")) {
                             startDate.plusDays(
                                 (input.orderDetails.getValue("duration_days") as Number).toLong()
                             )
+                        } else if (input.orderDetails.getString("frequency_code") == "STAT") {
+                            startDate
                         } else {
                             null
                         }
@@ -248,6 +265,163 @@ class MedicalOrderService(
         }
     }
 
+    // ========================================================================
+    //  011 药房接方/发药内部端口：只供 App 编排调用，不暴露为 Healthcare 路由
+    // ========================================================================
+
+    /**
+     * 药房待接方只读列表（011）：只返回活动养老入住（ELDERLY_CARE + ACTIVE）
+     * 下的 `MEDICATION` + `ACTIVE` 医嘱。读取不写医嘱、不创建任务、不锁库存。
+     * 只读场景调用方传 Pool 即可，不开启事务。
+     */
+    fun listMedicationOrdersForPharmacy(
+        client: SqlClient,
+        encounterId: String?,
+        search: String?,
+        limit: Int,
+        offset: Int,
+    ): Future<JsonObject> {
+        val conditions = mutableListOf<Condition>()
+        conditions.add(MEDICAL_ORDERS.ORDER_TYPE.eq("MEDICATION"))
+        conditions.add(MEDICAL_ORDERS.STATUS.eq("ACTIVE"))
+        conditions.add(ENCOUNTERS.ENCOUNTER_TYPE.eq("ELDERLY_CARE"))
+        conditions.add(ENCOUNTERS.STATUS.eq("ACTIVE"))
+        encounterId?.let { conditions.add(MEDICAL_ORDERS.ENCOUNTER_ID.eq(it)) }
+        if (!search.isNullOrBlank()) {
+            conditions.add(
+                DSL.or(
+                    MEDICAL_ORDERS.ORDER_CONTENT.like("%$search%"),
+                    DSL.field("order_details->>'drug_name'").like("%$search%"),
+                    PATIENTS.NAME.like("%$search%"),
+                    ENCOUNTERS.ENCOUNTER_NO.like("%$search%"),
+                ),
+            )
+        }
+
+        val fields = listOf(
+            MEDICAL_ORDERS.ID.`as`("order_id"),
+            MEDICAL_ORDERS.ENCOUNTER_ID,
+            ENCOUNTERS.PATIENT_ID,
+            PATIENTS.NAME.`as`("patient_name"),
+            ENCOUNTERS.ENCOUNTER_NO,
+            MEDICAL_ORDERS.ORDER_TYPE,
+            MEDICAL_ORDERS.ORDER_CLASS,
+            MEDICAL_ORDERS.ORDER_CONTENT,
+            MEDICAL_ORDERS.ORDER_DETAILS,
+            MEDICAL_ORDERS.DOCTOR,
+            MEDICAL_ORDERS.START_TIME,
+            MEDICAL_ORDERS.END_TIME,
+        )
+        val from = ctx.select(fields)
+            .from(MEDICAL_ORDERS)
+            .join(ENCOUNTERS).on(MEDICAL_ORDERS.ENCOUNTER_ID.eq(ENCOUNTERS.ID))
+            .join(PATIENTS).on(ENCOUNTERS.PATIENT_ID.eq(PATIENTS.ID))
+            .where(conditions)
+        val countQuery = ctx.select(DSL.count().`as`("total"))
+            .from(MEDICAL_ORDERS)
+            .join(ENCOUNTERS).on(MEDICAL_ORDERS.ENCOUNTER_ID.eq(ENCOUNTERS.ID))
+            .join(PATIENTS).on(ENCOUNTERS.PATIENT_ID.eq(PATIENTS.ID))
+            .where(conditions)
+        val dataQuery = from
+            .orderBy(MEDICAL_ORDERS.CREATED_AT.desc())
+            .limit(limit)
+            .offset(offset)
+
+        return execute(client, countQuery).compose { countRows ->
+            val total = countRows.iterator().next().getLong("total") ?: 0L
+            execute(client, dataQuery).map { dataRows ->
+                JsonObject()
+                    .put("records", JsonArray(dataRows.map(::medicationOrderRowJson)))
+                    .put("meta", JsonObject().put("total", total))
+            }
+        }
+    }
+
+    /**
+     * 药房发药事务内精确锁读一条医嘱（011）：FOR UPDATE OF medical_orders，
+     * 返回受控快照。必须在调用方外层事务连接内执行，禁止重新取 Pool。
+     */
+    fun lockMedicationOrderForPharmacy(
+        client: SqlClient,
+        medicalOrderId: String,
+    ): Future<MedicationOrderLockSnapshot> {
+        val fields = listOf(
+            MEDICAL_ORDERS.ID.`as`("order_id"),
+            MEDICAL_ORDERS.ENCOUNTER_ID,
+            MEDICAL_ORDERS.ORDER_TYPE,
+            MEDICAL_ORDERS.ORDER_CLASS,
+            MEDICAL_ORDERS.ORDER_CONTENT,
+            MEDICAL_ORDERS.ORDER_DETAILS,
+            MEDICAL_ORDERS.DOCTOR,
+            MEDICAL_ORDERS.START_TIME,
+            MEDICAL_ORDERS.END_TIME,
+            MEDICAL_ORDERS.STATUS.`as`("order_status"),
+            ENCOUNTERS.PATIENT_ID,
+            ENCOUNTERS.ENCOUNTER_NO,
+            ENCOUNTERS.ENCOUNTER_TYPE,
+            ENCOUNTERS.STATUS.`as`("encounter_status"),
+            PATIENTS.NAME.`as`("patient_name"),
+        )
+        val query = ctx.select(fields)
+            .from(MEDICAL_ORDERS)
+            .join(ENCOUNTERS).on(MEDICAL_ORDERS.ENCOUNTER_ID.eq(ENCOUNTERS.ID))
+            .join(PATIENTS).on(ENCOUNTERS.PATIENT_ID.eq(PATIENTS.ID))
+            .where(MEDICAL_ORDERS.ID.eq(medicalOrderId))
+            .forUpdate()
+            .of(MEDICAL_ORDERS)
+        return execute(client, query).compose { rows ->
+            val row = rows.iterator().asSequence().firstOrNull()
+            if (row == null) {
+                Future.failedFuture(HealthcareNotFoundException("order not found: $medicalOrderId"))
+            } else {
+                Future.succeededFuture(
+                    MedicationOrderLockSnapshot(
+                        orderId = row.getString("order_id"),
+                        encounterId = row.getString("encounter_id"),
+                        patientId = row.getString("patient_id"),
+                        patientName = row.getString("patient_name") ?: "",
+                        encounterNo = row.getString("encounter_no"),
+                        encounterType = row.getString("encounter_type") ?: "",
+                        encounterStatus = row.getString("encounter_status") ?: "",
+                        orderType = row.getString("order_type") ?: "",
+                        orderClass = row.getString("order_class"),
+                        orderStatus = row.getString("order_status") ?: "",
+                        orderContent = row.getString("order_content") ?: "",
+                        doctor = row.getString("doctor") ?: "",
+                        startTime = row.getOffsetDateTime("start_time"),
+                        endTime = row.getOffsetDateTime("end_time"),
+                        orderDetails = (row.getValue("order_details") as? JsonObject) ?: JsonObject(),
+                    ),
+                )
+            }
+        }
+    }
+
+    private fun medicationOrderRowJson(row: Row): JsonObject {
+        val orderType = row.getString("order_type")
+        val orderClass = row.getString("order_class")
+        return JsonObject()
+            .put("order_id", row.getString("order_id"))
+            .put("encounter_id", row.getString("encounter_id"))
+            .put("patient_id", row.getString("patient_id"))
+            .put("patient_name", row.getString("patient_name"))
+            .put("encounter_no", row.getString("encounter_no"))
+            .put("order_type", orderType)
+            .put("order_type_label", ORDER_TYPE_LABELS[orderType])
+            .put("order_class", orderClass)
+            .put("order_class_label", orderClass?.let { ORDER_CLASS_LABELS[it] })
+            .put("drug_name", (row.getValue("order_details") as? JsonObject)?.getString("drug_name"))
+            .put("order_content", row.getString("order_content"))
+            .put("dose", (row.getValue("order_details") as? JsonObject)?.getString("dose"))
+            .put("unit", (row.getValue("order_details") as? JsonObject)?.getString("unit"))
+            .put("route", (row.getValue("order_details") as? JsonObject)?.getString("route"))
+            .put("frequency_code", (row.getValue("order_details") as? JsonObject)?.getString("frequency_code"))
+            .put("frequency_name", (row.getValue("order_details") as? JsonObject)?.getString("frequency_name"))
+            .put("start_time", row.getOffsetDateTime("start_time")?.toString())
+            .put("end_time", row.getOffsetDateTime("end_time")?.toString())
+            .put("doctor", row.getString("doctor"))
+    }
+
     /**
      * 离院/去世终局编排复用：锁读该 encounter 全部 ACTIVE 医嘱，逐条改为
      * DISCONTINUED 并同连接取消关联任务。必须在调用方外层事务内执行。
@@ -358,6 +532,8 @@ class MedicalOrderService(
 
     private fun validateCreateInput(body: JsonObject): CreateOrderInput {
         val orderType = validStatus(body.getString("order_type"), VALID_ORDER_TYPES, "order_type")
+        // 新建医嘱必须明确周期，服务端不根据 duration_days / frequency_code 猜测
+        val orderClass = validStatus(requiredText(body, "order_class"), VALID_ORDER_CLASSES, "order_class")
         val orderContent = requiredText(body, "order_content")
         if (orderContent.length > 2000) {
             throw IllegalArgumentException("order_content must not exceed 2000 characters")
@@ -367,15 +543,31 @@ class MedicalOrderService(
             throw IllegalArgumentException("doctor must not exceed 100 characters")
         }
         val startTime = offsetDateTime(requiredText(body, "start_time"), "start_time")
+        val endTime = body.getString("end_time")?.trim()?.takeIf(String::isNotBlank)?.let {
+            offsetDateTime(it, "end_time")
+        }
+        if (endTime != null && !endTime.isAfter(startTime)) {
+            throw IllegalArgumentException("end_time must be later than start_time")
+        }
         val orderDetails = normalizeDetails(body.getValue("order_details"), orderType)
-        return CreateOrderInput(orderType, orderContent, doctor, startTime, orderDetails)
+        val hasDuration = orderDetails.containsKey("duration_days")
+        val frequencyCode = orderDetails.getString("frequency_code")
+        if (endTime != null && hasDuration) {
+            throw IllegalArgumentException("provide only one temporary order end condition")
+        }
+        if (orderClass == "TEMPORARY" && endTime == null && !hasDuration && frequencyCode != "STAT") {
+            throw IllegalArgumentException("TEMPORARY order requires end_time, duration_days, or STAT frequency")
+        }
+        return CreateOrderInput(orderType, orderClass, orderContent, doctor, startTime, endTime, orderDetails)
     }
 
     private data class CreateOrderInput(
         val orderType: String,
+        val orderClass: String,
         val orderContent: String,
         val doctor: String,
         val startTime: OffsetDateTime,
+        val endTime: OffsetDateTime?,
         val orderDetails: JsonObject,
     )
 
@@ -403,10 +595,14 @@ class MedicalOrderService(
                 normalized.put(key, fieldValue)
                 continue
             }
-            if (fieldValue !is String) {
+            if (fieldValue !is String && fieldValue !is Boolean) {
                 throw IllegalArgumentException("$key must be a string")
             }
-            normalized.put(key, fieldValue.trim())
+            if (fieldValue is String) {
+                normalized.put(key, fieldValue.trim())
+            } else {
+                normalized.put(key, fieldValue)
+            }
         }
 
         val requiredKey = REQUIRED_DETAIL_KEY.getValue(orderType)
@@ -422,11 +618,16 @@ class MedicalOrderService(
         return normalized
     }
 
-    private fun orderJson(row: Row, taskId: String? = null): JsonObject =
-        JsonObject()
+    private fun orderJson(row: Row, taskId: String? = null): JsonObject {
+        val orderType = row.getString("order_type")
+        val orderClass = row.getString("order_class")
+        return JsonObject()
             .put("id", row.getString("id"))
             .put("encounter_id", row.getString("encounter_id"))
-            .put("order_type", row.getString("order_type"))
+            .put("order_type", orderType)
+            .put("order_type_label", ORDER_TYPE_LABELS[orderType])
+            .put("order_class", orderClass)
+            .put("order_class_label", orderClass?.let { ORDER_CLASS_LABELS[it] })
             .put("order_content", row.getString("order_content"))
             .put("order_details", row.getValue("order_details") as? JsonObject)
             .put("start_time", row.getOffsetDateTime("start_time")?.toString())
@@ -436,12 +637,14 @@ class MedicalOrderService(
             .put("task_id", taskId ?: row.getString("task_id"))
             .put("created_at", row.getOffsetDateTime("created_at")?.toString())
             .put("updated_at", row.getOffsetDateTime("updated_at")?.toString())
+    }
 
     private fun businessDate(value: OffsetDateTime): LocalDate =
         value.atZoneSameInstant(businessZone).toLocalDate()
 
     private fun execute(client: SqlClient, query: Query): Future<RowSet<Row>> =
         client.preparedQuery(DatabaseConfig.sql(query)).execute(DatabaseConfig.tuple(query))
+
 
     private fun requiredText(body: JsonObject, key: String): String =
         body.getString(key)?.trim()?.takeIf(String::isNotBlank)

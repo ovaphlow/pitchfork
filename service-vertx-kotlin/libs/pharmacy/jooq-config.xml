@@ -14,7 +14,7 @@
                     <inputSchema>pharmacy</inputSchema>
                 </schema>
             </schemata>
-            <includes>pharmacy_dispenses|pharmacy_dispense_items|pharmacy_returns|pharmacy_return_items|pharmacy_requisitions|pharmacy_requisition_items</includes>
+            <includes>pharmacy_dispenses|pharmacy_dispense_items|pharmacy_returns|pharmacy_return_items|pharmacy_requisitions|pharmacy_requisition_items|pharmacy_purchase_orders|pharmacy_purchase_order_items|pharmacy_purchase_receipts|pharmacy_purchase_receipt_items</includes>
         </database>
         <target>
             <packageName>com.ovaphlow.crate.database.gen.pharmacy</packageName>

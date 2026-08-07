@@ -208,7 +208,7 @@ public class PharmacyDispenseItems extends TableImpl<PharmacyDispenseItemsRecord
 
     @Override
     public List<Index> getIndexes() {
-        return Arrays.asList(Indexes.IDX_DISPENSE_ITEMS_DISPENSE);
+        return Arrays.asList(Indexes.IDX_DISPENSE_ITEMS_DISPENSE, Indexes.IDX_PHARMACY_DISPENSE_ITEMS_ORDER_ITEM);
     }
 
     @Override

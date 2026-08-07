@@ -122,6 +122,64 @@ object HealthcareRoutes {
                 .onSuccess { ctx.json(it) }
                 .onFailure { respondFailure(ctx, it) }
         }
+        // 复评与照护计划修订：具体路由必须位于泛型 encounter 详情路由之前
+        router.post("/encounters/:id/care-plan-revisions").handler { ctx ->
+            service.createCarePlanRevision(requiredId(ctx), body(ctx))
+                .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.get("/encounters/:id/care-plan-revisions").handler { ctx ->
+            service.listCarePlanRevisions(requiredId(ctx))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.get("/care-plan-revisions/:id").handler { ctx ->
+            service.getCarePlanRevision(requiredId(ctx))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 医生病程记录：具体路径必须位于泛型 encounter 详情路由之前
+        router.post("/encounters/:id/progress-notes").handler { ctx ->
+            service.createProgressNote(requiredId(ctx), body(ctx))
+                .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.get("/encounters/:id/progress-notes").handler { ctx ->
+            service.listProgressNotes(
+                encounterId = requiredId(ctx),
+                noteType = ctx.request().getParam("note_type"),
+                dateFrom = ctx.request().getParam("date_from"),
+                dateTo = ctx.request().getParam("date_to"),
+                limit = limit(ctx),
+                offset = offset(ctx),
+            ).onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.get("/progress-notes/:id").handler { ctx ->
+            service.getProgressNote(requiredId(ctx))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 诊断：具体路径必须位于泛型 encounter 详情路由之前
+        router.post("/encounters/:id/diagnoses").handler { ctx ->
+            service.createDiagnosis(requiredId(ctx), body(ctx))
+                .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.get("/encounters/:id/diagnoses").handler { ctx ->
+            service.listDiagnoses(
+                encounterId = requiredId(ctx),
+                diagnosisType = ctx.request().getParam("diagnosis_type"),
+                limit = limit(ctx),
+                offset = offset(ctx),
+            ).onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.get("/diagnoses/:id").handler { ctx ->
+            service.getDiagnosis(requiredId(ctx))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
         router.get("/encounters/:id").handler { ctx ->
             service.getEncounter(requiredId(ctx))
                 .onSuccess { ctx.json(it) }

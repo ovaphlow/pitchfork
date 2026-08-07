@@ -175,6 +175,20 @@ public class PharmacyDispensesRecord extends UpdatableRecordImpl<PharmacyDispens
         return (OffsetDateTime) get(10);
     }
 
+    /**
+     * Setter for <code>pharmacy.pharmacy_dispenses.warehouse</code>.
+     */
+    public void setWarehouse(String value) {
+        set(11, value);
+    }
+
+    /**
+     * Getter for <code>pharmacy.pharmacy_dispenses.warehouse</code>.
+     */
+    public String getWarehouse() {
+        return (String) get(11);
+    }
+
     // -------------------------------------------------------------------------
     // Primary key information
     // -------------------------------------------------------------------------
@@ -198,7 +212,7 @@ public class PharmacyDispensesRecord extends UpdatableRecordImpl<PharmacyDispens
     /**
      * Create a detached, initialised PharmacyDispensesRecord
      */
-    public PharmacyDispensesRecord(String id, String dispenseNo, String patientId, String encounterId, String dispenseType, String status, String pharmacist, String reviewer, JSONB metadata, OffsetDateTime createdAt, OffsetDateTime dispensedAt) {
+    public PharmacyDispensesRecord(String id, String dispenseNo, String patientId, String encounterId, String dispenseType, String status, String pharmacist, String reviewer, JSONB metadata, OffsetDateTime createdAt, OffsetDateTime dispensedAt, String warehouse) {
         super(PharmacyDispenses.PHARMACY_DISPENSES);
 
         setId(id);
@@ -212,6 +226,7 @@ public class PharmacyDispensesRecord extends UpdatableRecordImpl<PharmacyDispens
         setMetadata(metadata);
         setCreatedAt(createdAt);
         setDispensedAt(dispensedAt);
+        setWarehouse(warehouse);
         resetChangedOnNotNull();
     }
 }

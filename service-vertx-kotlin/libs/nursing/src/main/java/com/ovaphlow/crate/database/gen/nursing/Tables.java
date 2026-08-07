@@ -5,6 +5,7 @@ package com.ovaphlow.crate.database.gen.nursing;
 
 
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingAssessments;
+import com.ovaphlow.crate.database.gen.nursing.tables.NursingCarePlanRevisions;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingPlanItems;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingPlans;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingServicePeriods;
@@ -23,6 +24,11 @@ public class Tables {
      * The table <code>nursing.nursing_assessments</code>.
      */
     public static final NursingAssessments NURSING_ASSESSMENTS = NursingAssessments.NURSING_ASSESSMENTS;
+
+    /**
+     * The table <code>nursing.nursing_care_plan_revisions</code>.
+     */
+    public static final NursingCarePlanRevisions NURSING_CARE_PLAN_REVISIONS = NursingCarePlanRevisions.NURSING_CARE_PLAN_REVISIONS;
 
     /**
      * The table <code>nursing.nursing_plan_items</code>.

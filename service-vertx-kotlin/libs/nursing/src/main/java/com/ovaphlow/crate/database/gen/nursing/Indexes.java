@@ -5,6 +5,7 @@ package com.ovaphlow.crate.database.gen.nursing;
 
 
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingAssessments;
+import com.ovaphlow.crate.database.gen.nursing.tables.NursingCarePlanRevisions;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingPlans;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingServicePeriods;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingTaskExecutions;
@@ -29,6 +30,9 @@ public class Indexes {
 
     public static final Index IDX_ASSESS_ENCOUNTER = Internal.createIndex(DSL.name("idx_assess_encounter"), NursingAssessments.NURSING_ASSESSMENTS, new OrderField[] { NursingAssessments.NURSING_ASSESSMENTS.ENCOUNTER_ID }, false);
     public static final Index IDX_ASSESS_PERIOD = Internal.createIndex(DSL.name("idx_assess_period"), NursingAssessments.NURSING_ASSESSMENTS, new OrderField[] { NursingAssessments.NURSING_ASSESSMENTS.PERIOD_ID }, false);
+    public static final Index IDX_CARE_PLAN_REVISION_PERIOD = Internal.createIndex(DSL.name("idx_care_plan_revision_period"), NursingCarePlanRevisions.NURSING_CARE_PLAN_REVISIONS, new OrderField[] { NursingCarePlanRevisions.NURSING_CARE_PLAN_REVISIONS.PERIOD_ID }, false);
+    public static final Index IDX_CARE_PLAN_REVISION_ASSESSMENT = Internal.createIndex(DSL.name("idx_care_plan_revision_assessment"), NursingCarePlanRevisions.NURSING_CARE_PLAN_REVISIONS, new OrderField[] { NursingCarePlanRevisions.NURSING_CARE_PLAN_REVISIONS.ASSESSMENT_ID }, false);
+    public static final Index IDX_CARE_PLAN_REVISION_PREVIOUS_PLAN = Internal.createIndex(DSL.name("idx_care_plan_revision_previous_plan"), NursingCarePlanRevisions.NURSING_CARE_PLAN_REVISIONS, new OrderField[] { NursingCarePlanRevisions.NURSING_CARE_PLAN_REVISIONS.PREVIOUS_PLAN_ID }, false);
     public static final Index IDX_EXEC_TASK = Internal.createIndex(DSL.name("idx_exec_task"), NursingTaskExecutions.NURSING_TASK_EXECUTIONS, new OrderField[] { NursingTaskExecutions.NURSING_TASK_EXECUTIONS.TASK_ID }, false);
     public static final Index IDX_PERIOD_ENCOUNTER_STATUS = Internal.createIndex(DSL.name("idx_period_encounter_status"), NursingServicePeriods.NURSING_SERVICE_PERIODS, new OrderField[] { NursingServicePeriods.NURSING_SERVICE_PERIODS.ENCOUNTER_ID, NursingServicePeriods.NURSING_SERVICE_PERIODS.STATUS }, false);
     public static final Index IDX_PLAN_PERIOD = Internal.createIndex(DSL.name("idx_plan_period"), NursingPlans.NURSING_PLANS, new OrderField[] { NursingPlans.NURSING_PLANS.PERIOD_ID }, false);

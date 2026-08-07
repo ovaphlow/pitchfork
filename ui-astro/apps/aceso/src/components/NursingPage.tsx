@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Badge, Button, Card, EmptyState, Input, Modal, Table, type Column } from "@pitchfork/ui";
 import {
+  createCarePlanRevision,
   createNursingAssessment,
   createNursingPlan,
   createNursingRecord,
@@ -8,10 +9,12 @@ import {
   createNursingTask,
   createNursingTaskExecution,
   enrollElderlyAdmissionCarePeriod,
+  getCarePlanRevision,
   getCurrentSession,
   getNursingPlan,
   getNursingRecord,
   listActiveElderlyAdmissions,
+  listCarePlanRevisions,
   listIdentitySubjects,
   listNursingAssessments,
   listNursingPlans,
@@ -28,6 +31,8 @@ import {
   listInventoryStocks,
   listInventoryWarehouses,
   listNursingExecutionConsumptions,
+  type CarePlanRevisionDetail,
+  type CarePlanRevisionListItem,
   type Encounter,
   type IdentitySubject,
   type NursingAssessment,
@@ -106,6 +111,30 @@ interface ExecutionForm {
   plannedTime: string;
   executor: string;
   note: string;
+}
+
+interface RevisionItemForm {
+  action: string;
+  frequencyCode: string;
+  frequencyName: string;
+  durationDays: number | undefined;
+  remark: string;
+}
+
+interface RevisionForm {
+  assessType: string;
+  assessDate: string;
+  assessor: string;
+  totalScore: string;
+  resultLevel: string;
+  detail: string;
+  remark: string;
+  planName: string;
+  goals: string;
+  createdBy: string;
+  startDate: string;
+  endDate: string;
+  items: RevisionItemForm[];
 }
 
 const selectClass = "h-10 rounded-md border border-border bg-surface px-3 text-sm text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent";
@@ -221,6 +250,22 @@ const taskDefaults = (): TaskForm => ({
 
 const executionDefaults = (): ExecutionForm => ({ plannedTime: "", executor: "", note: "" });
 
+const revisionDefaults = (): RevisionForm => ({
+  assessType: "BARTHEL",
+  assessDate: today(),
+  assessor: "",
+  totalScore: "",
+  resultLevel: "",
+  detail: "",
+  remark: "",
+  planName: "",
+  goals: "",
+  createdBy: "",
+  startDate: today(),
+  endDate: "",
+  items: [{ action: "", frequencyCode: "", frequencyName: "", durationDays: undefined, remark: "" }],
+});
+
 export default function NursingPage() {
   const [admissions, setAdmissions] = useState<ActiveAdmission[]>([]);
   const [selectedEncounterId, setSelectedEncounterId] = useState("");
@@ -237,6 +282,14 @@ export default function NursingPage() {
   const [assessmentOpen, setAssessmentOpen] = useState(false);
   const [planOpen, setPlanOpen] = useState(false);
   const [taskOpen, setTaskOpen] = useState(false);
+  // ——— 复评与照护计划修订 ———
+  const [revisionOpen, setRevisionOpen] = useState(false);
+  const [revisionForm, setRevisionForm] = useState<RevisionForm>(revisionDefaults);
+  const [revisionSaving, setRevisionSaving] = useState(false);
+  const [revisionError, setRevisionError] = useState("");
+  const [revisions, setRevisions] = useState<CarePlanRevisionListItem[]>([]);
+  const [revisionDetail, setRevisionDetail] = useState<CarePlanRevisionDetail | null>(null);
+  const [revisionDetailOpen, setRevisionDetailOpen] = useState(false);
   const [executionTask, setExecutionTask] = useState<NursingTask | null>(null);
   const [assessmentForm, setAssessmentForm] = useState<AssessmentForm>(assessmentDefaults);
   const [planForm, setPlanForm] = useState<PlanForm>(planDefaults);
@@ -340,13 +393,15 @@ export default function NursingPage() {
         setPlans([]);
         setTasks([]);
         setExecutionsByTaskId({});
+        setRevisions([]);
         return;
       }
 
-      const [assessmentResponse, planResponse, taskResponse] = await Promise.all([
+      const [assessmentResponse, planResponse, taskResponse, revisionResponse] = await Promise.all([
         listNursingAssessments({ period_id: currentPeriod.id, limit: 100 }),
         listNursingPlans({ period_id: currentPeriod.id, limit: 100 }),
         listNursingTasks({ period_id: currentPeriod.id, limit: 100 }),
+        listCarePlanRevisions(admission.id).catch(() => ({ records: [], meta: { total: 0 } })),
       ]);
       const plansWithItems = await Promise.all(planResponse.records.map(async (plan) => {
         try {
@@ -363,7 +418,8 @@ export default function NursingPage() {
       setPlans(plansWithItems);
       setTasks(taskResponse.records);
       setExecutionsByTaskId(Object.fromEntries(executionEntries));
-      
+      setRevisions(revisionResponse.records);
+
       // 加载时间线（此时 period 已正确设置，避免跨患者错误）
       void loadTimeline(currentPeriod.id, admission.id);
     } catch (error) {
@@ -405,6 +461,7 @@ export default function NursingPage() {
       setPlans([]);
       setTasks([]);
       setExecutionsByTaskId({});
+      setRevisions([]);
     }
   }, [loadResidentData, selectedAdmission]);
 
@@ -933,6 +990,85 @@ export default function NursingPage() {
     }
   }
 
+  async function handleCreateRevision() {
+    if (!selectedAdmission || !period) return;
+    if (!revisionForm.assessDate) {
+      setRevisionError("评估日期必填");
+      return;
+    }
+    if (!revisionForm.planName.trim()) {
+      setRevisionError("计划名称不能为空");
+      return;
+    }
+    if (!revisionForm.startDate) {
+      setRevisionError("计划开始日期必填");
+      return;
+    }
+    const totalScore = revisionForm.totalScore.trim() ? Number(revisionForm.totalScore) : undefined;
+    if (totalScore !== undefined && Number.isNaN(totalScore)) {
+      setRevisionError("评估分数必须是数字");
+      return;
+    }
+    const items = revisionForm.items
+      .map((item) => ({
+        action: item.action.trim(),
+        ...(item.frequencyCode?.trim() ? { frequency_code: item.frequencyCode.trim() } : {}),
+        ...(item.frequencyName?.trim() ? { frequency_name: item.frequencyName.trim() } : {}),
+        ...(item.durationDays !== undefined && item.durationDays > 0 ? { duration_days: item.durationDays } : {}),
+        ...(item.remark?.trim() ? { remark: item.remark.trim() } : {}),
+      }))
+      .filter((item) => item.action);
+
+    setRevisionSaving(true);
+    setRevisionError("");
+    try {
+      await createCarePlanRevision(selectedAdmission.id, {
+        assessment: {
+          assess_type: revisionForm.assessType,
+          assess_date: revisionForm.assessDate,
+          ...(revisionForm.assessor.trim() ? { assessor: revisionForm.assessor.trim() } : {}),
+          ...(totalScore !== undefined ? { total_score: totalScore } : {}),
+          ...(revisionForm.resultLevel ? { result_level: revisionForm.resultLevel } : {}),
+          ...(revisionForm.detail.trim() ? { detail: { note: revisionForm.detail.trim() } } : {}),
+          ...(revisionForm.remark.trim() ? { remark: revisionForm.remark.trim() } : {}),
+        },
+        plan: {
+          plan_name: revisionForm.planName.trim(),
+          ...(revisionForm.goals.trim() ? { goals: revisionForm.goals.trim() } : {}),
+          ...(revisionForm.createdBy.trim() ? { created_by: revisionForm.createdBy.trim() } : {}),
+          start_date: revisionForm.startDate,
+          ...(revisionForm.endDate ? { end_date: revisionForm.endDate } : {}),
+          items,
+        },
+      });
+      setRevisionOpen(false);
+      setRevisionForm(revisionDefaults());
+      await loadResidentData(selectedAdmission);
+    } catch (error) {
+      setRevisionError(errorMessage(error, "无法提交复评与计划修订"));
+    } finally {
+      setRevisionSaving(false);
+    }
+  }
+
+  function openRevision() {
+    setActionError("");
+    setRevisionError("");
+    setRevisionForm({ ...revisionDefaults(), assessor: currentSubjectId, createdBy: currentSubjectId });
+    setRevisionOpen(true);
+  }
+
+  async function openRevisionDetail(id: string) {
+    setRevisionError("");
+    try {
+      const detail = await getCarePlanRevision(id);
+      setRevisionDetail(detail);
+      setRevisionDetailOpen(true);
+    } catch (error) {
+      setRevisionError(errorMessage(error, "无法加载修订历史详情"));
+    }
+  }
+
   function openAssessment() {
     setActionError("");
     setAssessmentForm({ ...assessmentDefaults(), assessor: currentSubjectId, assessDate: today() });
@@ -1194,8 +1330,37 @@ export default function NursingPage() {
                 {activeTab === "assessments" && <Card className="min-w-0 overflow-hidden" title="护理评估记录" actions={<Button size="sm" onClick={openAssessment}>新增评估</Button>}><Table className="min-w-[900px]" columns={assessmentColumns} data={assessments} loading={false} emptyMessage="暂无护理评估，建议先完成入住后的 Barthel 指数和风险评估。" /></Card>}
 
                 {activeTab === "plans" && (
-                  <Card title="照护计划" actions={<Button size="sm" onClick={openPlan}>制定计划</Button>}>
+                  <Card title="照护计划" actions={<><Button size="sm" variant="secondary" onClick={openRevision}>复评并修订计划</Button><Button size="sm" onClick={openPlan}>制定计划</Button></>}>
                     {plans.length === 0 ? <p className="py-12 text-center text-sm text-fg-dimmed">暂无照护计划，请根据评估结果制定第一份计划。</p> : <div className="space-y-4">{plans.map((plan) => <div key={plan.id} className="rounded-lg border border-border p-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><div className="flex items-center gap-2"><h4 className="font-semibold text-fg-emphasis">{plan.plan_name}</h4><Badge variant={plan.status === "ACTIVE" ? "info" : plan.status === "COMPLETED" ? "success" : "default"}>{planStatusLabel(plan.status)}</Badge></div><p className="mt-2 text-sm text-fg-muted">目标：{plan.goals || "未填写"}</p><p className="mt-1 text-xs text-fg-dimmed">周期：{formatDate(plan.start_date)} 至 {formatDate(plan.end_date)}</p></div>{plan.status === "ACTIVE" && <div className="flex gap-2"><Button size="sm" variant="secondary" disabled={savingId === plan.id} onClick={() => void handlePlanStatus(plan, "COMPLETED")}>完成计划</Button><Button size="sm" variant="link" disabled={savingId === plan.id} onClick={() => void handlePlanStatus(plan, "DISCONTINUED")}>终止计划</Button></div>}</div>{plan.items && plan.items.length > 0 && <div className="mt-4 space-y-2 border-t border-border pt-3">{plan.items.map((item) => <div key={item.id} className="flex flex-wrap items-center justify-between gap-2 text-sm"><span className="text-fg">{item.action}</span><span className="text-fg-dimmed">{item.frequency_name || item.frequency_code || "按需"}{item.duration_days ? ` · ${item.duration_days} 天` : ""}</span></div>)}</div>}</div>)}</div>}
+                    {/* 修订历史：只读展示版本与终态，不提供正文编辑或删除 */}
+                    {revisions.length > 0 && (
+                      <div className="mt-6 border-t border-border pt-4">
+                        <div className="flex items-center justify-between">
+                          <h4 className="text-sm font-semibold text-fg-emphasis">修订历史（复评）</h4>
+                          <span className="text-xs text-fg-dimmed">共 {revisions.length} 次修订</span>
+                        </div>
+                        <div className="mt-3 space-y-2">
+                          {revisions.map((rev) => (
+                            <button
+                              key={rev.id}
+                              type="button"
+                              onClick={() => void openRevisionDetail(rev.id)}
+                              className="flex w-full flex-wrap items-center justify-between gap-2 rounded-md border border-border px-3 py-2 text-left text-sm transition-colors hover:bg-surface-alt"
+                            >
+                              <span className="flex items-center gap-2">
+                                <Badge variant="warning">修订 {rev.revision_no}</Badge>
+                                <span className="font-medium text-fg-emphasis">{rev.new_plan.plan_name}</span>
+                                <Badge variant={rev.new_plan.status === "ACTIVE" ? "info" : "default"}>{planStatusLabel(rev.new_plan.status)}</Badge>
+                              </span>
+                              <span className="text-xs text-fg-dimmed">
+                                {assessmentTypeLabel(rev.assessment.assess_type ?? "")} · {formatDate(rev.assessment.assess_date)}
+                                {rev.previous_plan ? ` · 前版「${rev.previous_plan.plan_name}」${planStatusLabel(rev.previous_plan.status)}` : ""}
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </Card>
                 )}
 
@@ -1466,6 +1631,89 @@ export default function NursingPage() {
           <div className="space-y-3"><div className="flex items-center justify-between"><h4 className="text-sm font-semibold text-fg-emphasis">护理措施</h4><Button type="button" size="sm" variant="secondary" onClick={() => setPlanForm((current) => ({ ...current, items: [...current.items, { action: "", frequencyCode: "", frequencyName: "", durationDays: undefined, remark: "" }] }))}>增加措施</Button></div>{planForm.items.map((item, index) => <div key={index} className="rounded-md border border-border p-3"><div className="grid gap-3 grid-cols-1 sm:grid-cols-3"><Input label="措施" value={item.action} onChange={(event) => setPlanForm((current) => ({ ...current, items: current.items.map((planItem, itemIndex) => itemIndex === index ? { ...planItem, action: event.target.value } : planItem) }))} placeholder="例如：协助晨间洗漱" /><Input label="频次" value={item.frequencyName ?? ""} onChange={(event) => setPlanForm((current) => ({ ...current, items: current.items.map((planItem, itemIndex) => itemIndex === index ? { ...planItem, frequencyName: event.target.value } : planItem) }))} placeholder="每日一次" /><Input label="天数" type="number" value={item.durationDays ?? ""} onChange={(event) => setPlanForm((current) => ({ ...current, items: current.items.map((planItem, itemIndex) => itemIndex === index ? { ...planItem, durationDays: event.target.value ? Number(event.target.value) : undefined } : planItem) }))} placeholder="可选" /></div><div className="mt-3 flex items-end gap-3"><div className="flex-1"><Input label="措施备注" value={item.remark ?? ""} onChange={(event) => setPlanForm((current) => ({ ...current, items: current.items.map((planItem, itemIndex) => itemIndex === index ? { ...planItem, remark: event.target.value } : planItem) }))} placeholder="可选" /></div>{planForm.items.length > 1 && <Button type="button" size="sm" variant="link" onClick={() => setPlanForm((current) => ({ ...current, items: current.items.filter((_, itemIndex) => itemIndex !== index) }))}>移除</Button>}</div></div>)}</div>
           <div className="flex justify-end gap-3"><Button type="button" variant="ghost" onClick={() => setPlanOpen(false)} disabled={saving}>取消</Button><Button type="submit" loading={saving}>保存计划</Button></div>
         </form>
+      </Modal>
+
+      <Modal open={revisionOpen} onClose={() => { if (!revisionSaving) { setRevisionOpen(false); setRevisionError(""); } }} title="复评并修订照护计划">
+        <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void handleCreateRevision(); }}>
+          <div className="rounded-md bg-surface-alt px-3 py-2 text-sm text-fg-muted">
+            复评完成后当前活动计划将转为已终止，并生成新版本计划及其护理任务。
+          </div>
+          <div>
+            <h4 className="text-sm font-semibold text-fg-emphasis">复评信息</h4>
+            <div className="mt-3 grid gap-4 sm:grid-cols-2">
+              <div className="flex flex-col gap-1.5"><label className="text-sm font-medium text-fg-muted" htmlFor="revision-type">评估类型</label><select id="revision-type" className={selectClass} value={revisionForm.assessType} onChange={(event) => setRevisionForm((current) => ({ ...current, assessType: event.target.value }))}><option value="BARTHEL">Barthel 指数</option><option value="FALL_RISK">跌倒风险</option><option value="PRESSURE_SORE">压疮风险</option><option value="NUTRITION">营养评估</option><option value="PAIN">疼痛评估</option><option value="HOME_ENVIRONMENT">居家环境</option><option value="OTHER">其他评估</option></select></div>
+              <Input label="评估日期" type="date" value={revisionForm.assessDate} onChange={(event) => setRevisionForm((current) => ({ ...current, assessDate: event.target.value }))} required />
+              {mounted ? (
+                <div className="flex flex-col gap-1.5"><label className="text-sm font-medium text-fg-muted" htmlFor="revision-assessor">评估人</label><select id="revision-assessor" className={selectClass} value={revisionForm.assessor} onChange={(event) => setRevisionForm((current) => ({ ...current, assessor: event.target.value }))}><option value="">请选择评估人</option>{subjects.map((subject) => <option key={subject.id} value={subject.id}>{subject.display_name}</option>)}</select></div>
+              ) : (
+                <Input label="评估人" value="" placeholder="加载中..." onChange={() => {}} />
+              )}
+              <Input label="总分" type="number" value={revisionForm.totalScore} onChange={(event) => setRevisionForm((current) => ({ ...current, totalScore: event.target.value }))} placeholder="可选" />
+              <div className="flex flex-col gap-1.5 sm:col-span-2"><label className="text-sm font-medium text-fg-muted" htmlFor="revision-level">结果等级</label><select id="revision-level" className={selectClass} value={revisionForm.resultLevel} onChange={(event) => setRevisionForm((current) => ({ ...current, resultLevel: event.target.value }))}><option value="">请选择</option><option value="低风险">低风险</option><option value="中风险">中风险</option><option value="高风险">高风险</option><option value="无需干预">无需干预</option></select></div>
+            </div>
+            <div className="mt-3 flex flex-col gap-1.5"><label className="text-sm font-medium text-fg-muted" htmlFor="revision-detail">评估详情</label><textarea id="revision-detail" rows={2} className={textareaClass} value={revisionForm.detail} onChange={(event) => setRevisionForm((current) => ({ ...current, detail: event.target.value }))} placeholder="记录主要评估结果、风险因素或量表说明" /></div>
+          </div>
+          <div>
+            <h4 className="text-sm font-semibold text-fg-emphasis">新计划版本</h4>
+            <div className="mt-3 grid gap-4 sm:grid-cols-2"><Input label="计划名称" value={revisionForm.planName} onChange={(event) => setRevisionForm((current) => ({ ...current, planName: event.target.value }))} placeholder="例如：第二阶段照护计划" required />{mounted ? (<div className="flex flex-col gap-1.5"><label className="text-sm font-medium text-fg-muted" htmlFor="revision-created-by">制定人</label><select id="revision-created-by" className={selectClass} value={revisionForm.createdBy} onChange={(event) => setRevisionForm((current) => ({ ...current, createdBy: event.target.value }))}><option value="">请选择制定人</option>{subjects.map((subject) => <option key={subject.id} value={subject.id}>{subject.display_name}</option>)}</select></div>) : (<Input label="制定人" value="" placeholder="加载中..." onChange={() => {}} />)}<Input label="开始日期" type="date" value={revisionForm.startDate} onChange={(event) => setRevisionForm((current) => ({ ...current, startDate: event.target.value }))} required /><Input label="结束日期" type="date" value={revisionForm.endDate} onChange={(event) => setRevisionForm((current) => ({ ...current, endDate: event.target.value }))} /></div>
+            <div className="mt-3 flex flex-col gap-1.5"><label className="text-sm font-medium text-fg-muted" htmlFor="revision-goals">照护目标</label><textarea id="revision-goals" rows={2} className={textareaClass} value={revisionForm.goals} onChange={(event) => setRevisionForm((current) => ({ ...current, goals: event.target.value }))} placeholder="例如：提高日常活动能力，预防跌倒" /></div>
+            <div className="mt-3 space-y-3"><div className="flex items-center justify-between"><h5 className="text-sm font-medium text-fg-emphasis">护理措施</h5><Button type="button" size="sm" variant="secondary" onClick={() => setRevisionForm((current) => ({ ...current, items: [...current.items, { action: "", frequencyCode: "", frequencyName: "", durationDays: undefined, remark: "" }] }))}>增加措施</Button></div>{revisionForm.items.map((item, index) => <div key={index} className="rounded-md border border-border p-3"><div className="grid gap-3 grid-cols-1 sm:grid-cols-3"><Input label="措施" value={item.action} onChange={(event) => setRevisionForm((current) => ({ ...current, items: current.items.map((revisionItem, itemIndex) => itemIndex === index ? { ...revisionItem, action: event.target.value } : revisionItem) }))} placeholder="例如：每日协助步行训练" /><div className="flex flex-col gap-1.5"><label className="text-xs text-fg-muted" htmlFor={`revision-freq-${index}`}>频次</label><select id={`revision-freq-${index}`} className={selectClass} value={item.frequencyCode} onChange={(event) => { const code = event.target.value; const name = frequencyOptions.find(([c]) => c === code)?.[1] ?? ""; setRevisionForm((current) => ({ ...current, items: current.items.map((revisionItem, itemIndex) => itemIndex === index ? { ...revisionItem, frequencyCode: code, frequencyName: name } : revisionItem) })); }}><option value="">请选择</option>{frequencyOptions.map(([code, name]) => <option key={code} value={code}>{code} — {name}</option>)}</select></div><Input label="天数" type="number" value={item.durationDays ?? ""} onChange={(event) => setRevisionForm((current) => ({ ...current, items: current.items.map((revisionItem, itemIndex) => itemIndex === index ? { ...revisionItem, durationDays: event.target.value ? Number(event.target.value) : undefined } : revisionItem) }))} placeholder="可选" /></div><div className="mt-3 flex items-end gap-3"><div className="flex-1"><Input label="措施备注" value={item.remark ?? ""} onChange={(event) => setRevisionForm((current) => ({ ...current, items: current.items.map((revisionItem, itemIndex) => itemIndex === index ? { ...revisionItem, remark: event.target.value } : revisionItem) }))} placeholder="可选" /></div>{revisionForm.items.length > 1 && <Button type="button" size="sm" variant="link" onClick={() => setRevisionForm((current) => ({ ...current, items: current.items.filter((_, itemIndex) => itemIndex !== index) }))}>移除</Button>}</div></div>)}</div>
+          </div>
+          {revisionError && <p className="text-sm text-danger">{revisionError}</p>}
+          <div className="flex justify-end gap-3"><Button type="button" variant="ghost" onClick={() => { setRevisionOpen(false); setRevisionError(""); }} disabled={revisionSaving}>取消</Button><Button type="submit" loading={revisionSaving}>提交复评并修订</Button></div>
+        </form>
+      </Modal>
+
+      {/* ——— 修订历史详情 ——— */}
+      <Modal open={revisionDetailOpen} onClose={() => { setRevisionDetailOpen(false); setRevisionDetail(null); }} title="修订历史详情">
+        {revisionDetail ? (
+          <div className="space-y-4">
+            <div className="rounded-md bg-surface-alt px-3 py-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant="warning">修订 {revisionDetail.revision_no}</Badge>
+                <span className="text-xs text-fg-dimmed">{formatDateTime(revisionDetail.created_at)}</span>
+                <span className="text-xs text-fg-dimmed">计划 {revisionDetail.plan.id.slice(0, 8)}…</span>
+              </div>
+            </div>
+            <div>
+              <h4 className="text-sm font-semibold text-fg-emphasis">复评</h4>
+              <div className="mt-2 rounded-md border border-border p-3 text-sm">
+                <div className="flex flex-wrap gap-x-6 gap-y-1 text-fg-muted">
+                  <span>类型：<span className="text-fg">{assessmentTypeLabel(revisionDetail.assessment.assess_type)}</span></span>
+                  <span>日期：<span className="text-fg">{formatDate(revisionDetail.assessment.assess_date)}</span></span>
+                  <span>分数：<span className="text-fg">{revisionDetail.assessment.total_score ?? "-"}</span></span>
+                  <span>结果等级：<span className="text-fg">{revisionDetail.assessment.result_level || "-"}</span></span>
+                </div>
+                {revisionDetail.assessment.remark && <p className="mt-2 text-xs text-fg-muted">备注：{revisionDetail.assessment.remark}</p>}
+              </div>
+            </div>
+            {revisionDetail.previous_plan && (
+              <div>
+                <h4 className="text-sm font-semibold text-fg-emphasis">上一版计划（已终止）</h4>
+                <div className="mt-2 rounded-md border border-border p-3">
+                  <div className="flex flex-wrap items-center gap-2"><span className="font-medium text-fg-emphasis">{revisionDetail.previous_plan.plan_name}</span><Badge variant="default">{planStatusLabel(revisionDetail.previous_plan.status)}</Badge></div>
+                  <p className="mt-1 text-xs text-fg-muted">周期：{formatDate(revisionDetail.previous_plan.start_date)} 至 {formatDate(revisionDetail.previous_plan.end_date)}</p>
+                  {revisionDetail.previous_plan.items && revisionDetail.previous_plan.items.length > 0 && <div className="mt-2 space-y-1 border-t border-border pt-2">{revisionDetail.previous_plan.items.map((item) => <div key={item.id} className="flex flex-wrap items-center justify-between gap-2 text-xs"><span className="text-fg">{item.action}</span><span className="text-fg-dimmed">{item.frequency_name || item.frequency_code || "按需"}{item.duration_days ? ` · ${item.duration_days} 天` : ""}</span></div>)}</div>}
+                </div>
+              </div>
+            )}
+            <div>
+              <h4 className="text-sm font-semibold text-fg-emphasis">新计划版本（执行中）</h4>
+              <div className="mt-2 rounded-md border border-border p-3">
+                <div className="flex flex-wrap items-center gap-2"><span className="font-medium text-fg-emphasis">{revisionDetail.plan.plan_name}</span><Badge variant="info">{planStatusLabel(revisionDetail.plan.status)}</Badge></div>
+                <p className="mt-1 text-xs text-fg-muted">目标：{revisionDetail.plan.goals || "未填写"}</p>
+                <p className="mt-1 text-xs text-fg-muted">周期：{formatDate(revisionDetail.plan.start_date)} 至 {formatDate(revisionDetail.plan.end_date)}</p>
+                {revisionDetail.plan.items && revisionDetail.plan.items.length > 0 && <div className="mt-2 space-y-1 border-t border-border pt-2">{revisionDetail.plan.items.map((item) => <div key={item.id} className="flex flex-wrap items-center justify-between gap-2 text-xs"><span className="text-fg">{item.action}</span><span className="text-fg-dimmed">{item.frequency_name || item.frequency_code || "按需"}{item.duration_days ? ` · ${item.duration_days} 天` : ""}</span></div>)}</div>}
+                {revisionDetail.tasks.length > 0 && <div className="mt-2 space-y-1 border-t border-border pt-2">{revisionDetail.tasks.map((task) => <div key={task.id} className="flex flex-wrap items-center justify-between gap-2 text-xs"><span className="text-fg">任务：{task.description}</span><span className="text-fg-dimmed">{taskStatusLabel(task.status)}{task.start_date ? ` · ${formatDate(task.start_date)} 起` : ""}{task.end_date ? ` · ${formatDate(task.end_date)} 止` : ""}</span></div>)}</div>}
+              </div>
+            </div>
+            <div className="flex justify-end gap-3">
+              <Button variant="ghost" onClick={() => { setRevisionDetailOpen(false); setRevisionDetail(null); }}>关闭</Button>
+            </div>
+          </div>
+        ) : (
+          <div className="py-8 text-center text-sm text-fg-dimmed">加载中...</div>
+        )}
       </Modal>
 
       <Modal open={taskOpen} onClose={() => !saving && setTaskOpen(false)} title="创建照护任务">

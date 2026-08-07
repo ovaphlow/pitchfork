@@ -1,16 +1,22 @@
 import { useCallback, useEffect, useState } from "react";
 import { Badge, Button, Card, EmptyState, Input, Modal, Table, type Column } from "@pitchfork/ui";
 import {
+  createDiagnosis,
   createMedicalOrder,
+  createProgressNote,
   getMedicalOrder,
-  listActiveElderlyAdmissions,
+  listDiagnoses,
+  listElderlyAdmissions,
   listMedicalOrders,
   listPatients,
+  listProgressNotes,
   updateMedicalOrderStatus,
+  type Diagnosis,
   type Encounter,
   type MedicalOrder,
   type MedicalOrderExecutionSummary,
   type MedicalOrderInput,
+  type ProgressNote,
 } from "@pitchfork/shared/aceso";
 
 interface ActiveAdmission extends Encounter {
@@ -19,9 +25,11 @@ interface ActiveAdmission extends Encounter {
 
 interface OrderForm {
   orderType: string;
+  orderClass: string;
   orderContent: string;
   doctor: string;
   startTime: string;
+  endTime: string;
   drugName: string;
   dose: string;
   unit: string;
@@ -34,11 +42,29 @@ interface OrderForm {
   itemName: string;
 }
 
+interface NoteForm {
+  content: string;
+  physician: string;
+  recordTime: string;
+}
+
+interface DiagnosisForm {
+  diagnosisType: string;
+  diagnosisText: string;
+  icdCode: string;
+  diagnosisDate: string;
+  physician: string;
+  isMajor: boolean;
+  remark: string;
+}
+
 const orderFormDefaults: OrderForm = {
   orderType: "MEDICATION",
+  orderClass: "LONG_TERM",
   orderContent: "",
   doctor: "",
   startTime: "",
+  endTime: "",
   drugName: "",
   dose: "",
   unit: "",
@@ -49,6 +75,23 @@ const orderFormDefaults: OrderForm = {
   remark: "",
   treatmentItem: "",
   itemName: "",
+};
+
+const noteFormDefaults: NoteForm = { content: "", physician: "", recordTime: "" };
+
+function todayLocal(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+}
+
+const diagnosisFormDefaults: DiagnosisForm = {
+  diagnosisType: "PRIMARY",
+  diagnosisText: "",
+  icdCode: "",
+  diagnosisDate: todayLocal(),
+  physician: "",
+  isMajor: false,
+  remark: "",
 };
 
 const FREQUENCY_OPTIONS: Array<{ code: string; label: string }> = [
@@ -65,10 +108,10 @@ const FREQUENCY_OPTIONS: Array<{ code: string; label: string }> = [
 ];
 
 const ORDER_TYPE_LABEL: Record<string, string> = {
-  MEDICATION: "用药",
-  THERAPY: "诊疗",
-  EXAMINATION: "检查",
-  LAB_TEST: "检验",
+  MEDICATION: "用药医嘱",
+  THERAPY: "治疗医嘱",
+  EXAMINATION: "检查医嘱",
+  LAB_TEST: "检验医嘱",
 };
 
 const ORDER_STATUS_LABEL: Record<string, string> = {
@@ -83,6 +126,18 @@ const ORDER_STATUS_VARIANT: Record<string, "default" | "success" | "warning" | "
   DISCONTINUED: "warning",
   CANCELLED: "danger",
   COMPLETED: "success",
+};
+
+const ENCOUNTER_STATUS_LABEL: Record<string, string> = {
+  ACTIVE: "在住",
+  DISCHARGED: "已离院",
+  TRANSFERRED: "已转出",
+  DECEASED: "已去世",
+};
+
+const DIAGNOSIS_TYPE_LABEL: Record<string, string> = {
+  PRIMARY: "主要诊断",
+  SECONDARY: "次要诊断",
 };
 
 const EXECUTION_SUMMARY_ITEMS: Array<[keyof MedicalOrderExecutionSummary, string]> = [
@@ -100,6 +155,11 @@ const ORDER_DETAIL_LABELS: Record<string, string> = {
   route: "途径",
   treatment_item: "诊疗项目",
   item_name: "项目名称",
+  body_part: "检查部位",
+  specimen_type: "标本类型",
+  priority: "优先级",
+  fasting: "是否空腹",
+  clinical_note: "临床说明",
   frequency_code: "频次编码",
   frequency_name: "频次",
   duration_days: "天数",
@@ -108,6 +168,7 @@ const ORDER_DETAIL_LABELS: Record<string, string> = {
 
 const selectClass = "h-10 rounded-md border border-border bg-surface px-3 text-sm text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent";
 const textareaClass = "w-full resize-none rounded-md border border-border bg-surface px-3 py-2 text-sm text-fg placeholder:text-fg-dimmed focus:outline-none focus-visible:ring-2 focus-visible:ring-accent";
+const radioClass = "h-4 w-4 border-border bg-surface accent-accent";
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
@@ -133,6 +194,12 @@ function formatDetailValue(value: unknown): string {
   return JSON.stringify(value);
 }
 
+function orderClassVariant(orderClass: string | null): "default" | "success" | "warning" {
+  if (orderClass === "TEMPORARY") return "warning";
+  if (orderClass === "LONG_TERM") return "success";
+  return "default";
+}
+
 export default function OrdersPage() {
   const [admissions, setAdmissions] = useState<ActiveAdmission[]>([]);
   const [admissionsLoading, setAdmissionsLoading] = useState(true);
@@ -140,6 +207,25 @@ export default function OrdersPage() {
   const [selectedEncounterId, setSelectedEncounterId] = useState("");
   const [preferredEncounterId] = useState(readEncounterIdFromUrl);
 
+  // —— 病程记录 ——
+  const [notes, setNotes] = useState<ProgressNote[]>([]);
+  const [notesTotal, setNotesTotal] = useState(0);
+  const [notesLoading, setNotesLoading] = useState(false);
+  const [notesError, setNotesError] = useState("");
+  const [noteForm, setNoteForm] = useState<NoteForm>(noteFormDefaults);
+  const [noteFormError, setNoteFormError] = useState("");
+  const [noteSaving, setNoteSaving] = useState(false);
+
+  // —— 诊断 ——
+  const [diagnoses, setDiagnoses] = useState<Diagnosis[]>([]);
+  const [diagnosesTotal, setDiagnosesTotal] = useState(0);
+  const [diagnosesLoading, setDiagnosesLoading] = useState(false);
+  const [diagnosesError, setDiagnosesError] = useState("");
+  const [diagnosisForm, setDiagnosisForm] = useState<DiagnosisForm>(diagnosisFormDefaults);
+  const [diagnosisFormError, setDiagnosisFormError] = useState("");
+  const [diagnosisSaving, setDiagnosisSaving] = useState(false);
+
+  // —— 医嘱 ——
   const [orders, setOrders] = useState<MedicalOrder[]>([]);
   const [ordersTotal, setOrdersTotal] = useState(0);
   const [ordersLoading, setOrdersLoading] = useState(false);
@@ -163,27 +249,62 @@ export default function OrdersPage() {
     setAdmissionsLoading(true);
     setPageError("");
     try {
+      // 含已离院/已去世入住（只读历史），ACTIVE 优先排列
       const [patientResponse, encounterResponse] = await Promise.all([
-        listPatients({ status: "ACTIVE", limit: 100 }),
-        listActiveElderlyAdmissions({ limit: 100 }),
+        listPatients({ limit: 200 }),
+        listElderlyAdmissions({ status: "", limit: 200 }),
       ]);
       const patientById = new Map(patientResponse.records.map((patient) => [patient.id, patient]));
       const records = encounterResponse.records.map((encounter) => ({
         ...encounter,
         patientName: patientById.get(encounter.patient_id)?.name ?? encounter.patient_id,
       }));
+      const statusRank: Record<string, number> = { ACTIVE: 0, DISCHARGED: 1, DECEASED: 2, TRANSFERRED: 3 };
+      records.sort((a, b) => (statusRank[a.status] ?? 9) - (statusRank[b.status] ?? 9) || (b.admit_date ?? "").localeCompare(a.admit_date ?? ""));
       setAdmissions(records);
       setSelectedEncounterId((current) => {
         if (records.some((record) => record.id === current)) return current;
-        const candidate = preferredEncounterId || records[0]?.id || "";
+        const candidate = preferredEncounterId || records.find((record) => record.status === "ACTIVE")?.id || "";
         return records.some((record) => record.id === candidate) ? candidate : records[0]?.id || "";
       });
     } catch (error) {
-      setPageError(errorMessage(error, "无法加载活动入住"));
+      setPageError(errorMessage(error, "无法加载入住"));
     } finally {
       setAdmissionsLoading(false);
     }
   }, [preferredEncounterId]);
+
+  const loadNotes = useCallback(async () => {
+    if (!selectedEncounterId) return;
+    setNotesLoading(true);
+    setNotesError("");
+    try {
+      const response = await listProgressNotes(selectedEncounterId, { limit: 100 });
+      setNotes(response.records);
+      setNotesTotal(response.meta.total);
+    } catch (error) {
+      setNotes([]);
+      setNotesError(errorMessage(error, "无法加载病程记录"));
+    } finally {
+      setNotesLoading(false);
+    }
+  }, [selectedEncounterId]);
+
+  const loadDiagnoses = useCallback(async () => {
+    if (!selectedEncounterId) return;
+    setDiagnosesLoading(true);
+    setDiagnosesError("");
+    try {
+      const response = await listDiagnoses(selectedEncounterId, { limit: 100 });
+      setDiagnoses(response.records);
+      setDiagnosesTotal(response.meta.total);
+    } catch (error) {
+      setDiagnoses([]);
+      setDiagnosesError(errorMessage(error, "无法加载诊断"));
+    } finally {
+      setDiagnosesLoading(false);
+    }
+  }, [selectedEncounterId]);
 
   const loadOrders = useCallback(async () => {
     if (!selectedEncounterId) return;
@@ -210,8 +331,81 @@ export default function OrdersPage() {
   }, [loadAdmissions]);
 
   useEffect(() => {
+    void loadNotes();
+  }, [loadNotes]);
+
+  useEffect(() => {
+    void loadDiagnoses();
+  }, [loadDiagnoses]);
+
+  useEffect(() => {
     void loadOrders();
   }, [loadOrders]);
+
+  const selectedAdmission = admissions.find((admission) => admission.id === selectedEncounterId) ?? null;
+  // 已离院/已去世等非活动入住只读历史
+  const isReadOnly = selectedAdmission !== null && selectedAdmission.status !== "ACTIVE";
+
+  // —— 病程记录 ——
+
+  async function handleSaveNote() {
+    const content = noteForm.content.trim();
+    const physician = noteForm.physician.trim();
+    if (!content || !physician) {
+      setNoteFormError("记录内容和医生不能为空");
+      return;
+    }
+    setNoteSaving(true);
+    setNoteFormError("");
+    try {
+      const recordTime = noteForm.recordTime.trim();
+      await createProgressNote(selectedEncounterId, {
+        note_type: "DAILY",
+        content,
+        physician,
+        ...(recordTime ? { record_time: `${recordTime}:00+08:00` } : {}),
+      });
+      setNoteForm(noteFormDefaults);
+      await loadNotes();
+    } catch (error) {
+      setNoteFormError(errorMessage(error, "无法保存病程记录"));
+    } finally {
+      setNoteSaving(false);
+    }
+  }
+
+  // —— 诊断 ——
+
+  async function handleSaveDiagnosis() {
+    const diagnosisText = diagnosisForm.diagnosisText.trim();
+    const physician = diagnosisForm.physician.trim();
+    const diagnosisDate = diagnosisForm.diagnosisDate.trim();
+    if (!diagnosisText || !physician || !diagnosisDate) {
+      setDiagnosisFormError("诊断内容、医生和诊断日期不能为空");
+      return;
+    }
+    setDiagnosisSaving(true);
+    setDiagnosisFormError("");
+    try {
+      await createDiagnosis(selectedEncounterId, {
+        diagnosis_type: diagnosisForm.diagnosisType === "SECONDARY" ? "SECONDARY" : "PRIMARY",
+        diagnosis_text: diagnosisText,
+        diagnosis_date: diagnosisDate,
+        physician,
+        ...(diagnosisForm.icdCode.trim() ? { icd_code: diagnosisForm.icdCode.trim() } : {}),
+        ...(diagnosisForm.isMajor ? { is_major: true } : {}),
+        ...(diagnosisForm.remark.trim() ? { remark: diagnosisForm.remark.trim() } : {}),
+      });
+      setDiagnosisForm((current) => ({ ...diagnosisFormDefaults, diagnosisDate: current.diagnosisDate, physician: current.physician }));
+      await loadDiagnoses();
+    } catch (error) {
+      setDiagnosisFormError(errorMessage(error, "无法保存诊断"));
+    } finally {
+      setDiagnosisSaving(false);
+    }
+  }
+
+  // —— 医嘱 ——
 
   function openCreate() {
     setForm(orderFormDefaults);
@@ -260,13 +454,18 @@ export default function OrdersPage() {
       details.duration_days = days;
     }
 
+    const endTime = form.endTime.trim();
+    if (form.orderClass === "TEMPORARY" && !endTime && !durationDays && form.frequencyCode !== "STAT") return null;
+
     if (form.remark.trim()) details.remark = form.remark.trim();
 
     return {
       order_type: form.orderType,
+      order_class: form.orderClass,
       order_content: orderContent,
       doctor,
       start_time: `${startTime}:00+08:00`,
+      ...(endTime ? { end_time: `${endTime}:00+08:00` } : {}),
       ...(Object.keys(details).length > 0 ? { order_details: details } : {}),
     };
   }
@@ -279,9 +478,11 @@ export default function OrdersPage() {
       } else if (form.orderType === "MEDICATION" && !form.drugName.trim()) {
         setFormError("用药医嘱必须填写药名");
       } else if (form.orderType === "THERAPY" && !form.treatmentItem.trim()) {
-        setFormError("诊疗医嘱必须填写诊疗项目");
+        setFormError("治疗医嘱必须填写治疗项目");
       } else if ((form.orderType === "EXAMINATION" || form.orderType === "LAB_TEST") && !form.itemName.trim()) {
         setFormError("检查/检验医嘱必须填写项目名称");
+      } else if (form.orderClass === "TEMPORARY" && !form.endTime.trim() && !form.durationDays.trim() && form.frequencyCode !== "STAT") {
+        setFormError("临时医嘱必须填写结束时间、持续天数，或选择立即执行（STAT）");
       } else {
         setFormError("时长必须是正整数");
       }
@@ -350,6 +551,16 @@ export default function OrdersPage() {
       render: (row) => ORDER_TYPE_LABEL[row.order_type] ?? row.order_type,
     },
     {
+      key: "order_class",
+      header: "周期",
+      className: "min-w-[90px]",
+      render: (row) => (
+        <Badge variant={orderClassVariant(row.order_class)}>
+          {row.order_class_label ?? "-"}
+        </Badge>
+      ),
+    },
+    {
       key: "order_content",
       header: "医嘱正文",
       className: "min-w-[240px] max-w-[380px]",
@@ -393,34 +604,77 @@ export default function OrdersPage() {
     },
   ];
 
-  const selectedAdmission = admissions.find((admission) => admission.id === selectedEncounterId) ?? null;
+  const diagnosisColumns: Column<Diagnosis>[] = [
+    {
+      key: "diagnosis_date",
+      header: "日期",
+      className: "min-w-[110px]",
+      render: (row) => row.diagnosis_date || "-",
+    },
+    {
+      key: "diagnosis_type",
+      header: "类型",
+      className: "min-w-[100px]",
+      render: (row) => DIAGNOSIS_TYPE_LABEL[row.diagnosis_type] ?? row.diagnosis_type,
+    },
+    {
+      key: "icd_code",
+      header: "ICD",
+      className: "min-w-[90px]",
+      render: (row) => row.icd_code || "-",
+    },
+    {
+      key: "diagnosis_text",
+      header: "诊断内容",
+      className: "min-w-[200px] max-w-[320px]",
+      render: (row) => (
+        <span className="block truncate" title={row.diagnosis_text}>
+          {row.diagnosis_text}
+        </span>
+      ),
+    },
+    {
+      key: "physician",
+      header: "医生",
+      className: "min-w-[110px]",
+      render: (row) => row.physician || "-",
+    },
+    {
+      key: "is_major",
+      header: "主诊断",
+      className: "min-w-[80px]",
+      render: (row) => (row.is_major ? <Badge variant="success">主要</Badge> : <span className="text-fg-dimmed">-</span>),
+    },
+  ];
 
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h2 className="text-lg font-semibold text-fg-emphasis">医嘱管理</h2>
-          <p className="mt-1 text-sm text-fg-muted">选择活动入住后开立、筛选并查看医嘱</p>
+          <h2 className="text-lg font-semibold text-fg-emphasis">医生诊疗</h2>
+          <p className="mt-1 text-sm text-fg-muted">选择活动入住老人，书写病程记录、录入诊断并开立医嘱</p>
         </div>
         {admissions.length > 0 && (
           <div className="flex flex-wrap items-end gap-3">
             <div className="flex flex-col gap-1.5">
-              <label className="text-sm font-medium text-fg-muted" htmlFor="orders-encounter">活动入住</label>
+              <label className="text-sm font-medium text-fg-muted" htmlFor="orders-encounter">入住老人</label>
               <select
                 id="orders-encounter"
-                className={`${selectClass} min-w-[260px]`}
+                className={`${selectClass} min-w-[280px]`}
                 value={selectedEncounterId}
                 onChange={(event) => setSelectedEncounterId(event.target.value)}
                 disabled={admissionsLoading}
               >
                 {admissions.map((admission) => (
                   <option key={admission.id} value={admission.id}>
-                    {admission.patientName} · {admission.encounter_no}
+                    {admission.patientName} · {admission.encounter_no}（{ENCOUNTER_STATUS_LABEL[admission.status] ?? admission.status}）
                   </option>
                 ))}
               </select>
             </div>
-            <Button variant="primary" onClick={openCreate}>开立医嘱</Button>
+            {!isReadOnly && (
+              <Button variant="primary" onClick={openCreate}>开立医嘱</Button>
+            )}
           </div>
         )}
       </div>
@@ -429,14 +683,14 @@ export default function OrdersPage() {
 
       {admissionsLoading ? (
         <Card>
-          <p className="py-10 text-center text-sm text-fg-dimmed">正在加载活动入住…</p>
+          <p className="py-10 text-center text-sm text-fg-dimmed">正在加载入住…</p>
         </Card>
       ) : admissions.length === 0 ? (
         <Card>
           <EmptyState
             icon="🏠"
-            title="暂无活动入住"
-            description="请先在入住管理办理养老入住，再开立医嘱。"
+            title="暂无入住老人"
+            description="请先在入住管理办理养老入住，再开展诊疗工作。"
             action={
               <a
                 href="/dashboard/admission"
@@ -450,13 +704,217 @@ export default function OrdersPage() {
       ) : (
         <>
           {selectedAdmission && (
-            <div className="rounded-lg border border-info/30 bg-info-bg px-4 py-3 text-sm text-info">
-              当前入住：{selectedAdmission.patientName} · {selectedAdmission.encounter_no}（{selectedAdmission.ward || selectedAdmission.department || "未设置床位"}）
+            <div className={`rounded-lg border px-4 py-3 text-sm ${isReadOnly ? "border-warning/30 bg-warning-bg text-warning" : "border-info/30 bg-info-bg text-info"}`}>
+              <div className="flex flex-wrap items-center gap-x-6 gap-y-1">
+                <span className="font-medium">{selectedAdmission.patientName}</span>
+                <span>入住号：{selectedAdmission.encounter_no}</span>
+                <span>床位：{selectedAdmission.ward || selectedAdmission.department || "未设置"}</span>
+                <span>入住日期：{formatDateTime(selectedAdmission.admit_date)}</span>
+                <Badge variant={selectedAdmission.status === "ACTIVE" ? "success" : "warning"}>
+                  {ENCOUNTER_STATUS_LABEL[selectedAdmission.status] ?? selectedAdmission.status}
+                </Badge>
+              </div>
+              {isReadOnly && (
+                <p className="mt-1 text-sm">该入住已{ENCOUNTER_STATUS_LABEL[selectedAdmission.status] ?? "结束"}，仅可查看历史病程、诊断和医嘱。</p>
+              )}
             </div>
           )}
 
+          {/* 病程记录 */}
           <Card
-            title="医嘱列表"
+            title="病程记录"
+            actions={<span className="text-sm text-fg-dimmed">共 {notesTotal} 条</span>}
+          >
+            {notesError && (
+              <div className="mb-4 rounded-lg border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">
+                {notesError}
+              </div>
+            )}
+
+            {!isReadOnly && (
+              <form
+                className="mb-6 space-y-4 rounded-md border border-border bg-surface-alt p-4"
+                noValidate
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void handleSaveNote();
+                }}
+              >
+                <p className="text-sm font-semibold text-fg-emphasis">新增病程记录</p>
+                {noteFormError && (
+                  <div role="alert" className="rounded-lg border border-danger/30 bg-danger-bg px-3 py-2 text-sm text-danger">
+                    {noteFormError}
+                  </div>
+                )}
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="flex flex-col gap-1.5 sm:col-span-2">
+                    <label className="text-sm font-medium text-fg-muted" htmlFor="note-content">记录内容（必填）</label>
+                    <textarea
+                      id="note-content"
+                      className={textareaClass}
+                      rows={3}
+                      maxLength={2000}
+                      value={noteForm.content}
+                      onChange={(event) => setNoteForm((current) => ({ ...current, content: event.target.value }))}
+                      placeholder="请输入病程记录内容，最多 2000 字"
+                      required
+                    />
+                  </div>
+                  <Input
+                    label="医生（必填）"
+                    value={noteForm.physician}
+                    onChange={(event) => setNoteForm((current) => ({ ...current, physician: event.target.value }))}
+                    placeholder="请输入记录医生"
+                    maxLength={100}
+                    required
+                  />
+                  <Input
+                    label="记录时间（可选，缺省为当前时间）"
+                    type="datetime-local"
+                    value={noteForm.recordTime}
+                    onChange={(event) => setNoteForm((current) => ({ ...current, recordTime: event.target.value }))}
+                  />
+                </div>
+                <div className="flex justify-end">
+                  <Button type="submit" loading={noteSaving} disabled={noteSaving}>保存病程记录</Button>
+                </div>
+              </form>
+            )}
+
+            {notesLoading ? (
+              <p className="py-6 text-center text-sm text-fg-dimmed">正在加载病程记录…</p>
+            ) : notes.length === 0 ? (
+              <p className="py-6 text-center text-sm text-fg-dimmed">暂无病程记录</p>
+            ) : (
+              <ol className="max-h-[420px] space-y-3 overflow-y-auto pr-1">
+                {notes.map((note) => (
+                  <li key={note.id} className="rounded-md border border-border bg-surface-alt p-3">
+                    <div className="mb-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-fg-muted">
+                      <span className="font-medium text-fg">{formatDateTime(note.record_time)}</span>
+                      <span>{note.physician}</span>
+                      <span className="ml-auto break-all">{note.id}</span>
+                    </div>
+                    <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-fg">{note.content}</p>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </Card>
+
+          {/* 诊断 */}
+          <Card
+            title="诊断"
+            actions={<span className="text-sm text-fg-dimmed">共 {diagnosesTotal} 条</span>}
+          >
+            {diagnosesError && (
+              <div className="mb-4 rounded-lg border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">
+                {diagnosesError}
+              </div>
+            )}
+
+            {!isReadOnly && (
+              <form
+                className="mb-6 space-y-4 rounded-md border border-border bg-surface-alt p-4"
+                noValidate
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void handleSaveDiagnosis();
+                }}
+              >
+                <p className="text-sm font-semibold text-fg-emphasis">新增诊断</p>
+                {diagnosisFormError && (
+                  <div role="alert" className="rounded-lg border border-danger/30 bg-danger-bg px-3 py-2 text-sm text-danger">
+                    {diagnosisFormError}
+                  </div>
+                )}
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-sm font-medium text-fg-muted" htmlFor="diagnosis-type">诊断类型</label>
+                    <select
+                      id="diagnosis-type"
+                      className={selectClass}
+                      value={diagnosisForm.diagnosisType}
+                      onChange={(event) => setDiagnosisForm((current) => ({ ...current, diagnosisType: event.target.value }))}
+                    >
+                      <option value="PRIMARY">主要诊断</option>
+                      <option value="SECONDARY">次要诊断</option>
+                    </select>
+                  </div>
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-sm font-medium text-fg-muted" htmlFor="diagnosis-date">诊断日期（必填）</label>
+                    <input
+                      id="diagnosis-date"
+                      type="date"
+                      className={selectClass}
+                      value={diagnosisForm.diagnosisDate}
+                      onChange={(event) => setDiagnosisForm((current) => ({ ...current, diagnosisDate: event.target.value }))}
+                      required
+                    />
+                  </div>
+                  <div className="sm:col-span-2">
+                    <Input
+                      label="诊断内容（必填）"
+                      value={diagnosisForm.diagnosisText}
+                      onChange={(event) => setDiagnosisForm((current) => ({ ...current, diagnosisText: event.target.value }))}
+                      placeholder="请输入诊断内容，如 高血压"
+                      maxLength={2000}
+                      required
+                    />
+                  </div>
+                  <Input
+                    label="ICD 编码（可选）"
+                    value={diagnosisForm.icdCode}
+                    onChange={(event) => setDiagnosisForm((current) => ({ ...current, icdCode: event.target.value }))}
+                    placeholder="如 I10"
+                    maxLength={32}
+                  />
+                  <Input
+                    label="医生（必填）"
+                    value={diagnosisForm.physician}
+                    onChange={(event) => setDiagnosisForm((current) => ({ ...current, physician: event.target.value }))}
+                    placeholder="请输入诊断医生"
+                    maxLength={100}
+                    required
+                  />
+                  <label className="flex items-center gap-2 text-sm text-fg-muted sm:col-span-2">
+                    <input
+                      type="checkbox"
+                      className={radioClass}
+                      checked={diagnosisForm.isMajor}
+                      onChange={(event) => setDiagnosisForm((current) => ({ ...current, isMajor: event.target.checked }))}
+                    />
+                    主要诊断（默认按诊断类型区分，如需标记可勾选）
+                  </label>
+                  <div className="flex flex-col gap-1.5 sm:col-span-2">
+                    <label className="text-sm font-medium text-fg-muted" htmlFor="diagnosis-remark">备注（可选）</label>
+                    <textarea
+                      id="diagnosis-remark"
+                      className={textareaClass}
+                      rows={2}
+                      maxLength={500}
+                      value={diagnosisForm.remark}
+                      onChange={(event) => setDiagnosisForm((current) => ({ ...current, remark: event.target.value }))}
+                      placeholder="请输入备注"
+                    />
+                  </div>
+                </div>
+                <div className="flex justify-end">
+                  <Button type="submit" loading={diagnosisSaving} disabled={diagnosisSaving}>保存诊断</Button>
+                </div>
+              </form>
+            )}
+
+            <Table
+              columns={diagnosisColumns}
+              data={diagnoses}
+              loading={diagnosesLoading}
+              emptyMessage="暂无诊断记录"
+            />
+          </Card>
+
+          {/* 医嘱 */}
+          <Card
+            title="医嘱"
             actions={<span className="text-sm text-fg-dimmed">共 {ordersTotal} 条</span>}
           >
             <div className="mb-4 flex flex-wrap items-end gap-3">
@@ -470,7 +928,7 @@ export default function OrdersPage() {
                 >
                   <option value="">全部</option>
                   <option value="MEDICATION">用药医嘱</option>
-                  <option value="THERAPY">诊疗医嘱</option>
+                  <option value="THERAPY">治疗医嘱</option>
                   <option value="EXAMINATION">检查医嘱</option>
                   <option value="LAB_TEST">检验医嘱</option>
                 </select>
@@ -537,10 +995,38 @@ export default function OrdersPage() {
                 onChange={(event) => setForm((current) => ({ ...current, orderType: event.target.value }))}
               >
                 <option value="MEDICATION">用药医嘱</option>
-                <option value="THERAPY">诊疗医嘱</option>
+                <option value="THERAPY">治疗医嘱</option>
                 <option value="EXAMINATION">检查医嘱</option>
                 <option value="LAB_TEST">检验医嘱</option>
               </select>
+            </div>
+
+            <div className="flex flex-col gap-2 sm:col-span-2">
+              <span className="text-sm font-medium text-fg-muted">持续周期（必选）</span>
+              <div className="flex flex-wrap gap-6">
+                <label className="flex items-center gap-2 text-sm text-fg">
+                  <input
+                    type="radio"
+                    className={radioClass}
+                    name="order-class"
+                    value="LONG_TERM"
+                    checked={form.orderClass === "LONG_TERM"}
+                    onChange={() => setForm((current) => ({ ...current, orderClass: "LONG_TERM" }))}
+                  />
+                  长期医嘱
+                </label>
+                <label className="flex items-center gap-2 text-sm text-fg">
+                  <input
+                    type="radio"
+                    className={radioClass}
+                    name="order-class"
+                    value="TEMPORARY"
+                    checked={form.orderClass === "TEMPORARY"}
+                    onChange={() => setForm((current) => ({ ...current, orderClass: "TEMPORARY" }))}
+                  />
+                  临时医嘱
+                </label>
+              </div>
             </div>
 
             <div className="flex flex-col gap-1.5 sm:col-span-2">
@@ -578,6 +1064,16 @@ export default function OrdersPage() {
               />
             </div>
 
+            <div className="sm:col-span-2">
+              <Input
+                label="结束时间（临时医嘱可选）"
+                type="datetime-local"
+                value={form.endTime}
+                onChange={(event) => setForm((current) => ({ ...current, endTime: event.target.value }))}
+                min={form.startTime || undefined}
+              />
+            </div>
+
             {form.orderType === "MEDICATION" && (
               <>
                 <Input
@@ -611,10 +1107,10 @@ export default function OrdersPage() {
             {form.orderType === "THERAPY" && (
               <div className="sm:col-span-2">
                 <Input
-                  label="诊疗项目（必填）"
+                  label="治疗项目（必填）"
                   value={form.treatmentItem}
                   onChange={(event) => setForm((current) => ({ ...current, treatmentItem: event.target.value }))}
-                  placeholder="请输入诊疗项目"
+                  placeholder="请输入治疗项目"
                   required
                 />
               </div>
@@ -632,7 +1128,7 @@ export default function OrdersPage() {
               </div>
             )}
 
-            {(form.orderType === "MEDICATION" || form.orderType === "THERAPY") && (
+            {(form.orderType === "MEDICATION" || form.orderType === "THERAPY" || form.orderType === "EXAMINATION" || form.orderType === "LAB_TEST") && (
               <>
                 <div className="flex flex-col gap-1.5">
                   <label className="text-sm font-medium text-fg-muted" htmlFor="order-frequency">频次</label>
@@ -710,7 +1206,8 @@ export default function OrdersPage() {
             <div className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
               <p><span className="text-fg-dimmed">医嘱 ID：</span><span className="break-all">{detail.id}</span></p>
               <p><span className="text-fg-dimmed">入住 ID：</span><span className="break-all">{detail.encounter_id}</span></p>
-              <p><span className="text-fg-dimmed">类型：</span>{ORDER_TYPE_LABEL[detail.order_type] ?? detail.order_type}</p>
+              <p><span className="text-fg-dimmed">类型：</span>{detail.order_type_label ?? ORDER_TYPE_LABEL[detail.order_type] ?? detail.order_type}</p>
+              <p><span className="text-fg-dimmed">周期：</span>{detail.order_class_label ?? "-"}</p>
               <p>
                 <span className="text-fg-dimmed">状态：</span>
                 <Badge variant={ORDER_STATUS_VARIANT[detail.status] ?? "default"}>

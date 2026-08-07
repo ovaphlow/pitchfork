@@ -3,13 +3,17 @@ package com.ovaphlow.crate.healthcare
 import com.ovaphlow.crate.common.Ulid
 import com.ovaphlow.crate.database.DatabaseConfig
 import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalRecords
+import com.ovaphlow.crate.database.gen.healthcare.tables.Diagnoses.DIAGNOSES
 import com.ovaphlow.crate.database.gen.healthcare.tables.Encounters.ENCOUNTERS
 import com.ovaphlow.crate.database.gen.healthcare.tables.Patients.PATIENTS
+import com.ovaphlow.crate.database.gen.healthcare.tables.ProgressNotes.PROGRESS_NOTES
 import com.ovaphlow.crate.database.gen.healthcare.tables.records.EncountersRecord
 import com.ovaphlow.crate.database.gen.healthcare.tables.records.MedicalRecordsRecord
 import com.ovaphlow.crate.database.gen.healthcare.tables.records.PatientsRecord
+import com.ovaphlow.crate.nursing.CarePlanRevisionService
 import com.ovaphlow.crate.nursing.ConflictException
 import com.ovaphlow.crate.nursing.ElderlyDischargeHandoverSnapshotService
+import com.ovaphlow.crate.nursing.PlanService
 import com.ovaphlow.crate.nursing.ServicePeriodService
 import com.ovaphlow.crate.nursing.TaskService
 import io.vertx.core.Future
@@ -36,10 +40,13 @@ class HealthcareService(
     private val servicePeriodService = ServicePeriodService(pool)
     private val dischargeHandoverSnapshotService = ElderlyDischargeHandoverSnapshotService()
     private val taskService = TaskService(pool)
+    private val planService = PlanService(pool)
     private val medicalOrderService = MedicalOrderService(pool, taskService)
+    private val carePlanRevisionService = CarePlanRevisionService(pool)
     companion object {
         private val patientStatuses = setOf("ACTIVE", "INACTIVE", "DECEASED")
         private val encounterStatuses = setOf("ACTIVE", "DISCHARGED", "TRANSFERRED")
+        private val diagnosisTypes = setOf("PRIMARY", "SECONDARY")
         private val businessZone = ZoneId.of("Asia/Shanghai")
 
         private fun patientJson(row: Row): JsonObject =
@@ -301,6 +308,500 @@ class HealthcareService(
 
     fun updateOrderStatus(id: String, body: JsonObject): Future<JsonObject> =
         medicalOrderService.updateOrderStatus(id, body)
+
+    // ——— 011 药房接方/发药内部端口（只供 App 编排调用，不注册为 Healthcare 路由） ———
+
+    fun listMedicationOrdersForPharmacy(
+        client: SqlClient,
+        encounterId: String?,
+        search: String?,
+        limit: Int,
+        offset: Int,
+    ): Future<JsonObject> =
+        medicalOrderService.listMedicationOrdersForPharmacy(client, encounterId, search, limit, offset)
+
+    fun lockMedicationOrderForPharmacy(client: SqlClient, medicalOrderId: String): Future<MedicationOrderLockSnapshot> =
+        medicalOrderService.lockMedicationOrderForPharmacy(client, medicalOrderId)
+
+    // ========================================================================
+    //  医生病程记录 (progress_notes)
+    // ========================================================================
+
+    /** 创建医生病程记录：只允许活动养老入住，追加写入、只读历史语义 */
+    fun createProgressNote(encounterId: String, body: JsonObject): Future<JsonObject> {
+        val input = try {
+            validateProgressNoteInput(body)
+        } catch (error: IllegalArgumentException) {
+            return Future.failedFuture(error)
+        }
+        return pool.withTransaction<JsonObject> { connection ->
+            lockEncounter(connection, encounterId).compose { encounter ->
+                if (encounter.getString("encounter_type") != "ELDERLY_CARE") {
+                    return@compose Future.failedFuture(IllegalArgumentException("encounter is not an elderly admission"))
+                }
+                if (encounter.getString("status") != "ACTIVE") {
+                    return@compose Future.failedFuture(ConflictException("encounter is not active"))
+                }
+                val id = Ulid.generate()
+                val now = OffsetDateTime.now()
+                val insert = ctx.insertInto(PROGRESS_NOTES)
+                    .set(PROGRESS_NOTES.ID, id)
+                    .set(PROGRESS_NOTES.ENCOUNTER_ID, encounterId)
+                    .set(PROGRESS_NOTES.NOTE_TYPE, input.noteType)
+                    .set(PROGRESS_NOTES.CONTENT, input.content)
+                    .set(PROGRESS_NOTES.PHYSICIAN, input.physician)
+                    .set(PROGRESS_NOTES.RECORD_TIME, input.recordTime)
+                    .set(PROGRESS_NOTES.CREATED_AT, now)
+                execute(connection, insert).map {
+                    progressNoteResponse(id, encounterId, input, now)
+                }
+            }
+        }
+    }
+
+    /** 按精确 encounter_id 读取病程记录，record_time DESC 分页 */
+    fun listProgressNotes(
+        encounterId: String,
+        noteType: String? = null,
+        dateFrom: String? = null,
+        dateTo: String? = null,
+        limit: Int = 50,
+        offset: Int = 0,
+    ): Future<JsonObject> {
+        val conditions = mutableListOf<Condition>()
+        conditions.add(PROGRESS_NOTES.ENCOUNTER_ID.eq(encounterId))
+        noteType?.takeIf(String::isNotBlank)?.let { conditions.add(PROGRESS_NOTES.NOTE_TYPE.eq(it)) }
+        val from = try {
+            dateFrom?.takeIf(String::isNotBlank)?.let {
+                LocalDate.parse(it).atStartOfDay(businessZone).toOffsetDateTime()
+            }
+        } catch (_: RuntimeException) {
+            return Future.failedFuture(IllegalArgumentException("invalid date_from"))
+        }
+        val to = try {
+            dateTo?.takeIf(String::isNotBlank)?.let {
+                LocalDate.parse(it).plusDays(1).atStartOfDay(businessZone).toOffsetDateTime()
+            }
+        } catch (_: RuntimeException) {
+            return Future.failedFuture(IllegalArgumentException("invalid date_to"))
+        }
+        from?.let { conditions.add(PROGRESS_NOTES.RECORD_TIME.ge(it)) }
+        to?.let { conditions.add(PROGRESS_NOTES.RECORD_TIME.lt(it)) }
+
+        val countQuery = ctx.select(DSL.count().`as`("total")).from(PROGRESS_NOTES).where(conditions)
+        val dataQuery = ctx.selectFrom(PROGRESS_NOTES)
+            .where(conditions)
+            .orderBy(PROGRESS_NOTES.RECORD_TIME.desc(), PROGRESS_NOTES.CREATED_AT.desc())
+            .limit(limit)
+            .offset(offset)
+
+        return execute(pool, countQuery).compose { countRows ->
+            val total = countRows.iterator().next().getLong("total") ?: 0L
+            execute(pool, dataQuery).map { rows ->
+                JsonObject()
+                    .put("records", JsonArray(rows.map(::progressNoteJson)))
+                    .put("meta", JsonObject().put("total", total))
+            }
+        }
+    }
+
+    /** 病程记录详情：按 ID 读取，不校验入住状态（历史只读） */
+    fun getProgressNote(id: String): Future<JsonObject> {
+        val query = ctx.selectFrom(PROGRESS_NOTES).where(PROGRESS_NOTES.ID.eq(id))
+        return execute(pool, query).compose { rows ->
+            rows.iterator().asSequence().firstOrNull()?.let { row ->
+                Future.succeededFuture(progressNoteJson(row))
+            } ?: Future.failedFuture(HealthcareNotFoundException("progress note not found: $id"))
+        }
+    }
+
+    // ========================================================================
+    //  诊断 (diagnoses)
+    // ========================================================================
+
+    /** 创建诊断：只允许活动养老入住，追加写入、不提供覆盖式编辑和删除 */
+    fun createDiagnosis(encounterId: String, body: JsonObject): Future<JsonObject> {
+        val input = try {
+            validateDiagnosisInput(body)
+        } catch (error: IllegalArgumentException) {
+            return Future.failedFuture(error)
+        }
+        return pool.withTransaction<JsonObject> { connection ->
+            lockEncounter(connection, encounterId).compose { encounter ->
+                if (encounter.getString("encounter_type") != "ELDERLY_CARE") {
+                    return@compose Future.failedFuture(IllegalArgumentException("encounter is not an elderly admission"))
+                }
+                if (encounter.getString("status") != "ACTIVE") {
+                    return@compose Future.failedFuture(ConflictException("encounter is not active"))
+                }
+                val id = Ulid.generate()
+                val now = OffsetDateTime.now()
+                var insert = ctx.insertInto(DIAGNOSES)
+                    .set(DIAGNOSES.ID, id)
+                    .set(DIAGNOSES.ENCOUNTER_ID, encounterId)
+                    .set(DIAGNOSES.DIAGNOSIS_TYPE, input.diagnosisType)
+                    .set(DIAGNOSES.DIAGNOSIS_TEXT, input.diagnosisText)
+                    .set(DIAGNOSES.DIAGNOSIS_DATE, input.diagnosisDate)
+                    .set(DIAGNOSES.PHYSICIAN, input.physician)
+                    .set(DIAGNOSES.CREATED_AT, now)
+                input.icdCode?.let { insert = insert.set(DIAGNOSES.ICD_CODE, it) }
+                input.isMajor?.let { insert = insert.set(DIAGNOSES.IS_MAJOR, it) }
+                input.remark?.let { insert = insert.set(DIAGNOSES.METADATA, JSONB.valueOf(JsonObject().put("remark", it).encode())) }
+                execute(connection, insert).map {
+                    diagnosisResponse(id, encounterId, input, now)
+                }
+            }
+        }
+    }
+
+    /** 按精确 encounter_id 读取诊断，诊断日期倒序分页 */
+    fun listDiagnoses(
+        encounterId: String,
+        diagnosisType: String? = null,
+        limit: Int = 50,
+        offset: Int = 0,
+    ): Future<JsonObject> {
+        val conditions = mutableListOf<Condition>()
+        conditions.add(DIAGNOSES.ENCOUNTER_ID.eq(encounterId))
+        diagnosisType?.takeIf(String::isNotBlank)?.let { conditions.add(DIAGNOSES.DIAGNOSIS_TYPE.eq(it)) }
+
+        val countQuery = ctx.select(DSL.count().`as`("total")).from(DIAGNOSES).where(conditions)
+        val dataQuery = ctx.selectFrom(DIAGNOSES)
+            .where(conditions)
+            .orderBy(DIAGNOSES.DIAGNOSIS_DATE.desc(), DIAGNOSES.CREATED_AT.desc())
+            .limit(limit)
+            .offset(offset)
+
+        return execute(pool, countQuery).compose { countRows ->
+            val total = countRows.iterator().next().getLong("total") ?: 0L
+            execute(pool, dataQuery).map { rows ->
+                JsonObject()
+                    .put("records", JsonArray(rows.map(::diagnosisJson)))
+                    .put("meta", JsonObject().put("total", total))
+            }
+        }
+    }
+
+    /** 诊断详情：按 ID 读取，不校验入住状态（历史只读） */
+    fun getDiagnosis(id: String): Future<JsonObject> {
+        val query = ctx.selectFrom(DIAGNOSES).where(DIAGNOSES.ID.eq(id))
+        return execute(pool, query).compose { rows ->
+            rows.iterator().asSequence().firstOrNull()?.let { row ->
+                Future.succeededFuture(diagnosisJson(row))
+            } ?: Future.failedFuture(HealthcareNotFoundException("diagnosis not found: $id"))
+        }
+    }
+
+    // ========================================================================
+    //  复评与照护计划修订
+    // ========================================================================
+
+    /**
+     * 在单个数据库事务内完成：锁定 encounter/period → 锁定唯一活动计划 →
+     * 检查 IN_PROGRESS 执行 → 写入复评 → 收束旧计划/措施/任务 →
+     * 创建新计划/措施/任务 → 写入修订关系。任一步失败整笔回滚。
+     */
+    fun createCarePlanRevision(encounterId: String, body: JsonObject): Future<JsonObject> {
+        val input = try {
+            validateCarePlanRevisionInput(body)
+        } catch (error: IllegalArgumentException) {
+            return Future.failedFuture(error)
+        }
+        return pool.withTransaction<JsonObject> { connection ->
+            lockEncounter(connection, encounterId).compose { encounter ->
+                if (encounter.getString("encounter_type") != "ELDERLY_CARE") {
+                    return@compose Future.failedFuture(IllegalArgumentException("encounter is not an elderly admission"))
+                }
+                if (encounter.getString("status") != "ACTIVE") {
+                    return@compose Future.failedFuture(ConflictException("encounter is not active"))
+                }
+                val patientId = requireNotNull(encounter.getString("patient_id"))
+                carePlanRevisionService
+                    .lockPeriodForEncounter(connection, encounterId, patientId)
+                    .compose { period ->
+                        val periodId = requireNotNull(period.getString("id"))
+                        val periodStartDate = period.getString("start_date")?.let { LocalDate.parse(it) }
+                        if (periodStartDate != null && input.assessment.assessDate.isBefore(periodStartDate)) {
+                            return@compose Future.failedFuture(
+                                IllegalArgumentException("assess_date cannot be earlier than the care period start date")
+                            )
+                        }
+                        val today = businessDate(OffsetDateTime.now())
+                        if (input.assessment.assessDate.isAfter(today)) {
+                            return@compose Future.failedFuture(IllegalArgumentException("assess_date cannot be in the future"))
+                        }
+                        if (input.plan.startDate.isBefore(input.assessment.assessDate)) {
+                            return@compose Future.failedFuture(
+                                IllegalArgumentException("plan.start_date cannot be earlier than assess_date")
+                            )
+                        }
+                        if (input.plan.endDate != null && input.plan.endDate.isBefore(input.plan.startDate)) {
+                            return@compose Future.failedFuture(
+                                IllegalArgumentException("plan.end_date cannot be earlier than start_date")
+                            )
+                        }
+
+                        planService.lockActivePlan(connection, periodId).compose { oldPlan ->
+                            val oldPlanId = requireNotNull(oldPlan.getString("id"))
+                            planService.lockActivePlanItems(connection, oldPlanId).compose { _ ->
+                                taskService.lockActivePlanTasks(connection, oldPlanId).compose { oldTasks ->
+                                    val oldTaskIds = oldTasks.map { it.getString("id")!! }
+                                    carePlanRevisionService.checkNoInProgressExecution(connection, oldTaskIds).compose {
+                                        carePlanRevisionService.nextRevisionNo(connection, periodId).compose { revisionNo ->
+                                            carePlanRevisionService.createAssessment(
+                                                connection,
+                                                CarePlanRevisionService.AssessmentCreateInput(
+                                                    encounterId = encounterId,
+                                                    periodId = periodId,
+                                                    assessType = input.assessment.assessType,
+                                                    assessDate = input.assessment.assessDate,
+                                                    assessor = input.assessment.assessor,
+                                                    totalScore = input.assessment.totalScore,
+                                                    resultLevel = input.assessment.resultLevel,
+                                                    detail = input.assessment.detail,
+                                                    remark = input.assessment.remark,
+                                                ),
+                                            ).compose { assessment ->
+                                                planService.terminatePlan(connection, oldPlanId).compose {
+                                                    taskService.cancelPlanTasks(connection, oldTaskIds).compose {
+                                                        planService.createPlanWithItems(
+                                                            connection,
+                                                            PlanService.PlanCreateInput(
+                                                                periodId = periodId,
+                                                                encounterId = encounterId,
+                                                                planName = input.plan.planName,
+                                                                goals = input.plan.goals,
+                                                                createdBy = input.plan.createdBy,
+                                                                startDate = input.plan.startDate,
+                                                                endDate = input.plan.endDate,
+                                                                items = input.plan.items.map { item ->
+                                                                    PlanService.PlanItemInput(
+                                                                        action = item.action,
+                                                                        frequencyCode = item.frequencyCode,
+                                                                        frequencyName = item.frequencyName,
+                                                                        durationDays = item.durationDays,
+                                                                        remark = item.remark,
+                                                                    )
+                                                                },
+                                                            ),
+                                                        ).compose { newPlan ->
+                                                            val newPlanId = requireNotNull(newPlan.getString("id"))
+                                                            createPlanTasks(
+                                                                connection,
+                                                                periodId,
+                                                                encounterId,
+                                                                newPlan.getJsonArray("items") ?: JsonArray(),
+                                                                input,
+                                                            ).compose { tasks ->
+                                                                    carePlanRevisionService.insertRevision(
+                                                                        connection,
+                                                                        periodId,
+                                                                        encounterId,
+                                                                        requireNotNull(assessment.getString("id")),
+                                                                        oldPlanId,
+                                                                        newPlanId,
+                                                                        revisionNo,
+                                                                    ).map { revision ->
+                                                                        JsonObject()
+                                                                            .put("revision_id", revision.getString("id"))
+                                                                            .put("revision_no", revisionNo)
+                                                                            .put("assessment", assessment)
+                                                                            .put("previous_plan", JsonObject()
+                                                                                .put("id", oldPlanId)
+                                                                                .put("status", "DISCONTINUED"))
+                                                                            .put("plan", newPlan)
+                                                                            .put("items", newPlan.getJsonArray("items") ?: JsonArray())
+                                                                            .put("tasks", tasks)
+                                                                    }
+                                                                }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+            }
+        }
+    }
+
+    /** 修订历史列表：按修订号倒序，空列表返回空 records 和 total 0 */
+    fun listCarePlanRevisions(encounterId: String): Future<JsonObject> =
+        carePlanRevisionService.listRevisions(encounterId)
+
+    /** 修订历史详情：按修订 ID 读取，服务端再次校验 period/encounter 归属 */
+    fun getCarePlanRevision(id: String): Future<JsonObject> =
+        carePlanRevisionService.getRevision(id)
+
+    /**
+     * 为新计划每条措施派生一条 `NURSING` 任务，精确写入 plan_item_id / period_id / encounter_id；
+     * 任务结束日期按措施 duration_days 计算（计划开始日 + 天数），未提供时为空。
+     */
+    private fun createPlanTasks(
+        connection: SqlClient,
+        periodId: String,
+        encounterId: String,
+        planItems: JsonArray,
+        input: RevisionCreateInput,
+    ): Future<JsonArray> {
+        val newPlan = input.plan
+        fun loop(index: Int, acc: JsonArray): Future<JsonArray> {
+            if (index >= planItems.size()) return Future.succeededFuture(acc)
+            val item = planItems.getJsonObject(index)
+            val itemId = requireNotNull(item.getString("id"))
+            val durationDays = item.getInteger("duration_days")
+            val taskEndDate = durationDays?.let { newPlan.startDate.plusDays(it.toLong()) }
+            return taskService.createPlanTask(
+                connection,
+                TaskService.PlanTaskInput(
+                    periodId = periodId,
+                    encounterId = encounterId,
+                    planItemId = itemId,
+                    description = requireNotNull(item.getString("action")),
+                    frequencyCode = item.getString("frequency_code"),
+                    frequencyName = item.getString("frequency_name"),
+                    startDate = newPlan.startDate,
+                    endDate = taskEndDate,
+                ),
+            ).compose { task ->
+                loop(index + 1, acc.add(task))
+            }
+        }
+        return loop(0, JsonArray())
+    }
+
+    private fun validateCarePlanRevisionInput(body: JsonObject): RevisionCreateInput {
+        rejectUnknownKeys(body, setOf("assessment", "plan"), "request")
+
+        val assessmentValue = body.getValue("assessment")
+        if (assessmentValue !is JsonObject) throw IllegalArgumentException("assessment is required")
+        rejectUnknownKeys(
+            assessmentValue,
+            setOf("assess_type", "assess_date", "assessor", "total_score", "result_level", "detail", "remark"),
+            "assessment",
+        )
+
+        val assessType = requiredText(assessmentValue, "assess_type")
+        if (!CarePlanRevisionService.isValidAssessType(assessType)) {
+            throw IllegalArgumentException(
+                "invalid assess_type, must be one of: ${CarePlanRevisionService.VALID_ASSESS_TYPES}"
+            )
+        }
+        val assessDate = localDate(requiredText(assessmentValue, "assess_date"), "assess_date")
+        val assessor = optionalText(assessmentValue, "assessor")
+        val totalScore = optionalNumber(assessmentValue, "total_score")
+        val resultLevel = optionalText(assessmentValue, "result_level")
+        val detail = optionalJsonObject(assessmentValue, "detail")
+        val remark = optionalText(assessmentValue, "remark")
+
+        val planValue = body.getValue("plan")
+        if (planValue !is JsonObject) throw IllegalArgumentException("plan is required")
+        rejectUnknownKeys(
+            planValue,
+            setOf("plan_name", "goals", "created_by", "start_date", "end_date", "items"),
+            "plan",
+        )
+
+        val planName = requiredText(planValue, "plan_name")
+        val goals = optionalText(planValue, "goals")
+        val createdBy = optionalText(planValue, "created_by")
+        val startDate = localDate(requiredText(planValue, "start_date"), "start_date")
+        val endDate = planValue.getValue("end_date")?.let {
+            if (it !is String) throw IllegalArgumentException("end_date must be a string")
+            localDate(it, "end_date")
+        }
+        val items = parsePlanItems(planValue.getValue("items"))
+
+        return RevisionCreateInput(
+            RevisionAssessmentInput(assessType, assessDate, assessor, totalScore, resultLevel, detail, remark),
+            RevisionPlanInput(planName, goals, createdBy, startDate, endDate, items),
+        )
+    }
+
+    private fun parsePlanItems(value: Any?): List<RevisionPlanItemInput> {
+        if (value == null) return emptyList()
+        if (value !is JsonArray) throw IllegalArgumentException("plan.items must be an array")
+        val result = mutableListOf<RevisionPlanItemInput>()
+        for (raw in value) {
+            if (raw !is JsonObject) throw IllegalArgumentException("plan items must be objects")
+            rejectUnknownKeys(raw, setOf("action", "frequency_code", "frequency_name", "duration_days", "remark"), "plan items")
+            val action = requiredText(raw, "action")
+            val frequencyCode = optionalText(raw, "frequency_code")
+            val frequencyName = optionalText(raw, "frequency_name")
+            val durationDays = raw.getValue("duration_days")?.let { v ->
+                if (v !is Int && v !is Long) throw IllegalArgumentException("duration_days must be a non-negative integer")
+                val days = (v as Number).toInt()
+                if (days < 0) throw IllegalArgumentException("duration_days must be a non-negative integer")
+                days
+            }
+            val remark = optionalText(raw, "remark")
+            result.add(RevisionPlanItemInput(action, frequencyCode, frequencyName, durationDays, remark))
+        }
+        return result
+    }
+
+    private fun rejectUnknownKeys(obj: JsonObject, allowed: Set<String>, label: String) {
+        val unknown = obj.fieldNames().filter { it !in allowed }
+        if (unknown.isNotEmpty()) {
+            throw IllegalArgumentException("unsupported keys in $label: ${unknown.joinToString(", ")}")
+        }
+    }
+
+    private fun optionalText(obj: JsonObject, key: String): String? {
+        if (!obj.containsKey(key) || obj.getValue(key) == null) return null
+        val value = obj.getValue(key)
+        if (value !is String) throw IllegalArgumentException("$key must be a string")
+        return value.trim().takeIf(String::isNotBlank)
+    }
+
+    private fun optionalNumber(obj: JsonObject, key: String): Double? {
+        if (!obj.containsKey(key) || obj.getValue(key) == null) return null
+        val value = obj.getValue(key)
+        if (value !is Number) throw IllegalArgumentException("$key must be a number")
+        return value.toDouble()
+    }
+
+    private fun optionalJsonObject(obj: JsonObject, key: String): JsonObject? {
+        if (!obj.containsKey(key) || obj.getValue(key) == null) return null
+        val value = obj.getValue(key)
+        if (value !is JsonObject) throw IllegalArgumentException("$key must be a JSON object")
+        return value
+    }
+
+    private data class RevisionAssessmentInput(
+        val assessType: String,
+        val assessDate: LocalDate,
+        val assessor: String?,
+        val totalScore: Double?,
+        val resultLevel: String?,
+        val detail: JsonObject?,
+        val remark: String?,
+    )
+
+    private data class RevisionPlanItemInput(
+        val action: String,
+        val frequencyCode: String?,
+        val frequencyName: String?,
+        val durationDays: Int?,
+        val remark: String?,
+    )
+
+    private data class RevisionPlanInput(
+        val planName: String,
+        val goals: String?,
+        val createdBy: String?,
+        val startDate: LocalDate,
+        val endDate: LocalDate?,
+        val items: List<RevisionPlanItemInput>,
+    )
+
+    private data class RevisionCreateInput(
+        val assessment: RevisionAssessmentInput,
+        val plan: RevisionPlanInput,
+    )
 
     fun admitElderly(body: JsonObject): Future<JsonObject> {
         val patientId = body.getString("patient_id")?.takeIf(String::isNotBlank)
@@ -773,6 +1274,134 @@ class HealthcareService(
             }
         }
     }
+
+    // ——— 病程记录与诊断私有辅助方法 ———
+
+    private data class ProgressNoteCreateInput(
+        val noteType: String,
+        val content: String,
+        val physician: String,
+        val recordTime: OffsetDateTime,
+    )
+
+    private fun validateProgressNoteInput(body: JsonObject): ProgressNoteCreateInput {
+        rejectUnknownKeys(body, setOf("note_type", "content", "physician", "record_time"), "request")
+        val noteType = requiredText(body, "note_type")
+        if (noteType != "DAILY") {
+            throw IllegalArgumentException("invalid note_type, must be DAILY")
+        }
+        val content = requiredText(body, "content")
+        if (content.length > 2000) {
+            throw IllegalArgumentException("content must not exceed 2000 characters")
+        }
+        val physician = requiredText(body, "physician")
+        if (physician.length > 100) {
+            throw IllegalArgumentException("physician must not exceed 100 characters")
+        }
+        val recordTime = body.getString("record_time")?.let { offsetDateTime(it, "record_time") }
+            ?: OffsetDateTime.now()
+        return ProgressNoteCreateInput(noteType, content, physician, recordTime)
+    }
+
+    private fun progressNoteJson(row: Row): JsonObject =
+        JsonObject()
+            .put("id", row.getString("id"))
+            .put("encounter_id", row.getString("encounter_id"))
+            .put("note_type", row.getString("note_type"))
+            .put("content", row.getString("content"))
+            .put("physician", row.getString("physician"))
+            .put("record_time", row.getOffsetDateTime("record_time")?.toString())
+            .put("created_at", row.getOffsetDateTime("created_at")?.toString())
+
+    private fun progressNoteResponse(
+        id: String,
+        encounterId: String,
+        input: ProgressNoteCreateInput,
+        now: OffsetDateTime,
+    ): JsonObject =
+        JsonObject()
+            .put("id", id)
+            .put("encounter_id", encounterId)
+            .put("note_type", input.noteType)
+            .put("content", input.content)
+            .put("physician", input.physician)
+            .put("record_time", input.recordTime.toString())
+            .put("created_at", now.toString())
+
+    private data class DiagnosisCreateInput(
+        val diagnosisType: String,
+        val diagnosisText: String,
+        val diagnosisDate: LocalDate,
+        val physician: String,
+        val icdCode: String?,
+        val isMajor: Boolean?,
+        val remark: String?,
+    )
+
+    private fun validateDiagnosisInput(body: JsonObject): DiagnosisCreateInput {
+        rejectUnknownKeys(
+            body,
+            setOf("diagnosis_type", "diagnosis_text", "icd_code", "diagnosis_date", "physician", "is_major", "remark"),
+            "request",
+        )
+        val diagnosisType = requiredText(body, "diagnosis_type")
+        if (diagnosisType !in diagnosisTypes) {
+            throw IllegalArgumentException("invalid diagnosis_type, must be one of: $diagnosisTypes")
+        }
+        val diagnosisText = requiredText(body, "diagnosis_text")
+        if (diagnosisText.length > 2000) {
+            throw IllegalArgumentException("diagnosis_text must not exceed 2000 characters")
+        }
+        val diagnosisDate = localDate(requiredText(body, "diagnosis_date"), "diagnosis_date")
+        val physician = requiredText(body, "physician")
+        if (physician.length > 100) {
+            throw IllegalArgumentException("physician must not exceed 100 characters")
+        }
+        val icdCode = optionalText(body, "icd_code")?.let {
+            if (it.length > 32) throw IllegalArgumentException("icd_code must not exceed 32 characters")
+            it
+        }
+        val isMajor = body.getValue("is_major")?.let { value ->
+            if (value !is Boolean) throw IllegalArgumentException("is_major must be a boolean")
+            value
+        }
+        val remark = optionalText(body, "remark")?.let {
+            if (it.length > 500) throw IllegalArgumentException("remark must not exceed 500 characters")
+            it
+        }
+        return DiagnosisCreateInput(diagnosisType, diagnosisText, diagnosisDate, physician, icdCode, isMajor, remark)
+    }
+
+    private fun diagnosisJson(row: Row): JsonObject =
+        JsonObject()
+            .put("id", row.getString("id"))
+            .put("encounter_id", row.getString("encounter_id"))
+            .put("diagnosis_type", row.getString("diagnosis_type"))
+            .put("icd_code", row.getString("icd_code"))
+            .put("diagnosis_text", row.getString("diagnosis_text"))
+            .put("diagnosis_date", row.getLocalDate("diagnosis_date")?.toString())
+            .put("physician", row.getString("physician"))
+            .put("is_major", row.getBoolean("is_major"))
+            .put("metadata", row.getValue("metadata"))
+            .put("created_at", row.getOffsetDateTime("created_at")?.toString())
+
+    private fun diagnosisResponse(
+        id: String,
+        encounterId: String,
+        input: DiagnosisCreateInput,
+        now: OffsetDateTime,
+    ): JsonObject =
+        JsonObject()
+            .put("id", id)
+            .put("encounter_id", encounterId)
+            .put("diagnosis_type", input.diagnosisType)
+            .put("icd_code", input.icdCode)
+            .put("diagnosis_text", input.diagnosisText)
+            .put("diagnosis_date", input.diagnosisDate.toString())
+            .put("physician", input.physician)
+            .put("is_major", input.isMajor ?: false)
+            .put("metadata", input.remark?.let { JsonObject().put("remark", it) })
+            .put("created_at", now.toString())
 
     // ——— 护理记录私有辅助方法 ———
 

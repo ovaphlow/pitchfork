@@ -12,7 +12,16 @@ object PharmacyRoutes {
 
     private val log = LoggerFactory.getLogger(PharmacyRoutes::class.java)
 
-    fun create(vertx: Vertx, pool: Pool): Router {
+    fun create(
+        vertx: Vertx,
+        pool: Pool,
+        medicalOrderReader: MedicalOrderReader,
+        inventoryOutboundPort: InventoryOutboundPort,
+        inventoryInboundPort: InventoryInboundPort,
+        inventoryRequisitionTransferPort: InventoryRequisitionTransferPort,
+        inventoryPurchaseReceiptPort: InventoryPurchaseReceiptPort,
+        authHandler: io.vertx.core.Handler<RoutingContext>,
+    ): Router {
         val router = Router.router(vertx)
         val mPool = pool
 
@@ -22,9 +31,21 @@ object PharmacyRoutes {
             ctx.json(JsonObject().put("status", "ok").put("service", "pharmacy"))
         }
 
-        router.route("/dispenses/*").subRouter(DispenseRoutes.create(vertx, mPool))
-        router.route("/returns/*").subRouter(ReturnRoutes.create(vertx, mPool))
-        router.route("/requisitions/*").subRouter(RequisitionRoutes.create(vertx, mPool))
+        router.route("/dispenses/*").subRouter(
+            DispenseRoutes.create(vertx, mPool, medicalOrderReader, inventoryOutboundPort),
+        )
+        router.route("/returns/*").subRouter(ReturnRoutes.create(vertx, mPool, inventoryInboundPort))
+        router.route("/requisitions/*").subRouter(
+            RequisitionRoutes.create(vertx, mPool, inventoryRequisitionTransferPort, authHandler),
+        )
+        val (orderRouter, receiptRouter) = PurchaseOrderRoutes.create(
+            vertx,
+            mPool,
+            inventoryPurchaseReceiptPort,
+            authHandler,
+        )
+        router.route("/purchase-orders/*").subRouter(orderRouter)
+        router.route("/purchase-receipts/*").subRouter(receiptRouter)
 
         return router
     }
@@ -44,5 +65,3 @@ object PharmacyRoutes {
             .end(JsonObject().put("error", "internal error").encode())
     }
 }
-
-class NotFoundException(message: String) : Exception(message)

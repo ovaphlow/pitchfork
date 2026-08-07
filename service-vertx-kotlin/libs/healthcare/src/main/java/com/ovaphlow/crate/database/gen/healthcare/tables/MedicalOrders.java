@@ -129,6 +129,12 @@ public class MedicalOrders extends TableImpl<MedicalOrdersRecord> {
      */
     public final TableField<MedicalOrdersRecord, OffsetDateTime> UPDATED_AT = createField(DSL.name("updated_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6).defaultValue(DSL.field(DSL.raw("now()"), SQLDataType.TIMESTAMPWITHTIMEZONE)), this, "");
 
+    /**
+     * The column <code>healthcare.medical_orders.order_class</code>. 医嘱持续
+     * 周期: LONG_TERM(长期) / TEMPORARY(临时)，历史医嘱可为 NULL
+     */
+    public final TableField<MedicalOrdersRecord, String> ORDER_CLASS = createField(DSL.name("order_class"), SQLDataType.VARCHAR, this, "医嘱持续周期: LONG_TERM(长期) / TEMPORARY(临时)，历史医嘱可为 NULL");
+
     private MedicalOrders(Name alias, Table<MedicalOrdersRecord> aliased) {
         this(alias, aliased, (Field<?>[]) null, null);
     }

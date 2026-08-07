@@ -4,12 +4,16 @@
 package com.ovaphlow.crate.database.gen.inventories.public_;
 
 
+import com.ovaphlow.crate.database.gen.inventories.public_.tables.InventoryUnitMigrationIssues;
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.Lots;
+import com.ovaphlow.crate.database.gen.inventories.public_.tables.MaterialUnitSpecs;
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.Materials;
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.StockOperationDetails;
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.StockOperations;
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.Stocks;
+import com.ovaphlow.crate.database.gen.inventories.public_.tables.records.InventoryUnitMigrationIssuesRecord;
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.records.LotsRecord;
+import com.ovaphlow.crate.database.gen.inventories.public_.tables.records.MaterialUnitSpecsRecord;
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.records.MaterialsRecord;
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.records.StockOperationDetailsRecord;
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.records.StockOperationsRecord;
@@ -33,8 +37,10 @@ public class Keys {
     // UNIQUE and PRIMARY KEY definitions
     // -------------------------------------------------------------------------
 
+    public static final UniqueKey<InventoryUnitMigrationIssuesRecord> INVENTORY_UNIT_MIGRATION_ISSUES_PKEY = Internal.createUniqueKey(InventoryUnitMigrationIssues.INVENTORY_UNIT_MIGRATION_ISSUES, DSL.name("inventory_unit_migration_issues_pkey"), new TableField[] { InventoryUnitMigrationIssues.INVENTORY_UNIT_MIGRATION_ISSUES.ID }, true);
     public static final UniqueKey<LotsRecord> LOTS_MATERIAL_ID_BATCH_NO_KEY = Internal.createUniqueKey(Lots.LOTS, DSL.name("lots_material_id_batch_no_key"), new TableField[] { Lots.LOTS.MATERIAL_ID, Lots.LOTS.BATCH_NO }, true);
     public static final UniqueKey<LotsRecord> LOTS_PKEY = Internal.createUniqueKey(Lots.LOTS, DSL.name("lots_pkey"), new TableField[] { Lots.LOTS.ID }, true);
+    public static final UniqueKey<MaterialUnitSpecsRecord> MATERIAL_UNIT_SPECS_PKEY = Internal.createUniqueKey(MaterialUnitSpecs.MATERIAL_UNIT_SPECS, DSL.name("material_unit_specs_pkey"), new TableField[] { MaterialUnitSpecs.MATERIAL_UNIT_SPECS.ID }, true);
     public static final UniqueKey<MaterialsRecord> MATERIALS_CODE_KEY = Internal.createUniqueKey(Materials.MATERIALS, DSL.name("materials_code_key"), new TableField[] { Materials.MATERIALS.CODE }, true);
     public static final UniqueKey<MaterialsRecord> MATERIALS_PKEY = Internal.createUniqueKey(Materials.MATERIALS, DSL.name("materials_pkey"), new TableField[] { Materials.MATERIALS.ID }, true);
     public static final UniqueKey<StockOperationDetailsRecord> STOCK_OPERATION_DETAILS_PKEY = Internal.createUniqueKey(StockOperationDetails.STOCK_OPERATION_DETAILS, DSL.name("stock_operation_details_pkey"), new TableField[] { StockOperationDetails.STOCK_OPERATION_DETAILS.ID }, true);
@@ -46,7 +52,9 @@ public class Keys {
     // FOREIGN KEY definitions
     // -------------------------------------------------------------------------
 
+    public static final ForeignKey<InventoryUnitMigrationIssuesRecord, MaterialsRecord> INVENTORY_UNIT_MIGRATION_ISSUES__INVENTORY_UNIT_MIGRATION_ISSUES_MATERIAL_ID_FKEY = Internal.createForeignKey(InventoryUnitMigrationIssues.INVENTORY_UNIT_MIGRATION_ISSUES, DSL.name("inventory_unit_migration_issues_material_id_fkey"), new TableField[] { InventoryUnitMigrationIssues.INVENTORY_UNIT_MIGRATION_ISSUES.MATERIAL_ID }, Keys.MATERIALS_PKEY, new TableField[] { Materials.MATERIALS.ID }, true);
     public static final ForeignKey<LotsRecord, MaterialsRecord> LOTS__LOTS_MATERIAL_ID_FKEY = Internal.createForeignKey(Lots.LOTS, DSL.name("lots_material_id_fkey"), new TableField[] { Lots.LOTS.MATERIAL_ID }, Keys.MATERIALS_PKEY, new TableField[] { Materials.MATERIALS.ID }, true);
+    public static final ForeignKey<MaterialUnitSpecsRecord, MaterialsRecord> MATERIAL_UNIT_SPECS__MATERIAL_UNIT_SPECS_MATERIAL_ID_FKEY = Internal.createForeignKey(MaterialUnitSpecs.MATERIAL_UNIT_SPECS, DSL.name("material_unit_specs_material_id_fkey"), new TableField[] { MaterialUnitSpecs.MATERIAL_UNIT_SPECS.MATERIAL_ID }, Keys.MATERIALS_PKEY, new TableField[] { Materials.MATERIALS.ID }, true);
     public static final ForeignKey<StockOperationDetailsRecord, LotsRecord> STOCK_OPERATION_DETAILS__STOCK_OPERATION_DETAILS_LOT_ID_FKEY = Internal.createForeignKey(StockOperationDetails.STOCK_OPERATION_DETAILS, DSL.name("stock_operation_details_lot_id_fkey"), new TableField[] { StockOperationDetails.STOCK_OPERATION_DETAILS.LOT_ID }, Keys.LOTS_PKEY, new TableField[] { Lots.LOTS.ID }, true);
     public static final ForeignKey<StockOperationDetailsRecord, MaterialsRecord> STOCK_OPERATION_DETAILS__STOCK_OPERATION_DETAILS_MATERIAL_ID_FKEY = Internal.createForeignKey(StockOperationDetails.STOCK_OPERATION_DETAILS, DSL.name("stock_operation_details_material_id_fkey"), new TableField[] { StockOperationDetails.STOCK_OPERATION_DETAILS.MATERIAL_ID }, Keys.MATERIALS_PKEY, new TableField[] { Materials.MATERIALS.ID }, true);
     public static final ForeignKey<StockOperationDetailsRecord, StockOperationsRecord> STOCK_OPERATION_DETAILS__STOCK_OPERATION_DETAILS_OPERATION_ID_FKEY = Internal.createForeignKey(StockOperationDetails.STOCK_OPERATION_DETAILS, DSL.name("stock_operation_details_operation_id_fkey"), new TableField[] { StockOperationDetails.STOCK_OPERATION_DETAILS.OPERATION_ID }, Keys.STOCK_OPERATIONS_PKEY, new TableField[] { StockOperations.STOCK_OPERATIONS.ID }, true);

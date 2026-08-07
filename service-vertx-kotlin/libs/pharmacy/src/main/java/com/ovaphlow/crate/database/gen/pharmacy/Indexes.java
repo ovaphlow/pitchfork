@@ -6,6 +6,10 @@ package com.ovaphlow.crate.database.gen.pharmacy;
 
 import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyDispenseItems;
 import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyDispenses;
+import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyPurchaseOrderItems;
+import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyPurchaseOrders;
+import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyPurchaseReceiptItems;
+import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyPurchaseReceipts;
 import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyRequisitions;
 import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyReturns;
 
@@ -27,6 +31,23 @@ public class Indexes {
 
     public static final Index IDX_DISPENSE_ITEMS_DISPENSE = Internal.createIndex(DSL.name("idx_dispense_items_dispense"), PharmacyDispenseItems.PHARMACY_DISPENSE_ITEMS, new OrderField[] { PharmacyDispenseItems.PHARMACY_DISPENSE_ITEMS.DISPENSE_ID }, false);
     public static final Index IDX_DISPENSE_PATIENT = Internal.createIndex(DSL.name("idx_dispense_patient"), PharmacyDispenses.PHARMACY_DISPENSES, new OrderField[] { PharmacyDispenses.PHARMACY_DISPENSES.PATIENT_ID }, false);
+    public static final Index IDX_PHARMACY_DISPENSE_ITEMS_ORDER_ITEM = Internal.createIndex(DSL.name("idx_pharmacy_dispense_items_order_item"), PharmacyDispenseItems.PHARMACY_DISPENSE_ITEMS, new OrderField[] { PharmacyDispenseItems.PHARMACY_DISPENSE_ITEMS.ORDER_ITEM_ID }, false);
+    public static final Index IDX_PURCHASE_ORDER_IDEMPOTENCY_KEY = Internal.createIndex(DSL.name("idx_purchase_order_idempotency_key"), PharmacyPurchaseOrders.PHARMACY_PURCHASE_ORDERS, new OrderField[] { PharmacyPurchaseOrders.PHARMACY_PURCHASE_ORDERS.IDEMPOTENCY_KEY }, true);
+    public static final Index IDX_PURCHASE_ORDER_ITEMS_ORDER_MATERIAL = Internal.createIndex(DSL.name("idx_purchase_order_items_order_material"), PharmacyPurchaseOrderItems.PHARMACY_PURCHASE_ORDER_ITEMS, new OrderField[] { PharmacyPurchaseOrderItems.PHARMACY_PURCHASE_ORDER_ITEMS.PURCHASE_ORDER_ID, PharmacyPurchaseOrderItems.PHARMACY_PURCHASE_ORDER_ITEMS.MATERIAL_ID }, true);
+    public static final Index IDX_PURCHASE_ORDER_STATUS_CREATED = Internal.createIndex(DSL.name("idx_purchase_order_status_created"), PharmacyPurchaseOrders.PHARMACY_PURCHASE_ORDERS, new OrderField[] { PharmacyPurchaseOrders.PHARMACY_PURCHASE_ORDERS.STATUS, PharmacyPurchaseOrders.PHARMACY_PURCHASE_ORDERS.CREATED_AT.desc() }, false);
+    public static final Index IDX_PURCHASE_ORDER_SUPPLIER = Internal.createIndex(DSL.name("idx_purchase_order_supplier"), PharmacyPurchaseOrders.PHARMACY_PURCHASE_ORDERS, new OrderField[] { PharmacyPurchaseOrders.PHARMACY_PURCHASE_ORDERS.SUPPLIER_NAME }, false);
+    public static final Index IDX_PURCHASE_ORDER_WAREHOUSE = Internal.createIndex(DSL.name("idx_purchase_order_warehouse"), PharmacyPurchaseOrders.PHARMACY_PURCHASE_ORDERS, new OrderField[] { PharmacyPurchaseOrders.PHARMACY_PURCHASE_ORDERS.WAREHOUSE }, false);
+    public static final Index IDX_PURCHASE_RECEIPT_IDEMPOTENCY_KEY = Internal.createIndex(DSL.name("idx_purchase_receipt_idempotency_key"), PharmacyPurchaseReceipts.PHARMACY_PURCHASE_RECEIPTS, new OrderField[] { PharmacyPurchaseReceipts.PHARMACY_PURCHASE_RECEIPTS.IDEMPOTENCY_KEY }, true);
+    public static final Index IDX_PURCHASE_RECEIPT_ITEMS_BATCH = Internal.createIndex(DSL.name("idx_purchase_receipt_items_batch"), PharmacyPurchaseReceiptItems.PHARMACY_PURCHASE_RECEIPT_ITEMS, new OrderField[] { PharmacyPurchaseReceiptItems.PHARMACY_PURCHASE_RECEIPT_ITEMS.RECEIPT_ID, PharmacyPurchaseReceiptItems.PHARMACY_PURCHASE_RECEIPT_ITEMS.PURCHASE_ORDER_ITEM_ID, PharmacyPurchaseReceiptItems.PHARMACY_PURCHASE_RECEIPT_ITEMS.LOT_ID }, true);
+    public static final Index IDX_PURCHASE_RECEIPT_ITEMS_NO_LOT = Internal.createIndex(DSL.name("idx_purchase_receipt_items_no_lot"), PharmacyPurchaseReceiptItems.PHARMACY_PURCHASE_RECEIPT_ITEMS, new OrderField[] { PharmacyPurchaseReceiptItems.PHARMACY_PURCHASE_RECEIPT_ITEMS.RECEIPT_ID, PharmacyPurchaseReceiptItems.PHARMACY_PURCHASE_RECEIPT_ITEMS.PURCHASE_ORDER_ITEM_ID }, true);
+    public static final Index IDX_PURCHASE_RECEIPT_ITEMS_ORDER_ITEM = Internal.createIndex(DSL.name("idx_purchase_receipt_items_order_item"), PharmacyPurchaseReceiptItems.PHARMACY_PURCHASE_RECEIPT_ITEMS, new OrderField[] { PharmacyPurchaseReceiptItems.PHARMACY_PURCHASE_RECEIPT_ITEMS.PURCHASE_ORDER_ITEM_ID }, false);
+    public static final Index IDX_PURCHASE_RECEIPT_ITEMS_RECEIPT = Internal.createIndex(DSL.name("idx_purchase_receipt_items_receipt"), PharmacyPurchaseReceiptItems.PHARMACY_PURCHASE_RECEIPT_ITEMS, new OrderField[] { PharmacyPurchaseReceiptItems.PHARMACY_PURCHASE_RECEIPT_ITEMS.RECEIPT_ID }, false);
+    public static final Index IDX_PURCHASE_RECEIPT_ITEMS_STOCK_DETAIL = Internal.createIndex(DSL.name("idx_purchase_receipt_items_stock_detail"), PharmacyPurchaseReceiptItems.PHARMACY_PURCHASE_RECEIPT_ITEMS, new OrderField[] { PharmacyPurchaseReceiptItems.PHARMACY_PURCHASE_RECEIPT_ITEMS.STOCK_OPERATION_DETAIL_ID }, false);
+    public static final Index IDX_PURCHASE_RECEIPT_ORDER = Internal.createIndex(DSL.name("idx_purchase_receipt_order"), PharmacyPurchaseReceipts.PHARMACY_PURCHASE_RECEIPTS, new OrderField[] { PharmacyPurchaseReceipts.PHARMACY_PURCHASE_RECEIPTS.PURCHASE_ORDER_ID }, false);
+    public static final Index IDX_PURCHASE_RECEIPT_RECEIVED = Internal.createIndex(DSL.name("idx_purchase_receipt_received"), PharmacyPurchaseReceipts.PHARMACY_PURCHASE_RECEIPTS, new OrderField[] { PharmacyPurchaseReceipts.PHARMACY_PURCHASE_RECEIPTS.RECEIVED_AT.desc() }, false);
     public static final Index IDX_REQUISITION_DEPARTMENT = Internal.createIndex(DSL.name("idx_requisition_department"), PharmacyRequisitions.PHARMACY_REQUISITIONS, new OrderField[] { PharmacyRequisitions.PHARMACY_REQUISITIONS.DEPARTMENT }, false);
+    public static final Index IDX_REQUISITION_DESTINATION_WAREHOUSE = Internal.createIndex(DSL.name("idx_requisition_destination_warehouse"), PharmacyRequisitions.PHARMACY_REQUISITIONS, new OrderField[] { PharmacyRequisitions.PHARMACY_REQUISITIONS.DESTINATION_WAREHOUSE }, false);
+    public static final Index IDX_REQUISITION_IDEMPOTENCY_KEY = Internal.createIndex(DSL.name("idx_requisition_idempotency_key"), PharmacyRequisitions.PHARMACY_REQUISITIONS, new OrderField[] { PharmacyRequisitions.PHARMACY_REQUISITIONS.IDEMPOTENCY_KEY }, true);
+    public static final Index IDX_REQUISITION_STATUS_CREATED = Internal.createIndex(DSL.name("idx_requisition_status_created"), PharmacyRequisitions.PHARMACY_REQUISITIONS, new OrderField[] { PharmacyRequisitions.PHARMACY_REQUISITIONS.STATUS, PharmacyRequisitions.PHARMACY_REQUISITIONS.CREATED_AT.desc() }, false);
     public static final Index IDX_RETURN_PATIENT = Internal.createIndex(DSL.name("idx_return_patient"), PharmacyReturns.PHARMACY_RETURNS, new OrderField[] { PharmacyReturns.PHARMACY_RETURNS.PATIENT_ID }, false);
 }

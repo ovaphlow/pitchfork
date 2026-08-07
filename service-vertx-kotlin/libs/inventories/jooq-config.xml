@@ -10,7 +10,7 @@
         <database>
             <name>org.jooq.meta.postgres.PostgresDatabase</name>
             <outputSchemaToDefault>true</outputSchemaToDefault>
-            <includes>materials|lots|stocks|stock_operations|stock_operation_details</includes>
+            <includes>materials|lots|stocks|stock_operations|stock_operation_details|material_unit_specs|inventory_unit_migration_issues</includes>
         </database>
         <target>
             <packageName>com.ovaphlow.crate.database.gen.inventories</packageName>

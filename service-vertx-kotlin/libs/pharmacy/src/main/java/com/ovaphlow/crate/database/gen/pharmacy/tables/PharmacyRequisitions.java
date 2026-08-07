@@ -107,6 +107,63 @@ public class PharmacyRequisitions extends TableImpl<PharmacyRequisitionsRecord> 
      */
     public final TableField<PharmacyRequisitionsRecord, OffsetDateTime> DISPENSED_AT = createField(DSL.name("dispensed_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6), this, "");
 
+    /**
+     * The column
+     * <code>pharmacy.pharmacy_requisitions.destination_warehouse</code>.
+     */
+    public final TableField<PharmacyRequisitionsRecord, String> DESTINATION_WAREHOUSE = createField(DSL.name("destination_warehouse"), SQLDataType.VARCHAR, this, "");
+
+    /**
+     * The column <code>pharmacy.pharmacy_requisitions.requester_id</code>.
+     */
+    public final TableField<PharmacyRequisitionsRecord, String> REQUESTER_ID = createField(DSL.name("requester_id"), SQLDataType.VARCHAR, this, "");
+
+    /**
+     * The column <code>pharmacy.pharmacy_requisitions.approved_by</code>.
+     */
+    public final TableField<PharmacyRequisitionsRecord, String> APPROVED_BY = createField(DSL.name("approved_by"), SQLDataType.VARCHAR, this, "");
+
+    /**
+     * The column <code>pharmacy.pharmacy_requisitions.approved_at</code>.
+     */
+    public final TableField<PharmacyRequisitionsRecord, OffsetDateTime> APPROVED_AT = createField(DSL.name("approved_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6), this, "");
+
+    /**
+     * The column <code>pharmacy.pharmacy_requisitions.dispensed_by</code>.
+     */
+    public final TableField<PharmacyRequisitionsRecord, String> DISPENSED_BY = createField(DSL.name("dispensed_by"), SQLDataType.VARCHAR, this, "");
+
+    /**
+     * The column <code>pharmacy.pharmacy_requisitions.cancelled_by</code>.
+     */
+    public final TableField<PharmacyRequisitionsRecord, String> CANCELLED_BY = createField(DSL.name("cancelled_by"), SQLDataType.VARCHAR, this, "");
+
+    /**
+     * The column <code>pharmacy.pharmacy_requisitions.cancelled_at</code>.
+     */
+    public final TableField<PharmacyRequisitionsRecord, OffsetDateTime> CANCELLED_AT = createField(DSL.name("cancelled_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6), this, "");
+
+    /**
+     * The column <code>pharmacy.pharmacy_requisitions.cancel_reason</code>.
+     */
+    public final TableField<PharmacyRequisitionsRecord, String> CANCEL_REASON = createField(DSL.name("cancel_reason"), SQLDataType.VARCHAR, this, "");
+
+    /**
+     * The column <code>pharmacy.pharmacy_requisitions.idempotency_key</code>.
+     */
+    public final TableField<PharmacyRequisitionsRecord, String> IDEMPOTENCY_KEY = createField(DSL.name("idempotency_key"), SQLDataType.VARCHAR, this, "");
+
+    /**
+     * The column
+     * <code>pharmacy.pharmacy_requisitions.request_fingerprint</code>.
+     */
+    public final TableField<PharmacyRequisitionsRecord, String> REQUEST_FINGERPRINT = createField(DSL.name("request_fingerprint"), SQLDataType.VARCHAR, this, "");
+
+    /**
+     * The column <code>pharmacy.pharmacy_requisitions.updated_at</code>.
+     */
+    public final TableField<PharmacyRequisitionsRecord, OffsetDateTime> UPDATED_AT = createField(DSL.name("updated_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6), this, "");
+
     private PharmacyRequisitions(Name alias, Table<PharmacyRequisitionsRecord> aliased) {
         this(alias, aliased, (Field<?>[]) null, null);
     }
@@ -178,7 +235,7 @@ public class PharmacyRequisitions extends TableImpl<PharmacyRequisitionsRecord> 
 
     @Override
     public List<Index> getIndexes() {
-        return Arrays.asList(Indexes.IDX_REQUISITION_DEPARTMENT);
+        return Arrays.asList(Indexes.IDX_REQUISITION_DEPARTMENT, Indexes.IDX_REQUISITION_DESTINATION_WAREHOUSE, Indexes.IDX_REQUISITION_IDEMPOTENCY_KEY, Indexes.IDX_REQUISITION_STATUS_CREATED);
     }
 
     @Override

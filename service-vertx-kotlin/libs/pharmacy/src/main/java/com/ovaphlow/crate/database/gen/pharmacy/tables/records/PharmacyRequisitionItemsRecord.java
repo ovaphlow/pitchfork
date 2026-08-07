@@ -143,6 +143,66 @@ public class PharmacyRequisitionItemsRecord extends UpdatableRecordImpl<Pharmacy
         return (JSONB) get(7);
     }
 
+    /**
+     * Setter for <code>pharmacy.pharmacy_requisition_items.unit</code>.
+     */
+    public void setUnit(String value) {
+        set(8, value);
+    }
+
+    /**
+     * Getter for <code>pharmacy.pharmacy_requisition_items.unit</code>.
+     */
+    public String getUnit() {
+        return (String) get(8);
+    }
+
+    /**
+     * Setter for <code>pharmacy.pharmacy_requisition_items.lot_id</code>.
+     */
+    public void setLotId(String value) {
+        set(9, value);
+    }
+
+    /**
+     * Getter for <code>pharmacy.pharmacy_requisition_items.lot_id</code>.
+     */
+    public String getLotId() {
+        return (String) get(9);
+    }
+
+    /**
+     * Setter for
+     * <code>pharmacy.pharmacy_requisition_items.outbound_stock_operation_detail_id</code>.
+     */
+    public void setOutboundStockOperationDetailId(String value) {
+        set(10, value);
+    }
+
+    /**
+     * Getter for
+     * <code>pharmacy.pharmacy_requisition_items.outbound_stock_operation_detail_id</code>.
+     */
+    public String getOutboundStockOperationDetailId() {
+        return (String) get(10);
+    }
+
+    /**
+     * Setter for
+     * <code>pharmacy.pharmacy_requisition_items.inbound_stock_operation_detail_id</code>.
+     */
+    public void setInboundStockOperationDetailId(String value) {
+        set(11, value);
+    }
+
+    /**
+     * Getter for
+     * <code>pharmacy.pharmacy_requisition_items.inbound_stock_operation_detail_id</code>.
+     */
+    public String getInboundStockOperationDetailId() {
+        return (String) get(11);
+    }
+
     // -------------------------------------------------------------------------
     // Primary key information
     // -------------------------------------------------------------------------
@@ -166,7 +226,7 @@ public class PharmacyRequisitionItemsRecord extends UpdatableRecordImpl<Pharmacy
     /**
      * Create a detached, initialised PharmacyRequisitionItemsRecord
      */
-    public PharmacyRequisitionItemsRecord(String id, String requisitionId, String materialId, BigDecimal requestedQuantity, BigDecimal approvedQuantity, BigDecimal dispensedQuantity, String stockOperationDetailId, JSONB metadata) {
+    public PharmacyRequisitionItemsRecord(String id, String requisitionId, String materialId, BigDecimal requestedQuantity, BigDecimal approvedQuantity, BigDecimal dispensedQuantity, String stockOperationDetailId, JSONB metadata, String unit, String lotId, String outboundStockOperationDetailId, String inboundStockOperationDetailId) {
         super(PharmacyRequisitionItems.PHARMACY_REQUISITION_ITEMS);
 
         setId(id);
@@ -177,6 +237,10 @@ public class PharmacyRequisitionItemsRecord extends UpdatableRecordImpl<Pharmacy
         setDispensedQuantity(dispensedQuantity);
         setStockOperationDetailId(stockOperationDetailId);
         setMetadata(metadata);
+        setUnit(unit);
+        setLotId(lotId);
+        setOutboundStockOperationDetailId(outboundStockOperationDetailId);
+        setInboundStockOperationDetailId(inboundStockOperationDetailId);
         resetChangedOnNotNull();
     }
 }

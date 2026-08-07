@@ -151,10 +151,10 @@ class NursingSupplyConsumptionIntegrationTest {
             StockService.InboundCommand(
                 warehouse = WAREHOUSE,
                 items = listOf(
-                    StockService.InboundItem(PACKAGE_MATERIAL, null, decimal("10"), decimal("5")),
-                    StockService.InboundItem(BATCH_MATERIAL, VALID_LOT, decimal("2"), decimal("7")),
-                    StockService.InboundItem(BATCH_MATERIAL, EXPIRED_LOT, decimal("4"), decimal("7")),
-                    StockService.InboundItem(INACTIVE_MATERIAL, null, decimal("3"), decimal("1")),
+                    StockService.InboundItem(PACKAGE_MATERIAL, null, quantity = decimal("10"), unitCost = decimal("5")),
+                    StockService.InboundItem(BATCH_MATERIAL, VALID_LOT, quantity = decimal("2"), unitCost = decimal("7")),
+                    StockService.InboundItem(BATCH_MATERIAL, EXPIRED_LOT, quantity = decimal("4"), unitCost = decimal("7")),
+                    StockService.InboundItem(INACTIVE_MATERIAL, null, quantity = decimal("3"), unitCost = decimal("1")),
                 ),
                 note = "fixture inbound",
             ),
@@ -163,7 +163,7 @@ class NursingSupplyConsumptionIntegrationTest {
         await(stockService.confirmInbound(
             StockService.InboundCommand(
                 warehouse = WAREHOUSE,
-                items = listOf(StockService.InboundItem(PACKAGE_MATERIAL, null, decimal("2"), decimal("7"))),
+                items = listOf(StockService.InboundItem(PACKAGE_MATERIAL, null, quantity = decimal("2"), unitCost = decimal("7"))),
                 note = "fixture merge",
             ),
         ))
@@ -188,8 +188,8 @@ class NursingSupplyConsumptionIntegrationTest {
             StockService.InboundCommand(
                 warehouse = WAREHOUSE,
                 items = listOf(
-                    StockService.InboundItem(PACKAGE_MATERIAL, null, decimal("2"), decimal("4")),
-                    StockService.InboundItem(BATCH_MATERIAL, null, decimal("1"), decimal("9")),
+                    StockService.InboundItem(PACKAGE_MATERIAL, null, quantity = decimal("2"), unitCost = decimal("4")),
+                    StockService.InboundItem(BATCH_MATERIAL, null, quantity = decimal("1"), unitCost = decimal("9")),
                 ),
                 note = "invalid fixture inbound",
             ),
@@ -213,7 +213,7 @@ class NursingSupplyConsumptionIntegrationTest {
         val afterFirst = stockState(stockId)
         val retry = consume(command)
         val conflict = expectFailure(consumeFuture(command.copy(items = listOf(
-            InventoryConsumptionService.ConsumptionItem(stockId, "PACKAGE", decimal("2"), null),
+            InventoryConsumptionService.ConsumptionItem(stockId, unit = "PACKAGE", quantity = decimal("2")),
         ))))
 
         assertEquals(first.operationId, retry.operationId)
@@ -249,8 +249,8 @@ class NursingSupplyConsumptionIntegrationTest {
         val splitStockId = stockId(SPLIT_MATERIAL)
         val command = InventoryConsumptionService.NursingConsumptionCommand(
             items = listOf(
-                InventoryConsumptionService.ConsumptionItem(packageStockId, "PACKAGE", decimal("1"), null),
-                InventoryConsumptionService.ConsumptionItem(splitStockId, "PACKAGE", decimal("2"), null),
+                InventoryConsumptionService.ConsumptionItem(packageStockId, unit = "PACKAGE", quantity = decimal("1")),
+                InventoryConsumptionService.ConsumptionItem(splitStockId, unit = "PACKAGE", quantity = decimal("2")),
             ),
             taskExecutionId = "sc-consume-rollback",
             taskId = TASK_ID,
@@ -316,8 +316,8 @@ class NursingSupplyConsumptionIntegrationTest {
         val packageStockId = stockId(PACKAGE_MATERIAL)
         val splitStockId = stockId(SPLIT_MATERIAL)
         val inputs = listOf(
-            TaskExecutionService.ConsumptionInput(packageStockId, "PACKAGE", decimal("1"), null),
-            TaskExecutionService.ConsumptionInput(splitStockId, "SPLIT", null, decimal("2")),
+            TaskExecutionService.ConsumptionInput(packageStockId, unit = "PACKAGE", quantity = decimal("1")),
+            TaskExecutionService.ConsumptionInput(splitStockId, unit = "SPLIT", splitQuantity = decimal("2")),
         )
 
         val first = await(taskExecutionService.completeExecutionWithConsumptions(EXECUTION_ID, "完成备注", inputs, "sc-tester"))
@@ -338,7 +338,7 @@ class NursingSupplyConsumptionIntegrationTest {
         val conflict = expectFailure(taskExecutionService.completeExecutionWithConsumptions(
             EXECUTION_ID,
             "不同备注",
-            listOf(TaskExecutionService.ConsumptionInput(packageStockId, "PACKAGE", decimal("2"), null)),
+            listOf(TaskExecutionService.ConsumptionInput(packageStockId, unit = "PACKAGE", quantity = decimal("2"))),
             "sc-tester",
         ))
         assertTrue(conflict is ConflictException)
@@ -351,7 +351,7 @@ class NursingSupplyConsumptionIntegrationTest {
         val error = expectFailure(taskExecutionService.completeExecutionWithConsumptions(
             EXECUTION_ID,
             "不应保存",
-            listOf(TaskExecutionService.ConsumptionInput(stockId, "PACKAGE", decimal("2"), null)),
+            listOf(TaskExecutionService.ConsumptionInput(stockId, unit = "PACKAGE", quantity = decimal("2"))),
             "sc-tester",
         ))
 
@@ -408,7 +408,7 @@ class NursingSupplyConsumptionIntegrationTest {
         stockService.confirmInbound(
             StockService.InboundCommand(
                 warehouse = WAREHOUSE,
-                items = listOf(StockService.InboundItem(materialId, lotId, decimal(quantity), decimal(unitCost))),
+                items = listOf(StockService.InboundItem(materialId, lotId, quantity = decimal(quantity), unitCost = decimal(unitCost))),
                 note = "fixture inbound",
             ),
         )

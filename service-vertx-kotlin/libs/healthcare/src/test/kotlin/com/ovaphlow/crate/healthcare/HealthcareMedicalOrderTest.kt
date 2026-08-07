@@ -239,6 +239,7 @@ class HealthcareMedicalOrderTest {
     private fun validOrderBody(overrides: Map<String, Any?> = emptyMap()): JsonObject {
         val body = JsonObject()
             .put("order_type", "MEDICATION")
+            .put("order_class", "LONG_TERM")
             .put("order_content", "阿司匹林 100mg 每日一次")
             .put("doctor", "赵医生")
             .put("start_time", "2026-08-01T09:00:00+08:00")

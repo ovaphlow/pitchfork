@@ -77,7 +77,12 @@ class InventoryConsumptionServiceTest {
         val now = OffsetDateTime.now()
         val command = InventoryConsumptionService.NursingConsumptionCommand(
             items = listOf(
-                InventoryConsumptionService.ConsumptionItem("stock-1", "PACKAGE", BigDecimal.ONE, null)
+                InventoryConsumptionService.ConsumptionItem(
+                    stockId = "stock-1",
+                    unit = "PACKAGE",
+                    quantity = BigDecimal.ONE,
+                    splitQuantity = null,
+                ),
             ),
             taskExecutionId = "exec-1",
             taskId = "task-1",
@@ -181,34 +186,60 @@ class InventoryConsumptionServiceTest {
 
     @Test
     fun `validatedItem stores fields`() {
+        val conversion = BaseQuantityCommand(
+            materialId = "mat-1",
+            unitSpecId = "spec-1",
+            inputQuantity = BigDecimal.valueOf(2),
+            inputUnit = "盒",
+            baseQuantity = BigDecimal.valueOf(20),
+            baseUnit = "片",
+            conversionRatio = BigDecimal.TEN,
+            inputUnitCost = BigDecimal("8.5"),
+            baseUnitCost = BigDecimal("0.85"),
+            totalCost = BigDecimal.valueOf(17),
+            isDefaultSpec = true,
+        )
         val item = InventoryConsumptionService.ValidatedItem(
             stockId = "stock-1",
             materialId = "mat-1",
             lotId = "lot-1",
             warehouse = "一号护理站",
-            demandQty = BigDecimal.valueOf(2),
-            unitCost = BigDecimal.valueOf(8.5),
+            conversion = conversion,
             originalQuantity = BigDecimal.valueOf(10),
+            originalBaseQuantity = BigDecimal.valueOf(100),
             originalTotalCost = BigDecimal.valueOf(85)
         )
         assertEquals("stock-1", item.stockId)
         assertEquals("mat-1", item.materialId)
-        assertEquals(BigDecimal.valueOf(2), item.demandQty)
-        assertEquals(BigDecimal.valueOf(8.5), item.unitCost)
+        assertEquals(BigDecimal.valueOf(20), item.conversion.baseQuantity)
         assertEquals(BigDecimal.valueOf(10), item.originalQuantity)
+        assertEquals(BigDecimal.valueOf(100), item.originalBaseQuantity)
         assertEquals(BigDecimal.valueOf(85), item.originalTotalCost)
     }
 
     @Test
     fun `validatedItem without lotId`() {
+        val conversion = BaseQuantityCommand(
+            materialId = "mat-2",
+            unitSpecId = "spec-2",
+            inputQuantity = BigDecimal.ONE,
+            inputUnit = "包",
+            baseQuantity = BigDecimal.ONE,
+            baseUnit = "片",
+            conversionRatio = BigDecimal.ONE,
+            inputUnitCost = BigDecimal.TEN,
+            baseUnitCost = BigDecimal.TEN,
+            totalCost = BigDecimal.TEN,
+            isDefaultSpec = true,
+        )
         val item = InventoryConsumptionService.ValidatedItem(
             stockId = "stock-2",
             materialId = "mat-2",
             lotId = null,
             warehouse = "二号护理站",
-            demandQty = BigDecimal.ONE,
-            unitCost = BigDecimal.TEN,
+            conversion = conversion,
             originalQuantity = BigDecimal.valueOf(5),
+            originalBaseQuantity = BigDecimal.valueOf(5),
             originalTotalCost = BigDecimal.valueOf(50)
         )
         assertNull(item.lotId)
@@ -219,26 +250,28 @@ class InventoryConsumptionServiceTest {
     // ========================================================================
 
     @Test
-    fun `rowToDetailResult converts PACKAGE row`() {
-        val mockRow = mockk<Row> {
+    fun `rowToDetailResult converts PACKAGE row with snapshots`() {
+        val mockRow = mockk<Row>(relaxed = true) {
             every { getValue("id") } returns "detail-1"
-            every { getValue("stock_id")?.toString() } returns "stock-1"
-            every { getValue("material_id")?.toString() } returns "mat-1"
+            every { getValue("stock_id") } returns "stock-1"
+            every { getValue("material_id") } returns "mat-1"
             every { getValue("lot_id") } returns "lot-1"
             every { getValue("quantity") } returns BigDecimal.valueOf(1)
             every { getValue("unit") } returns "PACKAGE"
             every { getValue("split_quantity") } returns null
             every { getValue("unit_cost") } returns BigDecimal.valueOf(8.5)
             every { getValue("total_cost") } returns BigDecimal.valueOf(8.5)
-            every { getValue("warehouse")?.toString() } returns "一号护理站"
+            every { getValue("warehouse") } returns "一号护理站"
+            // 015 快照列
+            every { getValue("unit_spec_id") } returns "spec-1"
+            every { getValue("input_quantity") } returns BigDecimal.valueOf(1)
+            every { getValue("input_unit") } returns "盒"
+            every { getValue("conversion_ratio") } returns BigDecimal.valueOf(10)
+            every { getValue("detail_base_quantity") } returns BigDecimal.valueOf(10)
+            every { getValue("base_unit") } returns "片"
+            every { getValue("input_unit_cost") } returns BigDecimal.valueOf(8.5)
+            every { getValue("base_unit_cost") } returns BigDecimal.valueOf(0.85)
         }
-        // mock the toString() for String? getValue
-        every { mockRow.getValue("id")?.toString() } returns "detail-1"
-        every { mockRow.getValue("stock_id")?.toString() } returns "stock-1"
-        every { mockRow.getValue("material_id")?.toString() } returns "mat-1"
-        every { mockRow.getValue("lot_id")?.toString() } returns "lot-1"
-        every { mockRow.getValue("warehouse")?.toString() } returns "一号护理站"
-        every { mockRow.getValue("unit")?.toString() } returns "PACKAGE"
 
         val result = InventoryConsumptionService.rowToDetailResult(mockRow)
         assertEquals("detail-1", result.detailId)
@@ -246,6 +279,9 @@ class InventoryConsumptionServiceTest {
         assertEquals("mat-1", result.materialId)
         assertEquals("PACKAGE", result.unit)
         assertEquals(8.5, result.unitCost.toDouble(), 0.001)
+        assertEquals("spec-1", result.unitSpecId)
+        assertEquals(0, result.baseQuantity!!.compareTo(BigDecimal.TEN))
+        assertEquals("片", result.baseUnit)
     }
 
     @Test
@@ -262,12 +298,93 @@ class InventoryConsumptionServiceTest {
     }
 
     @Test
-    fun `split quantity converts to package quantity with safe precision`() {
-        val packageQuantity = service.calculateSplitPackageQuantity(
-            splitQuantity = BigDecimal.ONE,
-            splitRatio = BigDecimal.valueOf(3),
+    fun `validateConsumptionItem accepts new contract unitSpecId plus inputQuantity`() {
+        val error = service.validateConsumptionItem(
+            InventoryConsumptionService.ConsumptionItem(
+                stockId = "stock-1",
+                unitSpecId = "spec-1",
+                inputQuantity = BigDecimal("2.5"),
+            ),
         )
-        assertEquals(0, packageQuantity.compareTo(BigDecimal("0.3334")))
+        assertNull(error)
+    }
+
+    @Test
+    fun `validateConsumptionItem rejects mixing new and legacy contract`() {
+        val error = service.validateConsumptionItem(
+            InventoryConsumptionService.ConsumptionItem(
+                stockId = "stock-1",
+                unitSpecId = "spec-1",
+                inputQuantity = BigDecimal.ONE,
+                unit = "PACKAGE",
+                quantity = BigDecimal.ONE,
+            ),
+        )
+        assertEquals("must not mix unit_spec_id/input_quantity with legacy unit/quantity", error)
+    }
+
+    @Test
+    fun `validateConsumptionItem rejects partial new contract`() {
+        val missingQuantity = service.validateConsumptionItem(
+            InventoryConsumptionService.ConsumptionItem(stockId = "stock-1", unitSpecId = "spec-1"),
+        )
+        assertEquals("input_quantity is required when unit_spec_id is provided", missingQuantity)
+
+        val missingSpec = service.validateConsumptionItem(
+            InventoryConsumptionService.ConsumptionItem(stockId = "stock-1", inputQuantity = BigDecimal.ONE),
+        )
+        assertEquals("unit_spec_id is required when input_quantity is provided", missingSpec)
+    }
+
+    @Test
+    fun `validateConsumptionItem rejects non positive inputQuantity`() {
+        val error = service.validateConsumptionItem(
+            InventoryConsumptionService.ConsumptionItem(
+                stockId = "stock-1",
+                unitSpecId = "spec-1",
+                inputQuantity = BigDecimal.ZERO,
+            ),
+        )
+        assertEquals("input_quantity must be > 0", error)
+    }
+
+    @Test
+    fun `sameConsumptionItems compares new contract by spec and input quantity`() {
+        val existing = listOf(
+            InventoryConsumptionService.DetailResult(
+                detailId = "detail-1",
+                stockId = "stock-1",
+                materialId = "mat-1",
+                lotId = null,
+                quantity = BigDecimal("10.0000"),
+                unit = "PACKAGE",
+                splitQuantity = null,
+                unitCost = BigDecimal.TEN,
+                totalCost = BigDecimal.valueOf(100),
+                warehouse = "一号护理站",
+                unitSpecId = "spec-1",
+                inputQuantity = BigDecimal("10"),
+                inputUnit = "盒",
+                conversionRatio = BigDecimal.TEN,
+                baseQuantity = BigDecimal("100"),
+                baseUnit = "片",
+                inputUnitCost = BigDecimal.TEN,
+                baseUnitCost = BigDecimal.ONE,
+            ),
+        )
+        val same = listOf(
+            InventoryConsumptionService.ConsumptionItem(
+                stockId = "stock-1",
+                unitSpecId = "spec-1",
+                inputQuantity = BigDecimal("10"),
+            ),
+        )
+        val differentSpec = same.map { it.copy(unitSpecId = "spec-2") }
+        val differentQty = same.map { it.copy(inputQuantity = BigDecimal("11")) }
+
+        assertTrue(service.sameConsumptionItems(existing, same))
+        assertFalse(service.sameConsumptionItems(existing, differentSpec))
+        assertFalse(service.sameConsumptionItems(existing, differentQty))
     }
 
     @Test

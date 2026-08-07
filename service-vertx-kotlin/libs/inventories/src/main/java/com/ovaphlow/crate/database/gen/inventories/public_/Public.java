@@ -5,7 +5,9 @@ package com.ovaphlow.crate.database.gen.inventories.public_;
 
 
 import com.ovaphlow.crate.database.gen.inventories.DefaultCatalog;
+import com.ovaphlow.crate.database.gen.inventories.public_.tables.InventoryUnitMigrationIssues;
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.Lots;
+import com.ovaphlow.crate.database.gen.inventories.public_.tables.MaterialUnitSpecs;
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.Materials;
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.StockOperationDetails;
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.StockOperations;
@@ -33,9 +35,19 @@ public class Public extends SchemaImpl {
     public static final Public PUBLIC = new Public();
 
     /**
+     * The table <code>public.inventory_unit_migration_issues</code>.
+     */
+    public final InventoryUnitMigrationIssues INVENTORY_UNIT_MIGRATION_ISSUES = InventoryUnitMigrationIssues.INVENTORY_UNIT_MIGRATION_ISSUES;
+
+    /**
      * The table <code>public.lots</code>.
      */
     public final Lots LOTS = Lots.LOTS;
+
+    /**
+     * The table <code>public.material_unit_specs</code>.
+     */
+    public final MaterialUnitSpecs MATERIAL_UNIT_SPECS = MaterialUnitSpecs.MATERIAL_UNIT_SPECS;
 
     /**
      * The table <code>public.materials</code>.
@@ -73,7 +85,9 @@ public class Public extends SchemaImpl {
     @Override
     public final List<Table<?>> getTables() {
         return Arrays.asList(
+            InventoryUnitMigrationIssues.INVENTORY_UNIT_MIGRATION_ISSUES,
             Lots.LOTS,
+            MaterialUnitSpecs.MATERIAL_UNIT_SPECS,
             Materials.MATERIALS,
             StockOperationDetails.STOCK_OPERATION_DETAILS,
             StockOperations.STOCK_OPERATIONS,

@@ -1,9 +1,13 @@
 # ADR-001：库存以最小可发放／可消耗单位记账
 
 - 日期：2026-08-02
-- 状态：提议中
+- 状态：已确认（2026-08-07 由计划 015 采用并进入实施，决策无差异）
 - 决策范围：Aceso Inventory、Pharmacy、Nursing 的库存余额、库存流水、发药、耗材消耗、退回与成本核算。
 - 相关计划：[002. Aceso 护理耗材使用与库存出库联动](../plans/002.aceso-nursing-supply-consumption-and-inventory-deduction.md)、后续 Pharmacy 发药与退药计划。
+
+## 采纳记录
+
+- 2026-08-07：[计划 015（Inventory 基础计量单位与包装换算演进）](../plans/015.aceso-inventory-base-unit-and-packaging-conversion.md) 按本 ADR 决策无差异实施：V202/V407 迁移、`UnitConversionService` 换算、库存/流水以基础数量记账并固化输入与换算快照、历史异常行阻断（`MIGRATION_BLOCKED`）不伪造余额。开发默认验证通过；隔离库集成验证与浏览器验收由测试角色在授权 `aceso_test` 完成后，按 015 第 11 节评审确认最终状态。
 
 ## 背景
 

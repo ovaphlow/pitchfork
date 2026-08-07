@@ -23,3 +23,7 @@ apps/*/config.json
 .env
 .env.*
 !.env.example
+
+.project
+.settings/
+.classpath

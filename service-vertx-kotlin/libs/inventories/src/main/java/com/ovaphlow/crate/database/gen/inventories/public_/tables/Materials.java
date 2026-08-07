@@ -124,6 +124,26 @@ public class Materials extends TableImpl<MaterialsRecord> {
     public final TableField<MaterialsRecord, String> STATUS = createField(DSL.name("status"), SQLDataType.VARCHAR.defaultValue(DSL.field(DSL.raw("'ACTIVE'::character varying"), SQLDataType.VARCHAR)), this, "");
 
     /**
+     * The column <code>public.materials.base_unit</code>.
+     */
+    public final TableField<MaterialsRecord, String> BASE_UNIT = createField(DSL.name("base_unit"), SQLDataType.VARCHAR, this, "");
+
+    /**
+     * The column <code>public.materials.base_quantity_scale</code>.
+     */
+    public final TableField<MaterialsRecord, Short> BASE_QUANTITY_SCALE = createField(DSL.name("base_quantity_scale"), SQLDataType.SMALLINT.nullable(false).defaultValue(DSL.field(DSL.raw("0"), SQLDataType.SMALLINT)), this, "");
+
+    /**
+     * The column <code>public.materials.unit_model_status</code>.
+     */
+    public final TableField<MaterialsRecord, String> UNIT_MODEL_STATUS = createField(DSL.name("unit_model_status"), SQLDataType.VARCHAR.nullable(false).defaultValue(DSL.field(DSL.raw("'LEGACY'::character varying"), SQLDataType.VARCHAR)), this, "");
+
+    /**
+     * The column <code>public.materials.updated_at</code>.
+     */
+    public final TableField<MaterialsRecord, OffsetDateTime> UPDATED_AT = createField(DSL.name("updated_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6), this, "");
+
+    /**
      * The column <code>public.materials.created_at</code>.
      */
     public final TableField<MaterialsRecord, OffsetDateTime> CREATED_AT = createField(DSL.name("created_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6).defaultValue(DSL.field(DSL.raw("now()"), SQLDataType.TIMESTAMPWITHTIMEZONE)), this, "");
@@ -246,8 +266,10 @@ public class Materials extends TableImpl<MaterialsRecord> {
     @Override
     public List<Check<MaterialsRecord>> getChecks() {
         return Arrays.asList(
+            Internal.createCheck(this, DSL.name("materials_base_quantity_scale_check"), "(((base_quantity_scale >= (0)::smallint) AND (base_quantity_scale <= (6)::smallint)))", true),
             Internal.createCheck(this, DSL.name("materials_cost_method_check"), "(((cost_method)::text = ANY ((ARRAY['MOVING_AVG'::character varying, 'FIFO'::character varying])::text[])))", true),
-            Internal.createCheck(this, DSL.name("materials_status_check"), "(((status)::text = ANY ((ARRAY['ACTIVE'::character varying, 'INACTIVE'::character varying, 'DISCONTINUED'::character varying])::text[])))", true)
+            Internal.createCheck(this, DSL.name("materials_status_check"), "(((status)::text = ANY ((ARRAY['ACTIVE'::character varying, 'INACTIVE'::character varying, 'DISCONTINUED'::character varying])::text[])))", true),
+            Internal.createCheck(this, DSL.name("materials_unit_model_status_check"), "(((unit_model_status)::text = ANY ((ARRAY['LEGACY'::character varying, 'ACTIVE'::character varying, 'MIGRATION_BLOCKED'::character varying])::text[])))", true)
         );
     }
 

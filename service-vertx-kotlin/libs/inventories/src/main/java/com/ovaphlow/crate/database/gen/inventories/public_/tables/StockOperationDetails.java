@@ -102,17 +102,57 @@ public class StockOperationDetails extends TableImpl<StockOperationDetailsRecord
     /**
      * The column <code>public.stock_operation_details.unit_cost</code>.
      */
-    public final TableField<StockOperationDetailsRecord, BigDecimal> UNIT_COST = createField(DSL.name("unit_cost"), SQLDataType.NUMERIC(18, 4).nullable(false), this, "");
+    public final TableField<StockOperationDetailsRecord, BigDecimal> UNIT_COST = createField(DSL.name("unit_cost"), SQLDataType.NUMERIC(24, 8).nullable(false), this, "");
 
     /**
      * The column <code>public.stock_operation_details.total_cost</code>.
      */
-    public final TableField<StockOperationDetailsRecord, BigDecimal> TOTAL_COST = createField(DSL.name("total_cost"), SQLDataType.NUMERIC(18, 4).nullable(false), this, "");
+    public final TableField<StockOperationDetailsRecord, BigDecimal> TOTAL_COST = createField(DSL.name("total_cost"), SQLDataType.NUMERIC(24, 8).nullable(false), this, "");
 
     /**
      * The column <code>public.stock_operation_details.created_at</code>.
      */
     public final TableField<StockOperationDetailsRecord, OffsetDateTime> CREATED_AT = createField(DSL.name("created_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6).nullable(false).defaultValue(DSL.field(DSL.raw("now()"), SQLDataType.TIMESTAMPWITHTIMEZONE)), this, "");
+
+    /**
+     * The column <code>public.stock_operation_details.unit_spec_id</code>.
+     */
+    public final TableField<StockOperationDetailsRecord, String> UNIT_SPEC_ID = createField(DSL.name("unit_spec_id"), SQLDataType.VARCHAR(32), this, "");
+
+    /**
+     * The column <code>public.stock_operation_details.input_quantity</code>.
+     */
+    public final TableField<StockOperationDetailsRecord, BigDecimal> INPUT_QUANTITY = createField(DSL.name("input_quantity"), SQLDataType.NUMERIC(20, 6), this, "");
+
+    /**
+     * The column <code>public.stock_operation_details.input_unit</code>.
+     */
+    public final TableField<StockOperationDetailsRecord, String> INPUT_UNIT = createField(DSL.name("input_unit"), SQLDataType.VARCHAR, this, "");
+
+    /**
+     * The column <code>public.stock_operation_details.conversion_ratio</code>.
+     */
+    public final TableField<StockOperationDetailsRecord, BigDecimal> CONVERSION_RATIO = createField(DSL.name("conversion_ratio"), SQLDataType.NUMERIC(20, 6), this, "");
+
+    /**
+     * The column <code>public.stock_operation_details.base_quantity</code>.
+     */
+    public final TableField<StockOperationDetailsRecord, BigDecimal> BASE_QUANTITY = createField(DSL.name("base_quantity"), SQLDataType.NUMERIC(20, 6), this, "");
+
+    /**
+     * The column <code>public.stock_operation_details.base_unit</code>.
+     */
+    public final TableField<StockOperationDetailsRecord, String> BASE_UNIT = createField(DSL.name("base_unit"), SQLDataType.VARCHAR, this, "");
+
+    /**
+     * The column <code>public.stock_operation_details.input_unit_cost</code>.
+     */
+    public final TableField<StockOperationDetailsRecord, BigDecimal> INPUT_UNIT_COST = createField(DSL.name("input_unit_cost"), SQLDataType.NUMERIC(24, 8), this, "");
+
+    /**
+     * The column <code>public.stock_operation_details.base_unit_cost</code>.
+     */
+    public final TableField<StockOperationDetailsRecord, BigDecimal> BASE_UNIT_COST = createField(DSL.name("base_unit_cost"), SQLDataType.NUMERIC(24, 8), this, "");
 
     private StockOperationDetails(Name alias, Table<StockOperationDetailsRecord> aliased) {
         this(alias, aliased, (Field<?>[]) null, null);
