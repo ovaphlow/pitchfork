@@ -15,6 +15,7 @@ import org.jooq.DSLContext
 import org.jooq.JSONB
 import org.jooq.UpdateSetMoreStep
 import org.jooq.impl.DSL.count
+import java.math.BigDecimal
 import java.time.OffsetDateTime
 
 /**
@@ -33,10 +34,12 @@ class MaterialService(
     private val createAllowed = setOf(
         "code", "name", "category", "spec", "base_unit", "quantity_scale",
         "enable_batch_control", "cost_method", "metadata", "status",
+        "package_unit", "package_size",
     )
     private val updateAllowed = setOf(
         "name", "category", "spec", "base_unit", "quantity_scale",
         "enable_batch_control", "cost_method", "metadata", "status",
+        "package_unit", "package_size",
     )
 
     fun create(body: JsonObject): Future<JsonObject> {
@@ -53,6 +56,7 @@ class MaterialService(
         if (category.isNullOrBlank()) return Future.failedFuture(IllegalArgumentException("category is required"))
         if (baseUnit.isNullOrBlank()) return Future.failedFuture(IllegalArgumentException("base_unit is required"))
         val scale = parseScale(body.getValue("quantity_scale"))
+        validatePackageSpec(body)
 
         val query = ctx.insertInto(t)
             .set(t.ID, id)
@@ -61,6 +65,8 @@ class MaterialService(
             .set(t.CATEGORY, category)
             .set(t.SPEC, body.getString("spec"))
             .set(t.BASE_UNIT, baseUnit)
+            .set(t.PACKAGE_UNIT, body.getString("package_unit"))
+            .set(t.PACKAGE_SIZE, body.getValue("package_size")?.let { jsonDecimal(it) })
             .set(t.QUANTITY_SCALE, scale)
             .set(t.ENABLE_BATCH_CONTROL, body.getBoolean("enable_batch_control"))
             .set(t.COST_METHOD, body.getString("cost_method"))
@@ -79,6 +85,8 @@ class MaterialService(
                     .put("category", category)
                     .put("spec", body.getString("spec"))
                     .put("base_unit", baseUnit)
+                    .put("package_unit", body.getString("package_unit"))
+                    .put("package_size", body.getValue("package_size")?.let { jsonDecimal(it) })
                     .put("quantity_scale", scale)
                     .put("enable_batch_control", body.getBoolean("enable_batch_control"))
                     .put("cost_method", body.getString("cost_method"))
@@ -139,8 +147,12 @@ class MaterialService(
     fun update(id: String, body: JsonObject): Future<JsonObject> {
         rejectUnknown(body, updateAllowed)?.let { return Future.failedFuture(it) }
         return get(id).flatMap { existing ->
-            val touchesUnit = body.containsKey("base_unit") || body.containsKey("quantity_scale")
-            if (touchesUnit) {
+            validatePackageSpec(body)
+            // 记账口径字段（base_unit/quantity_scale）存在库存事实后不可改；
+            // 包装规格仅是展示投影、不影响台账，可随时调整。
+            val immutableChanged = listOf("base_unit", "quantity_scale")
+                .any { immutableFieldChanged(existing, body, it) }
+            if (immutableChanged) {
                 val stockQuery = ctx.select(Stocks.STOCKS.ID)
                     .from(Stocks.STOCKS)
                     .where(Stocks.STOCKS.MATERIAL_ID.eq(id))
@@ -164,6 +176,23 @@ class MaterialService(
         }
     }
 
+    /** 不可变字段是否发生了值变化（null 视为空值，数字按数值比较，其余按字符串比较） */
+    private fun immutableFieldChanged(existing: JsonObject, body: JsonObject, key: String): Boolean {
+        if (!body.containsKey(key)) return false
+        val a = existing.getValue(key)
+        val b = body.getValue(key)
+        return when {
+            a == null && b == null -> false
+            a == null || b == null -> true
+            a is Number && b is Number -> {
+                val x = jsonDecimal(a)
+                val y = jsonDecimal(b)
+                if (x == null || y == null) true else x.compareTo(y) != 0
+            }
+            else -> a.toString() != b.toString()
+        }
+    }
+
     private fun applyUpdate(id: String, existing: JsonObject, body: JsonObject): Future<JsonObject> {
         val now = OffsetDateTime.now()
         var q: UpdateSetMoreStep<MaterialsRecord> = ctx.update(t) as UpdateSetMoreStep<MaterialsRecord>
@@ -178,6 +207,12 @@ class MaterialService(
         }
         if (body.containsKey("base_unit")) {
             q = q.set(t.BASE_UNIT, body.getString("base_unit"))
+        }
+        if (body.containsKey("package_unit")) {
+            q = q.set(t.PACKAGE_UNIT, body.getString("package_unit"))
+        }
+        if (body.containsKey("package_size")) {
+            q = q.set(t.PACKAGE_SIZE, body.getValue("package_size")?.let { jsonDecimal(it) })
         }
         if (body.containsKey("quantity_scale")) {
             q = q.set(t.QUANTITY_SCALE, parseScale(body.getValue("quantity_scale")))
@@ -210,6 +245,18 @@ class MaterialService(
             .map { null as Void? }
     }
 
+    /** 包装规格成对校验：package_unit 与 package_size 必须同空或同非空，且每包含量 > 0 */
+    private fun validatePackageSpec(body: JsonObject) {
+        val unit = body.getString("package_unit")
+        val sizeRaw = body.getValue("package_size")
+        if (unit.isNullOrBlank() && sizeRaw == null) return
+        if (unit.isNullOrBlank() || sizeRaw == null) {
+            throw IllegalArgumentException("package_unit and package_size must be both set or both empty")
+        }
+        val size = jsonDecimal(sizeRaw) ?: throw IllegalArgumentException("package_size must be a number")
+        if (size <= BigDecimal.ZERO) throw IllegalArgumentException("package_size must be greater than 0")
+    }
+
     private fun parseScale(value: Any?): Short {
         val scale = jsonDecimal(value)?.let { decimal ->
             runCatching { decimal.intValueExact() }.getOrNull()
@@ -235,6 +282,8 @@ class MaterialService(
                 .put("category", row.getValue("category")?.toString())
                 .put("spec", row.getValue("spec")?.toString())
                 .put("base_unit", row.getValue("base_unit")?.toString())
+                .put("package_unit", row.getValue("package_unit")?.toString())
+                .put("package_size", (row.getValue("package_size") as? Number)?.toDouble())
                 .put("quantity_scale", (row.getValue("quantity_scale") as? Number)?.toInt())
                 .put("enable_batch_control", row.getValue("enable_batch_control") as? Boolean)
                 .put("cost_method", row.getValue("cost_method")?.toString())

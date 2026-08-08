@@ -31,7 +31,7 @@ import {
   updateNursingTaskStatus,
   updateNursingTaskExecutionStatusWithConsumptions,
   listInventoryStocks,
-  listInventoryWarehouses,
+  listWarehouseOptions,
   listNursingExecutionConsumptions,
   type CarePlanRevisionDetail,
   type CarePlanRevisionListItem,
@@ -50,6 +50,7 @@ import {
   type MedicalOrder,
   type NursingConsumptionInput,
   type NursingExecutionConsumption,
+  type WarehouseOption,
 } from "@pitchfork/shared/aceso";
 import NursingExecutionStatisticsPanel from "./NursingExecutionStatisticsPanel";
 
@@ -345,7 +346,7 @@ export default function NursingPage() {
   // ——— 耗材使用（完成任务时可选） ———
   const [consumeEnabled, setConsumeEnabled] = useState(false);
   const [consumeWarehouse, setConsumeWarehouse] = useState("");
-  const [consumeWarehouses, setConsumeWarehouses] = useState<string[]>([]);
+  const [consumeWarehouses, setConsumeWarehouses] = useState<WarehouseOption[]>([]);
   const [consumeStocks, setConsumeStocks] = useState<InventoryStockAvailability[]>([]);
   const [consumeItems, setConsumeItems] = useState<ConsumptionDraft[]>([]);
 
@@ -720,7 +721,7 @@ export default function NursingPage() {
 
   async function loadConsumeWarehouses() {
     try {
-      const warehouses = await listInventoryWarehouses();
+      const warehouses = await listWarehouseOptions();
       setConsumeWarehouses(warehouses);
     } catch {
       setActionError("无法加载护理站列表");
@@ -1550,7 +1551,7 @@ export default function NursingPage() {
                       <label className="text-xs text-fg-muted" htmlFor="consume-warehouse">护理站/仓库</label>
                       <select id="consume-warehouse" className={selectClass} value={consumeWarehouse} onChange={(event) => { const warehouse = event.target.value; setConsumeWarehouse(warehouse); setConsumeStocks([]); setConsumeItems([]); if (warehouse) void loadConsumeStocks(warehouse); }}>
                         <option value="">选择护理站</option>
-                        {consumeWarehouses.map((wh) => <option key={wh} value={wh}>{wh}</option>)}
+                        {consumeWarehouses.map((wh) => <option key={wh.code} value={wh.code}>{wh.name}</option>)}
                       </select>
                     </div>
                     {consumeWarehouse && (

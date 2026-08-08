@@ -61,6 +61,7 @@ const items: Item[] = [
       { label: "用户",     path: "/users",                  icon: "👥", domains: ["医疗", "养老", "儿保"] },
       { label: "部门",     path: "/dashboard/departments",  icon: "🏢", domains: ["医疗", "养老", "儿保"] },
       { label: "仓库",     path: "/dashboard/warehouses",   icon: "📦", domains: ["医疗", "养老", "儿保"] },
+      { label: "物资",     path: "/dashboard/materials",    icon: "🏷️", domains: ["医疗", "养老", "儿保"] },
       { label: "角色",     path: "/dashboard/roles",        icon: "🔐", domains: ["医疗", "养老", "儿保"] },
     ],
   },

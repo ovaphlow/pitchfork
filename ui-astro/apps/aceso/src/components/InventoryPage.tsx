@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   confirmInventoryInbound,
-  createInventoryMaterial,
+  listInventoryLots,
   listInventoryMaterials,
   listInventoryStocks,
-  listInventoryWarehouses,
+  listWarehouseOptions,
   type InventoryInboundItem,
+  type InventoryLot,
   type InventoryMaterial,
   type InventoryStockAvailability,
+  type WarehouseOption,
 } from "@pitchfork/shared/aceso";
 import { Button, Card, Input, Modal, Table, type Column } from "@pitchfork/ui";
 
@@ -15,44 +17,43 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
-/** 新建物资：一次性提交 base_unit 与 quantity_scale */
-interface MaterialForm {
-  code: string;
-  name: string;
-  category: string;
-  baseUnit: string;
-  quantityScale: string;
+/** 整包 + 余数展示：按物资包装规格换算基础数量（库存账本仍为基础单位） */
+function packageBreakdown(material: InventoryMaterial | undefined, baseQty: number): string | null {
+  if (!material?.package_unit || !material.package_size || material.package_size <= 0) return null;
+  const scale = material.quantity_scale ?? 0;
+  const size = material.package_size;
+  const whole = Math.floor(baseQty / size);
+  const remainder = Number((baseQty - whole * size).toFixed(Math.max(scale, 0)));
+  const base = material.base_unit;
+  const fmt = (n: number) => Number(n.toFixed(scale)).toString();
+  if (whole === 0) return `${fmt(remainder)} ${base}`;
+  if (remainder === 0) return `${whole} ${material.package_unit}`;
+  return `${whole} ${material.package_unit} + ${fmt(remainder)} ${base}`;
 }
 
-const materialFormDefaults: MaterialForm = {
-  code: "",
-  name: "",
-  category: "",
-  baseUnit: "",
-  quantityScale: "0",
-};
+/** 整包数 × 每包含量 + 余数 = 基础数量 */
+function computeBaseTotal(pkgQty: string, remQty: string, size: number): number {
+  return (Number(pkgQty) || 0) * size + (Number(remQty) || 0);
+}
 
-/** 入库明细行：基础数量 + 每基础单位成本 */
+/** 入库明细行：基础数量 + 每基础单位成本；包装物资用 pkgQty/remQty 录入 */
 interface InboundRow {
   key: number;
   materialId: string;
   quantity: string;
   unitCost: string;
   lotId: string;
+  pkgQty: string;
+  remQty: string;
 }
 
 export default function InventoryPage() {
   const [materials, setMaterials] = useState<InventoryMaterial[]>([]);
   const [stocks, setStocks] = useState<InventoryStockAvailability[]>([]);
-  const [warehouses, setWarehouses] = useState<string[]>([]);
+  const [warehouses, setWarehouses] = useState<WarehouseOption[]>([]);
   const [warehouseFilter, setWarehouseFilter] = useState("");
   const [loading, setLoading] = useState(true);
   const [pageError, setPageError] = useState("");
-
-  const [createOpen, setCreateOpen] = useState(false);
-  const [createForm, setCreateForm] = useState<MaterialForm>(materialFormDefaults);
-  const [createError, setCreateError] = useState("");
-  const [creating, setCreating] = useState(false);
 
   const [inboundOpen, setInboundOpen] = useState(false);
   const [inboundWarehouse, setInboundWarehouse] = useState("");
@@ -60,6 +61,7 @@ export default function InventoryPage() {
   const [inboundError, setInboundError] = useState("");
   const [inboundSaving, setInboundSaving] = useState(false);
   const [inboundNote, setInboundNote] = useState("");
+  const [lotsByMaterial, setLotsByMaterial] = useState<Record<string, InventoryLot[]>>({});
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -68,7 +70,7 @@ export default function InventoryPage() {
       const [materialPage, stockPage, warehouseList] = await Promise.all([
         listInventoryMaterials({ limit: 200 }),
         listInventoryStocks({ warehouse: warehouseFilter || undefined, limit: 200 }),
-        listInventoryWarehouses(),
+        listWarehouseOptions(),
       ]);
       setMaterials(materialPage.records);
       setStocks(stockPage.records);
@@ -89,50 +91,32 @@ export default function InventoryPage() {
     [materials],
   );
 
-  async function handleCreateMaterial() {
-    const f = createForm;
-    if (!f.code.trim() || !f.name.trim() || !f.category.trim() || !f.baseUnit.trim()) {
-      setCreateError("物资编码、名称、类别与基础单位不能为空");
-      return;
-    }
-    const scale = Number(f.quantityScale);
-    if (!Number.isInteger(scale) || scale < 0 || scale > 6) {
-      setCreateError("数量精度必须为 0–6 的整数");
-      return;
-    }
-
-    setCreating(true);
-    setCreateError("");
-    try {
-      await createInventoryMaterial({
-        code: f.code.trim(),
-        name: f.name.trim(),
-        category: f.category.trim(),
-        base_unit: f.baseUnit.trim(),
-        quantity_scale: scale,
-        status: "ACTIVE",
-      });
-      setCreateOpen(false);
-      setCreateForm(materialFormDefaults);
-      await load();
-    } catch (error) {
-      setCreateError(errorMessage(error, "无法创建物资"));
-    } finally {
-      setCreating(false);
-    }
-  }
+  const materialByCode = useMemo(
+    () => new Map(materials.map((m) => [m.code, m])),
+    [materials],
+  );
 
   // ——— 入库 ———
   function freshRow(key: number): InboundRow {
-    return { key, materialId: "", quantity: "", unitCost: "", lotId: "" };
+    return { key, materialId: "", quantity: "", unitCost: "", lotId: "", pkgQty: "", remQty: "" };
   }
 
   function updateRow(key: number, patch: Partial<InboundRow>) {
     setInboundRows((rows) => rows.map((r) => (r.key === key ? { ...r, ...patch } : r)));
   }
 
+  async function fetchMaterialLots(materialId: string) {
+    if (lotsByMaterial[materialId]) return;
+    try {
+      const page = await listInventoryLots({ material_id: materialId, limit: 200 });
+      setLotsByMaterial((current) => ({ ...current, [materialId]: page.records }));
+    } catch {
+      setLotsByMaterial((current) => ({ ...current, [materialId]: [] }));
+    }
+  }
+
   function openInbound() {
-    setInboundWarehouse(warehouseFilter || warehouses[0] || "");
+    setInboundWarehouse(warehouseFilter || warehouses[0]?.code || "");
     setInboundRows([freshRow(Date.now())]);
     setInboundError("");
     setInboundNote("");
@@ -142,11 +126,29 @@ export default function InventoryPage() {
   function validateInbound(): InventoryInboundItem[] | null {
     const items: InventoryInboundItem[] = [];
     for (const row of inboundRows) {
+      const material = materials.find((m) => m.id === row.materialId);
       if (!row.materialId) {
         setInboundError("请为每一行选择物资");
         return null;
       }
-      const quantity = Number(row.quantity);
+      if (material?.enable_batch_control === true && !row.lotId.trim()) {
+        setInboundError("批控物资必须选择批次");
+        return null;
+      }
+      const packaged = material?.package_unit && material.package_size ? material : undefined;
+      let quantity: number;
+      if (packaged) {
+        const size = packaged.package_size!;
+        const p = Number(row.pkgQty) || 0;
+        const r = Number(row.remQty) || 0;
+        if (p < 0 || r < 0) {
+          setInboundError("整包数与余数不能为负数");
+          return null;
+        }
+        quantity = p * size + r;
+      } else {
+        quantity = Number(row.quantity);
+      }
       if (!Number.isFinite(quantity) || quantity <= 0) {
         setInboundError("基础数量必须为正数");
         return null;
@@ -160,7 +162,7 @@ export default function InventoryPage() {
         material_id: row.materialId,
         quantity,
         unit_cost: unitCost,
-        ...(row.lotId.trim() ? { lot_id: row.lotId.trim() } : {}),
+        ...(material?.enable_batch_control === true && row.lotId.trim() ? { lot_id: row.lotId.trim() } : {}),
       });
     }
     return items;
@@ -191,15 +193,6 @@ export default function InventoryPage() {
   }
 
   // ——— 表格 ———
-  const materialColumns: Column<InventoryMaterial>[] = [
-    { key: "code", header: "编码", className: "min-w-[120px] font-mono text-xs" },
-    { key: "name", header: "名称", className: "min-w-[180px]", render: (row) => <span className="font-medium text-fg-emphasis">{row.name}</span> },
-    { key: "category", header: "类别", className: "min-w-[120px]" },
-    { key: "base_unit", header: "基础单位", className: "min-w-[120px] font-mono text-xs" },
-    { key: "quantity_scale", header: "精度（小数位）", className: "min-w-[100px] text-right font-mono text-xs", render: (row) => String(row.quantity_scale ?? 0) },
-    { key: "status", header: "状态", className: "min-w-[100px]" },
-  ];
-
   const stockColumns: Column<InventoryStockAvailability>[] = [
     { key: "warehouse", header: "仓库", className: "min-w-[100px]" },
     {
@@ -227,15 +220,19 @@ export default function InventoryPage() {
     {
       key: "balance",
       header: "结存 / 锁定 / 可用",
-      className: "min-w-[180px] text-right font-mono text-xs",
-      render: (row) => (
-        <div className="flex flex-col gap-0.5 tabular-nums">
-          <span>
-            {row.quantity.toFixed(6)} / {row.locked_quantity.toFixed(6)} /{" "}
-            <b className="text-fg-emphasis">{row.available_quantity.toFixed(6)}</b> {row.unit}
-          </span>
-        </div>
-      ),
+      className: "min-w-[200px] text-right font-mono text-xs",
+      render: (row) => {
+        const pkg = packageBreakdown(materialByCode.get(row.material_code), row.quantity);
+        return (
+          <div className="flex flex-col gap-0.5 tabular-nums">
+            <span>
+              {row.quantity.toFixed(6)} / {row.locked_quantity.toFixed(6)} /{" "}
+              <b className="text-fg-emphasis">{row.available_quantity.toFixed(6)}</b> {row.unit}
+            </span>
+            {pkg && <span className="text-xs text-fg-dimmed">整包：{pkg}</span>}
+          </div>
+        );
+      },
     },
     {
       key: "unit_cost",
@@ -250,21 +247,12 @@ export default function InventoryPage() {
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h2 className="text-lg font-semibold text-fg-emphasis">库存计量</h2>
-          <p className="mt-1 text-sm text-fg-muted">每个物资只有一个基础单位和数量精度；所有库存与单据均以基础数量记账</p>
+          <p className="mt-1 text-sm text-fg-muted">查看各仓库库存结存、锁定与可用数量；手工入库按物资基础单位记账</p>
         </div>
-        <div className="flex gap-2">
-          <Button variant="secondary" onClick={openInbound}>手工入库</Button>
-          <Button onClick={() => { setCreateForm(materialFormDefaults); setCreateError(""); setCreateOpen(true); }}>新建物资</Button>
-        </div>
+        <Button variant="secondary" onClick={openInbound}>手工入库</Button>
       </div>
 
       {pageError && <div className="rounded-lg border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">{pageError}</div>}
-
-      <Card title="物资与基础单位" actions={<span className="text-sm text-fg-dimmed">共 {materials.length} 个</span>}>
-        <div className="overflow-x-auto">
-          <Table columns={materialColumns} data={materials} loading={loading} emptyMessage="暂无物资" />
-        </div>
-      </Card>
 
       <Card
         title="库存查看"
@@ -277,7 +265,7 @@ export default function InventoryPage() {
           >
             <option value="">全部仓库</option>
             {warehouses.map((warehouse) => (
-              <option key={warehouse} value={warehouse}>{warehouse}</option>
+              <option key={warehouse.code} value={warehouse.code}>{warehouse.name}</option>
             ))}
           </select>
         }
@@ -286,27 +274,6 @@ export default function InventoryPage() {
           <Table columns={stockColumns} data={stocks} loading={loading} emptyMessage="暂无可用库存" />
         </div>
       </Card>
-
-      {/* ——— 新建物资 Modal ——— */}
-      <Modal open={createOpen} onClose={() => !creating && setCreateOpen(false)} title="新建物资">
-        <div className="space-y-4">
-          {createError && <div className="rounded-lg border border-danger/30 bg-danger-bg px-3 py-2 text-sm text-danger">{createError}</div>}
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <Input label="物资编码" value={createForm.code} onChange={(event) => setCreateForm((current) => ({ ...current, code: event.target.value }))} placeholder="例如 M-001" />
-            <Input label="物资名称" value={createForm.name} onChange={(event) => setCreateForm((current) => ({ ...current, name: event.target.value }))} placeholder="例如 纱布敷料" />
-            <Input label="类别" value={createForm.category} onChange={(event) => setCreateForm((current) => ({ ...current, category: event.target.value }))} placeholder="例如 耗材" />
-            <Input label="基础单位" value={createForm.baseUnit} onChange={(event) => setCreateForm((current) => ({ ...current, baseUnit: event.target.value }))} placeholder="例如 片、支、包、mL" />
-            <Input label="数量精度（小数位 0–6）" value={createForm.quantityScale} onChange={(event) => setCreateForm((current) => ({ ...current, quantityScale: event.target.value }))} placeholder="0" />
-          </div>
-          <p className="rounded-lg border border-border bg-surface-alt px-4 py-3 text-xs text-fg-muted">
-            基础单位与数量精度在存在库存事实后不可修改；系统不接受包装单位、换算率或拆零输入。
-          </p>
-          <div className="flex justify-end gap-3 pt-2">
-            <Button variant="ghost" onClick={() => setCreateOpen(false)} disabled={creating}>取消</Button>
-            <Button onClick={() => void handleCreateMaterial()} loading={creating}>创建</Button>
-          </div>
-        </div>
-      </Modal>
 
       {/* ——— 手工入库 Modal ——— */}
       <Modal open={inboundOpen} onClose={() => !inboundSaving && setInboundOpen(false)} title="手工入库">
@@ -321,7 +288,7 @@ export default function InventoryPage() {
               className="h-10 rounded-md border border-border bg-surface px-3 text-sm text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
             >
               {warehouses.map((warehouse) => (
-                <option key={warehouse} value={warehouse}>{warehouse}</option>
+                <option key={warehouse.code} value={warehouse.code}>{warehouse.name}</option>
               ))}
             </select>
           </div>
@@ -348,37 +315,85 @@ export default function InventoryPage() {
                   <select
                     id={`inbound-material-${row.key}`}
                     value={row.materialId}
-                    onChange={(event) => updateRow(row.key, { materialId: event.target.value })}
+                    onChange={(event) => {
+                      updateRow(row.key, { materialId: event.target.value, lotId: "", pkgQty: "", remQty: "" });
+                      if (event.target.value) void fetchMaterialLots(event.target.value);
+                    }}
                     className="h-10 rounded-md border border-border bg-surface px-3 text-sm text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
                   >
                     <option value="">选择物资</option>
                     {activeMaterials.map((material) => (
                       <option key={material.id} value={material.id}>
-                        {material.code} · {material.name}（{material.base_unit}）
+                        {material.code} · {material.name}（{material.base_unit}）{material.enable_batch_control === true ? " · 批控" : ""}{material.package_unit ? ` · 1${material.package_unit}=${material.package_size}${material.base_unit}` : ""}
                       </option>
                     ))}
                   </select>
                 </div>
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <Input
-                    label={`基础数量（${material?.base_unit ?? "单位"}）`}
-                    value={row.quantity}
-                    onChange={(event) => updateRow(row.key, { quantity: event.target.value })}
-                    placeholder="例如 48"
-                  />
-                  <Input
-                    label={`单位成本（每${material?.base_unit ?? "基础单位"}）`}
-                    value={row.unitCost}
-                    onChange={(event) => updateRow(row.key, { unitCost: event.target.value })}
-                    placeholder="例如 1.5"
-                  />
+                  {material?.package_unit && material.package_size ? (
+                    <>
+                      <Input
+                        label={`整包数（${material.package_unit}）`}
+                        value={row.pkgQty}
+                        onChange={(event) => updateRow(row.key, { pkgQty: event.target.value })}
+                        placeholder="例如 2"
+                      />
+                      <Input
+                        label={`余数（${material.base_unit}）`}
+                        value={row.remQty}
+                        onChange={(event) => updateRow(row.key, { remQty: event.target.value })}
+                        placeholder="例如 5"
+                      />
+                      <Input
+                        label={`单位成本（每${material.base_unit}）`}
+                        value={row.unitCost}
+                        onChange={(event) => updateRow(row.key, { unitCost: event.target.value })}
+                        placeholder="例如 1.5"
+                      />
+                      <div className="flex items-end pb-1">
+                        <span className="text-sm text-fg-muted">
+                          合计基础数量：<b className="font-mono text-fg-emphasis">{computeBaseTotal(row.pkgQty, row.remQty, material.package_size)}</b> {material.base_unit}
+                        </span>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <Input
+                        label={`基础数量（${material?.base_unit ?? "单位"}）`}
+                        value={row.quantity}
+                        onChange={(event) => updateRow(row.key, { quantity: event.target.value })}
+                        placeholder="例如 48"
+                      />
+                      <Input
+                        label={`单位成本（每${material?.base_unit ?? "基础单位"}）`}
+                        value={row.unitCost}
+                        onChange={(event) => updateRow(row.key, { unitCost: event.target.value })}
+                        placeholder="例如 1.5"
+                      />
+                    </>
+                  )}
                 </div>
-                <Input
-                  label="批次号（批控物资必填）"
-                  value={row.lotId}
-                  onChange={(event) => updateRow(row.key, { lotId: event.target.value })}
-                  placeholder="例如 LOT-20260807"
-                />
+                {material?.enable_batch_control === true && (
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-sm font-medium text-fg-muted" htmlFor={`inbound-lot-${row.key}`}>批次（批控物资必选）</label>
+                    <select
+                      id={`inbound-lot-${row.key}`}
+                      value={row.lotId}
+                      onChange={(event) => updateRow(row.key, { lotId: event.target.value })}
+                      className="h-10 rounded-md border border-border bg-surface px-3 text-sm text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                    >
+                      <option value="">选择批次</option>
+                      {(lotsByMaterial[material.id] ?? []).map((lot) => (
+                        <option key={lot.id} value={lot.id}>
+                          {lot.batch_no}{lot.expiry_date ? `（效期 ${lot.expiry_date}）` : ""}
+                        </option>
+                      ))}
+                    </select>
+                    {(lotsByMaterial[material.id] ?? []).length === 0 && (
+                      <p className="text-xs text-fg-dimmed">该物资暂无可用批次，需先创建批次才能入库</p>
+                    )}
+                  </div>
+                )}
               </div>
             );
           })}

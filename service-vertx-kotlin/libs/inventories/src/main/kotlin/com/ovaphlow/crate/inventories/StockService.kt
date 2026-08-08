@@ -1154,28 +1154,6 @@ class StockService(
             }
     }
 
-    fun listAvailableWarehouses(): Future<List<String>> {
-        val s = Stocks.STOCKS.`as`("s")
-        val m = Materials.MATERIALS.`as`("m")
-        val l = Lots.LOTS.`as`("l")
-        val query = ctx.selectDistinct(s.WAREHOUSE)
-            .from(s)
-            .join(m).on(s.MATERIAL_ID.eq(m.ID))
-            .leftJoin(l).on(s.LOT_ID.eq(l.ID))
-            .where(s.QUANTITY.gt(s.LOCKED_QUANTITY))
-            .and(m.STATUS.eq("ACTIVE"))
-            .and(DSL.or(l.EXPIRY_DATE.isNull, l.EXPIRY_DATE.ge(LocalDate.now())))
-            .orderBy(s.WAREHOUSE.asc())
-
-        return pool.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
-            .map { rows ->
-                val warehouses = mutableListOf<String>()
-                for (row in rows) row.getValue("warehouse")?.toString()?.let { warehouses.add(it) }
-                warehouses
-            }
-    }
-
     fun loadOperation(connection: SqlConnection, opId: String): Future<JsonObject> {
         val findOp = ctx.selectFrom(StockOperations.STOCK_OPERATIONS)
             .where(StockOperations.STOCK_OPERATIONS.ID.eq(opId))

@@ -7,10 +7,11 @@ import {
   dispensePharmacyRequisition,
   getPharmacyRequisition,
   listInventoryStocks,
-  listInventoryWarehouses,
   listPharmacyRequisitions,
+  listWarehouseOptions,
   type InventoryStockAvailability,
   type PharmacyRequisition,
+  type WarehouseOption,
 } from "@pitchfork/shared/aceso";
 
 const REQUISITION_STATUS: Record<string, { label: string; variant: "default" | "success" | "warning" | "danger" | "info" }> = {
@@ -64,7 +65,7 @@ export default function RequisitionsSection() {
   const [offset, setOffset] = useState(0);
   const PAGE = 50;
 
-  const [warehouses, setWarehouses] = useState<string[]>([]);
+  const [warehouses, setWarehouses] = useState<WarehouseOption[]>([]);
   const [stocks, setStocks] = useState<InventoryStockAvailability[]>([]);
   const [stocksLoading, setStocksLoading] = useState(false);
 
@@ -131,7 +132,7 @@ export default function RequisitionsSection() {
 
   const loadWarehouses = useCallback(async () => {
     try {
-      setWarehouses(await listInventoryWarehouses());
+      setWarehouses(await listWarehouseOptions());
     } catch {
       // 仓库下拉失败不阻塞页面
     }
@@ -442,7 +443,7 @@ export default function RequisitionsSection() {
                 }}
               >
                 <option value="">请选择仓库</option>
-                {warehouses.map((warehouse) => <option key={warehouse} value={warehouse}>{warehouse}</option>)}
+                {warehouses.map((warehouse) => <option key={warehouse.code} value={warehouse.code}>{warehouse.name}</option>)}
               </select>
             </div>
             <div className="flex flex-col gap-1.5">
@@ -454,7 +455,7 @@ export default function RequisitionsSection() {
                 onChange={(event) => setCreateForm((current) => ({ ...current, destinationWarehouse: event.target.value }))}
               >
                 <option value="">请选择仓库</option>
-                {warehouses.map((warehouse) => <option key={warehouse} value={warehouse}>{warehouse}</option>)}
+                {warehouses.map((warehouse) => <option key={warehouse.code} value={warehouse.code}>{warehouse.name}</option>)}
               </select>
             </div>
           </div>

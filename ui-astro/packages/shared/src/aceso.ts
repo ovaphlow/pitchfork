@@ -1284,11 +1284,6 @@ export function listInventoryStocks(params: {
   return request<InventoryStockPage>(`/inventories/v1/stocks${nursingQuery(params)}`);
 }
 
-/** 查询可用仓库列表 */
-export function listInventoryWarehouses(): Promise<string[]> {
-  return request<string[]>("/inventories/v1/stocks/warehouses");
-}
-
 /** 入库明细（016）：基础数量与每基础单位成本 */
 export interface InventoryInboundItem {
   material_id: string;
@@ -1313,7 +1308,8 @@ export function confirmInventoryInbound(input: {
 //  Inventory API — Materials 与单位模型 (计划 015)
 // ========================================================================
 
-/** 物资（016：一个 base_unit 与一个 quantity_scale） */
+/** 物资（016：一个 base_unit 与一个 quantity_scale）
+ * package_unit/package_size 为可选包装规格投影：仅用于整包/拆零展示与换算，库存账本仍以基础单位记账 */
 export interface InventoryMaterial {
   id: string;
   code: string;
@@ -1322,6 +1318,8 @@ export interface InventoryMaterial {
   spec: string | null;
   base_unit: string;
   quantity_scale: number;
+  package_unit: string | null;
+  package_size: number | null;
   enable_batch_control: boolean | null;
   cost_method: string | null;
   metadata: Record<string, unknown> | null;
@@ -1352,7 +1350,7 @@ export function listInventoryMaterials(params: {
   return request<InventoryMaterialPage>(`/inventories/v1/materials${suffix}`);
 }
 
-/** 创建物资：一次性提交 base_unit 与 quantity_scale（0..6） */
+/** 创建物资：一次性提交 base_unit 与 quantity_scale（0..6）；包装规格可选 */
 export function createInventoryMaterial(input: {
   code: string;
   name: string;
@@ -1360,9 +1358,12 @@ export function createInventoryMaterial(input: {
   base_unit: string;
   quantity_scale?: number;
   spec?: string;
+  package_unit?: string;
+  package_size?: number;
   enable_batch_control?: boolean;
   cost_method?: string;
   status?: string;
+  metadata?: Record<string, unknown> | null;
 }): Promise<InventoryMaterial> {
   return request<InventoryMaterial>("/inventories/v1/materials", {
     method: "POST",
@@ -1373,6 +1374,52 @@ export function createInventoryMaterial(input: {
 /** 物资详情 */
 export function getInventoryMaterial(id: string): Promise<InventoryMaterial> {
   return request<InventoryMaterial>(`/inventories/v1/materials/${encodeURIComponent(id)}`);
+}
+
+/** 更新物资：code 不可改；base_unit/quantity_scale 存在库存事实后服务端返回 409；包装规格可随时调整 */
+export function updateInventoryMaterial(
+  id: string,
+  input: Partial<Pick<InventoryMaterial, "name" | "category" | "spec" | "base_unit" | "quantity_scale" | "package_unit" | "package_size" | "metadata" | "status">>,
+): Promise<InventoryMaterial> {
+  return request<InventoryMaterial>(`/inventories/v1/materials/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+/** 删除物资（存在库存事实时服务端返回 409） */
+export function deleteInventoryMaterial(id: string): Promise<void> {
+  return request<void>(`/inventories/v1/materials/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+/** 批次（批控物资的批次字典） */
+export interface InventoryLot {
+  id: string;
+  material_id: string;
+  batch_no: string;
+  production_date: string | null;
+  expiry_date: string | null;
+  manufacturer: string | null;
+  supplier: string | null;
+  metadata: Record<string, unknown> | null;
+}
+
+/** 查询批次列表（可按物资过滤） */
+export function listInventoryLots(params: {
+  material_id?: string;
+  batch_no?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<{ records: InventoryLot[]; meta: { total: number } }> {
+  const query = new URLSearchParams();
+  if (params.material_id?.trim()) query.set("material_id", params.material_id.trim());
+  if (params.batch_no?.trim()) query.set("batch_no", params.batch_no.trim());
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<{ records: InventoryLot[]; meta: { total: number } }>(`/inventories/v1/lots${suffix}`);
 }
 
 // ─── 医生病程记录 (Progress Notes) ─────────────────────────────────────

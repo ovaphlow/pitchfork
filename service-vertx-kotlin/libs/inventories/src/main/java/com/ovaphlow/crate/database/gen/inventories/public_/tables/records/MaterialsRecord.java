@@ -6,6 +6,7 @@ package com.ovaphlow.crate.database.gen.inventories.public_.tables.records;
 
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.Materials;
 
+import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 
 import org.jooq.JSONB;
@@ -203,6 +204,34 @@ public class MaterialsRecord extends UpdatableRecordImpl<MaterialsRecord> {
         return (OffsetDateTime) get(12);
     }
 
+    /**
+     * Setter for <code>public.materials.package_unit</code>.
+     */
+    public void setPackageUnit(String value) {
+        set(13, value);
+    }
+
+    /**
+     * Getter for <code>public.materials.package_unit</code>.
+     */
+    public String getPackageUnit() {
+        return (String) get(13);
+    }
+
+    /**
+     * Setter for <code>public.materials.package_size</code>.
+     */
+    public void setPackageSize(BigDecimal value) {
+        set(14, value);
+    }
+
+    /**
+     * Getter for <code>public.materials.package_size</code>.
+     */
+    public BigDecimal getPackageSize() {
+        return (BigDecimal) get(14);
+    }
+
     // -------------------------------------------------------------------------
     // Primary key information
     // -------------------------------------------------------------------------
@@ -226,7 +255,7 @@ public class MaterialsRecord extends UpdatableRecordImpl<MaterialsRecord> {
     /**
      * Create a detached, initialised MaterialsRecord
      */
-    public MaterialsRecord(String id, String code, String name, String category, String spec, String baseUnit, Short quantityScale, Boolean enableBatchControl, String costMethod, JSONB metadata, String status, OffsetDateTime createdAt, OffsetDateTime updatedAt) {
+    public MaterialsRecord(String id, String code, String name, String category, String spec, String baseUnit, Short quantityScale, Boolean enableBatchControl, String costMethod, JSONB metadata, String status, OffsetDateTime createdAt, OffsetDateTime updatedAt, String packageUnit, BigDecimal packageSize) {
         super(Materials.MATERIALS);
 
         setId(id);
@@ -242,6 +271,8 @@ public class MaterialsRecord extends UpdatableRecordImpl<MaterialsRecord> {
         setStatus(status);
         setCreatedAt(createdAt);
         setUpdatedAt(updatedAt);
+        setPackageUnit(packageUnit);
+        setPackageSize(packageSize);
         resetChangedOnNotNull();
     }
 }

@@ -11,6 +11,7 @@ import com.ovaphlow.crate.database.gen.inventories.public_.tables.StockOperation
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.Stocks.StocksPath;
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.records.MaterialsRecord;
 
+import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.util.Arrays;
 import java.util.Collection;
@@ -126,6 +127,16 @@ public class Materials extends TableImpl<MaterialsRecord> {
      * The column <code>public.materials.updated_at</code>.
      */
     public final TableField<MaterialsRecord, OffsetDateTime> UPDATED_AT = createField(DSL.name("updated_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6), this, "");
+
+    /**
+     * The column <code>public.materials.package_unit</code>.
+     */
+    public final TableField<MaterialsRecord, String> PACKAGE_UNIT = createField(DSL.name("package_unit"), SQLDataType.VARCHAR, this, "");
+
+    /**
+     * The column <code>public.materials.package_size</code>.
+     */
+    public final TableField<MaterialsRecord, BigDecimal> PACKAGE_SIZE = createField(DSL.name("package_size"), SQLDataType.NUMERIC(20, 6), this, "");
 
     private Materials(Name alias, Table<MaterialsRecord> aliased) {
         this(alias, aliased, (Field<?>[]) null, null);
@@ -245,8 +256,9 @@ public class Materials extends TableImpl<MaterialsRecord> {
     @Override
     public List<Check<MaterialsRecord>> getChecks() {
         return Arrays.asList(
-            Internal.createCheck(this, DSL.name("materials_quantity_scale_check"), "(((quantity_scale >= (0)::smallint) AND (quantity_scale <= (6)::smallint)))", true),
             Internal.createCheck(this, DSL.name("materials_cost_method_check"), "(((cost_method)::text = ANY ((ARRAY['MOVING_AVG'::character varying, 'FIFO'::character varying])::text[])))", true),
+            Internal.createCheck(this, DSL.name("materials_package_check"), "((((package_unit IS NULL) AND (package_size IS NULL)) OR ((package_unit IS NOT NULL) AND (package_size IS NOT NULL) AND (package_size > (0)::numeric))))", true),
+            Internal.createCheck(this, DSL.name("materials_quantity_scale_check"), "(((quantity_scale >= 0) AND (quantity_scale <= 6)))", true),
             Internal.createCheck(this, DSL.name("materials_status_check"), "(((status)::text = ANY ((ARRAY['ACTIVE'::character varying, 'INACTIVE'::character varying, 'DISCONTINUED'::character varying])::text[])))", true)
         );
     }

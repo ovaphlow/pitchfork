@@ -8,13 +8,14 @@ import {
   getPharmacyPurchaseOrder,
   getPharmacyPurchaseReceipt,
   listInventoryStocks,
-  listInventoryWarehouses,
   listPharmacyPurchaseOrders,
+  listWarehouseOptions,
   receivePharmacyPurchaseOrder,
   updatePharmacyPurchaseOrder,
   type InventoryStockAvailability,
   type PharmacyPurchaseOrder,
   type PharmacyPurchaseReceipt,
+  type WarehouseOption,
 } from "@pitchfork/shared/aceso";
 
 /**
@@ -74,7 +75,7 @@ export default function PurchaseOrdersSection() {
   const PAGE = 50;
 
   // ── 弹窗共用 ────────────────────────────────────────────────────────
-  const [warehouses, setWarehouses] = useState<string[]>([]);
+  const [warehouses, setWarehouses] = useState<WarehouseOption[]>([]);
   const [stocks, setStocks] = useState<InventoryStockAvailability[]>([]);
   const [stocksLoading, setStocksLoading] = useState(false);
 
@@ -134,7 +135,7 @@ export default function PurchaseOrdersSection() {
 
   const loadWarehouses = useCallback(async () => {
     try {
-      setWarehouses(await listInventoryWarehouses());
+      setWarehouses(await listWarehouseOptions());
     } catch {
       setWarehouses([]);
     }
@@ -491,8 +492,8 @@ export default function PurchaseOrdersSection() {
               >
                 <option value="">请选择仓库</option>
                 {warehouses.map((warehouse) => (
-                  <option key={warehouse} value={warehouse}>
-                    {warehouse}
+                  <option key={warehouse.code} value={warehouse.code}>
+                    {warehouse.name}
                   </option>
                 ))}
               </select>
