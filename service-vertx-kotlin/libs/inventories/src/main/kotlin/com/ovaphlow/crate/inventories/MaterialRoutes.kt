@@ -19,13 +19,13 @@ object MaterialRoutes {
             val code = b.getString("code", "")
             val name = b.getString("name", "")
             val category = b.getString("category", "")
-            val packageUnit = b.getString("package_unit", "")
+            val baseUnit = b.getString("base_unit", "")
 
             val missing = mutableListOf<String>()
             if (code.isBlank()) missing.add("code")
             if (name.isBlank()) missing.add("name")
             if (category.isBlank()) missing.add("category")
-            if (packageUnit.isBlank()) missing.add("package_unit")
+            if (baseUnit.isBlank()) missing.add("base_unit")
             if (missing.isNotEmpty()) {
                 InventoriesRoutes.respond(ctx, 400, "required: ${missing.joinToString(", ")}"); return@handler
             }
@@ -73,46 +73,6 @@ object MaterialRoutes {
             val id = ctx.pathParam("id") ?: return@handler InventoriesRoutes.respond(ctx, 400, "id required")
             val b = InventoriesRoutes.body(ctx)
             service.update(id, b)
-                .onSuccess { ctx.json(it) }
-                .onFailure { InventoriesRoutes.respondFailure(ctx, it) }
-        }
-
-        // ——— 计划 015：单位模型与包装规格生命周期 ———
-
-        // GET /materials/:id/unit-specs：基础单位、精度、迁移状态与全部规格（只读）
-        router.get("/:id/unit-specs").handler { ctx ->
-            val id = ctx.pathParam("id") ?: return@handler InventoriesRoutes.respond(ctx, 400, "id required")
-            service.listUnitSpecs(id)
-                .onSuccess { ctx.json(it) }
-                .onFailure { InventoriesRoutes.respondFailure(ctx, it) }
-        }
-
-        // PUT /materials/:id/unit-model：仅在无计量事实时创建首次基础单位模型
-        router.put("/:id/unit-model").handler { ctx ->
-            val id = ctx.pathParam("id") ?: return@handler InventoriesRoutes.respond(ctx, 400, "id required")
-            val b = InventoriesRoutes.body(ctx)
-            service.activateUnitModel(id, b)
-                .onSuccess { ctx.json(it) }
-                .onFailure { InventoriesRoutes.respondFailure(ctx, it) }
-        }
-
-        // POST /materials/:id/unit-specs：新增一条包装规格
-        router.post("/:id/unit-specs").handler { ctx ->
-            val id = ctx.pathParam("id") ?: return@handler InventoriesRoutes.respond(ctx, 400, "id required")
-            val b = InventoriesRoutes.body(ctx)
-            service.createUnitSpec(id, b)
-                .onSuccess {
-                    ctx.response().setStatusCode(201)
-                    ctx.json(it)
-                }
-                .onFailure { InventoriesRoutes.respondFailure(ctx, it) }
-        }
-
-        // POST /materials/:id/unit-specs/:specId/retire：停用包装规格（不可删除）
-        router.post("/:id/unit-specs/:specId/retire").handler { ctx ->
-            val id = ctx.pathParam("id") ?: return@handler InventoriesRoutes.respond(ctx, 400, "id required")
-            val specId = ctx.pathParam("specId") ?: return@handler InventoriesRoutes.respond(ctx, 400, "specId required")
-            service.retireUnitSpec(id, specId)
                 .onSuccess { ctx.json(it) }
                 .onFailure { InventoriesRoutes.respondFailure(ctx, it) }
         }

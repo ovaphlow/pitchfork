@@ -53,10 +53,9 @@ CREATE TABLE pharmacy_purchase_order_items (
     id                  VARCHAR(32) PRIMARY KEY,
     purchase_order_id   VARCHAR(32) NOT NULL REFERENCES pharmacy_purchase_orders(id),
     material_id         VARCHAR(32) NOT NULL,           -- 跨模块弱关联，由服务端经库存端口验证
-    ordered_quantity    NUMERIC(15,4) NOT NULL CHECK (ordered_quantity > 0),
-    received_quantity   NUMERIC(15,4) NOT NULL DEFAULT 0
-                        CHECK (received_quantity >= 0 AND received_quantity <= ordered_quantity),
-    unit                VARCHAR NOT NULL DEFAULT 'PACKAGE' CHECK (unit IN ('PACKAGE'))
+    ordered_quantity    NUMERIC(20,6) NOT NULL CHECK (ordered_quantity > 0),
+    received_quantity   NUMERIC(20,6) NOT NULL DEFAULT 0
+                        CHECK (received_quantity >= 0 AND received_quantity <= ordered_quantity)
 );
 
 -- 同一采购订单不能重复物资
@@ -96,10 +95,9 @@ CREATE TABLE pharmacy_purchase_receipt_items (
     purchase_order_item_id     VARCHAR(32) NOT NULL REFERENCES pharmacy_purchase_order_items(id),
     material_id                VARCHAR(32) NOT NULL,    -- 服务端从订单项复制，客户端不能改写
     lot_id                     VARCHAR(32),             -- 库存端口解析或创建的批次；非批次物资为 NULL
-    received_quantity          NUMERIC(15,4) NOT NULL CHECK (received_quantity > 0),
-    unit                       VARCHAR NOT NULL DEFAULT 'PACKAGE' CHECK (unit IN ('PACKAGE')),
-    unit_cost                  NUMERIC(15,4) NOT NULL CHECK (unit_cost >= 0),
-    total_cost                 NUMERIC(18,4) NOT NULL CHECK (total_cost >= 0),
+    received_quantity          NUMERIC(20,6) NOT NULL CHECK (received_quantity > 0),
+    unit_cost                  NUMERIC(24,8) NOT NULL CHECK (unit_cost >= 0),
+    total_cost                 NUMERIC(24,8) NOT NULL CHECK (total_cost >= 0),
     stock_operation_detail_id  VARCHAR(32)              -- 对应 INBOUND 操作明细 ID（弱关联）
 );
 

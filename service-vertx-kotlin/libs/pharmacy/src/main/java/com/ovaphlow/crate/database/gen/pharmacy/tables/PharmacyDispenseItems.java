@@ -98,23 +98,13 @@ public class PharmacyDispenseItems extends TableImpl<PharmacyDispenseItemsRecord
      * The column
      * <code>pharmacy.pharmacy_dispense_items.prescribed_quantity</code>.
      */
-    public final TableField<PharmacyDispenseItemsRecord, BigDecimal> PRESCRIBED_QUANTITY = createField(DSL.name("prescribed_quantity"), SQLDataType.NUMERIC(15, 4), this, "");
+    public final TableField<PharmacyDispenseItemsRecord, BigDecimal> PRESCRIBED_QUANTITY = createField(DSL.name("prescribed_quantity"), SQLDataType.NUMERIC(20, 6), this, "");
 
     /**
      * The column
      * <code>pharmacy.pharmacy_dispense_items.dispensed_quantity</code>.
      */
-    public final TableField<PharmacyDispenseItemsRecord, BigDecimal> DISPENSED_QUANTITY = createField(DSL.name("dispensed_quantity"), SQLDataType.NUMERIC(15, 4), this, "");
-
-    /**
-     * The column <code>pharmacy.pharmacy_dispense_items.unit</code>.
-     */
-    public final TableField<PharmacyDispenseItemsRecord, String> UNIT = createField(DSL.name("unit"), SQLDataType.VARCHAR.defaultValue(DSL.field(DSL.raw("'PACKAGE'::character varying"), SQLDataType.VARCHAR)), this, "");
-
-    /**
-     * The column <code>pharmacy.pharmacy_dispense_items.split_quantity</code>.
-     */
-    public final TableField<PharmacyDispenseItemsRecord, BigDecimal> SPLIT_QUANTITY = createField(DSL.name("split_quantity"), SQLDataType.NUMERIC(15, 4), this, "");
+    public final TableField<PharmacyDispenseItemsRecord, BigDecimal> DISPENSED_QUANTITY = createField(DSL.name("dispensed_quantity"), SQLDataType.NUMERIC(20, 6), this, "");
 
     /**
      * The column
@@ -125,12 +115,12 @@ public class PharmacyDispenseItems extends TableImpl<PharmacyDispenseItemsRecord
     /**
      * The column <code>pharmacy.pharmacy_dispense_items.unit_cost</code>.
      */
-    public final TableField<PharmacyDispenseItemsRecord, BigDecimal> UNIT_COST = createField(DSL.name("unit_cost"), SQLDataType.NUMERIC(15, 4), this, "");
+    public final TableField<PharmacyDispenseItemsRecord, BigDecimal> UNIT_COST = createField(DSL.name("unit_cost"), SQLDataType.NUMERIC(24, 8), this, "");
 
     /**
      * The column <code>pharmacy.pharmacy_dispense_items.total_cost</code>.
      */
-    public final TableField<PharmacyDispenseItemsRecord, BigDecimal> TOTAL_COST = createField(DSL.name("total_cost"), SQLDataType.NUMERIC(18, 4), this, "");
+    public final TableField<PharmacyDispenseItemsRecord, BigDecimal> TOTAL_COST = createField(DSL.name("total_cost"), SQLDataType.NUMERIC(24, 8), this, "");
 
     /**
      * The column <code>pharmacy.pharmacy_dispense_items.metadata</code>.
@@ -249,9 +239,7 @@ public class PharmacyDispenseItems extends TableImpl<PharmacyDispenseItemsRecord
 
     @Override
     public List<Check<PharmacyDispenseItemsRecord>> getChecks() {
-        return Arrays.asList(
-            Internal.createCheck(this, DSL.name("pharmacy_dispense_items_unit_check"), "(((unit)::text = ANY ((ARRAY['PACKAGE'::character varying, 'SPLIT'::character varying])::text[])))", true)
-        );
+        return Arrays.asList();
     }
 
     @Override

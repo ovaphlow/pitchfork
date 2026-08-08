@@ -309,6 +309,19 @@ class HealthcareService(
     fun updateOrderStatus(id: String, body: JsonObject): Future<JsonObject> =
         medicalOrderService.updateOrderStatus(id, body)
 
+    fun nurseCheckOrder(id: String, userId: String, body: JsonObject): Future<JsonObject> =
+        medicalOrderService.nurseCheckOrder(id, userId, body)
+
+    /** 护士核对汇总列表：跨入住待核对用药医嘱，供护理汇总页核对 */
+    fun listPendingNurseCheckOrders(
+        client: SqlClient,
+        encounterId: String?,
+        search: String?,
+        limit: Int,
+        offset: Int,
+    ): Future<JsonObject> =
+        medicalOrderService.listPendingNurseCheckOrders(client, encounterId, search, limit, offset)
+
     // ——— 011 药房接方/发药内部端口（只供 App 编排调用，不注册为 Healthcare 路由） ———
 
     fun listMedicationOrdersForPharmacy(

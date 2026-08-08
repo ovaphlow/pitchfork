@@ -1,0 +1,8 @@
+---
+import DashboardLayout from "../../layouts/DashboardLayout.astro";
+import WarehousesPage from "../../components/WarehousesPage.tsx";
+---
+
+<DashboardLayout title="仓库管理">
+  <WarehousesPage client:only="react" />
+</DashboardLayout>

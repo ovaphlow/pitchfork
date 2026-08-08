@@ -19,7 +19,11 @@ import java.math.BigDecimal
 import java.time.LocalDate
 import java.util.concurrent.atomic.AtomicInteger
 
-class PackageInboundTest {
+/**
+ * 016 退药回库（基础数量 INBOUND）单元测试。
+ * 验证物资/批次校验、库存累加与同连接写入；不依赖真实数据库。
+ */
+class ReturnInboundTest {
     private lateinit var pool: Pool
     private lateinit var connection: SqlConnection
     private lateinit var prepared: PreparedQuery<RowSet<Row>>
@@ -56,21 +60,22 @@ class PackageInboundTest {
         every { getValue(any<Int>()) } answers { values[firstArg<Int>()] }
     }
 
-    private fun materialRow(status: String = "ACTIVE", batchControl: Boolean = true): Row = indexedRow(mapOf(0 to status, 1 to batchControl))
-    private fun lotRow(materialId: String = "material-1", expiry: LocalDate? = LocalDate.now().plusDays(30)): Row = indexedRow(mapOf(0 to materialId, 1 to expiry))
-    private fun stockRow(): Row = indexedRow(mapOf(0 to "stock-1", 1 to BigDecimal.ONE, 2 to BigDecimal.TEN))
-    /** UnitConversionService.loadMaterial 的物资行：status, unit_model_status, base_unit, base_quantity_scale */
-    private fun modelMaterialRow(status: String = "ACTIVE", modelStatus: String = "ACTIVE"): Row =
-        indexedRow(mapOf(0 to status, 1 to modelStatus, 2 to "片", 3 to 4))
-    /** UnitConversionService.loadDefaultSpec 的规格行：spec_id, input_unit, base_ratio, is_default, status */
-    private fun specRow(ratio: BigDecimal = BigDecimal.TEN): Row =
-        indexedRow(mapOf(0 to "spec-1", 1 to "盒", 2 to ratio, 3 to true, 4 to "ACTIVE"))
+    /** loadMaterial 行：status, base_unit, quantity_scale, batch_control */
+    private fun materialRow(status: String = "ACTIVE", batchControl: Boolean = true): Row =
+        indexedRow(mapOf(0 to status, 1 to "片", 2 to 0, 3 to batchControl))
+
+    private fun lotRow(materialId: String = "material-1", expiry: LocalDate? = LocalDate.now().plusDays(30)): Row =
+        indexedRow(mapOf(0 to materialId, 1 to expiry))
+
+    /** loadStock 行：id, lot_id, quantity, locked_quantity, total_cost */
+    private fun stockRow(quantity: BigDecimal = BigDecimal.TEN): Row =
+        indexedRow(mapOf(0 to "stock-1", 1 to "lot-1", 2 to quantity, 3 to BigDecimal.ZERO, 4 to BigDecimal.valueOf(50)))
 
     private fun command(
         quantity: BigDecimal = BigDecimal.ONE,
-        unitCost: BigDecimal = BigDecimal.valueOf(3.5),
+        unitCost: BigDecimal = BigDecimal("3.5"),
         lotId: String? = "lot-1",
-    ) = StockService.PackageInboundCommand("西药库", "material-1", lotId, quantity, unitCost, "return test")
+    ) = StockService.ReturnInboundCommand("西药库", "material-1", lotId, quantity, unitCost, "return test")
 
     private fun failureOf(future: Future<*>): Throwable {
         val failures = mutableListOf<Throwable>()
@@ -79,9 +84,9 @@ class PackageInboundTest {
     }
 
     @Test
-    fun `inbound rejects non positive quantity and negative cost`() {
-        val quantityError = failureOf(service.confirmPackageInbound(connection, command(quantity = BigDecimal.ZERO)))
-        val costError = failureOf(service.confirmPackageInbound(connection, command(unitCost = BigDecimal.valueOf(-1))))
+    fun `inbound rejects non positive quantity and negative cost before touching db`() {
+        val quantityError = failureOf(service.confirmReturnInbound(connection, command(quantity = BigDecimal.ZERO)))
+        val costError = failureOf(service.confirmReturnInbound(connection, command(unitCost = BigDecimal.valueOf(-1))))
         assertTrue(quantityError.message!!.contains("quantity"))
         assertTrue(costError.message!!.contains("unit_cost"))
         verify(exactly = 0) { connection.preparedQuery(any()) }
@@ -90,62 +95,41 @@ class PackageInboundTest {
     @Test
     fun `inbound rejects inactive material`() {
         every { prepared.execute(any<Tuple>()) } returns Future.succeededFuture(rowsOf(materialRow(status = "INACTIVE")))
-        val error = failureOf(service.confirmPackageInbound(connection, command()))
+        val error = failureOf(service.confirmReturnInbound(connection, command()))
         assertTrue(error.message!!.contains("not ACTIVE"))
         verify(exactly = 1) { prepared.execute(any<Tuple>()) }
     }
 
     @Test
     fun `inbound rejects lot belonging to another material`() {
-        // 015 序列：规格解析（物资+规格）→ 物资批控 → 批次
         every { prepared.execute(any<Tuple>()) } answers {
             when (executeCalls.incrementAndGet()) {
-                1 -> Future.succeededFuture(rowsOf(modelMaterialRow()))
-                2 -> Future.succeededFuture(rowsOf(specRow()))
-                3 -> Future.succeededFuture(rowsOf(materialRow()))
+                1 -> Future.succeededFuture(rowsOf(materialRow()))
                 else -> Future.succeededFuture(rowsOf(lotRow(materialId = "other-material")))
             }
         }
-        val error = failureOf(service.confirmPackageInbound(connection, command()))
+        val error = failureOf(service.confirmReturnInbound(connection, command()))
         assertTrue(error.message!!.contains("does not belong"))
-        verify(exactly = 4) { prepared.execute(any<Tuple>()) }
+        verify(exactly = 2) { prepared.execute(any<Tuple>()) }
     }
 
     @Test
     fun `inbound writes operation detail and updates existing stock on same connection`() {
-        // 015 序列：规格解析（物资+规格）→ 物资批控 → 批次 → 库存查询 → 出库单 → 明细 → 库存累加
+        // 序列：物资 → 批次 → 出库单 → 明细 → 库存（FOR UPDATE）→ 库存累加
         every { prepared.execute(any<Tuple>()) } answers {
             when (executeCalls.incrementAndGet()) {
-                1 -> Future.succeededFuture(rowsOf(modelMaterialRow()))
-                2 -> Future.succeededFuture(rowsOf(specRow()))
-                3 -> Future.succeededFuture(rowsOf(materialRow()))
-                4 -> Future.succeededFuture(rowsOf(lotRow()))
+                1 -> Future.succeededFuture(rowsOf(materialRow()))
+                2 -> Future.succeededFuture(rowsOf(lotRow()))
+                3, 4 -> Future.succeededFuture(emptyRows())
                 5 -> Future.succeededFuture(rowsOf(stockRow()))
                 else -> Future.succeededFuture(emptyRows())
             }
         }
-        val result = service.confirmPackageInbound(connection, command())
+        val result = service.confirmReturnInbound(connection, command())
         assertEquals("lot-1", result.result().lotId)
-        assertEquals(0, BigDecimal.valueOf(3.5).compareTo(result.result().unitCost))
-        verify(exactly = 8) { connection.preparedQuery(any()) }
-        verify(exactly = 8) { prepared.execute(any<Tuple>()) }
+        assertEquals(0, BigDecimal("3.5").compareTo(result.result().unitCost))
+        verify(exactly = 6) { connection.preparedQuery(any()) }
+        verify(exactly = 6) { prepared.execute(any<Tuple>()) }
         verify(exactly = 0) { pool.preparedQuery(any()) }
-    }
-
-    @Test
-    fun `inbound creates stock row when no existing row`() {
-        every { prepared.execute(any<Tuple>()) } answers {
-            when (executeCalls.incrementAndGet()) {
-                1 -> Future.succeededFuture(rowsOf(modelMaterialRow()))
-                2 -> Future.succeededFuture(rowsOf(specRow()))
-                3 -> Future.succeededFuture(rowsOf(materialRow()))
-                4 -> Future.succeededFuture(rowsOf(lotRow()))
-                5 -> Future.succeededFuture(emptyRows())
-                else -> Future.succeededFuture(emptyRows())
-            }
-        }
-        val result = service.confirmPackageInbound(connection, command())
-        assertTrue(result.succeeded())
-        verify(exactly = 8) { connection.preparedQuery(any()) }
     }
 }

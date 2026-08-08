@@ -101,9 +101,9 @@ class HealthcareMedicalOrderTest {
                         sql.contains("nursing_task_executions") -> "executions"
                         sql.contains("select 1") && sql.contains("from healthcare.encounters") -> "select_one_encounters"
                         sql.contains("count(*)") && sql.contains("from healthcare.medical_orders") -> "count_rows"
+                        sql.contains("from healthcare.medical_orders") -> "orders"
                         sql.contains("from healthcare.patients") -> "patients"
                         sql.contains("from healthcare.encounters") -> "encounters"
-                        sql.contains("from healthcare.medical_orders") -> "orders"
                         sql.contains("nursing_service_periods") -> "periods"
                         sql.contains("nursing_tasks") -> "tasks"
                         else -> "else"
@@ -1040,9 +1040,14 @@ class HealthcareMedicalOrderTest {
     private fun <T> withServer(
         vertx: Vertx,
         stub: DatabaseStub,
+        userId: String? = null,
         block: (Int) -> Future<T>,
     ): Future<Unit> {
         val router = Router.router(vertx)
+        // 模拟认证中间件：注入 userId 后测试核对路由的认证与授权路径
+        if (userId != null) {
+            router.route("/healthcare/v1/*").handler { ctx -> ctx.put("userId", userId); ctx.next() }
+        }
         router.route("/healthcare/v1/*").subRouter(HealthcareRoutes.create(vertx, stub.pool))
         return vertx.createHttpServer().requestHandler(router).listen(0).compose { server ->
             block(server.actualPort()).compose {
@@ -1209,6 +1214,243 @@ class HealthcareMedicalOrderTest {
                             }
                         }
                 }
+        }.onComplete { ar ->
+            if (ar.succeeded()) ctx.completeNow() else ctx.failNow(ar.cause())
+        }
+    }
+
+    // ——— 5. 护士核对用药医嘱（010 计划） ———
+
+    @Test
+    fun `核对拒绝非空请求体且不触发SQL`() {
+        val stub = DatabaseStub()
+        val cause = causeOf(
+            HealthcareService(stub.pool).nurseCheckOrder("ord-1", "nurse-1", JsonObject().put("hacked", true)),
+        )
+        assertInstanceOf(IllegalArgumentException::class.java, cause)
+        assertTrue(cause.message?.contains("must not contain any fields") == true, "got: ${cause.message}")
+        assertTrue(stub.queries.isEmpty(), "严格请求体校验必须发生在任何 SQL 之前: ${stub.queries}")
+    }
+
+    @Test
+    fun `核对资格校验顺序与错误映射`() {
+        val nonMedication = DatabaseStub(
+            orders = rows(orderRow(mapOf("order_type" to "LAB"))),
+            encounters = rows(encounterRow()),
+        )
+        val cause1 = causeOf(
+            HealthcareService(nonMedication.pool).nurseCheckOrder("ord-1", "nurse-1", JsonObject()),
+        )
+        assertInstanceOf(IllegalArgumentException::class.java, cause1)
+        assertTrue(cause1.message?.contains("only MEDICATION") == true)
+
+        val notActiveOrder = DatabaseStub(
+            orders = rows(orderRow(mapOf("status" to "COMPLETED"))),
+            encounters = rows(encounterRow()),
+        )
+        val cause2 = causeOf(
+            HealthcareService(notActiveOrder.pool).nurseCheckOrder("ord-1", "nurse-1", JsonObject()),
+        )
+        assertInstanceOf(ConflictException::class.java, cause2)
+        assertTrue(cause2.message?.contains("order is not active") == true)
+
+        val notElderly = DatabaseStub(
+            orders = rows(orderRow()),
+            encounters = rows(encounterRow(mapOf("encounter_type" to "OUTPATIENT"))),
+        )
+        val cause3 = causeOf(
+            HealthcareService(notElderly.pool).nurseCheckOrder("ord-1", "nurse-1", JsonObject()),
+        )
+        assertInstanceOf(IllegalArgumentException::class.java, cause3)
+        assertTrue(cause3.message?.contains("not an elderly admission") == true)
+
+        val notActiveEncounter = DatabaseStub(
+            orders = rows(orderRow()),
+            encounters = rows(encounterRow(mapOf("status" to "DISCHARGED"))),
+        )
+        val cause4 = causeOf(
+            HealthcareService(notActiveEncounter.pool).nurseCheckOrder("ord-1", "nurse-1", JsonObject()),
+        )
+        assertInstanceOf(ConflictException::class.java, cause4)
+        assertTrue(cause4.message?.contains("encounter is not active") == true)
+    }
+
+    @Test
+    fun `已核对医嘱再次核对返回409且不触发更新`() {
+        val stub = DatabaseStub(
+            orders = rows(
+                orderRow(
+                    mapOf(
+                        "nurse_checked_by" to "nurse-1",
+                        "nurse_checked_at" to OffsetDateTime.parse("2026-08-02T10:00:00+08:00"),
+                    ),
+                ),
+            ),
+            encounters = rows(encounterRow()),
+        )
+        val cause = causeOf(
+            HealthcareService(stub.pool).nurseCheckOrder("ord-1", "nurse-2", JsonObject()),
+        )
+        assertInstanceOf(ConflictException::class.java, cause)
+        assertTrue(cause.message?.contains("already nurse-checked") == true)
+        assertTrue(
+            stub.queries.none { it.contains("update healthcare.medical_orders") },
+            "幂等冲突不得触发医嘱更新: ${stub.queries}",
+        )
+    }
+
+    @Test
+    fun `核对成功写入认证userId并返回核对字段且不影响临床状态`() {
+        val order = orderRow()
+        val stub = DatabaseStub(
+            orders = rows(order),
+            encounters = rows(encounterRow()),
+            onOrderUpdate = {
+                order["nurse_checked_by"] = "nurse-zhangsan"
+                order["nurse_checked_at"] = OffsetDateTime.parse("2026-08-02T10:00:00+08:00")
+            },
+        )
+        val updated = HealthcareService(stub.pool)
+            .nurseCheckOrder("ord-1", "nurse-zhangsan", JsonObject())
+            .toCompletionStage().toCompletableFuture().get()
+
+        assertEquals("nurse-zhangsan", updated.getString("nurse_checked_by"))
+        assertNotNull(updated.getString("nurse_checked_at"))
+
+        // 核对人必须来自认证 userId，绝不来自客户端
+        val update = stub.queries.first { it.contains("update healthcare.medical_orders") }
+        assertTrue(update.contains("set nurse_checked_by"), "必须写核对人: $update")
+        assertTrue(update.contains("nurse_checked_at"), "必须写核对时间: $update")
+        assertTrue(
+            stub.tuples.first { it.first.contains("update healthcare.medical_orders") }.second.contains("nurse-zhangsan"),
+            "核对人必须绑定认证 userId",
+        )
+        // 不影响临床状态：不改医嘱 status/end_time，不触碰护理任务，不删除数据
+        assertFalse(update.contains("set status"), "核对不得改写医嘱状态: $update")
+        assertTrue(stub.queries.none { it.contains("update nursing") }, "核对不得触碰护理任务: ${stub.queries}")
+        assertTrue(stub.queries.none { it.contains("delete") }, "核对不得删除任何数据: ${stub.queries}")
+    }
+
+    @Test
+    fun `PATCH核对未认证返回401`(vertx: Vertx, ctx: VertxTestContext) {
+        val stub = DatabaseStub(
+            orders = rows(orderRow()),
+            encounters = rows(encounterRow()),
+        )
+        withServer(vertx, stub) { port ->
+            httpRequest(
+                vertx, port, HttpMethod.PATCH,
+                "/healthcare/v1/orders/ord-1/nurse-check",
+                JsonObject(),
+            ).map { (status, body) ->
+                ctx.verify {
+                    assertEquals(401, status, "无认证 userId 必须 401")
+                    assertNotNull(body.getString("error"))
+                }
+            }
+        }.onComplete { ar ->
+            if (ar.succeeded()) ctx.completeNow() else ctx.failNow(ar.cause())
+        }
+    }
+
+    @Test
+    fun `PATCH核对200且认证userId写入核对人并拒绝非空请求体`(vertx: Vertx, ctx: VertxTestContext) {
+        val order = orderRow()
+        val stub = DatabaseStub(
+            orders = rows(order),
+            encounters = rows(encounterRow()),
+            onOrderUpdate = {
+                order["nurse_checked_by"] = "nurse-route-1"
+                order["nurse_checked_at"] = OffsetDateTime.parse("2026-08-02T10:00:00+08:00")
+            },
+        )
+        withServer(vertx, stub, userId = "nurse-route-1") { port ->
+            httpRequest(
+                vertx, port, HttpMethod.PATCH,
+                "/healthcare/v1/orders/ord-1/nurse-check",
+                JsonObject(),
+            ).compose { (status, body) ->
+                ctx.verify {
+                    assertEquals(200, status, "核对成功必须 200")
+                    assertEquals("nurse-route-1", body.getString("nurse_checked_by"))
+                    assertNotNull(body.getString("nurse_checked_at"))
+                }
+                httpRequest(
+                    vertx, port, HttpMethod.PATCH,
+                    "/healthcare/v1/orders/ord-1/nurse-check",
+                    JsonObject().put("hacked", true),
+                ).map { (strictStatus, strictBody) ->
+                    ctx.verify {
+                        assertEquals(400, strictStatus, "非空请求体必须 400")
+                        assertNotNull(strictBody.getString("error"))
+                    }
+                }
+            }
+        }.onComplete { ar ->
+            if (ar.succeeded()) ctx.completeNow() else ctx.failNow(ar.cause())
+        }
+    }
+
+    // ——— 6. 护士核对汇总列表（跨入住待核对医嘱） ———
+
+    @Test
+    fun `待核对汇总列表只含未核对且输出患者信息`() {
+        val stub = DatabaseStub(
+            orders = rows(
+                orderRow(
+                    mapOf(
+                        "patient_id" to "pat-1",
+                        "patient_name" to "张奶奶",
+                        "encounter_no" to "A20260801001",
+                    ),
+                ),
+            ),
+            encounters = rows(encounterRow()),
+            patients = rows(mapOf("id" to "pat-1", "name" to "张奶奶", "status" to "ACTIVE")),
+            countRows = rows(mapOf("total" to 1L)),
+        )
+        val result = HealthcareService(stub.pool)
+            .listPendingNurseCheckOrders(stub.pool, null, null, 50, 0)
+            .toCompletionStage().toCompletableFuture().get()
+
+        assertEquals(1L, result.getJsonObject("meta").getLong("total"))
+        val record = result.getJsonArray("records").getJsonObject(0)
+        assertEquals("ord-1", record.getString("id"))
+        assertEquals("pat-1", record.getString("patient_id"))
+        assertEquals("张奶奶", record.getString("patient_name"))
+        assertEquals("A20260801001", record.getString("encounter_no"))
+        assertNull(record.getString("nurse_checked_by"), "待核对医嘱核对人必须为 null")
+        assertNull(record.getString("nurse_checked_at"), "待核对医嘱核对时间必须为 null")
+
+        // 汇总过滤语义：MEDICATION + ACTIVE + 未核对 + 活动养老入住，join 患者取姓名
+        val sqls = stub.queries.joinToString("\n")
+        assertTrue(sqls.contains("nurse_checked_at is null"), "必须只列未核对医嘱: $sqls")
+        assertTrue(sqls.contains("order_type = $"), "必须限定用药医嘱: $sqls")
+        assertTrue(sqls.contains("join healthcare.patients"), "必须 join 患者表取姓名: $sqls")
+        assertTrue(sqls.contains("encounter_type = $"), "必须限定养老入住: $sqls")
+        assertTrue(sqls.contains("count(*)"), "必须带分页计数: $sqls")
+    }
+
+    @Test
+    fun `待核对汇总静态路由不被泛型路由吞掉`(vertx: Vertx, ctx: VertxTestContext) {
+        val stub = DatabaseStub(
+            orders = rows(orderRow(mapOf("patient_id" to "pat-1", "patient_name" to "张奶奶", "encounter_no" to "A20260801001"))),
+            encounters = rows(encounterRow()),
+            patients = rows(mapOf("id" to "pat-1", "name" to "张奶奶", "status" to "ACTIVE")),
+            countRows = rows(mapOf("total" to 1L)),
+        )
+        withServer(vertx, stub) { port ->
+            httpRequest(
+                vertx, port, HttpMethod.GET,
+                "/healthcare/v1/orders/pending-nurse-check",
+            ).map { (status, body) ->
+                ctx.verify {
+                    assertEquals(200, status, "待核对汇总路由必须命中而非被泛型 /orders/:id 吞掉")
+                    assertEquals(1, body.getJsonArray("records").size())
+                    assertEquals("张奶奶", body.getJsonArray("records").getJsonObject(0).getString("patient_name"))
+                    assertEquals(1L, body.getJsonObject("meta").getLong("total"))
+                }
+            }
         }.onComplete { ar ->
             if (ar.succeeded()) ctx.completeNow() else ctx.failNow(ar.cause())
         }

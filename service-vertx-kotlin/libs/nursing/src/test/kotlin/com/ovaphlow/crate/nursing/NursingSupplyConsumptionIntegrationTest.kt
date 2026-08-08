@@ -89,12 +89,12 @@ class NursingSupplyConsumptionIntegrationTest {
                 statement.execute(
                     """
                     INSERT INTO public.materials
-                        (id, code, name, category, package_unit, split_unit, split_ratio, enable_batch_control, status)
+                        (id, code, name, category, base_unit, quantity_scale, enable_batch_control, status)
                     VALUES
-                        ('$PACKAGE_MATERIAL', 'SC-PACKAGE', '测试包装耗材', '护理耗材', '包', NULL, NULL, FALSE, 'ACTIVE'),
-                        ('$SPLIT_MATERIAL', 'SC-SPLIT', '测试拆零耗材', '护理耗材', '盒', '片', 3, FALSE, 'ACTIVE'),
-                        ('$BATCH_MATERIAL', 'SC-BATCH', '测试批次耗材', '护理耗材', '盒', NULL, NULL, TRUE, 'ACTIVE'),
-                        ('$INACTIVE_MATERIAL', 'SC-INACTIVE', '测试停用耗材', '护理耗材', '包', NULL, NULL, FALSE, 'INACTIVE')
+                        ('$PACKAGE_MATERIAL', 'SC-PACKAGE', '测试无菌包耗材', '护理耗材', '包', 0, FALSE, 'ACTIVE'),
+                        ('$SPLIT_MATERIAL', 'SC-SPLIT', '测试消毒液耗材', '护理耗材', 'mL', 3, FALSE, 'ACTIVE'),
+                        ('$BATCH_MATERIAL', 'SC-BATCH', '测试批次耗材', '护理耗材', '片', 0, TRUE, 'ACTIVE'),
+                        ('$INACTIVE_MATERIAL', 'SC-INACTIVE', '测试停用耗材', '护理耗材', '包', 0, FALSE, 'INACTIVE')
                     """.trimIndent(),
                 )
                 statement.execute(
@@ -207,13 +207,13 @@ class NursingSupplyConsumptionIntegrationTest {
         val initialState = stockState(stockId)
         assertDecimalEquals("5", initialState.quantity)
         assertDecimalEquals("0", initialState.lockedQuantity)
-        val command = consumptionCommand("sc-consume-package", stockId, "PACKAGE", quantity = "1")
+        val command = consumptionCommand("sc-consume-package", stockId, "1")
 
         val first = consume(command)
         val afterFirst = stockState(stockId)
         val retry = consume(command)
         val conflict = expectFailure(consumeFuture(command.copy(items = listOf(
-            InventoryConsumptionService.ConsumptionItem(stockId, unit = "PACKAGE", quantity = decimal("2")),
+            InventoryConsumptionService.ConsumptionItem(stockId, decimal("2")),
         ))))
 
         assertEquals(first.operationId, retry.operationId)
@@ -226,19 +226,17 @@ class NursingSupplyConsumptionIntegrationTest {
     }
 
     @Test
-    fun `split consumption uses rounded package quantity and preserves source quantity`() {
+    fun `liquid consumption uses base quantity with configured precision`() {
         await(inbound(SPLIT_MATERIAL, null, "5", "3"))
-        assertDecimalEquals("3", queryOne("SELECT split_ratio FROM public.materials WHERE id = '$SPLIT_MATERIAL'")["split_ratio"] as java.math.BigDecimal)
         val stockId = stockId(SPLIT_MATERIAL)
-        val result = consume(consumptionCommand("sc-consume-split", stockId, "SPLIT", splitQuantity = "2"))
+        val result = consume(consumptionCommand("sc-consume-split", stockId, "2"))
         val detail = result.detailResults.single()
         val state = stockState(stockId)
 
-        assertDecimalEquals("0.6667", detail.quantity)
-        assertDecimalEquals("2", requireNotNull(detail.splitQuantity))
-        assertDecimalEquals("4.3333", state.quantity)
-        assertDecimalEquals("12.9999", state.totalCost)
-        assertEquals("SPLIT", detail.unit)
+        assertDecimalEquals("2", detail.quantity)
+        assertDecimalEquals("3", state.quantity)
+        assertDecimalEquals("9", state.totalCost)
+        assertEquals("mL", detail.unit)
     }
 
     @Test
@@ -249,8 +247,8 @@ class NursingSupplyConsumptionIntegrationTest {
         val splitStockId = stockId(SPLIT_MATERIAL)
         val command = InventoryConsumptionService.NursingConsumptionCommand(
             items = listOf(
-                InventoryConsumptionService.ConsumptionItem(packageStockId, unit = "PACKAGE", quantity = decimal("1")),
-                InventoryConsumptionService.ConsumptionItem(splitStockId, unit = "PACKAGE", quantity = decimal("2")),
+                InventoryConsumptionService.ConsumptionItem(packageStockId, decimal("1")),
+                InventoryConsumptionService.ConsumptionItem(splitStockId, decimal("2")),
             ),
             taskExecutionId = "sc-consume-rollback",
             taskId = TASK_ID,
@@ -274,7 +272,7 @@ class NursingSupplyConsumptionIntegrationTest {
         await(inbound(PACKAGE_MATERIAL, null, "1", "4"))
         val stockId = stockId(PACKAGE_MATERIAL)
         val commands = listOf("sc-concurrent-a", "sc-concurrent-b").map { executionId ->
-            consumptionCommand(executionId, stockId, "PACKAGE", quantity = "1")
+            consumptionCommand(executionId, stockId, "1")
         }
         val futures = commands.map { command ->
             consumeFuture(command).toCompletionStage().toCompletableFuture()
@@ -296,7 +294,7 @@ class NursingSupplyConsumptionIntegrationTest {
     fun `concurrent retry for one execution returns one existing operation`() {
         await(inbound(PACKAGE_MATERIAL, null, "1", "4"))
         val stockId = stockId(PACKAGE_MATERIAL)
-        val command = consumptionCommand("sc-concurrent-idempotent", stockId, "PACKAGE", quantity = "1")
+        val command = consumptionCommand("sc-concurrent-idempotent", stockId, "1")
         val futures = listOf(command, command).map { current ->
             consumeFuture(current).toCompletionStage().toCompletableFuture()
         }
@@ -316,8 +314,8 @@ class NursingSupplyConsumptionIntegrationTest {
         val packageStockId = stockId(PACKAGE_MATERIAL)
         val splitStockId = stockId(SPLIT_MATERIAL)
         val inputs = listOf(
-            TaskExecutionService.ConsumptionInput(packageStockId, unit = "PACKAGE", quantity = decimal("1")),
-            TaskExecutionService.ConsumptionInput(splitStockId, unit = "SPLIT", splitQuantity = decimal("2")),
+            TaskExecutionService.ConsumptionInput(packageStockId, decimal("1")),
+            TaskExecutionService.ConsumptionInput(splitStockId, decimal("1.5")),
         )
 
         val first = await(taskExecutionService.completeExecutionWithConsumptions(EXECUTION_ID, "完成备注", inputs, "sc-tester"))
@@ -329,7 +327,7 @@ class NursingSupplyConsumptionIntegrationTest {
         assertNull(first.getString("stock_operation_detail_id"))
         assertNull(first.getValue("quantity"))
         assertDecimalEquals("1", stockState(packageStockId).quantity)
-        assertDecimalEquals("2.3333", stockState(splitStockId).quantity)
+        assertDecimalEquals("1.5", stockState(splitStockId).quantity)
         assertEquals(1, count("public.stock_operations", "warehouse = '$WAREHOUSE' AND operation_type = 'OUTBOUND'").toInt())
         assertEquals(2, count("nursing.nursing_task_execution_consumptions", "task_execution_id = '$EXECUTION_ID'").toInt())
 
@@ -338,7 +336,7 @@ class NursingSupplyConsumptionIntegrationTest {
         val conflict = expectFailure(taskExecutionService.completeExecutionWithConsumptions(
             EXECUTION_ID,
             "不同备注",
-            listOf(TaskExecutionService.ConsumptionInput(packageStockId, unit = "PACKAGE", quantity = decimal("2"))),
+            listOf(TaskExecutionService.ConsumptionInput(packageStockId, decimal("2"))),
             "sc-tester",
         ))
         assertTrue(conflict is ConflictException)
@@ -351,7 +349,7 @@ class NursingSupplyConsumptionIntegrationTest {
         val error = expectFailure(taskExecutionService.completeExecutionWithConsumptions(
             EXECUTION_ID,
             "不应保存",
-            listOf(TaskExecutionService.ConsumptionInput(stockId, unit = "PACKAGE", quantity = decimal("2"))),
+            listOf(TaskExecutionService.ConsumptionInput(stockId, decimal("2"))),
             "sc-tester",
         ))
 
@@ -386,7 +384,6 @@ class NursingSupplyConsumptionIntegrationTest {
                                         listOf(
                                             JsonObject()
                                                 .put("stock_id", "sc-stock-missing")
-                                                .put("unit", "PACKAGE")
                                                 .put("quantity", 1),
                                         ),
                                     )
@@ -416,17 +413,13 @@ class NursingSupplyConsumptionIntegrationTest {
     private fun consumptionCommand(
         executionId: String,
         stockId: String,
-        unit: String,
-        quantity: String? = null,
-        splitQuantity: String? = null,
+        quantity: String,
     ): InventoryConsumptionService.NursingConsumptionCommand =
         InventoryConsumptionService.NursingConsumptionCommand(
             items = listOf(
                 InventoryConsumptionService.ConsumptionItem(
                     stockId = stockId,
-                    unit = unit,
-                    quantity = quantity?.let(::decimal),
-                    splitQuantity = splitQuantity?.let(::decimal),
+                    quantity = decimal(quantity),
                 ),
             ),
             taskExecutionId = executionId,

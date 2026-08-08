@@ -4,9 +4,7 @@
 package com.ovaphlow.crate.database.gen.inventories.public_;
 
 
-import com.ovaphlow.crate.database.gen.inventories.public_.tables.InventoryUnitMigrationIssues;
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.Lots;
-import com.ovaphlow.crate.database.gen.inventories.public_.tables.MaterialUnitSpecs;
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.Materials;
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.StockOperationDetails;
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.StockOperations;
@@ -20,19 +18,9 @@ import com.ovaphlow.crate.database.gen.inventories.public_.tables.Stocks;
 public class Tables {
 
     /**
-     * The table <code>public.inventory_unit_migration_issues</code>.
-     */
-    public static final InventoryUnitMigrationIssues INVENTORY_UNIT_MIGRATION_ISSUES = InventoryUnitMigrationIssues.INVENTORY_UNIT_MIGRATION_ISSUES;
-
-    /**
      * The table <code>public.lots</code>.
      */
     public static final Lots LOTS = Lots.LOTS;
-
-    /**
-     * The table <code>public.material_unit_specs</code>.
-     */
-    public static final MaterialUnitSpecs MATERIAL_UNIT_SPECS = MaterialUnitSpecs.MATERIAL_UNIT_SPECS;
 
     /**
      * The table <code>public.materials</code>.

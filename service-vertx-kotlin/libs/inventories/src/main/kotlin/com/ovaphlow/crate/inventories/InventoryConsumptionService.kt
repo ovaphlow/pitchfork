@@ -20,35 +20,19 @@ import java.math.BigDecimal
 import java.math.RoundingMode
 import java.time.OffsetDateTime
 
-private fun inventoryDecimalValue(value: Any?): BigDecimal =
-    inventoryDecimalValueOrNull(value) ?: BigDecimal.ZERO
-
-private fun inventoryDecimalValueOrNull(value: Any?): BigDecimal? = when (value) {
-    null -> null
-    is BigDecimal -> value
-    is Number -> value.toString().toBigDecimalOrNull()
-    else -> value.toString().toBigDecimalOrNull()
-}
-
+/**
+ * 016 护理耗材消耗：客户端只提交 `stock_id + quantity`（基础数量），单位、成本和
+ * 物资精度由服务端从库存行与物资档案读取并校验；与库存操作明细同事务写入。
+ */
 class InventoryConsumptionService(
-    private val ctx: DSLContext = DatabaseConfig.createDSL()
+    private val ctx: DSLContext = DatabaseConfig.createDSL(),
 ) {
     private val log = LoggerFactory.getLogger(InventoryConsumptionService::class.java)
 
-    /**
-     * 耗材消费明细输入（计划 015 新契约）：
-     *  - 新契约：unit_spec_id + input_quantity（按规格精确换算基础数量）
-     *  - 旧契约（仅过渡兼容）：unit=PACKAGE/SPLIT + quantity/splitQuantity，
-     *    映射到当前默认包装规格 / 基础单位规格
-     * 两种形式互斥，混合或无法精确转换返回 400。
-     */
     data class ConsumptionItem(
         val stockId: String,
-        val unitSpecId: String? = null,
-        val inputQuantity: BigDecimal? = null,
-        val unit: String? = null,
-        val quantity: BigDecimal? = null,
-        val splitQuantity: BigDecimal? = null
+        /** 基础数量 */
+        val quantity: BigDecimal,
     )
 
     data class NursingConsumptionCommand(
@@ -58,16 +42,15 @@ class InventoryConsumptionService(
         val periodId: String,
         val patientId: String,
         val executor: String,
-        val businessTime: OffsetDateTime
+        val businessTime: OffsetDateTime,
     )
 
     data class ConsumptionResult(
         val operationId: String,
         val orderNo: String,
-        val detailResults: List<DetailResult>
+        val detailResults: List<DetailResult>,
     )
 
-    /** 耗材明细结果：保留历史投影列，同时返回基础数量与输入快照（权威列） */
     data class DetailResult(
         val detailId: String,
         val stockId: String,
@@ -75,27 +58,17 @@ class InventoryConsumptionService(
         val lotId: String?,
         val quantity: BigDecimal,
         val unit: String,
-        val splitQuantity: BigDecimal?,
         val unitCost: BigDecimal,
         val totalCost: BigDecimal,
         val warehouse: String,
-        val unitSpecId: String? = null,
-        val inputQuantity: BigDecimal? = null,
-        val inputUnit: String? = null,
-        val conversionRatio: BigDecimal? = null,
-        val baseQuantity: BigDecimal? = null,
-        val baseUnit: String? = null,
-        val inputUnitCost: BigDecimal? = null,
-        val baseUnitCost: BigDecimal? = null,
     )
 
     fun consumeForNursingExecution(
         connection: SqlConnection,
-        command: NursingConsumptionCommand
+        command: NursingConsumptionCommand,
     ): Future<ConsumptionResult> {
         if (command.items.isEmpty())
             return Future.failedFuture(IllegalArgumentException("at least one consumption item is required"))
-
         command.items.firstNotNullOfOrNull(::validateConsumptionItem)?.let { message ->
             return Future.failedFuture(IllegalArgumentException(message))
         }
@@ -125,7 +98,6 @@ class InventoryConsumptionService(
                     .put("patient_id", command.patientId)
                     .put("executor", command.executor)
 
-                // 先验证库存，获取 warehouse
                 validateAndLockStocks(connection, command)
                     .compose { validated ->
                         if (validated.isEmpty())
@@ -155,7 +127,7 @@ class InventoryConsumptionService(
 
     private fun findExistingOperation(
         connection: SqlConnection,
-        taskExecutionId: String
+        taskExecutionId: String,
     ): Future<ConsumptionResult?> {
         val findQuery = ctx.select(
             StockOperations.STOCK_OPERATIONS.ID.`as`("operation_id"),
@@ -171,7 +143,6 @@ class InventoryConsumptionService(
             .execute(DatabaseConfig.tuple(findQuery))
             .compose { opRows ->
                 if (opRows.size() == 0) return@compose Future.succeededFuture(null)
-
                 val opRow = opRows.iterator().next()
                 val opId = opRow.getValue(0)?.toString() ?: return@compose Future.succeededFuture(null)
 
@@ -184,17 +155,8 @@ class InventoryConsumptionService(
                     detail.LOT_ID,
                     detail.QUANTITY,
                     detail.UNIT,
-                    detail.SPLIT_QUANTITY,
                     detail.UNIT_COST,
                     detail.TOTAL_COST,
-                    detail.UNIT_SPEC_ID,
-                    detail.INPUT_QUANTITY,
-                    detail.INPUT_UNIT,
-                    detail.CONVERSION_RATIO,
-                    detail.BASE_QUANTITY.`as`("detail_base_quantity"),
-                    detail.BASE_UNIT,
-                    detail.INPUT_UNIT_COST,
-                    detail.BASE_UNIT_COST,
                     stock.ID.`as`("stock_id"),
                     operation.WAREHOUSE.`as`("warehouse"),
                 )
@@ -203,10 +165,7 @@ class InventoryConsumptionService(
                     .leftJoin(stock).on(
                         stock.WAREHOUSE.eq(operation.WAREHOUSE)
                             .and(stock.MATERIAL_ID.eq(detail.MATERIAL_ID))
-                            .and(
-                                stock.LOT_ID.eq(detail.LOT_ID)
-                                    .or(stock.LOT_ID.isNull.and(detail.LOT_ID.isNull)),
-                            ),
+                            .and(stock.LOT_ID.eq(detail.LOT_ID).or(stock.LOT_ID.isNull.and(detail.LOT_ID.isNull))),
                     )
                     .where(detail.OPERATION_ID.eq(opId))
                 connection.preparedQuery(DatabaseConfig.sql(findDetails))
@@ -217,23 +176,16 @@ class InventoryConsumptionService(
                         ConsumptionResult(
                             operationId = opId,
                             orderNo = opRow.getValue(1)?.toString() ?: "",
-                            detailResults = detailResults
+                            detailResults = detailResults,
                         )
                     }
             }
     }
 
-    /**
-     * 锁定并按基础数量校验库存（计划 015）：
-     *  1. 无锁预览 stock 行，确定 warehouse / material / lot 与平均成本（换算输入用）；
-     *  2. 解析换算（锁定 material + spec —— 锁序：换算先于库存行）；
-     *  3. 只读校验批控与批次归属/过期；
-     *  4. FOR UPDATE 重锁库存行，用权威 base_quantity - locked_base_quantity
-     *     校验基础可用量（并发窗口内的成本差异可接受，扣减有 .max(ZERO) 保护）。
-     */
+    /** 锁定并按基础数量校验库存：物资（FOR UPDATE）→ 库存行（FOR UPDATE）。 */
     private fun validateAndLockStocks(
         connection: SqlConnection,
-        command: NursingConsumptionCommand
+        command: NursingConsumptionCommand,
     ): Future<List<ValidatedItem>> {
         val stockIds = command.items.map { it.stockId }.distinct()
         if (stockIds.size != command.items.size)
@@ -268,67 +220,87 @@ class InventoryConsumptionService(
                     val warehouse = preview.getValue(0)?.toString() ?: ""
                     val materialId = preview.getValue(1)?.toString() ?: ""
                     val lotId = preview.getValue(2)?.toString()
-                    val previewQty = inventoryDecimalValue(preview.getValue(3))
-                    val previewCost = inventoryDecimalValue(preview.getValue(4))
+                    val previewQty = stockDecimalValue(preview.getValue(3))
+                    val previewCost = stockDecimalValue(preview.getValue(4))
 
-                    if (validatedItems.isNotEmpty()) {
-                        val firstWarehouse = validatedItems[0].warehouse
-                        if (warehouse != firstWarehouse)
-                            return@compose Future.failedFuture(
-                                ConflictException("stock $stockId is in warehouse $warehouse, not $firstWarehouse")
-                            )
+                    if (validatedItems.isNotEmpty() && warehouse != validatedItems[0].warehouse) {
+                        return@compose Future.failedFuture(
+                            ConflictException("stock $stockId is in warehouse $warehouse, not ${validatedItems[0].warehouse}"),
+                        )
                     }
 
                     val avgUnitCost = if (previewQty.compareTo(BigDecimal.ZERO) > 0)
-                        previewCost.divide(previewQty, 4, RoundingMode.HALF_UP)
+                        previewCost.divide(previewQty, COST_DB_SCALE, RoundingMode.HALF_UP)
                     else BigDecimal.ZERO
 
-                    // 换算先于库存行锁定（锁序：material+spec → stock）
-                    resolveConsumptionConversion(connection, materialId, item, avgUnitCost)
-                        .compose { conversion ->
-                            validateMaterialAndLot(connection, materialId, lotId).compose {
-                                val lockQuery = ctx.select(
-                                    Stocks.STOCKS.QUANTITY.`as`("stock_quantity"),
-                                    Stocks.STOCKS.BASE_QUANTITY.`as`("stock_base_quantity"),
-                                    Stocks.STOCKS.LOCKED_BASE_QUANTITY.`as`("stock_locked_base_quantity"),
-                                    Stocks.STOCKS.TOTAL_COST.`as`("stock_total_cost"),
-                                )
-                                    .from(Stocks.STOCKS)
-                                    .where(Stocks.STOCKS.ID.eq(stockId))
-                                    .forUpdate()
+                    val materialQuery = ctx.select(
+                        Materials.MATERIALS.STATUS.`as`("material_status"),
+                        Materials.MATERIALS.BASE_UNIT.`as`("material_base_unit"),
+                        Materials.MATERIALS.QUANTITY_SCALE.`as`("material_quantity_scale"),
+                        Materials.MATERIALS.ENABLE_BATCH_CONTROL.`as`("material_batch_control"),
+                    )
+                        .from(Materials.MATERIALS)
+                        .where(Materials.MATERIALS.ID.eq(materialId))
+                        .forUpdate()
+                    connection.preparedQuery(DatabaseConfig.sql(materialQuery))
+                        .execute(DatabaseConfig.tuple(materialQuery))
+                        .compose { matRows ->
+                            if (matRows.size() == 0)
+                                return@compose Future.failedFuture(NotFoundException("material not found: $materialId"))
+                            val matRow = matRows.iterator().next()
+                            val matStatus = matRow.getValue(0)?.toString() ?: ""
+                            if (matStatus != "ACTIVE")
+                                return@compose Future.failedFuture(ConflictException("material $materialId is not ACTIVE"))
+                            val baseUnit = matRow.getValue(1)?.toString()
+                            if (baseUnit.isNullOrBlank())
+                                return@compose Future.failedFuture(ConflictException("material $materialId has no base unit"))
+                            val scale = (matRow.getValue(2) as? Number)?.toInt() ?: 0
+                            val batchControl = matRow.getValue(3) as? Boolean ?: false
 
-                                connection.preparedQuery(DatabaseConfig.sql(lockQuery))
-                                    .execute(DatabaseConfig.tuple(lockQuery))
-                                    .compose { stockRows ->
-                                        if (stockRows.size() == 0)
-                                            return@compose Future.failedFuture(NotFoundException("stock not found: $stockId"))
+                            validateBaseQuantity(item.quantity, scale)
+                            validateUnitCost(avgUnitCost)
+                            totalCostOf(item.quantity, avgUnitCost)
 
-                                        val stockRow = stockRows.iterator().next()
-                                        val lockedBaseQty = inventoryDecimalValue(stockRow.getValue(1))
-                                        val lockedBase = inventoryDecimalValue(stockRow.getValue(2))
-                                        val availableBase = lockedBaseQty.subtract(lockedBase)
-                                        if (availableBase < conversion.baseQuantity)
-                                            return@compose Future.failedFuture(
-                                                ConflictException(
-                                                    "insufficient stock: $stockId has $availableBase base units available, requested ${conversion.baseQuantity}",
-                                                ),
-                                            )
-
-                                        validatedItems.add(
-                                            ValidatedItem(
-                                                stockId = stockId,
-                                                materialId = materialId,
-                                                lotId = lotId,
-                                                warehouse = warehouse,
-                                                conversion = conversion,
-                                                originalQuantity = inventoryDecimalValue(stockRow.getValue(0)),
-                                                originalBaseQuantity = lockedBaseQty,
-                                                originalTotalCost = inventoryDecimalValue(stockRow.getValue(3)),
-                                            ),
+                            validateMaterialAndLot(connection, materialId, lotId, batchControl)
+                                .compose {
+                                    val lockQuery = ctx.select(
+                                        Stocks.STOCKS.QUANTITY.`as`("stock_quantity"),
+                                        Stocks.STOCKS.LOCKED_QUANTITY.`as`("stock_locked_quantity"),
+                                        Stocks.STOCKS.TOTAL_COST.`as`("stock_total_cost"),
+                                    )
+                                        .from(Stocks.STOCKS)
+                                        .where(Stocks.STOCKS.ID.eq(stockId))
+                                        .forUpdate()
+                                    connection.preparedQuery(DatabaseConfig.sql(lockQuery))
+                                        .execute(DatabaseConfig.tuple(lockQuery))
+                                }
+                                .compose { stockRows ->
+                                    if (stockRows.size() == 0)
+                                        return@compose Future.failedFuture(NotFoundException("stock not found: $stockId"))
+                                    val stockRow = stockRows.iterator().next()
+                                    val lockedQty = stockDecimalValue(stockRow.getValue(0))
+                                    val locked = stockDecimalValue(stockRow.getValue(1))
+                                    val available = lockedQty.subtract(locked)
+                                    if (available < item.quantity)
+                                        return@compose Future.failedFuture(
+                                            ConflictException("insufficient stock: $stockId has $available available, requested ${item.quantity}"),
                                         )
-                                        process(index + 1)
-                                    }
-                            }
+
+                                    validatedItems.add(
+                                        ValidatedItem(
+                                            stockId = stockId,
+                                            materialId = materialId,
+                                            lotId = lotId,
+                                            warehouse = warehouse,
+                                            quantity = item.quantity,
+                                            unit = baseUnit,
+                                            unitCost = avgUnitCost,
+                                            originalQuantity = lockedQty,
+                                            originalTotalCost = stockDecimalValue(stockRow.getValue(2)),
+                                        ),
+                                    )
+                                    process(index + 1)
+                                }
                         }
                 }
         }
@@ -336,76 +308,43 @@ class InventoryConsumptionService(
         return process(0)
     }
 
-    /** 解析耗材消费的换算：新契约按规格精确换算；旧 PACKAGE/SPLIT 映射默认包装/基础规格 */
-    private fun resolveConsumptionConversion(
-        connection: SqlConnection,
-        materialId: String,
-        item: ConsumptionItem,
-        avgUnitCost: BigDecimal,
-    ): Future<BaseQuantityCommand> {
-        val conversion = UnitConversionService(ctx)
-        return if (item.unitSpecId != null) {
-            conversion.convert(connection, materialId, item.unitSpecId, item.inputQuantity!!, avgUnitCost)
-        } else if (item.unit == "PACKAGE") {
-            log.warn("legacy PACKAGE consumption for stock {}; mapping to current default package spec", item.stockId)
-            conversion.resolvePackagePort(connection, materialId, item.quantity!!, avgUnitCost)
-        } else if (item.unit == "SPLIT") {
-            log.warn("legacy SPLIT consumption for stock {}; mapping to base unit spec (no more CEILING)", item.stockId)
-            conversion.resolveSplitPort(connection, materialId, item.splitQuantity!!, avgUnitCost)
-        } else {
-            Future.failedFuture(IllegalArgumentException("unit must be PACKAGE or SPLIT"))
-        }
+    private fun totalCostOf(quantity: BigDecimal, unitCost: BigDecimal): BigDecimal {
+        val total = quantity.multiply(unitCost)
+        if (total.stripTrailingZeros().scale() > COST_DB_SCALE)
+            throw IllegalArgumentException("total_cost exceeds precision of $COST_DB_SCALE decimals")
+        return total
     }
 
-    /** 只读校验物资状态 / 批控开关与批次归属 / 过期（换算服务已校验物资 ACTIVE 与计量模型） */
     private fun validateMaterialAndLot(
         connection: SqlConnection,
         materialId: String,
         lotId: String?,
+        batchControl: Boolean,
     ): Future<Void?> {
-        val checkMaterial = ctx.select(
-            Materials.MATERIALS.STATUS.`as`("material_status"),
-            Materials.MATERIALS.ENABLE_BATCH_CONTROL.`as`("material_batch_control"),
+        if (batchControl && lotId == null)
+            return Future.failedFuture(ConflictException("material $materialId requires a lot"))
+        if (!batchControl && lotId != null)
+            return Future.failedFuture(ConflictException("material $materialId does not use batch control"))
+        if (lotId == null) return Future.succeededFuture(null)
+
+        val checkLot = ctx.select(
+            Lots.LOTS.MATERIAL_ID.`as`("lot_material_id"),
+            Lots.LOTS.EXPIRY_DATE.`as`("lot_expiry_date"),
         )
-            .from(Materials.MATERIALS)
-            .where(Materials.MATERIALS.ID.eq(materialId))
-        return connection.preparedQuery(DatabaseConfig.sql(checkMaterial))
-            .execute(DatabaseConfig.tuple(checkMaterial))
-            .compose { matRows ->
-                if (matRows.size() == 0)
-                    return@compose Future.failedFuture(ConflictException("material $materialId not found"))
-                val materialRow = matRows.iterator().next()
-                val matStatus = materialRow.getValue(0)?.toString()
-                if (matStatus != "ACTIVE")
-                    return@compose Future.failedFuture(ConflictException("material $materialId is not ACTIVE"))
-                val batchControlled = materialRow.getValue(1) as? Boolean ?: false
-                if (batchControlled && lotId == null)
-                    return@compose Future.failedFuture(ConflictException("material $materialId requires a lot"))
-                if (!batchControlled && lotId != null)
-                    return@compose Future.failedFuture(ConflictException("material $materialId does not use batch control"))
-
-                if (lotId == null) return@compose Future.succeededFuture(null as Void?)
-
-                val checkLot = ctx.select(
-                    Lots.LOTS.MATERIAL_ID.`as`("lot_material_id"),
-                    Lots.LOTS.EXPIRY_DATE.`as`("lot_expiry_date"),
-                )
-                    .from(Lots.LOTS)
-                    .where(Lots.LOTS.ID.eq(lotId))
-                connection.preparedQuery(DatabaseConfig.sql(checkLot))
-                    .execute(DatabaseConfig.tuple(checkLot))
-                    .compose { lotRows ->
-                        if (lotRows.size() == 0)
-                            return@compose Future.failedFuture(ConflictException("lot $lotId not found"))
-                        val lotRow = lotRows.iterator().next()
-                        val lotMaterialId = lotRow.getValue(0)?.toString()
-                        if (lotMaterialId != materialId)
-                            return@compose Future.failedFuture(ConflictException("lot $lotId does not belong to material $materialId"))
-                        val expiry = lotRow.getValue(1) as? java.time.LocalDate
-                        if (expiry != null && expiry.isBefore(java.time.LocalDate.now()))
-                            return@compose Future.failedFuture(ConflictException("lot $lotId has expired on $expiry"))
-                        Future.succeededFuture(null as Void?)
-                    }
+            .from(Lots.LOTS)
+            .where(Lots.LOTS.ID.eq(lotId))
+        return connection.preparedQuery(DatabaseConfig.sql(checkLot))
+            .execute(DatabaseConfig.tuple(checkLot))
+            .compose { lotRows ->
+                if (lotRows.size() == 0)
+                    return@compose Future.failedFuture(ConflictException("lot $lotId not found"))
+                val lotRow = lotRows.iterator().next()
+                if (lotRow.getValue(0)?.toString() != materialId)
+                    return@compose Future.failedFuture(ConflictException("lot $lotId does not belong to material $materialId"))
+                val expiry = lotRow.getValue(1) as? java.time.LocalDate
+                if (expiry != null && expiry.isBefore(java.time.LocalDate.now()))
+                    return@compose Future.failedFuture(ConflictException("lot $lotId has expired on $expiry"))
+                Future.succeededFuture(null as Void?)
             }
     }
 
@@ -414,77 +353,56 @@ class InventoryConsumptionService(
         command: NursingConsumptionCommand,
         opId: String,
         validatedItems: List<ValidatedItem>,
-        now: OffsetDateTime
+        now: OffsetDateTime,
     ): Future<List<DetailResult>> {
         val detailResults = mutableListOf<DetailResult>()
 
         fun process(index: Int): Future<List<DetailResult>> {
             if (index >= validatedItems.size) return Future.succeededFuture(detailResults)
-
             val vi = validatedItems[index]
-            val conversion = vi.conversion
             val detailId = Ulid.generate()
-            val legacy = legacyDetailColumns(conversion)
-            val totalCost = conversion.totalCost
+            val totalCost = totalCostOf(vi.quantity, vi.unitCost)
 
-            // 明细：旧列投影（unit/quantity/split_quantity）供历史展示，快照列为权威
-            val insertDetail = applyConversionSnapshots(
-                ctx.insertInto(StockOperationDetails.STOCK_OPERATION_DETAILS)
-                    .set(StockOperationDetails.STOCK_OPERATION_DETAILS.ID, detailId)
-                    .set(StockOperationDetails.STOCK_OPERATION_DETAILS.OPERATION_ID, opId)
-                    .set(StockOperationDetails.STOCK_OPERATION_DETAILS.MATERIAL_ID, vi.materialId)
-                    .set(StockOperationDetails.STOCK_OPERATION_DETAILS.LOT_ID, vi.lotId)
-                    .set(StockOperationDetails.STOCK_OPERATION_DETAILS.QUANTITY, legacy.second)
-                    .set(StockOperationDetails.STOCK_OPERATION_DETAILS.UNIT, legacy.first)
-                    .set(StockOperationDetails.STOCK_OPERATION_DETAILS.SPLIT_QUANTITY, legacy.third)
-                    .set(StockOperationDetails.STOCK_OPERATION_DETAILS.UNIT_COST, conversion.inputUnitCost)
-                    .set(StockOperationDetails.STOCK_OPERATION_DETAILS.TOTAL_COST, totalCost)
-                    .set(StockOperationDetails.STOCK_OPERATION_DETAILS.CREATED_AT, now),
-                conversion,
-            )
+            val insertDetail = ctx.insertInto(StockOperationDetails.STOCK_OPERATION_DETAILS)
+                .set(StockOperationDetails.STOCK_OPERATION_DETAILS.ID, detailId)
+                .set(StockOperationDetails.STOCK_OPERATION_DETAILS.OPERATION_ID, opId)
+                .set(StockOperationDetails.STOCK_OPERATION_DETAILS.MATERIAL_ID, vi.materialId)
+                .set(StockOperationDetails.STOCK_OPERATION_DETAILS.LOT_ID, vi.lotId)
+                .set(StockOperationDetails.STOCK_OPERATION_DETAILS.QUANTITY, vi.quantity)
+                .set(StockOperationDetails.STOCK_OPERATION_DETAILS.UNIT, vi.unit)
+                .set(StockOperationDetails.STOCK_OPERATION_DETAILS.UNIT_COST, vi.unitCost)
+                .set(StockOperationDetails.STOCK_OPERATION_DETAILS.TOTAL_COST, totalCost)
+                .set(StockOperationDetails.STOCK_OPERATION_DETAILS.CREATED_AT, now)
 
             return connection.preparedQuery(DatabaseConfig.sql(insertDetail))
                 .execute(DatabaseConfig.tuple(insertDetail))
                 .compose {
-                    val newQty = vi.originalQuantity.subtract(legacy.second)
-                    val newBase = vi.originalBaseQuantity.subtract(conversion.baseQuantity)
+                    val newQty = vi.originalQuantity.subtract(vi.quantity)
                     val newCost = vi.originalTotalCost.subtract(totalCost).max(BigDecimal.ZERO)
-
                     val updateStock = ctx.update(Stocks.STOCKS)
                         .set(Stocks.STOCKS.QUANTITY, newQty)
-                        .set(Stocks.STOCKS.BASE_QUANTITY, newBase)
                         .set(Stocks.STOCKS.TOTAL_COST, newCost)
                         .set(Stocks.STOCKS.LAST_UPDATED, now)
                         .where(Stocks.STOCKS.ID.eq(vi.stockId))
-
                     connection.preparedQuery(DatabaseConfig.sql(updateStock))
                         .execute(DatabaseConfig.tuple(updateStock))
-                        .flatMap {
+                        .map {
                             detailResults.add(
                                 DetailResult(
                                     detailId = detailId,
                                     stockId = vi.stockId,
                                     materialId = vi.materialId,
                                     lotId = vi.lotId,
-                                    quantity = legacy.second,
-                                    unit = legacy.first,
-                                    splitQuantity = legacy.third,
-                                    unitCost = conversion.inputUnitCost,
+                                    quantity = vi.quantity,
+                                    unit = vi.unit,
+                                    unitCost = vi.unitCost,
                                     totalCost = totalCost,
                                     warehouse = vi.warehouse,
-                                    unitSpecId = conversion.unitSpecId,
-                                    inputQuantity = conversion.inputQuantity,
-                                    inputUnit = conversion.inputUnit,
-                                    conversionRatio = conversion.conversionRatio,
-                                    baseQuantity = conversion.baseQuantity,
-                                    baseUnit = conversion.baseUnit,
-                                    inputUnitCost = conversion.inputUnitCost,
-                                    baseUnitCost = conversion.baseUnitCost,
                                 ),
                             )
-                            process(index + 1)
                         }
                 }
+                .compose { process(index + 1) }
         }
 
         return process(0)
@@ -495,63 +413,29 @@ class InventoryConsumptionService(
         val materialId: String,
         val lotId: String?,
         val warehouse: String,
-        /** 权威换算命令（快照 + 基础数量） */
-        val conversion: BaseQuantityCommand,
-        /** 锁后权威包装数量 */
+        val quantity: BigDecimal,
+        val unit: String,
+        val unitCost: BigDecimal,
         val originalQuantity: BigDecimal,
-        /** 锁后权威基础数量 */
-        val originalBaseQuantity: BigDecimal,
-        val originalTotalCost: BigDecimal
+        val originalTotalCost: BigDecimal,
     )
 
     private fun lockExecutionKey(
         connection: SqlConnection,
         taskExecutionId: String,
-    ): Future<Void?> {
-        return connection
+    ): Future<Void?> =
+        connection
             .preparedQuery("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .execute(Tuple.of(taskExecutionId))
             .map { null as Void? }
-    }
 
-    /** 新契约校验：unit_spec_id + input_quantity（或旧 PACKAGE/SPLIT 过渡），互斥 */
     internal fun validateConsumptionItem(item: ConsumptionItem): String? {
         if (item.stockId.isBlank()) return "stock_id is required"
-        val hasNew = item.unitSpecId != null || item.inputQuantity != null
-        val hasOld = item.unit != null || item.quantity != null || item.splitQuantity != null
-        if (hasNew && hasOld)
-            return "must not mix unit_spec_id/input_quantity with legacy unit/quantity"
-        if (hasNew) {
-            return when {
-                item.unitSpecId == null -> "unit_spec_id is required when input_quantity is provided"
-                item.inputQuantity == null -> "input_quantity is required when unit_spec_id is provided"
-                item.inputQuantity <= BigDecimal.ZERO -> "input_quantity must be > 0"
-                else -> null
-            }
-        }
-        return when (item.unit) {
-            "PACKAGE" -> when {
-                item.quantity == null || item.quantity <= BigDecimal.ZERO ->
-                    "quantity must be > 0 for PACKAGE unit"
-                item.splitQuantity != null ->
-                    "split_quantity is not allowed for PACKAGE unit"
-                else -> null
-            }
-            "SPLIT" -> when {
-                item.splitQuantity == null || item.splitQuantity <= BigDecimal.ZERO ->
-                    "split_quantity must be > 0 for SPLIT unit"
-                item.quantity != null ->
-                    "quantity is not allowed for SPLIT unit"
-                else -> null
-            }
-            else -> "unit must be PACKAGE or SPLIT (or provide unit_spec_id + input_quantity)"
-        }
+        if (item.quantity == null || item.quantity <= BigDecimal.ZERO) return "quantity must be > 0"
+        return null
     }
 
-    /**
-     * 幂等比较：新契约按规格 + 输入数量快照比较；旧契约按历史投影列比较。
-     * 计划 015 起不再使用向上取整的包装数算法。
-     */
+    /** 幂等比较：同一 stock_id 且基础数量（十进制规范化）一致。 */
     internal fun sameConsumptionItems(
         existing: List<DetailResult>,
         requested: List<ConsumptionItem>,
@@ -561,46 +445,22 @@ class InventoryConsumptionService(
         if (existingByStock.size != existing.size) return false
         return requested.all { item ->
             val detail = existingByStock[item.stockId] ?: return@all false
-            if (item.unitSpecId != null || item.inputQuantity != null) {
-                // 新契约：比较快照（unit_spec_id + input_quantity）
-                detail.unitSpecId == item.unitSpecId &&
-                    detail.inputQuantity != null &&
-                    detail.inputQuantity.compareTo(item.inputQuantity!!) == 0
-            } else if (detail.unit != item.unit) {
-                false
-            } else if (item.unit == "SPLIT") {
-                item.splitQuantity?.let { requested ->
-                    detail.splitQuantity?.compareTo(requested) == 0
-                } ?: false
-            } else {
-                item.quantity?.let { requested -> detail.quantity.compareTo(requested) == 0 } ?: false
-            }
+            detail.quantity.compareTo(item.quantity) == 0
         }
     }
 
     companion object {
-        fun rowToDetailResult(row: Row): DetailResult {
-            return DetailResult(
+        fun rowToDetailResult(row: Row): DetailResult =
+            DetailResult(
                 detailId = row.getValue("id")?.toString() ?: "",
                 stockId = row.getValue("stock_id")?.toString() ?: "",
                 materialId = row.getValue("material_id")?.toString() ?: "",
                 lotId = row.getValue("lot_id")?.toString(),
-                quantity = inventoryDecimalValue(row.getValue("quantity")),
+                quantity = stockDecimalValue(row.getValue("quantity")),
                 unit = row.getValue("unit")?.toString() ?: "",
-                splitQuantity = inventoryDecimalValueOrNull(row.getValue("split_quantity")),
-                unitCost = inventoryDecimalValue(row.getValue("unit_cost")),
-                totalCost = inventoryDecimalValue(row.getValue("total_cost")),
+                unitCost = stockDecimalValue(row.getValue("unit_cost")),
+                totalCost = stockDecimalValue(row.getValue("total_cost")),
                 warehouse = row.getValue("warehouse")?.toString() ?: "",
-                unitSpecId = row.getValue("unit_spec_id")?.toString(),
-                inputQuantity = inventoryDecimalValueOrNull(row.getValue("input_quantity")),
-                inputUnit = row.getValue("input_unit")?.toString(),
-                conversionRatio = inventoryDecimalValueOrNull(row.getValue("conversion_ratio")),
-                baseQuantity = inventoryDecimalValueOrNull(row.getValue("detail_base_quantity")),
-                baseUnit = row.getValue("base_unit")?.toString(),
-                inputUnitCost = inventoryDecimalValueOrNull(row.getValue("input_unit_cost")),
-                baseUnitCost = inventoryDecimalValueOrNull(row.getValue("base_unit_cost")),
             )
-        }
     }
-
 }

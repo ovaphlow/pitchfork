@@ -77,7 +77,7 @@ public class PharmacyReturnItems extends TableImpl<PharmacyReturnItemsRecord> {
     /**
      * The column <code>pharmacy.pharmacy_return_items.quantity</code>.
      */
-    public final TableField<PharmacyReturnItemsRecord, BigDecimal> QUANTITY = createField(DSL.name("quantity"), SQLDataType.NUMERIC(15, 4).nullable(false), this, "");
+    public final TableField<PharmacyReturnItemsRecord, BigDecimal> QUANTITY = createField(DSL.name("quantity"), SQLDataType.NUMERIC(20, 6).nullable(false), this, "");
 
     /**
      * The column
@@ -88,12 +88,12 @@ public class PharmacyReturnItems extends TableImpl<PharmacyReturnItemsRecord> {
     /**
      * The column <code>pharmacy.pharmacy_return_items.unit_cost</code>.
      */
-    public final TableField<PharmacyReturnItemsRecord, BigDecimal> UNIT_COST = createField(DSL.name("unit_cost"), SQLDataType.NUMERIC(15, 4), this, "");
+    public final TableField<PharmacyReturnItemsRecord, BigDecimal> UNIT_COST = createField(DSL.name("unit_cost"), SQLDataType.NUMERIC(24, 8), this, "");
 
     /**
      * The column <code>pharmacy.pharmacy_return_items.total_cost</code>.
      */
-    public final TableField<PharmacyReturnItemsRecord, BigDecimal> TOTAL_COST = createField(DSL.name("total_cost"), SQLDataType.NUMERIC(18, 4), this, "");
+    public final TableField<PharmacyReturnItemsRecord, BigDecimal> TOTAL_COST = createField(DSL.name("total_cost"), SQLDataType.NUMERIC(24, 8), this, "");
 
     /**
      * The column <code>pharmacy.pharmacy_return_items.metadata</code>.

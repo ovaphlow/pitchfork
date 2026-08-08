@@ -133,48 +133,6 @@ public class StocksRecord extends UpdatableRecordImpl<StocksRecord> {
         return (OffsetDateTime) get(7);
     }
 
-    /**
-     * Setter for <code>public.stocks.base_quantity</code>.
-     */
-    public void setBaseQuantity(BigDecimal value) {
-        set(8, value);
-    }
-
-    /**
-     * Getter for <code>public.stocks.base_quantity</code>.
-     */
-    public BigDecimal getBaseQuantity() {
-        return (BigDecimal) get(8);
-    }
-
-    /**
-     * Setter for <code>public.stocks.locked_base_quantity</code>.
-     */
-    public void setLockedBaseQuantity(BigDecimal value) {
-        set(9, value);
-    }
-
-    /**
-     * Getter for <code>public.stocks.locked_base_quantity</code>.
-     */
-    public BigDecimal getLockedBaseQuantity() {
-        return (BigDecimal) get(9);
-    }
-
-    /**
-     * Setter for <code>public.stocks.unit_model_status</code>.
-     */
-    public void setUnitModelStatus(String value) {
-        set(10, value);
-    }
-
-    /**
-     * Getter for <code>public.stocks.unit_model_status</code>.
-     */
-    public String getUnitModelStatus() {
-        return (String) get(10);
-    }
-
     // -------------------------------------------------------------------------
     // Primary key information
     // -------------------------------------------------------------------------
@@ -198,7 +156,7 @@ public class StocksRecord extends UpdatableRecordImpl<StocksRecord> {
     /**
      * Create a detached, initialised StocksRecord
      */
-    public StocksRecord(String id, String warehouse, String materialId, String lotId, BigDecimal quantity, BigDecimal lockedQuantity, BigDecimal totalCost, OffsetDateTime lastUpdated, BigDecimal baseQuantity, BigDecimal lockedBaseQuantity, String unitModelStatus) {
+    public StocksRecord(String id, String warehouse, String materialId, String lotId, BigDecimal quantity, BigDecimal lockedQuantity, BigDecimal totalCost, OffsetDateTime lastUpdated) {
         super(Stocks.STOCKS);
 
         setId(id);
@@ -209,9 +167,6 @@ public class StocksRecord extends UpdatableRecordImpl<StocksRecord> {
         setLockedQuantity(lockedQuantity);
         setTotalCost(totalCost);
         setLastUpdated(lastUpdated);
-        setBaseQuantity(baseQuantity);
-        setLockedBaseQuantity(lockedBaseQuantity);
-        setUnitModelStatus(unitModelStatus);
         resetChangedOnNotNull();
     }
 }

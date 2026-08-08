@@ -6,7 +6,6 @@ package com.ovaphlow.crate.database.gen.inventories.public_.tables.records;
 
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.Materials;
 
-import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 
 import org.jooq.JSONB;
@@ -93,171 +92,115 @@ public class MaterialsRecord extends UpdatableRecordImpl<MaterialsRecord> {
     }
 
     /**
-     * Setter for <code>public.materials.package_unit</code>.
-     */
-    public void setPackageUnit(String value) {
-        set(5, value);
-    }
-
-    /**
-     * Getter for <code>public.materials.package_unit</code>.
-     */
-    public String getPackageUnit() {
-        return (String) get(5);
-    }
-
-    /**
-     * Setter for <code>public.materials.split_unit</code>.
-     */
-    public void setSplitUnit(String value) {
-        set(6, value);
-    }
-
-    /**
-     * Getter for <code>public.materials.split_unit</code>.
-     */
-    public String getSplitUnit() {
-        return (String) get(6);
-    }
-
-    /**
-     * Setter for <code>public.materials.split_ratio</code>.
-     */
-    public void setSplitRatio(BigDecimal value) {
-        set(7, value);
-    }
-
-    /**
-     * Getter for <code>public.materials.split_ratio</code>.
-     */
-    public BigDecimal getSplitRatio() {
-        return (BigDecimal) get(7);
-    }
-
-    /**
-     * Setter for <code>public.materials.enable_batch_control</code>.
-     */
-    public void setEnableBatchControl(Boolean value) {
-        set(8, value);
-    }
-
-    /**
-     * Getter for <code>public.materials.enable_batch_control</code>.
-     */
-    public Boolean getEnableBatchControl() {
-        return (Boolean) get(8);
-    }
-
-    /**
-     * Setter for <code>public.materials.cost_method</code>.
-     */
-    public void setCostMethod(String value) {
-        set(9, value);
-    }
-
-    /**
-     * Getter for <code>public.materials.cost_method</code>.
-     */
-    public String getCostMethod() {
-        return (String) get(9);
-    }
-
-    /**
-     * Setter for <code>public.materials.metadata</code>.
-     */
-    public void setMetadata(JSONB value) {
-        set(10, value);
-    }
-
-    /**
-     * Getter for <code>public.materials.metadata</code>.
-     */
-    public JSONB getMetadata() {
-        return (JSONB) get(10);
-    }
-
-    /**
-     * Setter for <code>public.materials.status</code>.
-     */
-    public void setStatus(String value) {
-        set(11, value);
-    }
-
-    /**
-     * Getter for <code>public.materials.status</code>.
-     */
-    public String getStatus() {
-        return (String) get(11);
-    }
-
-    /**
-     * Setter for <code>public.materials.created_at</code>.
-     */
-    public void setCreatedAt(OffsetDateTime value) {
-        set(12, value);
-    }
-
-    /**
-     * Getter for <code>public.materials.created_at</code>.
-     */
-    public OffsetDateTime getCreatedAt() {
-        return (OffsetDateTime) get(12);
-    }
-
-    /**
      * Setter for <code>public.materials.base_unit</code>.
      */
     public void setBaseUnit(String value) {
-        set(13, value);
+        set(5, value);
     }
 
     /**
      * Getter for <code>public.materials.base_unit</code>.
      */
     public String getBaseUnit() {
-        return (String) get(13);
+        return (String) get(5);
     }
 
     /**
-     * Setter for <code>public.materials.base_quantity_scale</code>.
+     * Setter for <code>public.materials.quantity_scale</code>.
      */
-    public void setBaseQuantityScale(Short value) {
-        set(14, value);
+    public void setQuantityScale(Short value) {
+        set(6, value);
     }
 
     /**
-     * Getter for <code>public.materials.base_quantity_scale</code>.
+     * Getter for <code>public.materials.quantity_scale</code>.
      */
-    public Short getBaseQuantityScale() {
-        return (Short) get(14);
+    public Short getQuantityScale() {
+        return (Short) get(6);
     }
 
     /**
-     * Setter for <code>public.materials.unit_model_status</code>.
+     * Setter for <code>public.materials.enable_batch_control</code>.
      */
-    public void setUnitModelStatus(String value) {
-        set(15, value);
+    public void setEnableBatchControl(Boolean value) {
+        set(7, value);
     }
 
     /**
-     * Getter for <code>public.materials.unit_model_status</code>.
+     * Getter for <code>public.materials.enable_batch_control</code>.
      */
-    public String getUnitModelStatus() {
-        return (String) get(15);
+    public Boolean getEnableBatchControl() {
+        return (Boolean) get(7);
+    }
+
+    /**
+     * Setter for <code>public.materials.cost_method</code>.
+     */
+    public void setCostMethod(String value) {
+        set(8, value);
+    }
+
+    /**
+     * Getter for <code>public.materials.cost_method</code>.
+     */
+    public String getCostMethod() {
+        return (String) get(8);
+    }
+
+    /**
+     * Setter for <code>public.materials.metadata</code>.
+     */
+    public void setMetadata(JSONB value) {
+        set(9, value);
+    }
+
+    /**
+     * Getter for <code>public.materials.metadata</code>.
+     */
+    public JSONB getMetadata() {
+        return (JSONB) get(9);
+    }
+
+    /**
+     * Setter for <code>public.materials.status</code>.
+     */
+    public void setStatus(String value) {
+        set(10, value);
+    }
+
+    /**
+     * Getter for <code>public.materials.status</code>.
+     */
+    public String getStatus() {
+        return (String) get(10);
+    }
+
+    /**
+     * Setter for <code>public.materials.created_at</code>.
+     */
+    public void setCreatedAt(OffsetDateTime value) {
+        set(11, value);
+    }
+
+    /**
+     * Getter for <code>public.materials.created_at</code>.
+     */
+    public OffsetDateTime getCreatedAt() {
+        return (OffsetDateTime) get(11);
     }
 
     /**
      * Setter for <code>public.materials.updated_at</code>.
      */
     public void setUpdatedAt(OffsetDateTime value) {
-        set(16, value);
+        set(12, value);
     }
 
     /**
      * Getter for <code>public.materials.updated_at</code>.
      */
     public OffsetDateTime getUpdatedAt() {
-        return (OffsetDateTime) get(16);
+        return (OffsetDateTime) get(12);
     }
 
     // -------------------------------------------------------------------------
@@ -283,7 +226,7 @@ public class MaterialsRecord extends UpdatableRecordImpl<MaterialsRecord> {
     /**
      * Create a detached, initialised MaterialsRecord
      */
-    public MaterialsRecord(String id, String code, String name, String category, String spec, String packageUnit, String splitUnit, BigDecimal splitRatio, Boolean enableBatchControl, String costMethod, JSONB metadata, String status, OffsetDateTime createdAt, String baseUnit, Short baseQuantityScale, String unitModelStatus, OffsetDateTime updatedAt) {
+    public MaterialsRecord(String id, String code, String name, String category, String spec, String baseUnit, Short quantityScale, Boolean enableBatchControl, String costMethod, JSONB metadata, String status, OffsetDateTime createdAt, OffsetDateTime updatedAt) {
         super(Materials.MATERIALS);
 
         setId(id);
@@ -291,17 +234,13 @@ public class MaterialsRecord extends UpdatableRecordImpl<MaterialsRecord> {
         setName(name);
         setCategory(category);
         setSpec(spec);
-        setPackageUnit(packageUnit);
-        setSplitUnit(splitUnit);
-        setSplitRatio(splitRatio);
+        setBaseUnit(baseUnit);
+        setQuantityScale(quantityScale);
         setEnableBatchControl(enableBatchControl);
         setCostMethod(costMethod);
         setMetadata(metadata);
         setStatus(status);
         setCreatedAt(createdAt);
-        setBaseUnit(baseUnit);
-        setBaseQuantityScale(baseQuantityScale);
-        setUnitModelStatus(unitModelStatus);
         setUpdatedAt(updatedAt);
         resetChangedOnNotNull();
     }

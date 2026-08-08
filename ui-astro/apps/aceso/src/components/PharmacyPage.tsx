@@ -13,11 +13,11 @@ import {
   listActiveElderlyAdmissions,
   listIdentitySubjects,
   listInventoryStocks,
-  listInventoryWarehouses,
   listPatients,
   listPharmacyDispenses,
   listPharmacyMedicationOrders,
   listPharmacyReturns,
+  listWarehouseOptions,
   reviewPharmacyDispense,
   startPharmacyDispense,
   type Encounter,
@@ -27,6 +27,7 @@ import {
   type PharmacyDispense,
   type PharmacyMedicationOrder,
   type PharmacyReturn,
+  type WarehouseOption,
 } from "@pitchfork/shared/aceso";
 
 type Tab = "orders" | "dispenses" | "returns" | "requisitions" | "purchase";
@@ -139,7 +140,7 @@ export default function PharmacyPage() {
   const [createForm, setCreateForm] = useState<DispenseForm>({ warehouse: "", stockId: "", materialId: "", lotId: "", quantity: "1", operator: "" });
   const [createError, setCreateError] = useState("");
   const [createSaving, setCreateSaving] = useState(false);
-  const [warehouses, setWarehouses] = useState<string[]>([]);
+  const [warehouses, setWarehouses] = useState<WarehouseOption[]>([]);
   const [stocks, setStocks] = useState<InventoryStockAvailability[]>([]);
   const [stocksLoading, setStocksLoading] = useState(false);
 
@@ -180,9 +181,15 @@ export default function PharmacyPage() {
     return map;
   }, [admissions]);
 
+  const materialUnit = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const stock of stocks) map.set(stock.material_id, stock.unit);
+    return map;
+  }, [stocks]);
+
   const loadSubjects = useCallback(async () => {
     try {
-      const response = await listIdentitySubjects(1, 200);
+      const response = await listIdentitySubjects(1, 100);
       setSubjects(response.records);
     } catch {
       // 操作人下拉失败不影响页面主体
@@ -293,7 +300,7 @@ export default function PharmacyPage() {
 
   const loadWarehouses = useCallback(async () => {
     try {
-      setWarehouses(await listInventoryWarehouses());
+      setWarehouses(await listWarehouseOptions());
     } catch (error) {
       setCreateError(errorMessage(error, "无法加载仓库列表"));
     }
@@ -347,7 +354,6 @@ export default function PharmacyPage() {
         material_id: createForm.materialId,
         ...(createForm.lotId ? { lot_id: createForm.lotId } : {}),
         dispensed_quantity: quantity,
-        unit: "PACKAGE",
       });
       setCreateTarget(null);
       void loadOrders();
@@ -410,7 +416,7 @@ export default function PharmacyPage() {
   };
 
   const openReturn = (dispense: PharmacyDispense, itemId?: string) => {
-    const firstItem = dispense.items.find((item) => item.unit === "PACKAGE") ?? dispense.items[0];
+    const firstItem = dispense.items[0];
     const selectedItemId = itemId ?? firstItem?.id ?? "";
     const selectedItem = dispense.items.find((item) => item.id === selectedItemId);
     setReturnTarget(dispense);
@@ -431,7 +437,7 @@ export default function PharmacyPage() {
     if (!returnForm.reason.trim()) return setReturnError("请填写退药原因");
     if (!returnForm.operator.trim()) return setReturnError("请选择操作人");
     const selectedItem = returnTarget.items.find((item) => item.id === returnForm.itemId);
-    if (!selectedItem || selectedItem.unit !== "PACKAGE") return setReturnError("仅支持包装单位发药明细退药");
+    if (!selectedItem) return setReturnError("请选择退药明细");
     if (!quantity || quantity <= 0 || (selectedItem.dispensed_quantity != null && quantity > selectedItem.dispensed_quantity)) {
       return setReturnError("退药数量必须大于 0 且不超过原发药数量");
     }
@@ -533,6 +539,19 @@ export default function PharmacyPage() {
       key: "doctor",
       header: "医生",
       render: (row) => <span className="text-fg-muted">{row.doctor || "—"}</span>,
+    },
+    {
+      key: "nurse_check",
+      header: "护士核对",
+      render: (row) =>
+        row.nurse_checked_by && row.nurse_checked_at ? (
+          <div className="text-sm">
+            <div className="text-fg">{row.nurse_checked_by}</div>
+            <div className="text-xs text-fg-dimmed">{formatDateTime(row.nurse_checked_at)}</div>
+          </div>
+        ) : (
+          <span className="text-xs text-fg-dimmed">未核对</span>
+        ),
     },
     {
       key: "status",
@@ -719,7 +738,7 @@ export default function PharmacyPage() {
             <EmptyState
               icon="💊"
               title="暂无待接方用药医嘱"
-              description="仅展示活动养老入住下进行中的用药医嘱。"
+              description="仅展示已由护士核对的用药医嘱；未核对医嘱在护理工作台核对后才可见。"
             />
           ) : (
             <Table
@@ -864,7 +883,7 @@ export default function PharmacyPage() {
           <div className="space-y-4">
             <div className="rounded-md border border-border p-3 text-sm space-y-1">
               <div className="font-medium text-fg-emphasis">{returnTarget.dispense_no} · {patientName.get(returnTarget.patient_id) ?? returnTarget.patient_id}</div>
-              <div className="text-xs text-fg-dimmed">退药确认后，包装将退回原仓库并增加库存；物资、批次和成本由原发药记录锁定。</div>
+              <div className="text-xs text-fg-dimmed">退药确认后，基础数量将退回原仓库并增加库存；物资、批次和成本由原发药记录锁定。</div>
             </div>
             <div className="flex flex-col gap-1.5">
               <label className="text-sm font-medium text-fg-muted" htmlFor="return-item">退药明细</label>
@@ -878,7 +897,7 @@ export default function PharmacyPage() {
                 }}
               >
                 <option value="">请选择发药明细</option>
-                {returnTarget.items.filter((item) => item.unit === "PACKAGE").map((item) => (
+                {returnTarget.items.map((item) => (
                   <option key={item.id} value={item.id}>{item.material_id || "药品"} · 批次 {item.lot_id || "无"} · 原发 {item.dispensed_quantity ?? "—"}</option>
                 ))}
               </select>
@@ -959,8 +978,8 @@ export default function PharmacyPage() {
               >
                 <option value="">请选择仓库</option>
                 {warehouses.map((warehouse) => (
-                  <option key={warehouse} value={warehouse}>
-                    {warehouse}
+                  <option key={warehouse.code} value={warehouse.code}>
+                    {warehouse.name}
                   </option>
                 ))}
               </select>
@@ -991,7 +1010,7 @@ export default function PharmacyPage() {
                     {stock.material_name}
                     {stock.batch_no ? `（批次 ${stock.batch_no}` : "（无批次"}
                     {stock.expiry_date ? `，效期 ${stock.expiry_date.slice(0, 10)}` : ""}
-                    {`，可用 ${stock.available_quantity}${stock.package_unit ?? ""}）`}
+                    {`，可用 ${stock.available_quantity}${stock.unit ?? ""}）`}
                   </option>
                 ))}
               </select>
@@ -1117,7 +1136,7 @@ export default function PharmacyPage() {
               <div className="flex items-center justify-between">
                 <span className="font-medium text-fg-emphasis">{detail.dispense_no}</span>
                 <div className="flex items-center gap-2">
-                  {detail.status === "DISPENSED" && detail.items.some((item) => item.unit === "PACKAGE") && <Button size="sm" onClick={() => openReturn(detail)}>创建退药</Button>}
+                  {detail.status === "DISPENSED" && detail.items.length > 0 && <Button size="sm" onClick={() => openReturn(detail)}>创建退药</Button>}
                   {statusBadge(detail.status)}
                 </div>
               </div>
@@ -1164,7 +1183,7 @@ export default function PharmacyPage() {
                         <td className="py-2 px-3 text-fg">{item.material_id || "—"}</td>
                         <td className="py-2 px-3 text-fg-muted">{item.lot_id || "—"}</td>
                         <td className="py-2 px-3 text-fg">
-                          {item.dispensed_quantity ?? "—"} {item.unit || ""}
+                          {item.dispensed_quantity ?? "—"} {materialUnit.get(item.material_id ?? "") ?? ""}
                           {item.prescribed_quantity != null && `（医嘱 ${item.prescribed_quantity}）`}
                         </td>
                         <td className="py-2 px-3 text-fg-muted">{item.unit_cost ?? "—"}</td>

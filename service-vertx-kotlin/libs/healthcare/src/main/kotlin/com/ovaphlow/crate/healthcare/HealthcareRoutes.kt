@@ -1,6 +1,7 @@
 package com.ovaphlow.crate.healthcare
 
 import com.ovaphlow.crate.nursing.ConflictException
+import io.vertx.core.Handler
 import io.vertx.core.Vertx
 import io.vertx.core.json.JsonObject
 import io.vertx.ext.web.Router
@@ -15,7 +16,7 @@ class DuplicateNursingRecordException(message: String) : Exception(message)
 object HealthcareRoutes {
     private val log = LoggerFactory.getLogger(HealthcareRoutes::class.java)
 
-    fun create(vertx: Vertx, pool: Pool): Router {
+    fun create(vertx: Vertx, pool: Pool, nurseCheckAuthHandler: Handler<RoutingContext>? = null): Router {
         val router = Router.router(vertx)
         val service = HealthcareService(pool)
 
@@ -107,6 +108,17 @@ object HealthcareRoutes {
             ).onSuccess { ctx.json(it) }
                 .onFailure { respondFailure(ctx, it) }
         }
+        // 护士核对汇总列表：跨入住待核对用药医嘱。静态路径必须先于泛型 /orders/:id
+        router.get("/orders/pending-nurse-check").handler { ctx ->
+            service.listPendingNurseCheckOrders(
+                pool,
+                encounterId = ctx.request().getParam("encounter_id"),
+                search = ctx.request().getParam("search"),
+                limit = limit(ctx),
+                offset = offset(ctx),
+            ).onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
         router.get("/orders/:id").handler { ctx ->
             service.getOrder(requiredId(ctx))
                 .onSuccess { ctx.json(it) }
@@ -114,6 +126,21 @@ object HealthcareRoutes {
         }
         router.patch("/orders/:id/status").handler { ctx ->
             service.updateOrderStatus(requiredId(ctx), body(ctx))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 护士核对用药医嘱：核对人取自认证中间件写入的 userId，缺失返回 401。
+        // 认证中间件（IDP 会话校验）由 App 编排层注入；未注入时保持原有 401 兜底。
+        if (nurseCheckAuthHandler != null) {
+            router.patch("/orders/:id/nurse-check").handler(nurseCheckAuthHandler)
+        }
+        router.patch("/orders/:id/nurse-check").handler { ctx ->
+            val userId = ctx.get<String>("userId")
+            if (userId.isNullOrBlank()) {
+                respond(ctx, 401, "authentication required")
+                return@handler
+            }
+            service.nurseCheckOrder(requiredId(ctx), userId, body(ctx))
                 .onSuccess { ctx.json(it) }
                 .onFailure { respondFailure(ctx, it) }
         }

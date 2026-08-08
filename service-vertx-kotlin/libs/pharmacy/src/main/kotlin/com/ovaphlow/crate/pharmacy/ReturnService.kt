@@ -39,7 +39,6 @@ class ReturnService(
         val returnStockOperationDetailId: String?,
         val returnStatus: String,
         val dispenseStatus: String,
-        val unit: String?,
     )
 
     companion object {
@@ -68,6 +67,9 @@ class ReturnService(
     }
 
     fun createFromDispense(body: JsonObject): Future<JsonObject> {
+        rejectUnknown(body, setOf("dispense_id", "dispense_item_id", "quantity", "return_reason", "operator", "restockable", "remark"))?.let {
+            return Future.failedFuture(it)
+        }
         val dispenseId = body.getString("dispense_id")?.trim().orEmpty()
         val dispenseItemId = body.getString("dispense_item_id")?.trim().orEmpty()
         val returnReason = body.getString("return_reason")?.trim().orEmpty()
@@ -173,6 +175,7 @@ class ReturnService(
     }
 
     fun confirm(id: String, body: JsonObject): Future<JsonObject> {
+        rejectUnknown(body, setOf("operator", "remark"))?.let { return Future.failedFuture(it) }
         val operator = body.getString("operator")?.trim().orEmpty()
         if (operator.isBlank()) return Future.failedFuture(IllegalArgumentException("operator is required"))
 
@@ -185,9 +188,9 @@ class ReturnService(
                         if (source.returnStockOperationDetailId != null) {
                             return@compose Future.failedFuture(ConflictException("return already has stock operation"))
                         }
-                        inventoryInboundPort.confirmPackageInbound(
+                        inventoryInboundPort.confirmInbound(
                             connection,
-                            PackageInboundCommand(
+                            InboundCommand(
                                 warehouse = source.warehouse,
                                 materialId = source.materialId,
                                 lotId = source.lotId,
@@ -299,7 +302,6 @@ class ReturnService(
             PHARMACY_DISPENSE_ITEMS.MATERIAL_ID,
             PHARMACY_DISPENSE_ITEMS.LOT_ID,
             PHARMACY_DISPENSE_ITEMS.DISPENSED_QUANTITY,
-            PHARMACY_DISPENSE_ITEMS.UNIT,
             PHARMACY_DISPENSE_ITEMS.UNIT_COST,
             PHARMACY_DISPENSE_ITEMS.STOCK_OPERATION_DETAIL_ID.`as`("original_stock_operation_detail_id"),
         )
@@ -329,7 +331,6 @@ class ReturnService(
             PHARMACY_RETURN_ITEMS.STOCK_OPERATION_DETAIL_ID.`as`("return_stock_operation_detail_id"),
             PHARMACY_DISPENSE_ITEMS.MATERIAL_ID,
             PHARMACY_DISPENSE_ITEMS.LOT_ID,
-            PHARMACY_DISPENSE_ITEMS.UNIT,
             PHARMACY_DISPENSE_ITEMS.UNIT_COST,
             PHARMACY_DISPENSE_ITEMS.STOCK_OPERATION_DETAIL_ID.`as`("original_stock_operation_detail_id"),
         )
@@ -362,12 +363,10 @@ class ReturnService(
         returnStockOperationDetailId = if (returnRow) row.getString("return_stock_operation_detail_id") else null,
         returnStatus = if (returnRow) row.getString("return_status") ?: "" else "",
         dispenseStatus = row.getString("dispense_status") ?: "",
-        unit = row.getString("unit"),
     )
 
     private fun validateDispenseSource(source: ReturnSource) {
         if (source.dispenseStatus != "DISPENSED") throw ConflictException("only DISPENSED dispense can be returned")
-        if (source.unit != "PACKAGE") throw ConflictException("only PACKAGE dispense can be returned")
         if (source.warehouse.isBlank()) throw ConflictException("dispense has no warehouse")
         if (source.materialId.isBlank()) throw ConflictException("dispense item has no material")
         if (source.originalStockOperationDetailId.isBlank()) throw ConflictException("dispense item has no stock operation")
@@ -390,5 +389,13 @@ class ReturnService(
         return connection.preparedQuery(DatabaseConfig.sql(query))
             .execute(DatabaseConfig.tuple(query))
             .map { rows -> rows.iterator().next().getValue("reserved_quantity") as? BigDecimal ?: BigDecimal.ZERO }
+    }
+
+    private fun rejectUnknown(body: JsonObject, allowed: Set<String>): IllegalArgumentException? {
+        val unknown = body.fieldNames().filter { it !in allowed }
+        if (unknown.isNotEmpty()) {
+            return IllegalArgumentException("unknown fields: ${unknown.joinToString(", ")}")
+        }
+        return null
     }
 }

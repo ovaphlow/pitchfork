@@ -1,0 +1,8 @@
+---
+import DashboardLayout from "../../layouts/DashboardLayout.astro";
+import OrdersCheckPage from "../../components/OrdersCheckPage";
+---
+
+<DashboardLayout title="医嘱核对汇总">
+  <OrdersCheckPage client:load />
+</DashboardLayout>

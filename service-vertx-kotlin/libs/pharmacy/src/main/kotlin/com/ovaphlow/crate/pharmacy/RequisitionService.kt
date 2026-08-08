@@ -67,7 +67,6 @@ class RequisitionService(
         ri.APPROVED_QUANTITY.`as`("approved_quantity"),
         ri.DISPENSED_QUANTITY.`as`("dispensed_quantity"),
         ri.STOCK_OPERATION_DETAIL_ID.`as`("stock_operation_detail_id"),
-        ri.UNIT.`as`("unit"),
         ri.LOT_ID.`as`("lot_id"),
         ri.OUTBOUND_STOCK_OPERATION_DETAIL_ID.`as`("outbound_stock_operation_detail_id"),
         ri.INBOUND_STOCK_OPERATION_DETAIL_ID.`as`("inbound_stock_operation_detail_id"),
@@ -158,7 +157,6 @@ class RequisitionService(
                 .set(ri.REQUISITION_ID, requisitionId)
                 .set(ri.MATERIAL_ID, item.getString("material_id"))
                 .set(ri.REQUESTED_QUANTITY, toBigDecimal(item.getValue("requested_quantity")))
-                .set(ri.UNIT, "PACKAGE")
             return conn.preparedQuery(DatabaseConfig.sql(insertItem))
                 .execute(DatabaseConfig.tuple(insertItem))
                 .compose { _: RowSet<Row> -> insertOne(index + 1) }
@@ -242,7 +240,7 @@ class RequisitionService(
                 if (approved.isEmpty()) {
                     return@compose Future.failedFuture(ConflictException("no positive approved quantity"))
                 }
-                inventoryPort.reservePackageStock(
+                inventoryPort.reserveStock(
                     conn,
                     RequisitionReserveCommand(warehouse = header.getString("warehouse") ?: "", items = approved),
                 ).compose { _: Void? ->
@@ -324,7 +322,7 @@ class RequisitionService(
                 if (items.isEmpty()) {
                     return@compose Future.failedFuture(ConflictException("no approved items to transfer"))
                 }
-                inventoryPort.confirmReservedPackageTransfer(
+                inventoryPort.confirmReservedTransfer(
                     conn,
                     RequisitionTransferCommand(
                         sourceWarehouse = header.getString("warehouse") ?: "",
@@ -428,7 +426,7 @@ class RequisitionService(
                             null
                         }
                     }
-                    inventoryPort.releasePackageReservation(
+                    inventoryPort.releaseReservation(
                         conn,
                         RequisitionReleaseCommand(warehouse = header.getString("warehouse") ?: "", items = items),
                     )
@@ -617,7 +615,6 @@ class RequisitionService(
                 .put("requested_quantity", qtyOf(row.getValue("requested_quantity"))?.toDouble())
                 .put("approved_quantity", qtyOf(row.getValue("approved_quantity"))?.toDouble())
                 .put("dispensed_quantity", qtyOf(row.getValue("dispensed_quantity"))?.toDouble())
-                .put("unit", row.getValue("unit")?.toString())
                 .put("lot_id", row.getValue("lot_id")?.toString())
                 .put("outbound_stock_operation_detail_id", row.getValue("outbound_stock_operation_detail_id")?.toString())
                 .put("inbound_stock_operation_detail_id", row.getValue("inbound_stock_operation_detail_id")?.toString())
@@ -662,7 +659,7 @@ class RequisitionService(
         val materialIds = mutableSetOf<String>()
         for (i in 0 until items.size()) {
             val item = items.getJsonObject(i) ?: return IllegalArgumentException("items[$i] must be an object")
-            rejectUnknown(item, setOf("material_id", "requested_quantity"))
+            rejectUnknown(item, setOf("material_id", "requested_quantity"))?.let { return it }
             val materialId = item.getString("material_id")
             if (materialId.isNullOrBlank()) return IllegalArgumentException("items[$i].material_id is required")
             if (!materialIds.add(materialId)) {
@@ -689,7 +686,7 @@ class RequisitionService(
         val ids = mutableSetOf<String>()
         for (i in 0 until items.size()) {
             val item = items.getJsonObject(i) ?: return IllegalArgumentException("items[$i] must be an object")
-            rejectUnknown(item, setOf("id", "approved_quantity", "lot_id"))
+            rejectUnknown(item, setOf("id", "approved_quantity", "lot_id"))?.let { return it }
             val itemId = item.getString("id")
             if (itemId.isNullOrBlank()) return IllegalArgumentException("items[$i].id is required")
             if (!ids.add(itemId)) return IllegalArgumentException("duplicate item id in request: $itemId")

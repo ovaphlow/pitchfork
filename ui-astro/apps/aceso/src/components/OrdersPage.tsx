@@ -215,6 +215,7 @@ export default function OrdersPage() {
   const [noteForm, setNoteForm] = useState<NoteForm>(noteFormDefaults);
   const [noteFormError, setNoteFormError] = useState("");
   const [noteSaving, setNoteSaving] = useState(false);
+  const [noteEditorOpen, setNoteEditorOpen] = useState(false);
 
   // —— 诊断 ——
   const [diagnoses, setDiagnoses] = useState<Diagnosis[]>([]);
@@ -224,6 +225,7 @@ export default function OrdersPage() {
   const [diagnosisForm, setDiagnosisForm] = useState<DiagnosisForm>(diagnosisFormDefaults);
   const [diagnosisFormError, setDiagnosisFormError] = useState("");
   const [diagnosisSaving, setDiagnosisSaving] = useState(false);
+  const [diagnosisEditorOpen, setDiagnosisEditorOpen] = useState(false);
 
   // —— 医嘱 ——
   const [orders, setOrders] = useState<MedicalOrder[]>([]);
@@ -348,6 +350,11 @@ export default function OrdersPage() {
 
   // —— 病程记录 ——
 
+  function openNoteEditor() {
+    setNoteFormError("");
+    setNoteEditorOpen(true);
+  }
+
   async function handleSaveNote() {
     const content = noteForm.content.trim();
     const physician = noteForm.physician.trim();
@@ -366,6 +373,7 @@ export default function OrdersPage() {
         ...(recordTime ? { record_time: `${recordTime}:00+08:00` } : {}),
       });
       setNoteForm(noteFormDefaults);
+      setNoteEditorOpen(false);
       await loadNotes();
     } catch (error) {
       setNoteFormError(errorMessage(error, "无法保存病程记录"));
@@ -375,6 +383,11 @@ export default function OrdersPage() {
   }
 
   // —— 诊断 ——
+
+  function openDiagnosisEditor() {
+    setDiagnosisFormError("");
+    setDiagnosisEditorOpen(true);
+  }
 
   async function handleSaveDiagnosis() {
     const diagnosisText = diagnosisForm.diagnosisText.trim();
@@ -397,6 +410,7 @@ export default function OrdersPage() {
         ...(diagnosisForm.remark.trim() ? { remark: diagnosisForm.remark.trim() } : {}),
       });
       setDiagnosisForm((current) => ({ ...diagnosisFormDefaults, diagnosisDate: current.diagnosisDate, physician: current.physician }));
+      setDiagnosisEditorOpen(false);
       await loadDiagnoses();
     } catch (error) {
       setDiagnosisFormError(errorMessage(error, "无法保存诊断"));
@@ -723,62 +737,19 @@ export default function OrdersPage() {
           {/* 病程记录 */}
           <Card
             title="病程记录"
-            actions={<span className="text-sm text-fg-dimmed">共 {notesTotal} 条</span>}
+            actions={
+              <>
+                <span className="text-sm text-fg-dimmed">共 {notesTotal} 条</span>
+                {!isReadOnly && (
+                  <Button type="button" variant="secondary" size="sm" onClick={openNoteEditor}>新增病程记录</Button>
+                )}
+              </>
+            }
           >
             {notesError && (
               <div className="mb-4 rounded-lg border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">
                 {notesError}
               </div>
-            )}
-
-            {!isReadOnly && (
-              <form
-                className="mb-6 space-y-4 rounded-md border border-border bg-surface-alt p-4"
-                noValidate
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  void handleSaveNote();
-                }}
-              >
-                <p className="text-sm font-semibold text-fg-emphasis">新增病程记录</p>
-                {noteFormError && (
-                  <div role="alert" className="rounded-lg border border-danger/30 bg-danger-bg px-3 py-2 text-sm text-danger">
-                    {noteFormError}
-                  </div>
-                )}
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <div className="flex flex-col gap-1.5 sm:col-span-2">
-                    <label className="text-sm font-medium text-fg-muted" htmlFor="note-content">记录内容（必填）</label>
-                    <textarea
-                      id="note-content"
-                      className={textareaClass}
-                      rows={3}
-                      maxLength={2000}
-                      value={noteForm.content}
-                      onChange={(event) => setNoteForm((current) => ({ ...current, content: event.target.value }))}
-                      placeholder="请输入病程记录内容，最多 2000 字"
-                      required
-                    />
-                  </div>
-                  <Input
-                    label="医生（必填）"
-                    value={noteForm.physician}
-                    onChange={(event) => setNoteForm((current) => ({ ...current, physician: event.target.value }))}
-                    placeholder="请输入记录医生"
-                    maxLength={100}
-                    required
-                  />
-                  <Input
-                    label="记录时间（可选，缺省为当前时间）"
-                    type="datetime-local"
-                    value={noteForm.recordTime}
-                    onChange={(event) => setNoteForm((current) => ({ ...current, recordTime: event.target.value }))}
-                  />
-                </div>
-                <div className="flex justify-end">
-                  <Button type="submit" loading={noteSaving} disabled={noteSaving}>保存病程记录</Button>
-                </div>
-              </form>
             )}
 
             {notesLoading ? (
@@ -804,104 +775,19 @@ export default function OrdersPage() {
           {/* 诊断 */}
           <Card
             title="诊断"
-            actions={<span className="text-sm text-fg-dimmed">共 {diagnosesTotal} 条</span>}
+            actions={
+              <>
+                <span className="text-sm text-fg-dimmed">共 {diagnosesTotal} 条</span>
+                {!isReadOnly && (
+                  <Button type="button" variant="secondary" size="sm" onClick={openDiagnosisEditor}>新增诊断</Button>
+                )}
+              </>
+            }
           >
             {diagnosesError && (
               <div className="mb-4 rounded-lg border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">
                 {diagnosesError}
               </div>
-            )}
-
-            {!isReadOnly && (
-              <form
-                className="mb-6 space-y-4 rounded-md border border-border bg-surface-alt p-4"
-                noValidate
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  void handleSaveDiagnosis();
-                }}
-              >
-                <p className="text-sm font-semibold text-fg-emphasis">新增诊断</p>
-                {diagnosisFormError && (
-                  <div role="alert" className="rounded-lg border border-danger/30 bg-danger-bg px-3 py-2 text-sm text-danger">
-                    {diagnosisFormError}
-                  </div>
-                )}
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <div className="flex flex-col gap-1.5">
-                    <label className="text-sm font-medium text-fg-muted" htmlFor="diagnosis-type">诊断类型</label>
-                    <select
-                      id="diagnosis-type"
-                      className={selectClass}
-                      value={diagnosisForm.diagnosisType}
-                      onChange={(event) => setDiagnosisForm((current) => ({ ...current, diagnosisType: event.target.value }))}
-                    >
-                      <option value="PRIMARY">主要诊断</option>
-                      <option value="SECONDARY">次要诊断</option>
-                    </select>
-                  </div>
-                  <div className="flex flex-col gap-1.5">
-                    <label className="text-sm font-medium text-fg-muted" htmlFor="diagnosis-date">诊断日期（必填）</label>
-                    <input
-                      id="diagnosis-date"
-                      type="date"
-                      className={selectClass}
-                      value={diagnosisForm.diagnosisDate}
-                      onChange={(event) => setDiagnosisForm((current) => ({ ...current, diagnosisDate: event.target.value }))}
-                      required
-                    />
-                  </div>
-                  <div className="sm:col-span-2">
-                    <Input
-                      label="诊断内容（必填）"
-                      value={diagnosisForm.diagnosisText}
-                      onChange={(event) => setDiagnosisForm((current) => ({ ...current, diagnosisText: event.target.value }))}
-                      placeholder="请输入诊断内容，如 高血压"
-                      maxLength={2000}
-                      required
-                    />
-                  </div>
-                  <Input
-                    label="ICD 编码（可选）"
-                    value={diagnosisForm.icdCode}
-                    onChange={(event) => setDiagnosisForm((current) => ({ ...current, icdCode: event.target.value }))}
-                    placeholder="如 I10"
-                    maxLength={32}
-                  />
-                  <Input
-                    label="医生（必填）"
-                    value={diagnosisForm.physician}
-                    onChange={(event) => setDiagnosisForm((current) => ({ ...current, physician: event.target.value }))}
-                    placeholder="请输入诊断医生"
-                    maxLength={100}
-                    required
-                  />
-                  <label className="flex items-center gap-2 text-sm text-fg-muted sm:col-span-2">
-                    <input
-                      type="checkbox"
-                      className={radioClass}
-                      checked={diagnosisForm.isMajor}
-                      onChange={(event) => setDiagnosisForm((current) => ({ ...current, isMajor: event.target.checked }))}
-                    />
-                    主要诊断（默认按诊断类型区分，如需标记可勾选）
-                  </label>
-                  <div className="flex flex-col gap-1.5 sm:col-span-2">
-                    <label className="text-sm font-medium text-fg-muted" htmlFor="diagnosis-remark">备注（可选）</label>
-                    <textarea
-                      id="diagnosis-remark"
-                      className={textareaClass}
-                      rows={2}
-                      maxLength={500}
-                      value={diagnosisForm.remark}
-                      onChange={(event) => setDiagnosisForm((current) => ({ ...current, remark: event.target.value }))}
-                      placeholder="请输入备注"
-                    />
-                  </div>
-                </div>
-                <div className="flex justify-end">
-                  <Button type="submit" loading={diagnosisSaving} disabled={diagnosisSaving}>保存诊断</Button>
-                </div>
-              </form>
             )}
 
             <Table
@@ -968,6 +854,155 @@ export default function OrdersPage() {
           </Card>
         </>
       )}
+
+      {/* 新增病程记录弹窗 */}
+      <Modal
+        open={noteEditorOpen}
+        onClose={() => !noteSaving && setNoteEditorOpen(false)}
+        title="新增病程记录"
+        width="42rem"
+      >
+        <form
+          className="space-y-5"
+          noValidate
+          onSubmit={(event) => {
+            event.preventDefault();
+            void handleSaveNote();
+          }}
+        >
+          {noteFormError && (
+            <div role="alert" className="rounded-lg border border-danger/30 bg-danger-bg px-3 py-2 text-sm text-danger">
+              {noteFormError}
+            </div>
+          )}
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="flex flex-col gap-1.5 sm:col-span-2">
+              <label className="text-sm font-medium text-fg-muted" htmlFor="note-content">记录内容（必填）</label>
+              <textarea
+                id="note-content"
+                className={textareaClass}
+                rows={3}
+                maxLength={2000}
+                value={noteForm.content}
+                onChange={(event) => setNoteForm((current) => ({ ...current, content: event.target.value }))}
+                placeholder="请输入病程记录内容，最多 2000 字"
+                required
+              />
+            </div>
+            <Input
+              label="医生（必填）"
+              value={noteForm.physician}
+              onChange={(event) => setNoteForm((current) => ({ ...current, physician: event.target.value }))}
+              placeholder="请输入记录医生"
+              maxLength={100}
+              required
+            />
+            <Input
+              label="记录时间（可选，缺省为当前时间）"
+              type="datetime-local"
+              value={noteForm.recordTime}
+              onChange={(event) => setNoteForm((current) => ({ ...current, recordTime: event.target.value }))}
+            />
+          </div>
+          <div className="flex justify-end gap-3 pt-1">
+            <Button type="button" variant="ghost" onClick={() => setNoteEditorOpen(false)} disabled={noteSaving}>取消</Button>
+            <Button type="submit" loading={noteSaving} disabled={noteSaving}>保存病程记录</Button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* 新增诊断弹窗 */}
+      <Modal open={diagnosisEditorOpen} onClose={() => !diagnosisSaving && setDiagnosisEditorOpen(false)} title="新增诊断">
+        <form
+          className="space-y-5"
+          noValidate
+          onSubmit={(event) => {
+            event.preventDefault();
+            void handleSaveDiagnosis();
+          }}
+        >
+          {diagnosisFormError && (
+            <div role="alert" className="rounded-lg border border-danger/30 bg-danger-bg px-3 py-2 text-sm text-danger">
+              {diagnosisFormError}
+            </div>
+          )}
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="flex flex-col gap-1.5">
+              <label className="text-sm font-medium text-fg-muted" htmlFor="diagnosis-type">诊断类型</label>
+              <select
+                id="diagnosis-type"
+                className={selectClass}
+                value={diagnosisForm.diagnosisType}
+                onChange={(event) => setDiagnosisForm((current) => ({ ...current, diagnosisType: event.target.value }))}
+              >
+                <option value="PRIMARY">主要诊断</option>
+                <option value="SECONDARY">次要诊断</option>
+              </select>
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <label className="text-sm font-medium text-fg-muted" htmlFor="diagnosis-date">诊断日期（必填）</label>
+              <input
+                id="diagnosis-date"
+                type="date"
+                className={selectClass}
+                value={diagnosisForm.diagnosisDate}
+                onChange={(event) => setDiagnosisForm((current) => ({ ...current, diagnosisDate: event.target.value }))}
+                required
+              />
+            </div>
+            <div className="sm:col-span-2">
+              <Input
+                label="诊断内容（必填）"
+                value={diagnosisForm.diagnosisText}
+                onChange={(event) => setDiagnosisForm((current) => ({ ...current, diagnosisText: event.target.value }))}
+                placeholder="请输入诊断内容，如 高血压"
+                maxLength={2000}
+                required
+              />
+            </div>
+            <Input
+              label="ICD 编码（可选）"
+              value={diagnosisForm.icdCode}
+              onChange={(event) => setDiagnosisForm((current) => ({ ...current, icdCode: event.target.value }))}
+              placeholder="如 I10"
+              maxLength={32}
+            />
+            <Input
+              label="医生（必填）"
+              value={diagnosisForm.physician}
+              onChange={(event) => setDiagnosisForm((current) => ({ ...current, physician: event.target.value }))}
+              placeholder="请输入诊断医生"
+              maxLength={100}
+              required
+            />
+            <label className="flex items-center gap-2 text-sm text-fg-muted sm:col-span-2">
+              <input
+                type="checkbox"
+                className={radioClass}
+                checked={diagnosisForm.isMajor}
+                onChange={(event) => setDiagnosisForm((current) => ({ ...current, isMajor: event.target.checked }))}
+              />
+              主要诊断（默认按诊断类型区分，如需标记可勾选）
+            </label>
+            <div className="flex flex-col gap-1.5 sm:col-span-2">
+              <label className="text-sm font-medium text-fg-muted" htmlFor="diagnosis-remark">备注（可选）</label>
+              <textarea
+                id="diagnosis-remark"
+                className={textareaClass}
+                rows={2}
+                maxLength={500}
+                value={diagnosisForm.remark}
+                onChange={(event) => setDiagnosisForm((current) => ({ ...current, remark: event.target.value }))}
+                placeholder="请输入备注"
+              />
+            </div>
+          </div>
+          <div className="flex justify-end gap-3 pt-1">
+            <Button type="button" variant="ghost" onClick={() => setDiagnosisEditorOpen(false)} disabled={diagnosisSaving}>取消</Button>
+            <Button type="submit" loading={diagnosisSaving} disabled={diagnosisSaving}>保存诊断</Button>
+          </div>
+        </form>
+      </Modal>
 
       {/* 开立医嘱弹窗 */}
       <Modal open={editorOpen} onClose={() => !saving && setEditorOpen(false)} title="开立医嘱">

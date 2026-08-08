@@ -15,6 +15,7 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 
+import org.jooq.Check;
 import org.jooq.Condition;
 import org.jooq.Field;
 import org.jooq.ForeignKey;
@@ -35,6 +36,7 @@ import org.jooq.TableField;
 import org.jooq.TableOptions;
 import org.jooq.UniqueKey;
 import org.jooq.impl.DSL;
+import org.jooq.impl.Internal;
 import org.jooq.impl.SQLDataType;
 import org.jooq.impl.TableImpl;
 
@@ -130,10 +132,22 @@ public class MedicalOrders extends TableImpl<MedicalOrdersRecord> {
     public final TableField<MedicalOrdersRecord, OffsetDateTime> UPDATED_AT = createField(DSL.name("updated_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6).defaultValue(DSL.field(DSL.raw("now()"), SQLDataType.TIMESTAMPWITHTIMEZONE)), this, "");
 
     /**
-     * The column <code>healthcare.medical_orders.order_class</code>. 医嘱持续
-     * 周期: LONG_TERM(长期) / TEMPORARY(临时)，历史医嘱可为 NULL
+     * The column <code>healthcare.medical_orders.order_class</code>. 医嘱持续周期:
+     * LONG_TERM(长期) / TEMPORARY(临时)，历史医嘱可为 NULL
      */
     public final TableField<MedicalOrdersRecord, String> ORDER_CLASS = createField(DSL.name("order_class"), SQLDataType.VARCHAR, this, "医嘱持续周期: LONG_TERM(长期) / TEMPORARY(临时)，历史医嘱可为 NULL");
+
+    /**
+     * The column <code>healthcare.medical_orders.nurse_checked_by</code>.
+     * 护士核对人（认证主体 userId）；未核对为 NULL，核对后药房才可见并可从该医嘱发药
+     */
+    public final TableField<MedicalOrdersRecord, String> NURSE_CHECKED_BY = createField(DSL.name("nurse_checked_by"), SQLDataType.VARCHAR, this, "护士核对人（认证主体 userId）；未核对为 NULL，核对后药房才可见并可从该医嘱发药");
+
+    /**
+     * The column <code>healthcare.medical_orders.nurse_checked_at</code>.
+     * 护士核对时间（带时区）；与 nurse_checked_by 成对出现，未核对为 NULL
+     */
+    public final TableField<MedicalOrdersRecord, OffsetDateTime> NURSE_CHECKED_AT = createField(DSL.name("nurse_checked_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6), this, "护士核对时间（带时区）；与 nurse_checked_by 成对出现，未核对为 NULL");
 
     private MedicalOrders(Name alias, Table<MedicalOrdersRecord> aliased) {
         this(alias, aliased, (Field<?>[]) null, null);
@@ -204,7 +218,7 @@ public class MedicalOrders extends TableImpl<MedicalOrdersRecord> {
 
     @Override
     public List<Index> getIndexes() {
-        return Arrays.asList(Indexes.IDX_ORDERS_ENCOUNTER, Indexes.IDX_ORDERS_STATUS, Indexes.IDX_ORDERS_TYPE);
+        return Arrays.asList(Indexes.IDX_ORDERS_ENCOUNTER, Indexes.IDX_ORDERS_NURSE_CHECKED_MEDICATION, Indexes.IDX_ORDERS_STATUS, Indexes.IDX_ORDERS_TYPE);
     }
 
     @Override
@@ -228,6 +242,13 @@ public class MedicalOrders extends TableImpl<MedicalOrdersRecord> {
             _encounters = new EncountersPath(this, Keys.MEDICAL_ORDERS__MEDICAL_ORDERS_ENCOUNTER_ID_FKEY, null);
 
         return _encounters;
+    }
+
+    @Override
+    public List<Check<MedicalOrdersRecord>> getChecks() {
+        return Arrays.asList(
+            Internal.createCheck(this, DSL.name("ck_medical_orders_nurse_check_pair"), "((((nurse_checked_by IS NULL) AND (nurse_checked_at IS NULL)) OR ((nurse_checked_by IS NOT NULL) AND (nurse_checked_at IS NOT NULL))))", true)
+        );
     }
 
     @Override

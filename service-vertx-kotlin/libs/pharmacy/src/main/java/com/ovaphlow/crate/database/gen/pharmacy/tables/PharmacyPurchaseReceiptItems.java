@@ -95,24 +95,19 @@ public class PharmacyPurchaseReceiptItems extends TableImpl<PharmacyPurchaseRece
      * The column
      * <code>pharmacy.pharmacy_purchase_receipt_items.received_quantity</code>.
      */
-    public final TableField<PharmacyPurchaseReceiptItemsRecord, BigDecimal> RECEIVED_QUANTITY = createField(DSL.name("received_quantity"), SQLDataType.NUMERIC(15, 4).nullable(false), this, "");
-
-    /**
-     * The column <code>pharmacy.pharmacy_purchase_receipt_items.unit</code>.
-     */
-    public final TableField<PharmacyPurchaseReceiptItemsRecord, String> UNIT = createField(DSL.name("unit"), SQLDataType.VARCHAR.nullable(false).defaultValue(DSL.field(DSL.raw("'PACKAGE'::character varying"), SQLDataType.VARCHAR)), this, "");
+    public final TableField<PharmacyPurchaseReceiptItemsRecord, BigDecimal> RECEIVED_QUANTITY = createField(DSL.name("received_quantity"), SQLDataType.NUMERIC(20, 6).nullable(false), this, "");
 
     /**
      * The column
      * <code>pharmacy.pharmacy_purchase_receipt_items.unit_cost</code>.
      */
-    public final TableField<PharmacyPurchaseReceiptItemsRecord, BigDecimal> UNIT_COST = createField(DSL.name("unit_cost"), SQLDataType.NUMERIC(15, 4).nullable(false), this, "");
+    public final TableField<PharmacyPurchaseReceiptItemsRecord, BigDecimal> UNIT_COST = createField(DSL.name("unit_cost"), SQLDataType.NUMERIC(24, 8).nullable(false), this, "");
 
     /**
      * The column
      * <code>pharmacy.pharmacy_purchase_receipt_items.total_cost</code>.
      */
-    public final TableField<PharmacyPurchaseReceiptItemsRecord, BigDecimal> TOTAL_COST = createField(DSL.name("total_cost"), SQLDataType.NUMERIC(18, 4).nullable(false), this, "");
+    public final TableField<PharmacyPurchaseReceiptItemsRecord, BigDecimal> TOTAL_COST = createField(DSL.name("total_cost"), SQLDataType.NUMERIC(24, 8).nullable(false), this, "");
 
     /**
      * The column
@@ -236,7 +231,6 @@ public class PharmacyPurchaseReceiptItems extends TableImpl<PharmacyPurchaseRece
         return Arrays.asList(
             Internal.createCheck(this, DSL.name("pharmacy_purchase_receipt_items_received_quantity_check"), "((received_quantity > (0)::numeric))", true),
             Internal.createCheck(this, DSL.name("pharmacy_purchase_receipt_items_total_cost_check"), "((total_cost >= (0)::numeric))", true),
-            Internal.createCheck(this, DSL.name("pharmacy_purchase_receipt_items_unit_check"), "(((unit)::text = 'PACKAGE'::text))", true),
             Internal.createCheck(this, DSL.name("pharmacy_purchase_receipt_items_unit_cost_check"), "((unit_cost >= (0)::numeric))", true)
         );
     }

@@ -140,39 +140,11 @@ public class PharmacyDispenseItemsRecord extends UpdatableRecordImpl<PharmacyDis
     }
 
     /**
-     * Setter for <code>pharmacy.pharmacy_dispense_items.unit</code>.
-     */
-    public void setUnit(String value) {
-        set(8, value);
-    }
-
-    /**
-     * Getter for <code>pharmacy.pharmacy_dispense_items.unit</code>.
-     */
-    public String getUnit() {
-        return (String) get(8);
-    }
-
-    /**
-     * Setter for <code>pharmacy.pharmacy_dispense_items.split_quantity</code>.
-     */
-    public void setSplitQuantity(BigDecimal value) {
-        set(9, value);
-    }
-
-    /**
-     * Getter for <code>pharmacy.pharmacy_dispense_items.split_quantity</code>.
-     */
-    public BigDecimal getSplitQuantity() {
-        return (BigDecimal) get(9);
-    }
-
-    /**
      * Setter for
      * <code>pharmacy.pharmacy_dispense_items.stock_operation_detail_id</code>.
      */
     public void setStockOperationDetailId(String value) {
-        set(10, value);
+        set(8, value);
     }
 
     /**
@@ -180,49 +152,49 @@ public class PharmacyDispenseItemsRecord extends UpdatableRecordImpl<PharmacyDis
      * <code>pharmacy.pharmacy_dispense_items.stock_operation_detail_id</code>.
      */
     public String getStockOperationDetailId() {
-        return (String) get(10);
+        return (String) get(8);
     }
 
     /**
      * Setter for <code>pharmacy.pharmacy_dispense_items.unit_cost</code>.
      */
     public void setUnitCost(BigDecimal value) {
-        set(11, value);
+        set(9, value);
     }
 
     /**
      * Getter for <code>pharmacy.pharmacy_dispense_items.unit_cost</code>.
      */
     public BigDecimal getUnitCost() {
-        return (BigDecimal) get(11);
+        return (BigDecimal) get(9);
     }
 
     /**
      * Setter for <code>pharmacy.pharmacy_dispense_items.total_cost</code>.
      */
     public void setTotalCost(BigDecimal value) {
-        set(12, value);
+        set(10, value);
     }
 
     /**
      * Getter for <code>pharmacy.pharmacy_dispense_items.total_cost</code>.
      */
     public BigDecimal getTotalCost() {
-        return (BigDecimal) get(12);
+        return (BigDecimal) get(10);
     }
 
     /**
      * Setter for <code>pharmacy.pharmacy_dispense_items.metadata</code>.
      */
     public void setMetadata(JSONB value) {
-        set(13, value);
+        set(11, value);
     }
 
     /**
      * Getter for <code>pharmacy.pharmacy_dispense_items.metadata</code>.
      */
     public JSONB getMetadata() {
-        return (JSONB) get(13);
+        return (JSONB) get(11);
     }
 
     // -------------------------------------------------------------------------
@@ -248,7 +220,7 @@ public class PharmacyDispenseItemsRecord extends UpdatableRecordImpl<PharmacyDis
     /**
      * Create a detached, initialised PharmacyDispenseItemsRecord
      */
-    public PharmacyDispenseItemsRecord(String id, String dispenseId, String orderItemId, String orderExecutionId, String materialId, String lotId, BigDecimal prescribedQuantity, BigDecimal dispensedQuantity, String unit, BigDecimal splitQuantity, String stockOperationDetailId, BigDecimal unitCost, BigDecimal totalCost, JSONB metadata) {
+    public PharmacyDispenseItemsRecord(String id, String dispenseId, String orderItemId, String orderExecutionId, String materialId, String lotId, BigDecimal prescribedQuantity, BigDecimal dispensedQuantity, String stockOperationDetailId, BigDecimal unitCost, BigDecimal totalCost, JSONB metadata) {
         super(PharmacyDispenseItems.PHARMACY_DISPENSE_ITEMS);
 
         setId(id);
@@ -259,8 +231,6 @@ public class PharmacyDispenseItemsRecord extends UpdatableRecordImpl<PharmacyDis
         setLotId(lotId);
         setPrescribedQuantity(prescribedQuantity);
         setDispensedQuantity(dispensedQuantity);
-        setUnit(unit);
-        setSplitQuantity(splitQuantity);
         setStockOperationDetailId(stockOperationDetailId);
         setUnitCost(unitCost);
         setTotalCost(totalCost);

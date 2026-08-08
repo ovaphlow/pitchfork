@@ -68,6 +68,34 @@ export interface DepartmentInput {
   description?: string;
 }
 
+export interface WarehousePayload {
+  name: string;
+  description?: string;
+}
+
+export interface Warehouse {
+  id: string;
+  category: string;
+  code: string;
+  root_code: string;
+  parent_code: string;
+  payload: WarehousePayload;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WarehouseInput {
+  code: string;
+  name: string;
+  description?: string;
+}
+
+/** 仓库下拉选项：code 为发药/库存使用的仓库编码，name 为展示名称 */
+export interface WarehouseOption {
+  code: string;
+  name: string;
+}
+
 export interface Patient {
   id: string;
   name: string;
@@ -529,6 +557,50 @@ export function updateDepartment(id: string, input: DepartmentInput): Promise<De
 
 export async function deleteDepartment(id: string): Promise<void> {
   await request<void>(`/settings/${encodeURIComponent(id)}`, { method: "DELETE" }, { service: "nexus" });
+}
+
+const WAREHOUSE_CATEGORY = "warehouse";
+
+export function listWarehouses(): Promise<Warehouse[]> {
+  const params = new URLSearchParams({ category: WAREHOUSE_CATEGORY, page: "1", page_size: "100" });
+  return request<Warehouse[]>(`/settings?${params}`, {}, { service: "nexus" });
+}
+
+function warehouseSettingPayload(input: WarehouseInput): Record<string, unknown> {
+  return {
+    category: WAREHOUSE_CATEGORY,
+    code: input.code.trim(),
+    parent_code: "",
+    root_code: "",
+    payload: {
+      name: input.name.trim(),
+      ...(input.description?.trim() ? { description: input.description.trim() } : {}),
+    },
+  };
+}
+
+export function createWarehouse(input: WarehouseInput): Promise<Warehouse> {
+  return request<Warehouse>("/settings", {
+    method: "POST",
+    body: JSON.stringify(warehouseSettingPayload(input)),
+  }, { service: "nexus" });
+}
+
+export function updateWarehouse(id: string, input: WarehouseInput): Promise<Warehouse> {
+  return request<Warehouse>(`/settings/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(warehouseSettingPayload(input)),
+  }, { service: "nexus" });
+}
+
+export async function deleteWarehouse(id: string): Promise<void> {
+  await request<void>(`/settings/${encodeURIComponent(id)}`, { method: "DELETE" }, { service: "nexus" });
+}
+
+/** 发药单等业务页面使用的仓库下拉选项；无配置时返回空数组 */
+export async function listWarehouseOptions(): Promise<WarehouseOption[]> {
+  const warehouses = await listWarehouses();
+  return warehouses.map((warehouse) => ({ code: warehouse.code, name: warehouse.payload.name }));
 }
 
 export function listPatients(params: {
@@ -1133,7 +1205,7 @@ export interface NursingConsumptionSummary {
   total_cost: number;
 }
 
-/** 耗材明细（计划 015：保留历史投影列，同时返回基础数量与换算快照） */
+/** 耗材明细（016：单一基础数量与基础单位快照） */
 export interface NursingExecutionConsumption {
   id: string;
   stock_operation_detail_id: string;
@@ -1145,29 +1217,15 @@ export interface NursingExecutionConsumption {
   warehouse: string;
   quantity: number;
   unit: string;
-  split_quantity: number | null;
   unit_cost: number;
   total_cost: number;
   created_at: string;
-  unit_spec_id?: string | null;
-  input_quantity?: number | null;
-  input_unit?: string | null;
-  conversion_ratio?: number | null;
-  base_quantity?: number | null;
-  base_unit?: string | null;
-  input_unit_cost?: number | null;
-  base_unit_cost?: number | null;
-  migration_status?: string | null;
 }
 
-/** 耗材输入项：新契约 unit_spec_id + input_quantity；旧 unit= PACKAGE/SPLIT 仅过渡兼容 */
+/** 耗材输入项（016）：客户端只提交 stock_id + 基础数量 */
 export interface NursingConsumptionInput {
   stock_id: string;
-  unit_spec_id?: string;
-  input_quantity?: number;
-  unit?: "PACKAGE" | "SPLIT";
-  quantity?: number;
-  split_quantity?: number;
+  quantity: number;
 }
 
 /** 带耗材的状态更新 */
@@ -1195,7 +1253,7 @@ export function listNursingExecutionConsumptions(id: string): Promise<NursingPag
 //  Inventory API — Stocks (库存)
 // ========================================================================
 
-/** 可用库存（计划 015：base_* 为基础数量权威口径；quantity/locked_quantity 为过渡投影） */
+/** 可用库存（016：quantity/locked_quantity/available_quantity 均为基础数量） */
 export interface InventoryStockAvailability {
   id: string;
   warehouse: string;
@@ -1203,9 +1261,6 @@ export interface InventoryStockAvailability {
   material_code: string;
   material_name: string;
   category: string;
-  package_unit: string;
-  split_unit: string | null;
-  split_ratio: number | null;
   lot_id: string | null;
   batch_no: string | null;
   expiry_date: string | null;
@@ -1213,14 +1268,7 @@ export interface InventoryStockAvailability {
   locked_quantity: number;
   available_quantity: number;
   unit_cost: number;
-  base_unit?: string | null;
-  base_quantity?: number | null;
-  locked_base_quantity?: number | null;
-  available_base_quantity?: number | null;
-  unit_model_status?: string | null;
-  default_spec_id?: string | null;
-  default_spec_unit?: string | null;
-  default_spec_ratio?: number | null;
+  unit: string;
 }
 
 export type InventoryStockPage = NursingPage<InventoryStockAvailability>;
@@ -1241,15 +1289,12 @@ export function listInventoryWarehouses(): Promise<string[]> {
   return request<string[]>("/inventories/v1/stocks/warehouses");
 }
 
-/** 入库明细：新契约 unit_spec_id + input_quantity + input_unit_cost；旧 quantity/unit_cost 仅过渡兼容 */
+/** 入库明细（016）：基础数量与每基础单位成本 */
 export interface InventoryInboundItem {
   material_id: string;
   lot_id?: string;
-  unit_spec_id?: string;
-  input_quantity?: number;
-  input_unit_cost?: number;
-  quantity?: number;
-  unit_cost?: number;
+  quantity: number;
+  unit_cost: number;
 }
 
 /** 确认入库 */
@@ -1268,50 +1313,24 @@ export function confirmInventoryInbound(input: {
 //  Inventory API — Materials 与单位模型 (计划 015)
 // ========================================================================
 
-/** 物资（含计量模型字段） */
+/** 物资（016：一个 base_unit 与一个 quantity_scale） */
 export interface InventoryMaterial {
   id: string;
   code: string;
   name: string;
   category: string;
   spec: string | null;
-  package_unit: string;
-  split_unit: string | null;
-  split_ratio: number | null;
+  base_unit: string;
+  quantity_scale: number;
   enable_batch_control: boolean | null;
   cost_method: string | null;
   metadata: Record<string, unknown> | null;
   status: string;
-  base_unit?: string | null;
-  base_quantity_scale?: number | null;
-  unit_model_status?: string | null;
   created_at: string;
   updated_at: string | null;
 }
 
 export type InventoryMaterialPage = NursingPage<InventoryMaterial>;
-
-/** 包装规格 */
-export interface InventoryUnitSpec {
-  id: string;
-  material_id: string;
-  input_unit: string;
-  base_ratio: number | null;
-  is_base_unit: boolean | null;
-  is_default: boolean | null;
-  status: string;
-  created_at: string;
-  retired_at: string | null;
-}
-
-/** 物资单位模型视图（GET /materials/:id/unit-specs） */
-export interface InventoryUnitModelView {
-  material_id: string;
-  base_unit: string | null;
-  base_quantity_scale: number | null;
-  unit_model_status: string;
-  unit_specs: InventoryUnitSpec[];
-}
 
 /** 查询物资 */
 export function listInventoryMaterials(params: {
@@ -1333,15 +1352,14 @@ export function listInventoryMaterials(params: {
   return request<InventoryMaterialPage>(`/inventories/v1/materials${suffix}`);
 }
 
-/** 创建物资（LEGACY 计量状态；随后可用 activateMaterialUnitModel 建立首次单位模型） */
+/** 创建物资：一次性提交 base_unit 与 quantity_scale（0..6） */
 export function createInventoryMaterial(input: {
   code: string;
   name: string;
   category: string;
-  package_unit: string;
+  base_unit: string;
+  quantity_scale?: number;
   spec?: string;
-  split_unit?: string;
-  split_ratio?: number;
   enable_batch_control?: boolean;
   cost_method?: string;
   status?: string;
@@ -1355,45 +1373,6 @@ export function createInventoryMaterial(input: {
 /** 物资详情 */
 export function getInventoryMaterial(id: string): Promise<InventoryMaterial> {
   return request<InventoryMaterial>(`/inventories/v1/materials/${encodeURIComponent(id)}`);
-}
-
-/** 物资单位模型与规格（基础单位、精度、迁移状态、全部规格） */
-export function listMaterialUnitSpecs(id: string): Promise<InventoryUnitModelView> {
-  return request<InventoryUnitModelView>(`/inventories/v1/materials/${encodeURIComponent(id)}/unit-specs`);
-}
-
-/** 创建首次基础单位模型（仅无计量事实时可用） */
-export function activateMaterialUnitModel(
-  id: string,
-  input: {
-    base_unit: string;
-    base_quantity_scale?: number;
-    default_spec?: { input_unit?: string; base_ratio?: number };
-  },
-): Promise<InventoryMaterial> {
-  return request<InventoryMaterial>(`/inventories/v1/materials/${encodeURIComponent(id)}/unit-model`, {
-    method: "PUT",
-    body: JSON.stringify(input),
-  });
-}
-
-/** 新增包装规格；is_default=true 时切换当前默认规格（存在未结算锁定 → 409） */
-export function createMaterialUnitSpec(
-  id: string,
-  input: { input_unit: string; base_ratio: number; is_default?: boolean },
-): Promise<InventoryUnitSpec> {
-  return request<InventoryUnitSpec>(`/inventories/v1/materials/${encodeURIComponent(id)}/unit-specs`, {
-    method: "POST",
-    body: JSON.stringify(input),
-  });
-}
-
-/** 停用包装规格（不可删除；默认活动规格与基础规格不可停用） */
-export function retireMaterialUnitSpec(id: string, specId: string): Promise<InventoryUnitSpec> {
-  return request<InventoryUnitSpec>(
-    `/inventories/v1/materials/${encodeURIComponent(id)}/unit-specs/${encodeURIComponent(specId)}/retire`,
-    { method: "POST" },
-  );
 }
 
 // ─── 医生病程记录 (Progress Notes) ─────────────────────────────────────
@@ -1540,6 +1519,10 @@ export interface MedicalOrder {
   end_time: string | null;
   doctor: string;
   status: string;
+  /** 护士核对审计：未核对为 null */
+  nurse_checked_by: string | null;
+  /** 护士核对时间：与 nurse_checked_by 成对出现，未核对为 null */
+  nurse_checked_at: string | null;
   task_id: string | null;
   execution_summary?: MedicalOrderExecutionSummary;
   created_at: string;
@@ -1594,6 +1577,42 @@ export function updateMedicalOrderStatus(id: string, status: string): Promise<Me
     method: "PATCH",
     body: JSON.stringify({ status }),
   });
+}
+
+/** 护士核对用药医嘱：核对人由服务端认证中间件取得，请求体必须为空 */
+export function nurseCheckMedicalOrder(id: string): Promise<MedicalOrder> {
+  return request<MedicalOrder>(`/healthcare/v1/orders/${encodeURIComponent(id)}/nurse-check`, {
+    method: "PATCH",
+    body: JSON.stringify({}),
+  });
+}
+
+/** 护士核对汇总行：跨入住待核对用药医嘱（未核对），含患者/入住信息 */
+export interface NurseCheckPendingOrder extends MedicalOrder {
+  patient_id: string;
+  patient_name: string;
+  encounter_no: string | null;
+}
+
+export interface NurseCheckPendingOrderList {
+  records: NurseCheckPendingOrder[];
+  meta: { total: number };
+}
+
+/** 护士核对汇总列表：仅 ELDERLY_CARE + ACTIVE + MEDICATION + ACTIVE + 未核对 */
+export function listPendingNurseCheckOrders(params: {
+  encounter_id?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<NurseCheckPendingOrderList> {
+  const query = new URLSearchParams();
+  if (params.encounter_id) query.set("encounter_id", params.encounter_id);
+  if (params.search) query.set("search", params.search);
+  if (params.limit != null) query.set("limit", String(params.limit));
+  if (params.offset != null) query.set("offset", String(params.offset));
+  const qs = query.toString();
+  return request<NurseCheckPendingOrderList>(`/healthcare/v1/orders/pending-nurse-check${qs ? `?${qs}` : ""}`);
 }
 
 export function markEncounterDeath(encounterId: string, input: DeathInput): Promise<Encounter> {
@@ -1739,6 +1758,9 @@ export interface PharmacyMedicationOrder {
   start_time: string | null;
   end_time: string | null;
   doctor: string;
+  /** 护士核对审计：药房待接方只返回已核对医嘱，两字段均非空 */
+  nurse_checked_by: string | null;
+  nurse_checked_at: string | null;
   /** 该医嘱已有未取消发药单时返回发药单 ID，页面显示已接方 */
   dispense_id: string | null;
   dispense_status: string | null;
@@ -1758,8 +1780,6 @@ export interface PharmacyDispenseItem {
   lot_id: string | null;
   prescribed_quantity: number | null;
   dispensed_quantity: number | null;
-  unit: string | null;
-  split_quantity: number | null;
   stock_operation_detail_id: string | null;
   unit_cost: number | null;
   total_cost: number | null;
@@ -1835,7 +1855,6 @@ export interface PharmacyDispenseFromMedicalOrderInput {
   material_id: string;
   lot_id?: string;
   dispensed_quantity: number;
-  unit?: string;
 }
 
 /** 审方/调配/确认/取消入参 */
@@ -1979,7 +1998,6 @@ export interface PharmacyRequisitionItem {
   requested_quantity: number | null;
   approved_quantity: number | null;
   dispensed_quantity: number | null;
-  unit: string | null;
   lot_id: string | null;
   outbound_stock_operation_detail_id: string | null;
   inbound_stock_operation_detail_id: string | null;
@@ -2123,7 +2141,6 @@ export interface PharmacyPurchaseOrderItem {
   ordered_quantity: number;
   received_quantity: number;
   remaining_quantity: number;
-  unit: string;
 }
 
 export interface PharmacyPurchaseOrderReceiptSummary {
@@ -2193,7 +2210,6 @@ export interface PharmacyPurchaseReceiptItem {
   material_id: string;
   lot_id: string | null;
   received_quantity: number;
-  unit: string;
   unit_cost: number;
   total_cost: number;
   stock_operation_detail_id: string;

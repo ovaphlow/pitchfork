@@ -2,6 +2,7 @@
 -- 药房模块 - 核心表结构
 -- 发药、退药、申领
 -- Schema: pharmacy
+-- 016 单一基础单位模型：明细数量直接为基础数量，单位由服务端写入库存操作明细快照。
 -- =====================================================
 
 CREATE SCHEMA IF NOT EXISTS pharmacy;
@@ -41,13 +42,11 @@ CREATE TABLE pharmacy_dispense_items (
     order_execution_id          VARCHAR(32),           -- 医嘱执行记录ID
     material_id                 VARCHAR(32) NOT NULL,  -- 药品ID（弱关联）
     lot_id                      VARCHAR(32),           -- 批次ID
-    prescribed_quantity         NUMERIC(15,4),         -- 处方数量（包装单位）
-    dispensed_quantity          NUMERIC(15,4),         -- 实发数量
-    unit                        VARCHAR DEFAULT 'PACKAGE' CHECK (unit IN ('PACKAGE','SPLIT')),
-    split_quantity              NUMERIC(15,4),         -- 拆零数量
+    prescribed_quantity         NUMERIC(20,6),         -- 处方数量（基础单位）
+    dispensed_quantity          NUMERIC(20,6),         -- 实发数量（基础单位）
     stock_operation_detail_id   VARCHAR(32),           -- 关联库存出库明细ID（弱关联）
-    unit_cost                   NUMERIC(15,4),
-    total_cost                  NUMERIC(18,4),
+    unit_cost                   NUMERIC(24,8),         -- 每基础单位成本快照
+    total_cost                  NUMERIC(24,8),
     metadata                    JSONB
 );
 
@@ -70,10 +69,10 @@ CREATE TABLE pharmacy_return_items (
     id                          VARCHAR(32) PRIMARY KEY,
     return_id                   VARCHAR(32) NOT NULL REFERENCES pharmacy_returns(id),
     dispense_item_id            VARCHAR(32) NOT NULL REFERENCES pharmacy_dispense_items(id),
-    quantity                    NUMERIC(15,4) NOT NULL,   -- 退回数量（包装单位）
+    quantity                    NUMERIC(20,6) NOT NULL,   -- 退回数量（基础单位）
     stock_operation_detail_id   VARCHAR(32),              -- 关联库存入库明细ID
-    unit_cost                   NUMERIC(15,4),
-    total_cost                  NUMERIC(18,4),
+    unit_cost                   NUMERIC(24,8),
+    total_cost                  NUMERIC(24,8),
     metadata                    JSONB
 );
 
@@ -95,9 +94,9 @@ CREATE TABLE pharmacy_requisition_items (
     id                          VARCHAR(32) PRIMARY KEY,
     requisition_id              VARCHAR(32) NOT NULL REFERENCES pharmacy_requisitions(id),
     material_id                 VARCHAR(32) NOT NULL,
-    requested_quantity          NUMERIC(15,4) NOT NULL,   -- 申领数量
-    approved_quantity           NUMERIC(15,4),            -- 批准数量
-    dispensed_quantity          NUMERIC(15,4),            -- 实发数量
+    requested_quantity          NUMERIC(20,6) NOT NULL,   -- 申领数量（基础单位）
+    approved_quantity           NUMERIC(20,6),            -- 批准数量（基础单位）
+    dispensed_quantity          NUMERIC(20,6),            -- 实发数量（基础单位）
     stock_operation_detail_id   VARCHAR(32),              -- 关联库存调拨出库明细ID
     metadata                    JSONB
 );

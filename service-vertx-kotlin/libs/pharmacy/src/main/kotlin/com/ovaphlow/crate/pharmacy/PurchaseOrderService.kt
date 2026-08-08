@@ -68,7 +68,6 @@ class PurchaseOrderService(
         oi.MATERIAL_ID.`as`("material_id"),
         oi.ORDERED_QUANTITY.`as`("ordered_quantity"),
         oi.RECEIVED_QUANTITY.`as`("received_quantity"),
-        oi.UNIT.`as`("unit"),
     )
 
     private val receiptSelect = ctx.select(
@@ -90,7 +89,6 @@ class PurchaseOrderService(
         pri.MATERIAL_ID.`as`("material_id"),
         pri.LOT_ID.`as`("lot_id"),
         pri.RECEIVED_QUANTITY.`as`("received_quantity"),
-        pri.UNIT.`as`("unit"),
         pri.UNIT_COST.`as`("unit_cost"),
         pri.TOTAL_COST.`as`("total_cost"),
         pri.STOCK_OPERATION_DETAIL_ID.`as`("stock_operation_detail_id"),
@@ -219,7 +217,6 @@ class PurchaseOrderService(
                 .set(oi.MATERIAL_ID, item.getString("material_id"))
                 .set(oi.ORDERED_QUANTITY, toBigDecimal(item.getValue("ordered_quantity")))
                 .set(oi.RECEIVED_QUANTITY, BigDecimal.ZERO)
-                .set(oi.UNIT, "PACKAGE")
             return conn.preparedQuery(DatabaseConfig.sql(insertItem))
                 .execute(DatabaseConfig.tuple(insertItem))
                 .compose { _: RowSet<Row> -> insertOne(index + 1) }
@@ -463,7 +460,7 @@ class PurchaseOrderService(
             items = receiptItems,
         )
 
-        return inventoryPort.confirmPackagePurchaseReceipt(conn, command)
+        return inventoryPort.confirmPurchaseReceipt(conn, command)
             .compose { result: PurchaseReceiptResult ->
                 val insertReceipt = ctx.insertInto(pr)
                     .set(pr.ID, receiptId)
@@ -545,7 +542,6 @@ class PurchaseOrderService(
                 .set(pri.MATERIAL_ID, materialId)
                 .set(pri.LOT_ID, entry.lotId)
                 .set(pri.RECEIVED_QUANTITY, quantity)
-                .set(pri.UNIT, "PACKAGE")
                 .set(pri.UNIT_COST, unitCost)
                 .set(pri.TOTAL_COST, unitCost.multiply(quantity))
                 .set(pri.STOCK_OPERATION_DETAIL_ID, entry.stockOperationDetailId)
@@ -832,7 +828,6 @@ class PurchaseOrderService(
                 .put("ordered_quantity", ordered.toDouble())
                 .put("received_quantity", received.toDouble())
                 .put("remaining_quantity", ordered.subtract(received).toDouble())
-                .put("unit", row.getValue("unit")?.toString())
         }
 
         fun receiptToJson(row: Row): JsonObject =
@@ -855,7 +850,6 @@ class PurchaseOrderService(
                 .put("material_id", row.getValue("material_id")?.toString())
                 .put("lot_id", row.getValue("lot_id")?.toString())
                 .put("received_quantity", qtyOf(row.getValue("received_quantity"))?.toDouble())
-                .put("unit", row.getValue("unit")?.toString())
                 .put("unit_cost", qtyOf(row.getValue("unit_cost"))?.toDouble())
                 .put("total_cost", qtyOf(row.getValue("total_cost"))?.toDouble())
                 .put("stock_operation_detail_id", row.getValue("stock_operation_detail_id")?.toString())
@@ -895,7 +889,7 @@ class PurchaseOrderService(
         val materialIds = mutableSetOf<String>()
         for (i in 0 until items.size()) {
             val item = items.getJsonObject(i) ?: return IllegalArgumentException("items[$i] must be an object")
-            rejectUnknown(item, setOf("material_id", "ordered_quantity"))
+            rejectUnknown(item, setOf("material_id", "ordered_quantity"))?.let { return it }
             val materialId = item.getString("material_id")
             if (materialId.isNullOrBlank()) return IllegalArgumentException("items[$i].material_id is required")
             if (!materialIds.add(materialId)) {
@@ -940,7 +934,7 @@ class PurchaseOrderService(
                     "manufacturer",
                     "unit_cost",
                 ),
-            )
+            )?.let { return it }
             val itemId = item.getString("purchase_order_item_id")
             if (itemId.isNullOrBlank()) return IllegalArgumentException("items[$i].purchase_order_item_id is required")
             val batchNo = if (item.containsKey("batch_no")) item.getString("batch_no") else null

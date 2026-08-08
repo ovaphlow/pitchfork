@@ -1,5 +1,6 @@
 -- =====================================================
 -- 库存模块 - 库存结存、出入库操作单与明细
+-- 016 单一基础单位模型：所有数量、锁定量、单位成本和总成本均直接按物资基础单位记账。
 -- =====================================================
 
 -- 库存结存表
@@ -9,9 +10,11 @@ CREATE TABLE IF NOT EXISTS stocks
     warehouse       VARCHAR     NOT NULL,
     material_id     VARCHAR(32) NOT NULL REFERENCES materials(id),
     lot_id          VARCHAR(32) REFERENCES lots(id),
-    quantity        NUMERIC(15,4) NOT NULL DEFAULT 0 CHECK (quantity >= 0),
-    locked_quantity NUMERIC(15,4) NOT NULL DEFAULT 0 CHECK (locked_quantity >= 0),
-    total_cost      NUMERIC(18,4) NOT NULL DEFAULT 0 CHECK (total_cost >= 0),
+    quantity        NUMERIC(20,6) NOT NULL DEFAULT 0,
+    locked_quantity NUMERIC(20,6) NOT NULL DEFAULT 0,
+    total_cost      NUMERIC(24,8) NOT NULL DEFAULT 0 CHECK (total_cost >= 0),
+    CONSTRAINT ck_stocks_quantity_ge_locked
+        CHECK (quantity >= locked_quantity AND locked_quantity >= 0),
     last_updated    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -61,11 +64,10 @@ CREATE TABLE IF NOT EXISTS stock_operation_details
     operation_id    VARCHAR(32) NOT NULL REFERENCES stock_operations(id) ON DELETE CASCADE,
     material_id     VARCHAR(32) NOT NULL REFERENCES materials(id),
     lot_id          VARCHAR(32) REFERENCES lots(id),
-    quantity        NUMERIC(15,4) NOT NULL CHECK (quantity > 0),
-    unit            VARCHAR     NOT NULL CHECK (unit IN ('PACKAGE', 'SPLIT')),
-    split_quantity  NUMERIC(15,4) CHECK (split_quantity IS NULL OR split_quantity > 0),
-    unit_cost       NUMERIC(18,4) NOT NULL CHECK (unit_cost >= 0),
-    total_cost      NUMERIC(18,4) NOT NULL CHECK (total_cost >= 0),
+    quantity        NUMERIC(20,6) NOT NULL CHECK (quantity > 0),
+    unit            VARCHAR     NOT NULL,
+    unit_cost       NUMERIC(24,8) NOT NULL CHECK (unit_cost >= 0),
+    total_cost      NUMERIC(24,8) NOT NULL CHECK (total_cost >= 0),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

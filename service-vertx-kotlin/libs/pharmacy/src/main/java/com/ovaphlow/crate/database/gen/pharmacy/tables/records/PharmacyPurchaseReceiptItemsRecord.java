@@ -113,25 +113,11 @@ public class PharmacyPurchaseReceiptItemsRecord extends UpdatableRecordImpl<Phar
     }
 
     /**
-     * Setter for <code>pharmacy.pharmacy_purchase_receipt_items.unit</code>.
-     */
-    public void setUnit(String value) {
-        set(6, value);
-    }
-
-    /**
-     * Getter for <code>pharmacy.pharmacy_purchase_receipt_items.unit</code>.
-     */
-    public String getUnit() {
-        return (String) get(6);
-    }
-
-    /**
      * Setter for
      * <code>pharmacy.pharmacy_purchase_receipt_items.unit_cost</code>.
      */
     public void setUnitCost(BigDecimal value) {
-        set(7, value);
+        set(6, value);
     }
 
     /**
@@ -139,7 +125,7 @@ public class PharmacyPurchaseReceiptItemsRecord extends UpdatableRecordImpl<Phar
      * <code>pharmacy.pharmacy_purchase_receipt_items.unit_cost</code>.
      */
     public BigDecimal getUnitCost() {
-        return (BigDecimal) get(7);
+        return (BigDecimal) get(6);
     }
 
     /**
@@ -147,7 +133,7 @@ public class PharmacyPurchaseReceiptItemsRecord extends UpdatableRecordImpl<Phar
      * <code>pharmacy.pharmacy_purchase_receipt_items.total_cost</code>.
      */
     public void setTotalCost(BigDecimal value) {
-        set(8, value);
+        set(7, value);
     }
 
     /**
@@ -155,7 +141,7 @@ public class PharmacyPurchaseReceiptItemsRecord extends UpdatableRecordImpl<Phar
      * <code>pharmacy.pharmacy_purchase_receipt_items.total_cost</code>.
      */
     public BigDecimal getTotalCost() {
-        return (BigDecimal) get(8);
+        return (BigDecimal) get(7);
     }
 
     /**
@@ -163,7 +149,7 @@ public class PharmacyPurchaseReceiptItemsRecord extends UpdatableRecordImpl<Phar
      * <code>pharmacy.pharmacy_purchase_receipt_items.stock_operation_detail_id</code>.
      */
     public void setStockOperationDetailId(String value) {
-        set(9, value);
+        set(8, value);
     }
 
     /**
@@ -171,7 +157,7 @@ public class PharmacyPurchaseReceiptItemsRecord extends UpdatableRecordImpl<Phar
      * <code>pharmacy.pharmacy_purchase_receipt_items.stock_operation_detail_id</code>.
      */
     public String getStockOperationDetailId() {
-        return (String) get(9);
+        return (String) get(8);
     }
 
     // -------------------------------------------------------------------------
@@ -197,7 +183,7 @@ public class PharmacyPurchaseReceiptItemsRecord extends UpdatableRecordImpl<Phar
     /**
      * Create a detached, initialised PharmacyPurchaseReceiptItemsRecord
      */
-    public PharmacyPurchaseReceiptItemsRecord(String id, String receiptId, String purchaseOrderItemId, String materialId, String lotId, BigDecimal receivedQuantity, String unit, BigDecimal unitCost, BigDecimal totalCost, String stockOperationDetailId) {
+    public PharmacyPurchaseReceiptItemsRecord(String id, String receiptId, String purchaseOrderItemId, String materialId, String lotId, BigDecimal receivedQuantity, BigDecimal unitCost, BigDecimal totalCost, String stockOperationDetailId) {
         super(PharmacyPurchaseReceiptItems.PHARMACY_PURCHASE_RECEIPT_ITEMS);
 
         setId(id);
@@ -206,7 +192,6 @@ public class PharmacyPurchaseReceiptItemsRecord extends UpdatableRecordImpl<Phar
         setMaterialId(materialId);
         setLotId(lotId);
         setReceivedQuantity(receivedQuantity);
-        setUnit(unit);
         setUnitCost(unitCost);
         setTotalCost(totalCost);
         setStockOperationDetailId(stockOperationDetailId);

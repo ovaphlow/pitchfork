@@ -20,4 +20,8 @@ data class MedicationOrderLockSnapshot(
     val startTime: OffsetDateTime?,
     val endTime: OffsetDateTime?,
     val orderDetails: JsonObject,
+    /** 护士核对审计：未核对为 null，已核对为认证主体 userId */
+    val nurseCheckedBy: String?,
+    /** 护士核对时间：与 nurseCheckedBy 成对出现 */
+    val nurseCheckedAt: OffsetDateTime?,
 )

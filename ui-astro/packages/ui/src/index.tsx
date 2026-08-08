@@ -166,6 +166,7 @@ export function Modal({
   onClose,
   title,
   children,
+  width = "32rem",
 }: ModalProps) {
   if (!open) return null;
   return (
@@ -188,7 +189,7 @@ export function Modal({
           border: "1px solid oklch(25% 0.01 250)",
           borderRadius: "0.5rem",
           width: "100%",
-          maxWidth: "32rem",
+          maxWidth: width,
           maxHeight: "85vh",
           overflowY: "auto",
           boxShadow: "0 8px 32px rgba(0,0,0,0.4)",

@@ -79,19 +79,19 @@ public class PharmacyRequisitionItems extends TableImpl<PharmacyRequisitionItems
      * The column
      * <code>pharmacy.pharmacy_requisition_items.requested_quantity</code>.
      */
-    public final TableField<PharmacyRequisitionItemsRecord, BigDecimal> REQUESTED_QUANTITY = createField(DSL.name("requested_quantity"), SQLDataType.NUMERIC(15, 4).nullable(false), this, "");
+    public final TableField<PharmacyRequisitionItemsRecord, BigDecimal> REQUESTED_QUANTITY = createField(DSL.name("requested_quantity"), SQLDataType.NUMERIC(20, 6).nullable(false), this, "");
 
     /**
      * The column
      * <code>pharmacy.pharmacy_requisition_items.approved_quantity</code>.
      */
-    public final TableField<PharmacyRequisitionItemsRecord, BigDecimal> APPROVED_QUANTITY = createField(DSL.name("approved_quantity"), SQLDataType.NUMERIC(15, 4), this, "");
+    public final TableField<PharmacyRequisitionItemsRecord, BigDecimal> APPROVED_QUANTITY = createField(DSL.name("approved_quantity"), SQLDataType.NUMERIC(20, 6), this, "");
 
     /**
      * The column
      * <code>pharmacy.pharmacy_requisition_items.dispensed_quantity</code>.
      */
-    public final TableField<PharmacyRequisitionItemsRecord, BigDecimal> DISPENSED_QUANTITY = createField(DSL.name("dispensed_quantity"), SQLDataType.NUMERIC(15, 4), this, "");
+    public final TableField<PharmacyRequisitionItemsRecord, BigDecimal> DISPENSED_QUANTITY = createField(DSL.name("dispensed_quantity"), SQLDataType.NUMERIC(20, 6), this, "");
 
     /**
      * The column
@@ -103,11 +103,6 @@ public class PharmacyRequisitionItems extends TableImpl<PharmacyRequisitionItems
      * The column <code>pharmacy.pharmacy_requisition_items.metadata</code>.
      */
     public final TableField<PharmacyRequisitionItemsRecord, JSONB> METADATA = createField(DSL.name("metadata"), SQLDataType.JSONB, this, "");
-
-    /**
-     * The column <code>pharmacy.pharmacy_requisition_items.unit</code>.
-     */
-    public final TableField<PharmacyRequisitionItemsRecord, String> UNIT = createField(DSL.name("unit"), SQLDataType.VARCHAR, this, "");
 
     /**
      * The column <code>pharmacy.pharmacy_requisition_items.lot_id</code>.

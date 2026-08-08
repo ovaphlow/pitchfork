@@ -1,4 +1,8 @@
--- 物资主表
+-- =====================================================
+-- 物资主表（016 单一基础单位模型）
+-- 每个物资恰好一个基础单位 base_unit 与数量精度 quantity_scale；
+-- 不再存在包装单位、拆零单位、换算率或计量模型状态。
+-- =====================================================
 CREATE TABLE IF NOT EXISTS materials
 (
     id                   VARCHAR(32) PRIMARY KEY,
@@ -6,16 +10,17 @@ CREATE TABLE IF NOT EXISTS materials
     name                 VARCHAR NOT NULL,
     category             VARCHAR NOT NULL,
     spec                 VARCHAR,
-    package_unit         VARCHAR NOT NULL,
-    split_unit           VARCHAR,
-    split_ratio          NUMERIC(10, 4),
+    base_unit            VARCHAR NOT NULL,
+    quantity_scale       SMALLINT NOT NULL DEFAULT 0
+        CHECK (quantity_scale BETWEEN 0 AND 6),
     enable_batch_control BOOLEAN     DEFAULT FALSE,
     cost_method          VARCHAR     DEFAULT 'MOVING_AVG'
         CHECK (cost_method IN ('MOVING_AVG', 'FIFO')),
     metadata             JSONB,
     status               VARCHAR     DEFAULT 'ACTIVE'
         CHECK (status IN ('ACTIVE', 'INACTIVE', 'DISCONTINUED')),
-    created_at           TIMESTAMPTZ DEFAULT NOW()
+    created_at           TIMESTAMPTZ DEFAULT NOW(),
+    updated_at           TIMESTAMPTZ
 );
 
 -- 批次表

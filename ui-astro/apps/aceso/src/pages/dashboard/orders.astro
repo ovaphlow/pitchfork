@@ -3,6 +3,8 @@ import DashboardLayout from "../../layouts/DashboardLayout.astro";
 import OrdersPage from "../../components/OrdersPage";
 ---
 
-<DashboardLayout title="医嘱管理">
-  <OrdersPage client:only="react" />
+<DashboardLayout title="医生诊疗">
+  <div class="h-[calc(100vh-var(--topbar-h)-3rem)] overflow-y-auto pr-2">
+    <OrdersPage client:only="react" />
+  </div>
 </DashboardLayout>

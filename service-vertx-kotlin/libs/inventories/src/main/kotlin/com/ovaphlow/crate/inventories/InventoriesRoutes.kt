@@ -23,14 +23,15 @@ object InventoriesRoutes {
             ctx.json(JsonObject().put("status", "ok").put("service", "inventories"))
         }
 
-        router.route("/materials/*").subRouter(MaterialRoutes.create(vertx, mPool))
-        router.route("/lots/*").subRouter(LotRoutes.create(vertx, mPool))
-        router.route("/stocks/*").subRouter(StockRoutes.create(vertx, mPool))
+        // 用 /xxx*（非 /xxx/*）挂载：Vertx 的 /* 不匹配裸路径 /xxx，
+        // 而前端按 REST 习惯调用 /inventories/v1/stocks 这类无尾斜杠路径。
+        router.route("/materials*").subRouter(MaterialRoutes.create(vertx, mPool))
+        router.route("/lots*").subRouter(LotRoutes.create(vertx, mPool))
+        router.route("/stocks*").subRouter(StockRoutes.create(vertx, mPool))
 
-        // ——— 手工确认入库（计划 015 新契约） ———
-        // 每个明细提交 material_id、可选 lot_id、unit_spec_id、input_quantity 与
-        // input_unit_cost；旧 quantity/unit_cost 形式仅过渡映射当前默认包装规格
-        // （StockService 记录弃用日志）。两种形式互斥，混合返回 400。
+        // ——— 手工确认入库（016 单一基础单位契约） ———
+        // 每个明细提交 material_id、可选 lot_id、quantity（基础数量）与
+        // unit_cost（每基础单位成本）；包装/拆零/换算/规格字段一律 400。
         router.post("/operations/inbound").handler { ctx ->
             val b = body(ctx)
             val warehouse = b.getString("warehouse")
@@ -55,52 +56,36 @@ object InventoriesRoutes {
                     return@handler
                 }
 
-                val unitSpecId = item.getString("unit_spec_id")
-                val inputQuantity = jsonDecimal(item.getValue("input_quantity"))
-                val quantity = jsonDecimal(item.getValue("quantity"))
-                val unitCost = jsonDecimal(item.getValue("unit_cost")) ?: jsonDecimal(item.getValue("input_unit_cost"))
-                val hasLegacyCost = item.containsKey("unit_cost")
-
-                // 契约互斥与字段级校验
-                val contractError = when {
-                    unitSpecId != null && inputQuantity == null ->
-                        "input_quantity required when unit_spec_id is provided"
-                    unitSpecId == null && inputQuantity != null ->
-                        "unit_spec_id required when input_quantity is provided"
-                    unitSpecId != null && quantity != null ->
-                        "must not mix unit_spec_id/input_quantity with quantity"
-                    unitSpecId == null && inputQuantity == null && quantity == null ->
-                        "quantity (legacy) or unit_spec_id+input_quantity (new contract) required"
-                    unitSpecId != null && hasLegacyCost ->
-                        "unit_cost is not supported with the new contract"
-                    unitSpecId == null && item.containsKey("input_unit_cost") ->
-                        "input_unit_cost requires unit_spec_id"
-                    else -> null
+                val legacyField = item.fieldNames().firstOrNull {
+                    it in setOf(
+                        "unit_spec_id", "input_quantity", "input_unit_cost", "input_unit",
+                        "conversion_ratio", "split_quantity", "unit", "base_quantity", "base_unit",
+                    )
                 }
-                if (contractError != null) {
-                    respond(ctx, 400, "invalid item at index $i: $contractError")
+                if (legacyField != null) {
+                    respond(ctx, 400, "invalid item at index $i: unsupported field $legacyField")
                     return@handler
                 }
-                if (quantity != null && quantity <= BigDecimal.ZERO) {
+                val quantity = jsonDecimal(item.getValue("quantity"))
+                val unitCost = jsonDecimal(item.getValue("unit_cost"))
+                if (quantity == null) {
+                    respond(ctx, 400, "invalid item at index $i: quantity is required")
+                    return@handler
+                }
+                if (quantity <= BigDecimal.ZERO) {
                     respond(ctx, 400, "invalid item at index $i: quantity must be positive")
                     return@handler
                 }
-                if (inputQuantity != null && inputQuantity <= BigDecimal.ZERO) {
-                    respond(ctx, 400, "invalid item at index $i: input_quantity must be positive")
-                    return@handler
-                }
                 if (unitCost == null || unitCost < BigDecimal.ZERO) {
-                    respond(ctx, 400, "invalid item at index $i: input_unit_cost (>=0) required")
+                    respond(ctx, 400, "invalid item at index $i: unit_cost (>=0) required")
                     return@handler
                 }
 
                 items.add(StockService.InboundItem(
                     materialId = materialId,
                     lotId = item.getString("lot_id"),
-                    unitSpecId = unitSpecId,
-                    inputQuantity = inputQuantity,
                     quantity = quantity,
-                    unitCost = unitCost
+                    unitCost = unitCost,
                 ))
             }
 

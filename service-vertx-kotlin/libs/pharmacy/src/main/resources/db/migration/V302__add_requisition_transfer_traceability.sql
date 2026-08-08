@@ -29,7 +29,6 @@ CREATE INDEX idx_requisition_destination_warehouse
     ON pharmacy.pharmacy_requisitions(destination_warehouse);
 
 ALTER TABLE pharmacy.pharmacy_requisition_items
-    ADD COLUMN unit                               VARCHAR,   -- 013 新记录固定 PACKAGE；历史 NULL，不猜测拆零语义
     ADD COLUMN lot_id                             VARCHAR,   -- 已审批并实际调拨的单一批次；批次物资必填、非批次物资为空
     ADD COLUMN outbound_stock_operation_detail_id VARCHAR,   -- 药房源仓库 OUTBOUND 操作明细 ID
     ADD COLUMN inbound_stock_operation_detail_id  VARCHAR;   -- 护理站目标仓库 INBOUND 操作明细 ID

@@ -23,7 +23,9 @@ import {
   listNursingTasks,
   listNursingTimeline,
   listNursingTodayExecutions,
+  listMedicalOrders,
   listPatients,
+  nurseCheckMedicalOrder,
   updateNursingPlanStatus,
   updateNursingTaskExecutionStatus,
   updateNursingTaskStatus,
@@ -45,12 +47,13 @@ import {
   type NursingTimelineEvent,
   type Patient,
   type InventoryStockAvailability,
+  type MedicalOrder,
   type NursingConsumptionInput,
   type NursingExecutionConsumption,
 } from "@pitchfork/shared/aceso";
 import NursingExecutionStatisticsPanel from "./NursingExecutionStatisticsPanel";
 
-type Tab = "overview" | "assessments" | "plans" | "tasks" | "timeline";
+type Tab = "overview" | "assessments" | "plans" | "tasks" | "orders" | "timeline";
 type MainView = "today" | "resident";
 
 interface ActiveAdmission extends Encounter {
@@ -96,14 +99,10 @@ interface TaskForm {
 
 interface ConsumptionDraft {
   stock_id: string;
-  unit: "PACKAGE" | "SPLIT";
   quantity: number;
-  split_quantity: number;
   material_name: string;
   material_id: string;
-  package_unit: string;
-  split_unit: string | null;
-  split_ratio: number | null;
+  unit: string;
   available_quantity: number;
 }
 
@@ -273,6 +272,9 @@ export default function NursingPage() {
   const [assessments, setAssessments] = useState<NursingAssessment[]>([]);
   const [plans, setPlans] = useState<NursingPlan[]>([]);
   const [tasks, setTasks] = useState<NursingTask[]>([]);
+  const [medicationOrders, setMedicationOrders] = useState<MedicalOrder[]>([]);
+  const [ordersError, setOrdersError] = useState("");
+  const [checkingOrderId, setCheckingOrderId] = useState<string | null>(null);
   const [executionsByTaskId, setExecutionsByTaskId] = useState<Record<string, NursingTaskExecution[]>>({});
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -383,6 +385,7 @@ export default function NursingPage() {
     setDetailLoading(true);
     setPageError("");
     setActionError("");
+    setOrdersError("");
     try {
       // 精确加载与所选入住记录绑定的周期，绝不按同一患者的第一条活动周期猜测
       const periodResponse = await listNursingServicePeriods({ encounter_id: admission.id, limit: 10 });
@@ -392,16 +395,18 @@ export default function NursingPage() {
         setAssessments([]);
         setPlans([]);
         setTasks([]);
+        setMedicationOrders([]);
         setExecutionsByTaskId({});
         setRevisions([]);
         return;
       }
 
-      const [assessmentResponse, planResponse, taskResponse, revisionResponse] = await Promise.all([
+      const [assessmentResponse, planResponse, taskResponse, revisionResponse, ordersResponse] = await Promise.all([
         listNursingAssessments({ period_id: currentPeriod.id, limit: 100 }),
         listNursingPlans({ period_id: currentPeriod.id, limit: 100 }),
         listNursingTasks({ period_id: currentPeriod.id, limit: 100 }),
         listCarePlanRevisions(admission.id).catch(() => ({ records: [], meta: { total: 0 } })),
+        listMedicalOrders(admission.id, { order_type: "MEDICATION", status: "ACTIVE", limit: 100 }).catch(() => ({ records: [], meta: { total: 0 } })),
       ]);
       const plansWithItems = await Promise.all(planResponse.records.map(async (plan) => {
         try {
@@ -417,6 +422,7 @@ export default function NursingPage() {
       setAssessments(assessmentResponse.records);
       setPlans(plansWithItems);
       setTasks(taskResponse.records);
+      setMedicationOrders(ordersResponse.records);
       setExecutionsByTaskId(Object.fromEntries(executionEntries));
       setRevisions(revisionResponse.records);
 
@@ -428,6 +434,22 @@ export default function NursingPage() {
       setDetailLoading(false);
     }
   }, []);
+
+  // ——— 医嘱核对：护士确认用药医嘱后，药房才可见并可发药 ———
+  const handleNurseCheck = useCallback(async (order: MedicalOrder) => {
+    if (!selectedAdmission || checkingOrderId !== null) return;
+    setCheckingOrderId(order.id);
+    setOrdersError("");
+    try {
+      await nurseCheckMedicalOrder(order.id);
+      // 核对成功后刷新该入住医嘱与任务/执行数据，保留当前页签与上下文
+      await loadResidentData(selectedAdmission);
+    } catch (error) {
+      setOrdersError(errorMessage(error, "核对失败，请稍后重试"));
+    } finally {
+      setCheckingOrderId(null);
+    }
+  }, [selectedAdmission, checkingOrderId, loadResidentData]);
 
   useEffect(() => {
     void loadAdmissions();
@@ -664,19 +686,16 @@ export default function NursingPage() {
 
       if (actionModal === "complete" && consumeEnabled && consumeItems.length > 0) {
         const invalidItem = consumeItems.find((item) => {
-          if (item.unit === "PACKAGE") return item.quantity <= 0 || item.quantity > item.available_quantity;
-          if (!item.split_unit || !item.split_ratio || item.split_ratio <= 0 || item.split_quantity <= 0) return true;
-          return item.split_quantity / item.split_ratio > item.available_quantity;
+          return item.quantity <= 0 || item.quantity > item.available_quantity;
         });
         if (invalidItem) {
-          setActionError("耗材数量必须大于零且不能超过当前可用库存；拆零物资还必须支持有效换算率");
+          setActionError("耗材数量必须大于零且不能超过当前可用库存");
           return;
         }
         // 带耗材完成
         const consumptions: NursingConsumptionInput[] = consumeItems.map((item) => ({
           stock_id: item.stock_id,
-          unit: item.unit,
-          ...(item.unit === "PACKAGE" ? { quantity: item.quantity } : { split_quantity: item.split_quantity }),
+          quantity: item.quantity,
         }));
         await updateNursingTaskExecutionStatusWithConsumptions(
           actionTarget.id,
@@ -727,24 +746,13 @@ export default function NursingPage() {
       ...current,
       {
         stock_id: stock.id,
-        unit: "PACKAGE" as const,
         quantity: 1,
-        split_quantity: 1,
         material_name: stock.material_name,
         material_id: stock.material_id,
-        package_unit: stock.package_unit,
-        split_unit: stock.split_unit,
-        split_ratio: stock.split_ratio,
+        unit: stock.unit,
         available_quantity: stock.available_quantity,
       },
     ]);
-  }
-
-  function packageQuantityPreview(item: ConsumptionDraft): number {
-    if (item.unit === "PACKAGE") return item.quantity;
-    if (!item.split_ratio || item.split_ratio <= 0) return 0;
-    const rawQuantity = item.split_quantity / item.split_ratio;
-    return Math.ceil((rawQuantity - Number.EPSILON) * 10000) / 10000;
   }
 
   function removeConsumeItem(stockId: string) {
@@ -1311,7 +1319,7 @@ export default function NursingPage() {
                 </div>
 
                 <div className="flex flex-wrap gap-1 border-b border-border">
-                  {([ ["overview", "概览"], ["assessments", "护理评估"], ["plans", "照护计划"], ["tasks", "任务执行"], ["timeline", "照护时间线"] ] as [Tab, string][]).map(([tab, label]) => (
+                  {([ ["overview", "概览"], ["assessments", "护理评估"], ["plans", "照护计划"], ["tasks", "任务执行"], ["orders", "医嘱核对"], ["timeline", "照护时间线"] ] as [Tab, string][]).map(([tab, label]) => (
                     <button key={tab} type="button" onClick={() => setActiveTab(tab)} className={`border-b-2 px-4 py-3 text-sm font-medium transition-colors ${activeTab === tab ? "border-accent text-accent" : "border-transparent text-fg-muted hover:text-fg"}`}>{label}</button>
                   ))}
                 </div>
@@ -1450,6 +1458,49 @@ export default function NursingPage() {
                     </Card>
                   </div>
                 )}
+
+                {activeTab === "orders" && (
+                  <Card className="min-w-0" title="医嘱核对" actions={detailLoading ? undefined : <Button variant="link" onClick={() => { if (selectedAdmission) void loadResidentData(selectedAdmission); }}>刷新</Button>}>
+                    {ordersError && <div className="mb-3 rounded border border-danger/30 bg-danger-bg px-3 py-2 text-sm text-danger">{ordersError}</div>}
+                    {detailLoading ? (
+                      <div className="py-16 text-center text-sm text-fg-dimmed">正在加载医嘱…</div>
+                    ) : medicationOrders.length === 0 ? (
+                      <div className="py-16 text-center text-sm text-fg-dimmed">暂无执行中的用药医嘱。医生下达用药医嘱后在此核对，核对确认后药房才可见并可发药。</div>
+                    ) : (
+                      <div className="space-y-4">
+                        {medicationOrders.map((order) => {
+                          const details = order.order_details ?? {};
+                          const checked = order.nurse_checked_by != null && order.nurse_checked_at != null;
+                          return (
+                            <div key={order.id} className="rounded-lg border border-border p-4">
+                              <div className="flex flex-wrap items-start justify-between gap-3">
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <h4 className="font-semibold text-fg-emphasis">{order.order_content}</h4>
+                                    <Badge variant={checked ? "success" as const : "warning" as const}>{checked ? "已核对" : "待核对"}</Badge>
+                                    <Badge variant={order.order_class === "TEMPORARY" ? "warning" as const : "info" as const}>{order.order_class === "LONG_TERM" ? "长期医嘱" : order.order_class === "TEMPORARY" ? "临时医嘱" : "-"}</Badge>
+                                  </div>
+                                  <div className="mt-2 grid gap-x-6 gap-y-1 text-sm sm:grid-cols-2">
+                                    {details.dosage != null && details.dosage !== "" && <p><span className="text-fg-dimmed">剂量：</span>{String(details.dosage)}{details.unit != null && details.unit !== "" ? ` ${String(details.unit)}` : ""}</p>}
+                                    {details.route != null && details.route !== "" && <p><span className="text-fg-dimmed">给药途径：</span>{String(details.route)}</p>}
+                                    <p><span className="text-fg-dimmed">频次：</span>{details.frequency_name != null && details.frequency_name !== "" ? String(details.frequency_name) : details.frequency_code != null && details.frequency_code !== "" ? String(details.frequency_code) : "按需"}</p>
+                                    <p><span className="text-fg-dimmed">医生：</span>{order.doctor || "-"}</p>
+                                    <p><span className="text-fg-dimmed">开始时间：</span>{formatDateTime(order.start_time)}</p>
+                                    <p><span className="text-fg-dimmed">结束时间：</span>{formatDateTime(order.end_time)}</p>
+                                    <p className="sm:col-span-2"><span className="text-fg-dimmed">核对：</span>{checked ? `${subjectMap.get(order.nurse_checked_by ?? "") ?? order.nurse_checked_by ?? "-"} · ${formatDateTime(order.nurse_checked_at)}` : "尚未核对，核对确认后药房才可发药"}</p>
+                                  </div>
+                                </div>
+                                {!checked && (
+                                  <Button size="sm" loading={checkingOrderId === order.id} disabled={checkingOrderId !== null} onClick={() => void handleNurseCheck(order)}>确认核对</Button>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </Card>
+                )}
               </>
             )}
           </div>
@@ -1513,7 +1564,7 @@ export default function NursingPage() {
                             {consumeStocks.map((stock) => (
                               <div key={stock.id} className="flex items-center justify-between rounded bg-surface-alt px-2 py-1 text-xs">
                                 <span className="min-w-0 truncate">{stock.material_name}{stock.batch_no ? ` (${stock.batch_no})` : ""}</span>
-                                <span className="shrink-0 text-fg-dimmed">可用 {stock.available_quantity} {stock.package_unit}{stock.expiry_date ? ` · ${stock.expiry_date} 到期` : ""}</span>
+                                <span className="shrink-0 text-fg-dimmed">可用 {stock.available_quantity} {stock.unit}{stock.expiry_date ? ` · ${stock.expiry_date} 到期` : ""}</span>
                                 <button type="button" className="ml-2 text-accent hover:underline" onClick={() => addConsumeItem(stock)}>添加</button>
                               </div>
                             ))}
@@ -1527,26 +1578,18 @@ export default function NursingPage() {
                         {consumeItems.map((item) => (
                           <div key={item.stock_id} className="flex flex-wrap items-center gap-2 rounded bg-surface-alt px-2 py-1.5 text-xs">
                             <span className="min-w-[80px] truncate">{item.material_name}</span>
-                            <select className="rounded border border-border px-1 py-0.5 text-xs" value={item.unit} onChange={(event) => updateConsumeItem(item.stock_id, "unit", event.target.value)}>
-                              <option value="PACKAGE">包装</option>
-                              <option value="SPLIT" disabled={!item.split_unit || !item.split_ratio || item.split_ratio <= 0}>拆零</option>
-                            </select>
                             <input
-                              type="number" min={0.0001} step={item.unit === "PACKAGE" ? 0.0001 : 0.01}
+                              type="number" min={0.000001} step={0.000001}
                               className="w-20 rounded border border-border px-1 py-0.5 text-xs"
-                              value={item.unit === "PACKAGE" ? item.quantity : item.split_quantity}
+                              value={item.quantity}
                               onChange={(event) => {
                                 const val = Number(event.target.value);
-                                if (item.unit === "PACKAGE") updateConsumeItem(item.stock_id, "quantity", val > 0 ? val : 1);
-                                else updateConsumeItem(item.stock_id, "split_quantity", val > 0 ? val : 1);
+                                updateConsumeItem(item.stock_id, "quantity", val > 0 ? val : 1);
                               }}
                             />
-                            <span className="text-fg-dimmed">{item.unit === "PACKAGE" ? item.package_unit : item.split_unit ?? "拆零数量"}</span>
-                            <span className="w-full text-fg-dimmed sm:w-auto">
-                              扣减 {packageQuantityPreview(item).toFixed(4)} {item.package_unit}
-                            </span>
-                            {packageQuantityPreview(item) > item.available_quantity && (
-                              <span className="w-full text-danger sm:w-auto">超过可用库存 {item.available_quantity} {item.package_unit}</span>
+                            <span className="text-fg-dimmed">{item.unit}</span>
+                            {item.quantity > item.available_quantity && (
+                              <span className="w-full text-danger sm:w-auto">超过可用库存 {item.available_quantity} {item.unit}</span>
                             )}
                             <button type="button" className="text-danger hover:underline" onClick={() => removeConsumeItem(item.stock_id)}>移除</button>
                           </div>
@@ -1589,7 +1632,7 @@ export default function NursingPage() {
                   </div>
                   <div className="text-right text-xs text-fg-muted">
                     <div>
-                      {item.unit === "SPLIT" ? `${item.split_quantity ?? item.quantity} 拆零单位` : `${item.quantity} 包装单位`}
+                      {item.quantity} {item.unit}
                     </div>
                     {item.batch_no && <div className="mt-0.5">批次：{item.batch_no}</div>}
                     {item.total_cost != null && <div className="mt-0.5">￥{item.total_cost.toFixed(2)}</div>}

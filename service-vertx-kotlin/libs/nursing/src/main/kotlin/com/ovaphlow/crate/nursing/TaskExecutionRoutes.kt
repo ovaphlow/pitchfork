@@ -277,51 +277,26 @@ object TaskExecutionRoutes {
                         return@handler
                     }
 
-                    // 计划 015 新契约：unit_spec_id + input_quantity（按规格精确换算）；
-                    // 旧契约 unit=PACKAGE/SPLIT 仅过渡兼容，两种形式互斥。
-                    val unitSpecId = item.getString("unit_spec_id")
-                    val inputQuantity = item.getValue("input_quantity")?.toString()?.toBigDecimalOrNull()
-                    val unit = item.getString("unit")
-                    val qty = item.getValue("quantity")?.toString()?.toBigDecimalOrNull()
-                    val splitQty = item.getValue("split_quantity")?.toString()?.toBigDecimalOrNull()
-
-                    val hasNew = unitSpecId != null || inputQuantity != null
-                    val hasOld = unit != null || item.containsKey("quantity") || item.containsKey("split_quantity")
-                    val invalid = when {
-                        hasNew && hasOld ->
-                            "must not mix unit_spec_id/input_quantity with legacy unit/quantity"
-                        hasNew && unitSpecId == null ->
-                            "unit_spec_id required when input_quantity is provided"
-                        hasNew && inputQuantity == null ->
-                            "input_quantity required when unit_spec_id is provided"
-                        hasNew && inputQuantity!! <= BigDecimal.ZERO ->
-                            "input_quantity must be > 0"
-                        !hasNew && unit.isNullOrBlank() ->
-                            "unit required (PACKAGE/SPLIT legacy) or unit_spec_id+input_quantity"
-                        unit !in setOf("PACKAGE", "SPLIT") ->
-                            "unit must be PACKAGE or SPLIT"
-                        unit == "PACKAGE" && (qty == null || qty <= BigDecimal.ZERO) ->
-                            "quantity must be > 0 for PACKAGE unit"
-                        unit == "PACKAGE" && item.containsKey("split_quantity") ->
-                            "split_quantity not allowed for PACKAGE unit"
-                        unit == "SPLIT" && (splitQty == null || splitQty <= BigDecimal.ZERO) ->
-                            "split_quantity must be > 0 for SPLIT unit"
-                        unit == "SPLIT" && item.containsKey("quantity") ->
-                            "quantity not allowed for SPLIT unit"
-                        else -> null
+                    // 016 单一基础单位：只接受 stock_id + quantity（基础数量）。
+                    val legacyField = item.fieldNames().firstOrNull {
+                        it in setOf(
+                            "unit_spec_id", "input_quantity", "input_unit", "conversion_ratio",
+                            "split_quantity", "unit", "base_quantity", "base_unit",
+                        )
                     }
-                    if (invalid != null) {
-                        NursingRoutes.respond(ctx, 400, "invalid consumption at index $i: $invalid")
+                    if (legacyField != null) {
+                        NursingRoutes.respond(ctx, 400, "invalid consumption at index $i: unsupported field $legacyField")
+                        return@handler
+                    }
+                    val qty = item.getValue("quantity")?.toString()?.toBigDecimalOrNull()
+                    if (qty == null || qty <= BigDecimal.ZERO) {
+                        NursingRoutes.respond(ctx, 400, "invalid consumption at index $i: quantity must be > 0")
                         return@handler
                     }
 
                     consumptions.add(TaskExecutionService.ConsumptionInput(
                         stockId = stockId,
-                        unitSpecId = unitSpecId,
-                        inputQuantity = inputQuantity,
-                        unit = unit,
                         quantity = qty,
-                        splitQuantity = splitQty
                     ))
                 }
 

@@ -17,10 +17,10 @@ import com.ovaphlow.crate.pharmacy.InventoryPurchaseReceiptPort
 import com.ovaphlow.crate.pharmacy.InventoryRequisitionTransferPort
 import com.ovaphlow.crate.pharmacy.MedicalOrderReader
 import com.ovaphlow.crate.pharmacy.MedicationOrderSnapshot
-import com.ovaphlow.crate.pharmacy.PackageOutboundCommand
-import com.ovaphlow.crate.pharmacy.PackageOutboundResult
-import com.ovaphlow.crate.pharmacy.PackageInboundCommand
-import com.ovaphlow.crate.pharmacy.PackageInboundResult
+import com.ovaphlow.crate.pharmacy.OutboundCommand
+import com.ovaphlow.crate.pharmacy.OutboundResult
+import com.ovaphlow.crate.pharmacy.InboundCommand
+import com.ovaphlow.crate.pharmacy.InboundResult
 import com.ovaphlow.crate.pharmacy.PharmacyRoutes
 import com.ovaphlow.crate.pharmacy.PurchaseReceiptCommand
 import com.ovaphlow.crate.pharmacy.PurchaseReceiptItemCommand
@@ -138,7 +138,9 @@ fun main() {
         ),
     )
     apiRouter.route("/inventories/v1/*").subRouter(InventoriesRoutes.create(vertx, pool))
-    apiRouter.route("/healthcare/v1/*").subRouter(HealthcareRoutes.create(vertx, pool))
+    apiRouter.route("/healthcare/v1/*").subRouter(
+        HealthcareRoutes.create(vertx, pool, idpSessionAuthHandler(vertx, idpBaseUrl)),
+    )
     apiRouter.route("/nursing/v1/*").subRouter(NursingRoutes.create(vertx, pool))
     apiRouter.route("/pharmacy/v1/*").subRouter(
         PharmacyRoutes.create(
@@ -231,18 +233,20 @@ private fun toMedicationOrderSnapshot(snapshot: MedicationOrderLockSnapshot): Me
         startTime = snapshot.startTime,
         endTime = snapshot.endTime,
         orderDetails = snapshot.orderDetails,
+        nurseCheckedBy = snapshot.nurseCheckedBy,
+        nurseCheckedAt = snapshot.nurseCheckedAt,
     )
 
 private fun inventoryOutboundPort(stockService: StockService): InventoryOutboundPort =
     object : InventoryOutboundPort {
-        override fun validatePackageOutbound(
+        override fun validateOutbound(
             client: SqlClient,
-            command: PackageOutboundCommand,
+            command: OutboundCommand,
         ): Future<Void?> =
             mapPharmacyPortFailure(
-                stockService.validatePackageOutbound(
+                stockService.validateOutbound(
                     client,
-                    StockService.PackageOutboundCommand(
+                    StockService.OutboundCommand(
                         warehouse = command.warehouse,
                         materialId = command.materialId,
                         lotId = command.lotId,
@@ -252,14 +256,14 @@ private fun inventoryOutboundPort(stockService: StockService): InventoryOutbound
                 ),
             )
 
-        override fun confirmPackageOutbound(
+        override fun confirmOutbound(
             client: SqlClient,
-            command: PackageOutboundCommand,
-        ): Future<PackageOutboundResult> =
+            command: OutboundCommand,
+        ): Future<OutboundResult> =
             mapPharmacyPortFailure(
-                stockService.confirmPackageOutbound(
+                stockService.confirmOutbound(
                     client,
-                    StockService.PackageOutboundCommand(
+                    StockService.OutboundCommand(
                         warehouse = command.warehouse,
                         materialId = command.materialId,
                         lotId = command.lotId,
@@ -268,7 +272,7 @@ private fun inventoryOutboundPort(stockService: StockService): InventoryOutbound
                     ),
                 ),
             ).map { result ->
-                PackageOutboundResult(
+                OutboundResult(
                     stockOperationDetailId = result.stockOperationDetailId,
                     lotId = result.lotId,
                     unitCost = result.unitCost,
@@ -278,14 +282,14 @@ private fun inventoryOutboundPort(stockService: StockService): InventoryOutbound
 
 private fun inventoryInboundPort(stockService: StockService): InventoryInboundPort =
     object : InventoryInboundPort {
-        override fun confirmPackageInbound(
+        override fun confirmInbound(
             client: SqlClient,
-            command: PackageInboundCommand,
-        ): Future<PackageInboundResult> =
+            command: InboundCommand,
+        ): Future<InboundResult> =
             mapPharmacyPortFailure(
-                stockService.confirmPackageInbound(
+                stockService.confirmReturnInbound(
                     client,
-                    StockService.PackageInboundCommand(
+                    StockService.ReturnInboundCommand(
                         warehouse = command.warehouse,
                         materialId = command.materialId,
                         lotId = command.lotId,
@@ -295,7 +299,7 @@ private fun inventoryInboundPort(stockService: StockService): InventoryInboundPo
                     ),
                 ),
             ).map { result ->
-                PackageInboundResult(
+                InboundResult(
                     stockOperationDetailId = result.stockOperationDetailId,
                     lotId = result.lotId,
                     unitCost = result.unitCost,
@@ -326,12 +330,12 @@ private fun inventoryRequisitionTransferPort(stockService: StockService): Invent
         ): Future<Void?> =
             mapPharmacyPortFailure(stockService.validateRequisitionMaterials(client, materialIds))
 
-        override fun reservePackageStock(
+        override fun reserveStock(
             client: SqlClient,
             command: RequisitionReserveCommand,
         ): Future<Void?> =
             mapPharmacyPortFailure(
-                stockService.reservePackageStock(
+                stockService.reserveStock(
                     client,
                     StockService.RequisitionReserveCommand(
                         warehouse = command.warehouse,
@@ -346,12 +350,12 @@ private fun inventoryRequisitionTransferPort(stockService: StockService): Invent
                 ),
             )
 
-        override fun releasePackageReservation(
+        override fun releaseReservation(
             client: SqlClient,
             command: RequisitionReleaseCommand,
         ): Future<Void?> =
             mapPharmacyPortFailure(
-                stockService.releasePackageReservation(
+                stockService.releaseReservation(
                     client,
                     StockService.RequisitionReleaseCommand(
                         warehouse = command.warehouse,
@@ -366,12 +370,12 @@ private fun inventoryRequisitionTransferPort(stockService: StockService): Invent
                 ),
             )
 
-        override fun confirmReservedPackageTransfer(
+        override fun confirmReservedTransfer(
             client: SqlClient,
             command: RequisitionTransferCommand,
         ): Future<RequisitionTransferResult> =
             mapPharmacyPortFailure(
-                stockService.confirmReservedPackageTransfer(
+                stockService.confirmReservedTransfer(
                     client,
                     StockService.RequisitionTransferCommand(
                         sourceWarehouse = command.sourceWarehouse,
@@ -419,12 +423,12 @@ private fun inventoryPurchaseReceiptPort(stockService: StockService): InventoryP
         ): Future<Void?> =
             mapPharmacyPortFailure(stockService.validatePurchaseMaterials(client, materialIds))
 
-        override fun confirmPackagePurchaseReceipt(
+        override fun confirmPurchaseReceipt(
             client: SqlClient,
             command: PurchaseReceiptCommand,
         ): Future<PurchaseReceiptResult> =
             mapPharmacyPortFailure(
-                stockService.confirmPackagePurchaseReceipt(
+                stockService.confirmPurchaseReceipt(
                     client,
                     StockService.PurchaseReceiptCommand(
                         warehouse = command.warehouse,

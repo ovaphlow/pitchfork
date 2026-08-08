@@ -270,6 +270,59 @@ class MedicalOrderService(
     // ========================================================================
 
     /**
+     * 护士核对用药医嘱（护士核对计划）：只更新核对审计字段与 updated_at，
+     * 不创建领药记录、护理任务、执行、发药单或库存操作，也不改写临床 status。
+     *
+     * 请求体必须为空：核对人由认证中间件提供的 userId 决定，拒绝客户端伪造。
+     * 校验顺序：请求体严格性 → 医嘱存在 → MEDICATION 类型 → ACTIVE 状态 →
+     * 未核对（幂等冲突）→ 入住 ELDERLY_CARE → 入住 ACTIVE。
+     */
+    fun nurseCheckOrder(id: String, userId: String, body: JsonObject): Future<JsonObject> {
+        if (body.fieldNames().any { it.isNotBlank() }) {
+            return Future.failedFuture(
+                IllegalArgumentException("nurse-check request must not contain any fields")
+            )
+        }
+        return pool.withTransaction<JsonObject> { connection ->
+            lockOrder(connection, id).compose { order ->
+                val encounterId = requireNotNull(order.getString("encounter_id"))
+                if (order.getString("order_type") != "MEDICATION") {
+                    return@compose Future.failedFuture(
+                        IllegalArgumentException("only MEDICATION orders can be nurse-checked")
+                    )
+                }
+                if (order.getString("status") != "ACTIVE") {
+                    return@compose Future.failedFuture(ConflictException("order is not active"))
+                }
+                if (order.getString("nurse_checked_by") != null || order.getOffsetDateTime("nurse_checked_at") != null) {
+                    return@compose Future.failedFuture(ConflictException("order is already nurse-checked"))
+                }
+                lockEncounter(connection, encounterId).compose { encounter ->
+                    if (encounter.getString("encounter_type") != "ELDERLY_CARE") {
+                        return@compose Future.failedFuture(
+                            IllegalArgumentException("encounter is not an elderly admission")
+                        )
+                    }
+                    if (encounter.getString("status") != "ACTIVE") {
+                        return@compose Future.failedFuture(ConflictException("encounter is not active"))
+                    }
+                    val now = OffsetDateTime.now()
+                    val updateQuery = ctx.update(MEDICAL_ORDERS)
+                        .set(MEDICAL_ORDERS.NURSE_CHECKED_BY, userId)
+                        .set(MEDICAL_ORDERS.NURSE_CHECKED_AT, now)
+                        .set(MEDICAL_ORDERS.UPDATED_AT, now)
+                        .where(MEDICAL_ORDERS.ID.eq(id))
+                    execute(connection, updateQuery).compose {
+                        readOrderWithTask(connection, id).map { row ->
+                            orderJson(row, row.getString("task_id"))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
      * 药房待接方只读列表（011）：只返回活动养老入住（ELDERLY_CARE + ACTIVE）
      * 下的 `MEDICATION` + `ACTIVE` 医嘱。读取不写医嘱、不创建任务、不锁库存。
      * 只读场景调用方传 Pool 即可，不开启事务。
@@ -284,6 +337,8 @@ class MedicalOrderService(
         val conditions = mutableListOf<Condition>()
         conditions.add(MEDICAL_ORDERS.ORDER_TYPE.eq("MEDICATION"))
         conditions.add(MEDICAL_ORDERS.STATUS.eq("ACTIVE"))
+        // 药房门禁：只返回已核对的活动用药医嘱，未核对医嘱药房不可见
+        conditions.add(MEDICAL_ORDERS.NURSE_CHECKED_AT.isNotNull())
         conditions.add(ENCOUNTERS.ENCOUNTER_TYPE.eq("ELDERLY_CARE"))
         conditions.add(ENCOUNTERS.STATUS.eq("ACTIVE"))
         encounterId?.let { conditions.add(MEDICAL_ORDERS.ENCOUNTER_ID.eq(it)) }
@@ -311,6 +366,8 @@ class MedicalOrderService(
             MEDICAL_ORDERS.DOCTOR,
             MEDICAL_ORDERS.START_TIME,
             MEDICAL_ORDERS.END_TIME,
+            MEDICAL_ORDERS.NURSE_CHECKED_BY,
+            MEDICAL_ORDERS.NURSE_CHECKED_AT,
         )
         val from = ctx.select(fields)
             .from(MEDICAL_ORDERS)
@@ -338,6 +395,83 @@ class MedicalOrderService(
     }
 
     /**
+     * 护士核对汇总列表：跨入住展示所有待核对的用药医嘱（010 计划）。
+     * 只返回活动养老入住（ELDERLY_CARE + ACTIVE）下的 `MEDICATION` + `ACTIVE`
+     * 且尚未护士核对（nurse_checked_at IS NULL）的医嘱，供护理汇总页核对；
+     * 已核对医嘱由药房待接方列表呈现。读取不写医嘱、不创建任务、不锁库存，
+     * 只读场景调用方传 Pool 即可，不开启事务。
+     */
+    fun listPendingNurseCheckOrders(
+        client: SqlClient,
+        encounterId: String?,
+        search: String?,
+        limit: Int,
+        offset: Int,
+    ): Future<JsonObject> {
+        val conditions = mutableListOf<Condition>()
+        conditions.add(MEDICAL_ORDERS.ORDER_TYPE.eq("MEDICATION"))
+        conditions.add(MEDICAL_ORDERS.STATUS.eq("ACTIVE"))
+        // 汇总页只列尚未核对的用药医嘱；已核对医嘱在药房待接方列表可见
+        conditions.add(MEDICAL_ORDERS.NURSE_CHECKED_AT.isNull())
+        conditions.add(ENCOUNTERS.ENCOUNTER_TYPE.eq("ELDERLY_CARE"))
+        conditions.add(ENCOUNTERS.STATUS.eq("ACTIVE"))
+        encounterId?.let { conditions.add(MEDICAL_ORDERS.ENCOUNTER_ID.eq(it)) }
+        if (!search.isNullOrBlank()) {
+            conditions.add(
+                DSL.or(
+                    MEDICAL_ORDERS.ORDER_CONTENT.like("%$search%"),
+                    DSL.field("order_details->>'drug_name'").like("%$search%"),
+                    PATIENTS.NAME.like("%$search%"),
+                    ENCOUNTERS.ENCOUNTER_NO.like("%$search%"),
+                ),
+            )
+        }
+
+        val fields = listOf(
+            MEDICAL_ORDERS.ID,
+            MEDICAL_ORDERS.ENCOUNTER_ID,
+            ENCOUNTERS.PATIENT_ID,
+            PATIENTS.NAME.`as`("patient_name"),
+            ENCOUNTERS.ENCOUNTER_NO,
+            MEDICAL_ORDERS.ORDER_TYPE,
+            MEDICAL_ORDERS.ORDER_CLASS,
+            MEDICAL_ORDERS.ORDER_CONTENT,
+            MEDICAL_ORDERS.ORDER_DETAILS,
+            MEDICAL_ORDERS.DOCTOR,
+            MEDICAL_ORDERS.START_TIME,
+            MEDICAL_ORDERS.END_TIME,
+            MEDICAL_ORDERS.STATUS,
+            MEDICAL_ORDERS.NURSE_CHECKED_BY,
+            MEDICAL_ORDERS.NURSE_CHECKED_AT,
+            MEDICAL_ORDERS.CREATED_AT,
+            MEDICAL_ORDERS.UPDATED_AT,
+        )
+        val from = ctx.select(fields)
+            .from(MEDICAL_ORDERS)
+            .join(ENCOUNTERS).on(MEDICAL_ORDERS.ENCOUNTER_ID.eq(ENCOUNTERS.ID))
+            .join(PATIENTS).on(ENCOUNTERS.PATIENT_ID.eq(PATIENTS.ID))
+            .where(conditions)
+        val countQuery = ctx.select(DSL.count().`as`("total"))
+            .from(MEDICAL_ORDERS)
+            .join(ENCOUNTERS).on(MEDICAL_ORDERS.ENCOUNTER_ID.eq(ENCOUNTERS.ID))
+            .join(PATIENTS).on(ENCOUNTERS.PATIENT_ID.eq(PATIENTS.ID))
+            .where(conditions)
+        val dataQuery = from
+            .orderBy(MEDICAL_ORDERS.CREATED_AT.desc())
+            .limit(limit)
+            .offset(offset)
+
+        return execute(client, countQuery).compose { countRows ->
+            val total = countRows.iterator().next().getLong("total") ?: 0L
+            execute(client, dataQuery).map { dataRows ->
+                JsonObject()
+                    .put("records", JsonArray(dataRows.map(::nurseCheckPendingRowJson)))
+                    .put("meta", JsonObject().put("total", total))
+            }
+        }
+    }
+
+    /**
      * 药房发药事务内精确锁读一条医嘱（011）：FOR UPDATE OF medical_orders，
      * 返回受控快照。必须在调用方外层事务连接内执行，禁止重新取 Pool。
      */
@@ -356,6 +490,8 @@ class MedicalOrderService(
             MEDICAL_ORDERS.START_TIME,
             MEDICAL_ORDERS.END_TIME,
             MEDICAL_ORDERS.STATUS.`as`("order_status"),
+            MEDICAL_ORDERS.NURSE_CHECKED_BY,
+            MEDICAL_ORDERS.NURSE_CHECKED_AT,
             ENCOUNTERS.PATIENT_ID,
             ENCOUNTERS.ENCOUNTER_NO,
             ENCOUNTERS.ENCOUNTER_TYPE,
@@ -391,6 +527,8 @@ class MedicalOrderService(
                         startTime = row.getOffsetDateTime("start_time"),
                         endTime = row.getOffsetDateTime("end_time"),
                         orderDetails = (row.getValue("order_details") as? JsonObject) ?: JsonObject(),
+                        nurseCheckedBy = row.getString("nurse_checked_by"),
+                        nurseCheckedAt = row.getOffsetDateTime("nurse_checked_at"),
                     ),
                 )
             }
@@ -420,6 +558,37 @@ class MedicalOrderService(
             .put("start_time", row.getOffsetDateTime("start_time")?.toString())
             .put("end_time", row.getOffsetDateTime("end_time")?.toString())
             .put("doctor", row.getString("doctor"))
+            .put("nurse_checked_by", row.getString("nurse_checked_by"))
+            .put("nurse_checked_at", row.getOffsetDateTime("nurse_checked_at")?.toString())
+    }
+
+    /**
+     * 护士核对汇总行：字段与 orderJson 一致并补患者/入住信息，但不读 task_id
+     * （汇总查询未 join 护理任务，jOOQ Row 对未选列取值会抛异常）。
+     */
+    private fun nurseCheckPendingRowJson(row: Row): JsonObject {
+        val orderType = row.getString("order_type")
+        val orderClass = row.getString("order_class")
+        return JsonObject()
+            .put("id", row.getString("id"))
+            .put("encounter_id", row.getString("encounter_id"))
+            .put("patient_id", row.getString("patient_id"))
+            .put("patient_name", row.getString("patient_name"))
+            .put("encounter_no", row.getString("encounter_no"))
+            .put("order_type", orderType)
+            .put("order_type_label", ORDER_TYPE_LABELS[orderType])
+            .put("order_class", orderClass)
+            .put("order_class_label", orderClass?.let { ORDER_CLASS_LABELS[it] })
+            .put("order_content", row.getString("order_content"))
+            .put("order_details", row.getValue("order_details") as? JsonObject)
+            .put("start_time", row.getOffsetDateTime("start_time")?.toString())
+            .put("end_time", row.getOffsetDateTime("end_time")?.toString())
+            .put("doctor", row.getString("doctor"))
+            .put("status", row.getString("status"))
+            .put("nurse_checked_by", row.getString("nurse_checked_by"))
+            .put("nurse_checked_at", row.getOffsetDateTime("nurse_checked_at")?.toString())
+            .put("created_at", row.getOffsetDateTime("created_at")?.toString())
+            .put("updated_at", row.getOffsetDateTime("updated_at")?.toString())
     }
 
     /**
@@ -634,6 +803,8 @@ class MedicalOrderService(
             .put("end_time", row.getOffsetDateTime("end_time")?.toString())
             .put("doctor", row.getString("doctor"))
             .put("status", row.getString("status"))
+            .put("nurse_checked_by", row.getString("nurse_checked_by"))
+            .put("nurse_checked_at", row.getOffsetDateTime("nurse_checked_at")?.toString())
             .put("task_id", taskId ?: row.getString("task_id"))
             .put("created_at", row.getOffsetDateTime("created_at")?.toString())
             .put("updated_at", row.getOffsetDateTime("updated_at")?.toString())

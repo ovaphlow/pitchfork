@@ -11,7 +11,6 @@ import com.ovaphlow.crate.database.gen.inventories.public_.tables.StockOperation
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.Stocks.StocksPath;
 import com.ovaphlow.crate.database.gen.inventories.public_.tables.records.MaterialsRecord;
 
-import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.util.Arrays;
 import java.util.Collection;
@@ -89,19 +88,14 @@ public class Materials extends TableImpl<MaterialsRecord> {
     public final TableField<MaterialsRecord, String> SPEC = createField(DSL.name("spec"), SQLDataType.VARCHAR, this, "");
 
     /**
-     * The column <code>public.materials.package_unit</code>.
+     * The column <code>public.materials.base_unit</code>.
      */
-    public final TableField<MaterialsRecord, String> PACKAGE_UNIT = createField(DSL.name("package_unit"), SQLDataType.VARCHAR.nullable(false), this, "");
+    public final TableField<MaterialsRecord, String> BASE_UNIT = createField(DSL.name("base_unit"), SQLDataType.VARCHAR.nullable(false), this, "");
 
     /**
-     * The column <code>public.materials.split_unit</code>.
+     * The column <code>public.materials.quantity_scale</code>.
      */
-    public final TableField<MaterialsRecord, String> SPLIT_UNIT = createField(DSL.name("split_unit"), SQLDataType.VARCHAR, this, "");
-
-    /**
-     * The column <code>public.materials.split_ratio</code>.
-     */
-    public final TableField<MaterialsRecord, BigDecimal> SPLIT_RATIO = createField(DSL.name("split_ratio"), SQLDataType.NUMERIC(10, 4), this, "");
+    public final TableField<MaterialsRecord, Short> QUANTITY_SCALE = createField(DSL.name("quantity_scale"), SQLDataType.SMALLINT.nullable(false).defaultValue(DSL.field(DSL.raw("0"), SQLDataType.SMALLINT)), this, "");
 
     /**
      * The column <code>public.materials.enable_batch_control</code>.
@@ -124,29 +118,14 @@ public class Materials extends TableImpl<MaterialsRecord> {
     public final TableField<MaterialsRecord, String> STATUS = createField(DSL.name("status"), SQLDataType.VARCHAR.defaultValue(DSL.field(DSL.raw("'ACTIVE'::character varying"), SQLDataType.VARCHAR)), this, "");
 
     /**
-     * The column <code>public.materials.base_unit</code>.
+     * The column <code>public.materials.created_at</code>.
      */
-    public final TableField<MaterialsRecord, String> BASE_UNIT = createField(DSL.name("base_unit"), SQLDataType.VARCHAR, this, "");
-
-    /**
-     * The column <code>public.materials.base_quantity_scale</code>.
-     */
-    public final TableField<MaterialsRecord, Short> BASE_QUANTITY_SCALE = createField(DSL.name("base_quantity_scale"), SQLDataType.SMALLINT.nullable(false).defaultValue(DSL.field(DSL.raw("0"), SQLDataType.SMALLINT)), this, "");
-
-    /**
-     * The column <code>public.materials.unit_model_status</code>.
-     */
-    public final TableField<MaterialsRecord, String> UNIT_MODEL_STATUS = createField(DSL.name("unit_model_status"), SQLDataType.VARCHAR.nullable(false).defaultValue(DSL.field(DSL.raw("'LEGACY'::character varying"), SQLDataType.VARCHAR)), this, "");
+    public final TableField<MaterialsRecord, OffsetDateTime> CREATED_AT = createField(DSL.name("created_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6).defaultValue(DSL.field(DSL.raw("now()"), SQLDataType.TIMESTAMPWITHTIMEZONE)), this, "");
 
     /**
      * The column <code>public.materials.updated_at</code>.
      */
     public final TableField<MaterialsRecord, OffsetDateTime> UPDATED_AT = createField(DSL.name("updated_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6), this, "");
-
-    /**
-     * The column <code>public.materials.created_at</code>.
-     */
-    public final TableField<MaterialsRecord, OffsetDateTime> CREATED_AT = createField(DSL.name("created_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6).defaultValue(DSL.field(DSL.raw("now()"), SQLDataType.TIMESTAMPWITHTIMEZONE)), this, "");
 
     private Materials(Name alias, Table<MaterialsRecord> aliased) {
         this(alias, aliased, (Field<?>[]) null, null);
@@ -266,10 +245,9 @@ public class Materials extends TableImpl<MaterialsRecord> {
     @Override
     public List<Check<MaterialsRecord>> getChecks() {
         return Arrays.asList(
-            Internal.createCheck(this, DSL.name("materials_base_quantity_scale_check"), "(((base_quantity_scale >= (0)::smallint) AND (base_quantity_scale <= (6)::smallint)))", true),
+            Internal.createCheck(this, DSL.name("materials_quantity_scale_check"), "(((quantity_scale >= (0)::smallint) AND (quantity_scale <= (6)::smallint)))", true),
             Internal.createCheck(this, DSL.name("materials_cost_method_check"), "(((cost_method)::text = ANY ((ARRAY['MOVING_AVG'::character varying, 'FIFO'::character varying])::text[])))", true),
-            Internal.createCheck(this, DSL.name("materials_status_check"), "(((status)::text = ANY ((ARRAY['ACTIVE'::character varying, 'INACTIVE'::character varying, 'DISCONTINUED'::character varying])::text[])))", true),
-            Internal.createCheck(this, DSL.name("materials_unit_model_status_check"), "(((unit_model_status)::text = ANY ((ARRAY['LEGACY'::character varying, 'ACTIVE'::character varying, 'MIGRATION_BLOCKED'::character varying])::text[])))", true)
+            Internal.createCheck(this, DSL.name("materials_status_check"), "(((status)::text = ANY ((ARRAY['ACTIVE'::character varying, 'INACTIVE'::character varying, 'DISCONTINUED'::character varying])::text[])))", true)
         );
     }
 

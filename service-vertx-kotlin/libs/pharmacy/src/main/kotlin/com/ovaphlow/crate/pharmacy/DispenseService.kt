@@ -72,8 +72,6 @@ class DispenseService(
                 .put("lot_id", row.getValue("lot_id")?.toString())
                 .put("prescribed_quantity", (row.getValue("prescribed_quantity") as? BigDecimal)?.toDouble())
                 .put("dispensed_quantity", (row.getValue("dispensed_quantity") as? BigDecimal)?.toDouble())
-                .put("unit", row.getValue("unit")?.toString())
-                .put("split_quantity", (row.getValue("split_quantity") as? BigDecimal)?.toDouble())
                 .put("stock_operation_detail_id", row.getValue("stock_operation_detail_id")?.toString())
                 .put("unit_cost", (row.getValue("unit_cost") as? BigDecimal)?.toDouble())
                 .put("total_cost", (row.getValue("total_cost") as? BigDecimal)?.toDouble())
@@ -143,10 +141,12 @@ class DispenseService(
     // ========================================================================
 
     fun createFromMedicalOrder(body: JsonObject): Future<JsonObject> {
+        rejectUnknown(body, setOf("medical_order_id", "warehouse", "material_id", "lot_id", "dispensed_quantity"))?.let {
+            return Future.failedFuture(it)
+        }
         val medicalOrderId = body.getString("medical_order_id")?.trim().orEmpty()
         val warehouse = body.getString("warehouse")?.trim().orEmpty()
         val materialId = body.getString("material_id")?.trim().orEmpty()
-        val unit = body.getString("unit") ?: "PACKAGE"
         val dispensedQuantity = body.getDouble("dispensed_quantity")
         val lotId = body.getString("lot_id")?.trim()?.takeIf(String::isNotBlank)
 
@@ -162,18 +162,15 @@ class DispenseService(
         if (dispensedQuantity == null || dispensedQuantity <= 0) {
             return Future.failedFuture(IllegalArgumentException("dispensed_quantity must be positive"))
         }
-        if (unit != "PACKAGE") {
-            return Future.failedFuture(IllegalArgumentException("only PACKAGE unit is supported in this version"))
-        }
 
         return pool.withTransaction<JsonObject> { connection ->
             medicalOrderReader.lockMedicationOrder(connection, medicalOrderId)
                 .compose { snapshot ->
                     validateOrderForDispensing(snapshot)
                         .compose {
-                            inventoryOutboundPort.validatePackageOutbound(
+                            inventoryOutboundPort.validateOutbound(
                                 connection,
-                                PackageOutboundCommand(
+                                OutboundCommand(
                                     warehouse = warehouse,
                                     materialId = materialId,
                                     lotId = lotId,
@@ -200,6 +197,10 @@ class DispenseService(
         }
         if (snapshot.orderStatus != "ACTIVE") {
             return Future.failedFuture(ConflictException("order is not active: ${snapshot.orderStatus}"))
+        }
+        // 护士核对门禁：未核对医嘱不得发药，即使列表过滤被绕过
+        if (snapshot.nurseCheckedBy == null || snapshot.nurseCheckedAt == null) {
+            return Future.failedFuture(ConflictException("order has not been nurse-checked"))
         }
         return Future.succeededFuture(null)
     }
@@ -265,7 +266,6 @@ class DispenseService(
             .set(PHARMACY_DISPENSE_ITEMS.MATERIAL_ID, materialId)
             .set(PHARMACY_DISPENSE_ITEMS.LOT_ID, lotId)
             .set(PHARMACY_DISPENSE_ITEMS.DISPENSED_QUANTITY, dispensedQuantity)
-            .set(PHARMACY_DISPENSE_ITEMS.UNIT, "PACKAGE")
 
         return connection.preparedQuery(DatabaseConfig.sql(headerInsert))
             .execute(DatabaseConfig.tuple(headerInsert))
@@ -288,7 +288,6 @@ class DispenseService(
                             .put("material_id", materialId)
                             .put("lot_id", lotId)
                             .put("dispensed_quantity", dispensedQuantity.toDouble())
-                            .put("unit", "PACKAGE"),
                     ))
             }
     }
@@ -298,6 +297,7 @@ class DispenseService(
     // ========================================================================
 
     fun review(id: String, body: JsonObject): Future<JsonObject> {
+        rejectUnknown(body, setOf("operator", "remark"))?.let { return Future.failedFuture(it) }
         val operator = try {
             requiredOperator(body)
         } catch (error: IllegalArgumentException) {
@@ -322,6 +322,7 @@ class DispenseService(
     }
 
     fun start(id: String, body: JsonObject): Future<JsonObject> {
+        rejectUnknown(body, setOf("operator", "remark"))?.let { return Future.failedFuture(it) }
         val operator = try {
             requiredOperator(body)
         } catch (error: IllegalArgumentException) {
@@ -382,18 +383,13 @@ class DispenseService(
                             IllegalArgumentException("dispense item has no material_id or invalid quantity"),
                         )
                     }
-                    if (item.getString("unit") != "PACKAGE") {
-                        return@compose Future.failedFuture(
-                            ConflictException("only PACKAGE unit outbound is supported in this version"),
-                        )
-                    }
                     val quantity = BigDecimal.valueOf(quantityDouble)
                     medicalOrderReader.lockMedicationOrder(connection, orderItemId)
                         .compose(::validateOrderForDispensing)
                         .compose {
-                            inventoryOutboundPort.confirmPackageOutbound(
+                            inventoryOutboundPort.confirmOutbound(
                                 connection,
-                                PackageOutboundCommand(
+                                OutboundCommand(
                                     warehouse = warehouse,
                                     materialId = materialId,
                                     lotId = lotId,
@@ -415,7 +411,7 @@ class DispenseService(
         connection: SqlConnection,
         dispenseId: String,
         itemId: String,
-        outbound: PackageOutboundResult,
+        outbound: OutboundResult,
         quantity: BigDecimal,
     ): Future<Void?> {
         val now = OffsetDateTime.now()
@@ -436,6 +432,7 @@ class DispenseService(
     }
 
     fun cancel(id: String, body: JsonObject): Future<JsonObject> {
+        rejectUnknown(body, setOf("operator", "remark", "reason"))?.let { return Future.failedFuture(it) }
         return pool.withTransaction<JsonObject> { connection ->
             lockDispense(connection, id).compose { current ->
                 val status = current.getString("status")
@@ -470,6 +467,7 @@ class DispenseService(
      * DISPENSING 目标一律转发到与动作接口相同的校验和事务逻辑。
      */
     fun updateStatus(id: String, body: JsonObject): Future<JsonObject> {
+        rejectUnknown(body, setOf("status", "operator", "remark", "reason"))?.let { return Future.failedFuture(it) }
         val target = body.getString("status")?.trim().orEmpty()
         if (target.isBlank()) {
             return Future.failedFuture(IllegalArgumentException("status is required"))
@@ -500,6 +498,9 @@ class DispenseService(
     }
 
     private fun legacyCreate(body: JsonObject): Future<JsonObject> {
+        rejectUnknown(body, setOf("dispense_no", "patient_id", "dispense_type", "encounter_id", "pharmacist", "reviewer", "metadata", "items"))?.let {
+            return Future.failedFuture(it)
+        }
         val dispenseNo = body.getString("dispense_no")
         val patientId = body.getString("patient_id")
         val dispenseType = body.getString("dispense_type")
@@ -553,6 +554,13 @@ class DispenseService(
                     }
 
                     val itemObj = itemsArray.getJsonObject(index)
+                    rejectUnknown(
+                        itemObj,
+                        setOf(
+                            "order_item_id", "order_execution_id", "material_id", "lot_id",
+                            "prescribed_quantity", "dispensed_quantity", "unit_cost", "metadata",
+                        ),
+                    )?.let { return Future.failedFuture(it) }
                     val itemId = Ulid.generate()
                     val prescribedQty = itemObj.getDouble("prescribed_quantity")
                     val dispensedQty = itemObj.getDouble("dispensed_quantity")
@@ -569,8 +577,6 @@ class DispenseService(
                         .set(PHARMACY_DISPENSE_ITEMS.LOT_ID, itemObj.getString("lot_id"))
                         .set(PHARMACY_DISPENSE_ITEMS.PRESCRIBED_QUANTITY, prescribedQty?.let { BigDecimal.valueOf(it) })
                         .set(PHARMACY_DISPENSE_ITEMS.DISPENSED_QUANTITY, dispensedQty?.let { BigDecimal.valueOf(it) })
-                        .set(PHARMACY_DISPENSE_ITEMS.UNIT, itemObj.getString("unit"))
-                        .set(PHARMACY_DISPENSE_ITEMS.SPLIT_QUANTITY, itemObj.getDouble("split_quantity")?.let { BigDecimal.valueOf(it) })
                         .set(PHARMACY_DISPENSE_ITEMS.UNIT_COST, unitCost?.let { BigDecimal.valueOf(it) })
                         .set(PHARMACY_DISPENSE_ITEMS.TOTAL_COST, totalCost)
                         .set(PHARMACY_DISPENSE_ITEMS.METADATA, itemObj.containsKey("metadata")
@@ -588,8 +594,6 @@ class DispenseService(
                                 .put("lot_id", itemObj.getString("lot_id"))
                                 .put("prescribed_quantity", itemObj.getDouble("prescribed_quantity"))
                                 .put("dispensed_quantity", itemObj.getDouble("dispensed_quantity"))
-                                .put("unit", itemObj.getString("unit"))
-                                .put("split_quantity", itemObj.getDouble("split_quantity"))
                                 .put("stock_operation_detail_id", itemObj.getString("stock_operation_detail_id"))
                                 .put("unit_cost", itemObj.getDouble("unit_cost"))
                                 .put("total_cost", totalCost?.toDouble()))
@@ -716,4 +720,12 @@ class DispenseService(
     private fun requiredOperator(body: JsonObject): String =
         body.getString("operator")?.trim()?.takeIf(String::isNotBlank)
             ?: throw IllegalArgumentException("operator is required")
+
+    private fun rejectUnknown(body: JsonObject, allowed: Set<String>): IllegalArgumentException? {
+        val unknown = body.fieldNames().filter { it !in allowed }
+        if (unknown.isNotEmpty()) {
+            return IllegalArgumentException("unknown fields: ${unknown.joinToString(", ")}")
+        }
+        return null
+    }
 }

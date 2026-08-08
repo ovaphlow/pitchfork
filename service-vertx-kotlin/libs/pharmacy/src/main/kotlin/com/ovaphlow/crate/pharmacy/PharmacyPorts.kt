@@ -51,10 +51,14 @@ data class MedicationOrderSnapshot(
     val startTime: OffsetDateTime?,
     val endTime: OffsetDateTime?,
     val orderDetails: JsonObject,
+    /** 护士核对审计：发药事务校验要求已核对，未核对为 null */
+    val nurseCheckedBy: String?,
+    /** 护士核对时间：与 nurseCheckedBy 成对出现 */
+    val nurseCheckedAt: OffsetDateTime?,
 )
 
-/** 011 包装单位出库命令（单位固定 PACKAGE，不支持拆零） */
-data class PackageOutboundCommand(
+/** 016 基础数量出库命令：quantity 是物资基础数量，单位由服务端写入库存明细快照。 */
+data class OutboundCommand(
     val warehouse: String,
     val materialId: String,
     val lotId: String?,
@@ -62,15 +66,15 @@ data class PackageOutboundCommand(
     val note: String?,
 )
 
-/** 011 包装单位出库结果：库存操作明细 ID、实际批次和单位成本 */
-data class PackageOutboundResult(
+/** 016 出库结果：库存操作明细 ID、实际批次和每基础单位成本。 */
+data class OutboundResult(
     val stockOperationDetailId: String,
     val lotId: String?,
     val unitCost: BigDecimal,
 )
 
 /** 012 退药回库命令：物资、批次、成本均由原发药明细推导。 */
-data class PackageInboundCommand(
+data class InboundCommand(
     val warehouse: String,
     val materialId: String,
     val lotId: String?,
@@ -79,33 +83,31 @@ data class PackageInboundCommand(
     val note: String?,
 )
 
-data class PackageInboundResult(
+data class InboundResult(
     val stockOperationDetailId: String,
     val lotId: String?,
     val unitCost: BigDecimal,
 )
 
 /**
- * 011 同连接内部端口：包装单位库存出库。
+ * 011 同连接内部端口：基础数量库存出库。
  *
  * 由 Aceso `Main.kt` 注入 StockService 适配器；必须在 Pharmacy 外层事务连接内调用，
  * 与药房单状态变更同事务提交或回滚。
  */
 interface InventoryOutboundPort {
-    /**
-     * 在创建发药单前只读校验包装单位出库条件。不得扣减库存或写库存操作。
-     */
-    fun validatePackageOutbound(client: SqlClient, command: PackageOutboundCommand): Future<Void?>
+    /** 在创建发药单前只读校验基础数量出库条件。不得扣减库存或写库存操作。 */
+    fun validateOutbound(client: SqlClient, command: OutboundCommand): Future<Void?>
 
-    fun confirmPackageOutbound(client: SqlClient, command: PackageOutboundCommand): Future<PackageOutboundResult>
+    fun confirmOutbound(client: SqlClient, command: OutboundCommand): Future<OutboundResult>
 }
 
 /**
- * 012 同连接内部端口：退药包装单位回库。
+ * 012 同连接内部端口：退药基础数量回库。
  * 使用库存 INBOUND 操作并通过 metadata.source 标记 PHARMACY_RETURN。
  */
 interface InventoryInboundPort {
-    fun confirmPackageInbound(client: SqlClient, command: PackageInboundCommand): Future<PackageInboundResult>
+    fun confirmInbound(client: SqlClient, command: InboundCommand): Future<InboundResult>
 }
 
 // ========================================================================
@@ -168,12 +170,12 @@ data class RequisitionTransferResult(
 )
 
 /**
- * 013 同连接内部端口：申领预留、释放与整单 PACKAGE 双仓调拨。
+ * 013 同连接内部端口：申领预留、释放与整单双仓调拨。
  *
  * 由 Aceso `Main.kt` 注入 StockService 适配器；所有方法必须复用 Pharmacy 外层
  * 事务连接，自身不开启新事务。确认调拨写一张源仓库 OUTBOUND 与一张目标仓库
  * INBOUND 操作，并为每个正批准项分别写出、入两条明细，保持成本守恒；任一写入
- * 失败由外层事务整体回滚。
+ * 失败由外层事务整体回滚。数量全部为基础数量。
  */
 interface InventoryRequisitionTransferPort {
 
@@ -188,20 +190,20 @@ interface InventoryRequisitionTransferPort {
      * `locked_quantity`；源 `quantity` 不变。物资非 ACTIVE、批次不归属/已过期、
      * 可用量不足时返回 ConflictException。
      */
-    fun reservePackageStock(client: SqlClient, command: RequisitionReserveCommand): Future<Void?>
+    fun reserveStock(client: SqlClient, command: RequisitionReserveCommand): Future<Void?>
 
     /**
      * 取消已审批单据时释放预留：锁定源库存并原子减少 `locked_quantity`，不产生
      * 任何库存操作。预留被异常破坏（locked_quantity 不足）时返回 ConflictException。
      */
-    fun releasePackageReservation(client: SqlClient, command: RequisitionReleaseCommand): Future<Void?>
+    fun releaseReservation(client: SqlClient, command: RequisitionReleaseCommand): Future<Void?>
 
     /**
      * 确认调拨：锁全部源库存与目标库存（稳定顺序），写一张源 OUTBOUND 与一张目标
      * INBOUND 操作及逐项双向明细，扣减源库存并增加目标库存。目标库存行不存在时
      * 以并发安全 upsert/冲突重读创建。元数据标记 `source = PHARMACY_REQUISITION_TRANSFER`。
      */
-    fun confirmReservedPackageTransfer(client: SqlClient, command: RequisitionTransferCommand): Future<RequisitionTransferResult>
+    fun confirmReservedTransfer(client: SqlClient, command: RequisitionTransferCommand): Future<RequisitionTransferResult>
 }
 
 // ========================================================================
@@ -258,8 +260,7 @@ data class PurchaseReceiptResult(
  * 由 Aceso `Main.kt` 注入 StockService 适配器；必须复用 Pharmacy 外层事务连接，
  * 自身不开启新事务。一次收货只写一张 `INBOUND`、`CONFIRMED` 的 `stock_operations`
  * 及逐条 `stock_operation_details`，按稳定键解析/创建批次与目标库存行（唯一冲突
- * 后重读并比对事实），`quantity`/`total_cost` 累加且不改变 `locked_quantity`；
- * 元数据标记 `source = PHARMACY_PURCHASE_RECEIPT`。任一步失败由外层事务整体回滚。
+ * 后重读并比对事实），数量与成本均为基础口径。任一步失败由外层事务整体回滚。
  */
 interface InventoryPurchaseReceiptPort {
 
@@ -269,5 +270,5 @@ interface InventoryPurchaseReceiptPort {
      */
     fun validatePurchaseMaterials(client: SqlClient, materialIds: List<String>): Future<Void?>
 
-    fun confirmPackagePurchaseReceipt(client: SqlClient, command: PurchaseReceiptCommand): Future<PurchaseReceiptResult>
+    fun confirmPurchaseReceipt(client: SqlClient, command: PurchaseReceiptCommand): Future<PurchaseReceiptResult>
 }

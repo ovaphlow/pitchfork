@@ -211,6 +211,54 @@ public class MedicalOrdersRecord extends UpdatableRecordImpl<MedicalOrdersRecord
         return (OffsetDateTime) get(12);
     }
 
+    /**
+     * Setter for <code>healthcare.medical_orders.order_class</code>. 医嘱持续周期:
+     * LONG_TERM(长期) / TEMPORARY(临时)，历史医嘱可为 NULL
+     */
+    public void setOrderClass(String value) {
+        set(13, value);
+    }
+
+    /**
+     * Getter for <code>healthcare.medical_orders.order_class</code>. 医嘱持续周期:
+     * LONG_TERM(长期) / TEMPORARY(临时)，历史医嘱可为 NULL
+     */
+    public String getOrderClass() {
+        return (String) get(13);
+    }
+
+    /**
+     * Setter for <code>healthcare.medical_orders.nurse_checked_by</code>.
+     * 护士核对人（认证主体 userId）；未核对为 NULL，核对后药房才可见并可从该医嘱发药
+     */
+    public void setNurseCheckedBy(String value) {
+        set(14, value);
+    }
+
+    /**
+     * Getter for <code>healthcare.medical_orders.nurse_checked_by</code>.
+     * 护士核对人（认证主体 userId）；未核对为 NULL，核对后药房才可见并可从该医嘱发药
+     */
+    public String getNurseCheckedBy() {
+        return (String) get(14);
+    }
+
+    /**
+     * Setter for <code>healthcare.medical_orders.nurse_checked_at</code>.
+     * 护士核对时间（带时区）；与 nurse_checked_by 成对出现，未核对为 NULL
+     */
+    public void setNurseCheckedAt(OffsetDateTime value) {
+        set(15, value);
+    }
+
+    /**
+     * Getter for <code>healthcare.medical_orders.nurse_checked_at</code>.
+     * 护士核对时间（带时区）；与 nurse_checked_by 成对出现，未核对为 NULL
+     */
+    public OffsetDateTime getNurseCheckedAt() {
+        return (OffsetDateTime) get(15);
+    }
+
     // -------------------------------------------------------------------------
     // Primary key information
     // -------------------------------------------------------------------------
@@ -234,7 +282,7 @@ public class MedicalOrdersRecord extends UpdatableRecordImpl<MedicalOrdersRecord
     /**
      * Create a detached, initialised MedicalOrdersRecord
      */
-    public MedicalOrdersRecord(String id, String encounterId, String orderType, String orderContent, JSONB orderDetails, OffsetDateTime startTime, OffsetDateTime endTime, String doctor, String nurse, String status, JSONB metadata, OffsetDateTime createdAt, OffsetDateTime updatedAt) {
+    public MedicalOrdersRecord(String id, String encounterId, String orderType, String orderContent, JSONB orderDetails, OffsetDateTime startTime, OffsetDateTime endTime, String doctor, String nurse, String status, JSONB metadata, OffsetDateTime createdAt, OffsetDateTime updatedAt, String orderClass, String nurseCheckedBy, OffsetDateTime nurseCheckedAt) {
         super(MedicalOrders.MEDICAL_ORDERS);
 
         setId(id);
@@ -250,6 +298,9 @@ public class MedicalOrdersRecord extends UpdatableRecordImpl<MedicalOrdersRecord
         setMetadata(metadata);
         setCreatedAt(createdAt);
         setUpdatedAt(updatedAt);
+        setOrderClass(orderClass);
+        setNurseCheckedBy(nurseCheckedBy);
+        setNurseCheckedAt(nurseCheckedAt);
         resetChangedOnNotNull();
     }
 }

@@ -84,18 +84,13 @@ public class PharmacyPurchaseOrderItems extends TableImpl<PharmacyPurchaseOrderI
      * The column
      * <code>pharmacy.pharmacy_purchase_order_items.ordered_quantity</code>.
      */
-    public final TableField<PharmacyPurchaseOrderItemsRecord, BigDecimal> ORDERED_QUANTITY = createField(DSL.name("ordered_quantity"), SQLDataType.NUMERIC(15, 4).nullable(false), this, "");
+    public final TableField<PharmacyPurchaseOrderItemsRecord, BigDecimal> ORDERED_QUANTITY = createField(DSL.name("ordered_quantity"), SQLDataType.NUMERIC(20, 6).nullable(false), this, "");
 
     /**
      * The column
      * <code>pharmacy.pharmacy_purchase_order_items.received_quantity</code>.
      */
-    public final TableField<PharmacyPurchaseOrderItemsRecord, BigDecimal> RECEIVED_QUANTITY = createField(DSL.name("received_quantity"), SQLDataType.NUMERIC(15, 4).nullable(false).defaultValue(DSL.field(DSL.raw("0"), SQLDataType.NUMERIC)), this, "");
-
-    /**
-     * The column <code>pharmacy.pharmacy_purchase_order_items.unit</code>.
-     */
-    public final TableField<PharmacyPurchaseOrderItemsRecord, String> UNIT = createField(DSL.name("unit"), SQLDataType.VARCHAR.nullable(false).defaultValue(DSL.field(DSL.raw("'PACKAGE'::character varying"), SQLDataType.VARCHAR)), this, "");
+    public final TableField<PharmacyPurchaseOrderItemsRecord, BigDecimal> RECEIVED_QUANTITY = createField(DSL.name("received_quantity"), SQLDataType.NUMERIC(20, 6).nullable(false).defaultValue(DSL.field(DSL.raw("0"), SQLDataType.NUMERIC)), this, "");
 
     private PharmacyPurchaseOrderItems(Name alias, Table<PharmacyPurchaseOrderItemsRecord> aliased) {
         this(alias, aliased, (Field<?>[]) null, null);
@@ -212,8 +207,7 @@ public class PharmacyPurchaseOrderItems extends TableImpl<PharmacyPurchaseOrderI
     public List<Check<PharmacyPurchaseOrderItemsRecord>> getChecks() {
         return Arrays.asList(
             Internal.createCheck(this, DSL.name("pharmacy_purchase_order_items_check"), "(((received_quantity >= (0)::numeric) AND (received_quantity <= ordered_quantity)))", true),
-            Internal.createCheck(this, DSL.name("pharmacy_purchase_order_items_ordered_quantity_check"), "((ordered_quantity > (0)::numeric))", true),
-            Internal.createCheck(this, DSL.name("pharmacy_purchase_order_items_unit_check"), "(((unit)::text = 'PACKAGE'::text))", true)
+            Internal.createCheck(this, DSL.name("pharmacy_purchase_order_items_ordered_quantity_check"), "((ordered_quantity > (0)::numeric))", true)
         );
     }
 

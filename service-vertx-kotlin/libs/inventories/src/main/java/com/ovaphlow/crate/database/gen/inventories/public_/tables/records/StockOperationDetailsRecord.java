@@ -106,171 +106,45 @@ public class StockOperationDetailsRecord extends UpdatableRecordImpl<StockOperat
     }
 
     /**
-     * Setter for <code>public.stock_operation_details.split_quantity</code>.
-     */
-    public void setSplitQuantity(BigDecimal value) {
-        set(6, value);
-    }
-
-    /**
-     * Getter for <code>public.stock_operation_details.split_quantity</code>.
-     */
-    public BigDecimal getSplitQuantity() {
-        return (BigDecimal) get(6);
-    }
-
-    /**
      * Setter for <code>public.stock_operation_details.unit_cost</code>.
      */
     public void setUnitCost(BigDecimal value) {
-        set(7, value);
+        set(6, value);
     }
 
     /**
      * Getter for <code>public.stock_operation_details.unit_cost</code>.
      */
     public BigDecimal getUnitCost() {
-        return (BigDecimal) get(7);
+        return (BigDecimal) get(6);
     }
 
     /**
      * Setter for <code>public.stock_operation_details.total_cost</code>.
      */
     public void setTotalCost(BigDecimal value) {
-        set(8, value);
+        set(7, value);
     }
 
     /**
      * Getter for <code>public.stock_operation_details.total_cost</code>.
      */
     public BigDecimal getTotalCost() {
-        return (BigDecimal) get(8);
+        return (BigDecimal) get(7);
     }
 
     /**
      * Setter for <code>public.stock_operation_details.created_at</code>.
      */
     public void setCreatedAt(OffsetDateTime value) {
-        set(9, value);
+        set(8, value);
     }
 
     /**
      * Getter for <code>public.stock_operation_details.created_at</code>.
      */
     public OffsetDateTime getCreatedAt() {
-        return (OffsetDateTime) get(9);
-    }
-
-    /**
-     * Setter for <code>public.stock_operation_details.unit_spec_id</code>.
-     */
-    public void setUnitSpecId(String value) {
-        set(10, value);
-    }
-
-    /**
-     * Getter for <code>public.stock_operation_details.unit_spec_id</code>.
-     */
-    public String getUnitSpecId() {
-        return (String) get(10);
-    }
-
-    /**
-     * Setter for <code>public.stock_operation_details.input_quantity</code>.
-     */
-    public void setInputQuantity(BigDecimal value) {
-        set(11, value);
-    }
-
-    /**
-     * Getter for <code>public.stock_operation_details.input_quantity</code>.
-     */
-    public BigDecimal getInputQuantity() {
-        return (BigDecimal) get(11);
-    }
-
-    /**
-     * Setter for <code>public.stock_operation_details.input_unit</code>.
-     */
-    public void setInputUnit(String value) {
-        set(12, value);
-    }
-
-    /**
-     * Getter for <code>public.stock_operation_details.input_unit</code>.
-     */
-    public String getInputUnit() {
-        return (String) get(12);
-    }
-
-    /**
-     * Setter for <code>public.stock_operation_details.conversion_ratio</code>.
-     */
-    public void setConversionRatio(BigDecimal value) {
-        set(13, value);
-    }
-
-    /**
-     * Getter for <code>public.stock_operation_details.conversion_ratio</code>.
-     */
-    public BigDecimal getConversionRatio() {
-        return (BigDecimal) get(13);
-    }
-
-    /**
-     * Setter for <code>public.stock_operation_details.base_quantity</code>.
-     */
-    public void setBaseQuantity(BigDecimal value) {
-        set(14, value);
-    }
-
-    /**
-     * Getter for <code>public.stock_operation_details.base_quantity</code>.
-     */
-    public BigDecimal getBaseQuantity() {
-        return (BigDecimal) get(14);
-    }
-
-    /**
-     * Setter for <code>public.stock_operation_details.base_unit</code>.
-     */
-    public void setBaseUnit(String value) {
-        set(15, value);
-    }
-
-    /**
-     * Getter for <code>public.stock_operation_details.base_unit</code>.
-     */
-    public String getBaseUnit() {
-        return (String) get(15);
-    }
-
-    /**
-     * Setter for <code>public.stock_operation_details.input_unit_cost</code>.
-     */
-    public void setInputUnitCost(BigDecimal value) {
-        set(16, value);
-    }
-
-    /**
-     * Getter for <code>public.stock_operation_details.input_unit_cost</code>.
-     */
-    public BigDecimal getInputUnitCost() {
-        return (BigDecimal) get(16);
-    }
-
-    /**
-     * Setter for <code>public.stock_operation_details.base_unit_cost</code>.
-     */
-    public void setBaseUnitCost(BigDecimal value) {
-        set(17, value);
-    }
-
-    /**
-     * Getter for <code>public.stock_operation_details.base_unit_cost</code>.
-     */
-    public BigDecimal getBaseUnitCost() {
-        return (BigDecimal) get(17);
+        return (OffsetDateTime) get(8);
     }
 
     // -------------------------------------------------------------------------
@@ -296,7 +170,7 @@ public class StockOperationDetailsRecord extends UpdatableRecordImpl<StockOperat
     /**
      * Create a detached, initialised StockOperationDetailsRecord
      */
-    public StockOperationDetailsRecord(String id, String operationId, String materialId, String lotId, BigDecimal quantity, String unit, BigDecimal splitQuantity, BigDecimal unitCost, BigDecimal totalCost, OffsetDateTime createdAt, String unitSpecId, BigDecimal inputQuantity, String inputUnit, BigDecimal conversionRatio, BigDecimal baseQuantity, String baseUnit, BigDecimal inputUnitCost, BigDecimal baseUnitCost) {
+    public StockOperationDetailsRecord(String id, String operationId, String materialId, String lotId, BigDecimal quantity, String unit, BigDecimal unitCost, BigDecimal totalCost, OffsetDateTime createdAt) {
         super(StockOperationDetails.STOCK_OPERATION_DETAILS);
 
         setId(id);
@@ -305,18 +179,9 @@ public class StockOperationDetailsRecord extends UpdatableRecordImpl<StockOperat
         setLotId(lotId);
         setQuantity(quantity);
         setUnit(unit);
-        setSplitQuantity(splitQuantity);
         setUnitCost(unitCost);
         setTotalCost(totalCost);
         setCreatedAt(createdAt);
-        setUnitSpecId(unitSpecId);
-        setInputQuantity(inputQuantity);
-        setInputUnit(inputUnit);
-        setConversionRatio(conversionRatio);
-        setBaseQuantity(baseQuantity);
-        setBaseUnit(baseUnit);
-        setInputUnitCost(inputUnitCost);
-        setBaseUnitCost(baseUnitCost);
         resetChangedOnNotNull();
     }
 }

@@ -104,6 +104,12 @@ export default function RequisitionsSection() {
     return map;
   }, [stocks]);
 
+  const materialUnit = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const stock of stocks) map.set(stock.material_id, stock.unit);
+    return map;
+  }, [stocks]);
+
   const loadRequisitions = useCallback(async () => {
     setLoading(true);
     setError("");
@@ -479,7 +485,7 @@ export default function RequisitionsSection() {
                   </option>
                   {materialOptions.map((stock) => (
                     <option key={stock.material_id} value={stock.material_id}>
-                      {stock.material_name}（可用 {stock.available_quantity}{stock.package_unit ?? ""}）
+                      {stock.material_name}（可用 {stock.available_quantity}{stock.unit ?? ""}）
                     </option>
                   ))}
                 </select>
@@ -553,7 +559,7 @@ export default function RequisitionsSection() {
                     return (
                       <tr key={item.id} className="border-b border-border/50">
                         <td className="py-2 px-3 text-fg">{materialName.get(item.material_id) ?? item.material_id}</td>
-                        <td className="py-2 px-3 text-fg-muted">{item.requested_quantity ?? "—"} {item.unit || "PACKAGE"}</td>
+                        <td className="py-2 px-3 text-fg-muted">{item.requested_quantity ?? "—"} {materialUnit.get(item.material_id) ?? ""}</td>
                         <td className="py-2 px-3">
                           <Input
                             type="number"

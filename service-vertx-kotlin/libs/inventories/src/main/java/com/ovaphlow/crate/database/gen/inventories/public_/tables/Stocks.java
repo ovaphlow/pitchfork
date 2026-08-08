@@ -86,12 +86,12 @@ public class Stocks extends TableImpl<StocksRecord> {
     /**
      * The column <code>public.stocks.quantity</code>.
      */
-    public final TableField<StocksRecord, BigDecimal> QUANTITY = createField(DSL.name("quantity"), SQLDataType.NUMERIC(15, 4).nullable(false).defaultValue(DSL.field(DSL.raw("0"), SQLDataType.NUMERIC)), this, "");
+    public final TableField<StocksRecord, BigDecimal> QUANTITY = createField(DSL.name("quantity"), SQLDataType.NUMERIC(20, 6).nullable(false).defaultValue(DSL.field(DSL.raw("0"), SQLDataType.NUMERIC)), this, "");
 
     /**
      * The column <code>public.stocks.locked_quantity</code>.
      */
-    public final TableField<StocksRecord, BigDecimal> LOCKED_QUANTITY = createField(DSL.name("locked_quantity"), SQLDataType.NUMERIC(15, 4).nullable(false).defaultValue(DSL.field(DSL.raw("0"), SQLDataType.NUMERIC)), this, "");
+    public final TableField<StocksRecord, BigDecimal> LOCKED_QUANTITY = createField(DSL.name("locked_quantity"), SQLDataType.NUMERIC(20, 6).nullable(false).defaultValue(DSL.field(DSL.raw("0"), SQLDataType.NUMERIC)), this, "");
 
     /**
      * The column <code>public.stocks.total_cost</code>.
@@ -102,21 +102,6 @@ public class Stocks extends TableImpl<StocksRecord> {
      * The column <code>public.stocks.last_updated</code>.
      */
     public final TableField<StocksRecord, OffsetDateTime> LAST_UPDATED = createField(DSL.name("last_updated"), SQLDataType.TIMESTAMPWITHTIMEZONE(6).nullable(false).defaultValue(DSL.field(DSL.raw("now()"), SQLDataType.TIMESTAMPWITHTIMEZONE)), this, "");
-
-    /**
-     * The column <code>public.stocks.base_quantity</code>.
-     */
-    public final TableField<StocksRecord, BigDecimal> BASE_QUANTITY = createField(DSL.name("base_quantity"), SQLDataType.NUMERIC(20, 6), this, "");
-
-    /**
-     * The column <code>public.stocks.locked_base_quantity</code>.
-     */
-    public final TableField<StocksRecord, BigDecimal> LOCKED_BASE_QUANTITY = createField(DSL.name("locked_base_quantity"), SQLDataType.NUMERIC(20, 6), this, "");
-
-    /**
-     * The column <code>public.stocks.unit_model_status</code>.
-     */
-    public final TableField<StocksRecord, String> UNIT_MODEL_STATUS = createField(DSL.name("unit_model_status"), SQLDataType.VARCHAR.nullable(false).defaultValue(DSL.field(DSL.raw("'LEGACY'::character varying"), SQLDataType.VARCHAR)), this, "");
 
     private Stocks(Name alias, Table<StocksRecord> aliased) {
         this(alias, aliased, (Field<?>[]) null, null);
@@ -227,11 +212,8 @@ public class Stocks extends TableImpl<StocksRecord> {
     @Override
     public List<Check<StocksRecord>> getChecks() {
         return Arrays.asList(
-            Internal.createCheck(this, DSL.name("ck_stocks_base_ge_locked"), "((base_quantity IS NULL) OR ((locked_base_quantity IS NOT NULL) AND (base_quantity >= locked_base_quantity) AND (locked_base_quantity >= (0)::numeric)))", true),
-            Internal.createCheck(this, DSL.name("stocks_locked_quantity_check"), "((locked_quantity >= (0)::numeric))", true),
-            Internal.createCheck(this, DSL.name("stocks_quantity_check"), "((quantity >= (0)::numeric))", true),
-            Internal.createCheck(this, DSL.name("stocks_total_cost_check"), "((total_cost >= (0)::numeric))", true),
-            Internal.createCheck(this, DSL.name("stocks_unit_model_status_check"), "(((unit_model_status)::text = ANY ((ARRAY['LEGACY'::character varying, 'ACTIVE'::character varying, 'MIGRATION_BLOCKED'::character varying])::text[])))", true)
+            Internal.createCheck(this, DSL.name("ck_stocks_quantity_ge_locked"), "(((quantity >= locked_quantity) AND (locked_quantity >= (0)::numeric)))", true),
+            Internal.createCheck(this, DSL.name("stocks_total_cost_check"), "((total_cost >= (0)::numeric))", true)
         );
     }
 

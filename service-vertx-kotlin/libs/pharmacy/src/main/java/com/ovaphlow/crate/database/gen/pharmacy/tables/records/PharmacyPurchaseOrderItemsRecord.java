@@ -98,20 +98,6 @@ public class PharmacyPurchaseOrderItemsRecord extends UpdatableRecordImpl<Pharma
         return (BigDecimal) get(4);
     }
 
-    /**
-     * Setter for <code>pharmacy.pharmacy_purchase_order_items.unit</code>.
-     */
-    public void setUnit(String value) {
-        set(5, value);
-    }
-
-    /**
-     * Getter for <code>pharmacy.pharmacy_purchase_order_items.unit</code>.
-     */
-    public String getUnit() {
-        return (String) get(5);
-    }
-
     // -------------------------------------------------------------------------
     // Primary key information
     // -------------------------------------------------------------------------
@@ -135,7 +121,7 @@ public class PharmacyPurchaseOrderItemsRecord extends UpdatableRecordImpl<Pharma
     /**
      * Create a detached, initialised PharmacyPurchaseOrderItemsRecord
      */
-    public PharmacyPurchaseOrderItemsRecord(String id, String purchaseOrderId, String materialId, BigDecimal orderedQuantity, BigDecimal receivedQuantity, String unit) {
+    public PharmacyPurchaseOrderItemsRecord(String id, String purchaseOrderId, String materialId, BigDecimal orderedQuantity, BigDecimal receivedQuantity) {
         super(PharmacyPurchaseOrderItems.PHARMACY_PURCHASE_ORDER_ITEMS);
 
         setId(id);
@@ -143,7 +129,6 @@ public class PharmacyPurchaseOrderItemsRecord extends UpdatableRecordImpl<Pharma
         setMaterialId(materialId);
         setOrderedQuantity(orderedQuantity);
         setReceivedQuantity(receivedQuantity);
-        setUnit(unit);
         resetChangedOnNotNull();
     }
 }
