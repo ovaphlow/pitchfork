@@ -70,11 +70,11 @@ class DispenseService(
                 .put("order_execution_id", row.getValue("order_execution_id")?.toString())
                 .put("material_id", row.getValue("material_id")?.toString())
                 .put("lot_id", row.getValue("lot_id")?.toString())
-                .put("prescribed_quantity", (row.getValue("prescribed_quantity") as? BigDecimal)?.toDouble())
-                .put("dispensed_quantity", (row.getValue("dispensed_quantity") as? BigDecimal)?.toDouble())
+                .put("prescribed_quantity", decimalApi(row.getValue("prescribed_quantity") as? BigDecimal))
+                .put("dispensed_quantity", decimalApi(row.getValue("dispensed_quantity") as? BigDecimal))
                 .put("stock_operation_detail_id", row.getValue("stock_operation_detail_id")?.toString())
-                .put("unit_cost", (row.getValue("unit_cost") as? BigDecimal)?.toDouble())
-                .put("total_cost", (row.getValue("total_cost") as? BigDecimal)?.toDouble())
+                .put("unit_cost", decimalApi(row.getValue("unit_cost") as? BigDecimal))
+                .put("total_cost", decimalApi(row.getValue("total_cost") as? BigDecimal))
                 .put("metadata", row.getValue("metadata") as? JsonObject)
         }
     }
@@ -147,7 +147,7 @@ class DispenseService(
         val medicalOrderId = body.getString("medical_order_id")?.trim().orEmpty()
         val warehouse = body.getString("warehouse")?.trim().orEmpty()
         val materialId = body.getString("material_id")?.trim().orEmpty()
-        val dispensedQuantity = body.getDouble("dispensed_quantity")
+        val dispensedQuantity = requestDecimalText(body.getValue("dispensed_quantity"))
         val lotId = body.getString("lot_id")?.trim()?.takeIf(String::isNotBlank)
 
         if (medicalOrderId.isBlank()) {
@@ -159,8 +159,16 @@ class DispenseService(
         if (materialId.isBlank()) {
             return Future.failedFuture(IllegalArgumentException("material_id is required"))
         }
-        if (dispensedQuantity == null || dispensedQuantity <= 0) {
+        if (dispensedQuantity == null) {
+            return Future.failedFuture(IllegalArgumentException("dispensed_quantity must be decimal text"))
+        }
+        if (dispensedQuantity <= BigDecimal.ZERO) {
             return Future.failedFuture(IllegalArgumentException("dispensed_quantity must be positive"))
+        }
+        try {
+            validateQuantityPrecision(dispensedQuantity, "dispensed_quantity")
+        } catch (error: IllegalArgumentException) {
+            return Future.failedFuture(error)
         }
 
         return pool.withTransaction<JsonObject> { connection ->
@@ -174,13 +182,13 @@ class DispenseService(
                                     warehouse = warehouse,
                                     materialId = materialId,
                                     lotId = lotId,
-                                    quantity = BigDecimal.valueOf(dispensedQuantity),
+                                    quantity = dispensedQuantity,
                                     note = "pharmacy dispense for medical order $medicalOrderId",
                                 ),
                             )
                         }
                         .compose { rejectDuplicate(connection, medicalOrderId) }
-                        .compose { insertDispenseAndItem(connection, snapshot, warehouse, materialId, lotId, BigDecimal.valueOf(dispensedQuantity)) }
+                        .compose { insertDispenseAndItem(connection, snapshot, warehouse, materialId, lotId, dispensedQuantity) }
                 }
         }
     }
@@ -287,7 +295,7 @@ class DispenseService(
                             .put("order_item_id", snapshot.orderId)
                             .put("material_id", materialId)
                             .put("lot_id", lotId)
-                            .put("dispensed_quantity", dispensedQuantity.toDouble())
+                            .put("dispensed_quantity", dispensedQuantity)
                     ))
             }
     }
@@ -377,13 +385,12 @@ class DispenseService(
                     }
                     val materialId = item.getString("material_id")
                     val lotId = item.getString("lot_id")
-                    val quantityDouble = item.getDouble("dispensed_quantity")
-                    if (materialId.isNullOrBlank() || quantityDouble == null || quantityDouble <= 0) {
+                    val quantity = decimalText(item.getValue("dispensed_quantity"))
+                    if (materialId.isNullOrBlank() || quantity == null || quantity <= BigDecimal.ZERO) {
                         return@compose Future.failedFuture(
                             IllegalArgumentException("dispense item has no material_id or invalid quantity"),
                         )
                     }
-                    val quantity = BigDecimal.valueOf(quantityDouble)
                     medicalOrderReader.lockMedicationOrder(connection, orderItemId)
                         .compose(::validateOrderForDispensing)
                         .compose {
@@ -562,11 +569,28 @@ class DispenseService(
                         ),
                     )?.let { return Future.failedFuture(it) }
                     val itemId = Ulid.generate()
-                    val prescribedQty = itemObj.getDouble("prescribed_quantity")
-                    val dispensedQty = itemObj.getDouble("dispensed_quantity")
-                    val unitCost = itemObj.getDouble("unit_cost")
+                    val prescribedQty = requestDecimalText(itemObj.getValue("prescribed_quantity"))
+                    val dispensedQty = requestDecimalText(itemObj.getValue("dispensed_quantity"))
+                    val unitCost = requestDecimalText(itemObj.getValue("unit_cost"))
+                    val nonDecimalField = mapOf(
+                        "prescribed_quantity" to prescribedQty,
+                        "dispensed_quantity" to dispensedQty,
+                        "unit_cost" to unitCost,
+                    ).entries.firstOrNull { (field, value) -> itemObj.containsKey(field) && value == null }
+                    if (nonDecimalField != null) {
+                        return Future.failedFuture(
+                            IllegalArgumentException("${nonDecimalField.key} must be decimal text"),
+                        )
+                    }
+                    try {
+                        prescribedQty?.let { validateQuantityPrecision(it, "prescribed_quantity") }
+                        dispensedQty?.let { validateQuantityPrecision(it, "dispensed_quantity") }
+                        unitCost?.let { validateCostPrecision(it, "unit_cost") }
+                    } catch (error: IllegalArgumentException) {
+                        return Future.failedFuture(error)
+                    }
                     val totalCost = if (dispensedQty != null && unitCost != null)
-                        BigDecimal.valueOf(dispensedQty * unitCost) else null
+                        dispensedQty.multiply(unitCost) else null
 
                     val itemInsert = ctx.insertInto(PHARMACY_DISPENSE_ITEMS)
                         .set(PHARMACY_DISPENSE_ITEMS.ID, itemId)
@@ -575,9 +599,9 @@ class DispenseService(
                         .set(PHARMACY_DISPENSE_ITEMS.ORDER_EXECUTION_ID, itemObj.getString("order_execution_id"))
                         .set(PHARMACY_DISPENSE_ITEMS.MATERIAL_ID, itemObj.getString("material_id"))
                         .set(PHARMACY_DISPENSE_ITEMS.LOT_ID, itemObj.getString("lot_id"))
-                        .set(PHARMACY_DISPENSE_ITEMS.PRESCRIBED_QUANTITY, prescribedQty?.let { BigDecimal.valueOf(it) })
-                        .set(PHARMACY_DISPENSE_ITEMS.DISPENSED_QUANTITY, dispensedQty?.let { BigDecimal.valueOf(it) })
-                        .set(PHARMACY_DISPENSE_ITEMS.UNIT_COST, unitCost?.let { BigDecimal.valueOf(it) })
+                        .set(PHARMACY_DISPENSE_ITEMS.PRESCRIBED_QUANTITY, prescribedQty)
+                        .set(PHARMACY_DISPENSE_ITEMS.DISPENSED_QUANTITY, dispensedQty)
+                        .set(PHARMACY_DISPENSE_ITEMS.UNIT_COST, unitCost)
                         .set(PHARMACY_DISPENSE_ITEMS.TOTAL_COST, totalCost)
                         .set(PHARMACY_DISPENSE_ITEMS.METADATA, itemObj.containsKey("metadata")
                             .let { if (it) JSONB.valueOf(itemObj.getJsonObject("metadata").encode()) else null })
@@ -592,11 +616,11 @@ class DispenseService(
                                 .put("order_execution_id", itemObj.getString("order_execution_id"))
                                 .put("material_id", itemObj.getString("material_id"))
                                 .put("lot_id", itemObj.getString("lot_id"))
-                                .put("prescribed_quantity", itemObj.getDouble("prescribed_quantity"))
-                                .put("dispensed_quantity", itemObj.getDouble("dispensed_quantity"))
+                                .put("prescribed_quantity", prescribedQty)
+                                .put("dispensed_quantity", dispensedQty)
                                 .put("stock_operation_detail_id", itemObj.getString("stock_operation_detail_id"))
-                                .put("unit_cost", itemObj.getDouble("unit_cost"))
-                                .put("total_cost", totalCost?.toDouble()))
+                                .put("unit_cost", unitCost)
+                                .put("total_cost", totalCost))
                             insertItem(index + 1)
                         }
                 }

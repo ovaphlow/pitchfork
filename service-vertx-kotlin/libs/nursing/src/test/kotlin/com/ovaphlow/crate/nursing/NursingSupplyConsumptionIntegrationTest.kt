@@ -384,7 +384,7 @@ class NursingSupplyConsumptionIntegrationTest {
                                         listOf(
                                             JsonObject()
                                                 .put("stock_id", "sc-stock-missing")
-                                                .put("quantity", 1),
+                                                .put("quantity", "1"),
                                         ),
                                     )
                                     .encode(),

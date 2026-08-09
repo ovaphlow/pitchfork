@@ -66,10 +66,10 @@ object InventoriesRoutes {
                     respond(ctx, 400, "invalid item at index $i: unsupported field $legacyField")
                     return@handler
                 }
-                val quantity = jsonDecimal(item.getValue("quantity"))
-                val unitCost = jsonDecimal(item.getValue("unit_cost"))
+                val quantity = requestDecimalText(item.getValue("quantity"))
+                val unitCost = requestDecimalText(item.getValue("unit_cost"))
                 if (quantity == null) {
-                    respond(ctx, 400, "invalid item at index $i: quantity is required")
+                    respond(ctx, 400, "invalid item at index $i: quantity must be a decimal text")
                     return@handler
                 }
                 if (quantity <= BigDecimal.ZERO) {
@@ -77,7 +77,7 @@ object InventoriesRoutes {
                     return@handler
                 }
                 if (unitCost == null || unitCost < BigDecimal.ZERO) {
-                    respond(ctx, 400, "invalid item at index $i: unit_cost (>=0) required")
+                    respond(ctx, 400, "invalid item at index $i: unit_cost must be decimal text (>=0)")
                     return@handler
                 }
 

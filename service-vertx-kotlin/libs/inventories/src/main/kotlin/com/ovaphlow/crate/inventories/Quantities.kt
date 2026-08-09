@@ -15,6 +15,10 @@ fun jsonDecimal(value: Any?): BigDecimal? = when (value) {
     else -> value.toString().toBigDecimalOrNull()
 }
 
+/** HTTP 数量/成本入口只接受 JSON 十进制文本，避免 JSON number 被解码为 Double 后丢失精度。 */
+fun requestDecimalText(value: Any?): BigDecimal? =
+    (value as? String)?.toBigDecimalOrNull()
+
 fun stockDecimalValue(value: Any?): BigDecimal =
     stockDecimalValueOrNull(value) ?: BigDecimal.ZERO
 

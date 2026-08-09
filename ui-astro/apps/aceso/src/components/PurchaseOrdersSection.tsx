@@ -202,7 +202,7 @@ export default function PurchaseOrdersSection() {
     const input = {
       warehouse: createForm.warehouse.trim(),
       supplier_name: createForm.supplierName.trim(),
-      items: createForm.rows.map((row) => ({ material_id: row.materialId, ordered_quantity: Number(row.quantity) })),
+      items: createForm.rows.map((row) => ({ material_id: row.materialId, ordered_quantity: row.quantity.trim() })),
     };
     setCreateSaving(true);
     setCreateError("");
@@ -261,7 +261,7 @@ export default function PurchaseOrdersSection() {
     setReceiveRows(
       (order.items ?? []).map((item) => ({
         orderItemId: item.id,
-        quantity: String(Math.max(1, item.remaining_quantity)),
+        quantity: String(Math.max(1, Number(item.remaining_quantity))),
         batchNo: "",
         productionDate: "",
         expiryDate: "",
@@ -280,7 +280,7 @@ export default function PurchaseOrdersSection() {
       const cost = Number(row.unitCost);
       if (!cost || cost < 0) return setReceiveError("实际成本必须 ≥ 0");
       const item = receiveTarget.items.find((candidate) => candidate.id === row.orderItemId);
-      if (item && quantity > item.remaining_quantity) {
+      if (item && quantity > Number(item.remaining_quantity)) {
         return setReceiveError(`收货数量不能超过剩余 ${item.remaining_quantity}（${item.material_id}）`);
       }
     }
@@ -292,8 +292,8 @@ export default function PurchaseOrdersSection() {
         {
           items: receiveRows.map((row) => ({
             purchase_order_item_id: row.orderItemId,
-            received_quantity: Number(row.quantity),
-            unit_cost: Number(row.unitCost),
+            received_quantity: row.quantity.trim(),
+            unit_cost: row.unitCost.trim(),
             ...(row.batchNo.trim() ? { batch_no: row.batchNo.trim() } : {}),
             ...(row.productionDate.trim() ? { production_date: row.productionDate.trim() } : {}),
             ...(row.expiryDate.trim() ? { expiry_date: row.expiryDate.trim() } : {}),
@@ -370,8 +370,8 @@ export default function PurchaseOrdersSection() {
       key: "progress",
       header: "进度",
       render: (row) => {
-        const ordered = row.items.reduce((sum, item) => sum + item.ordered_quantity, 0);
-        const received = row.items.reduce((sum, item) => sum + item.received_quantity, 0);
+        const ordered = row.items.reduce((sum, item) => sum + Number(item.ordered_quantity), 0);
+        const received = row.items.reduce((sum, item) => sum + Number(item.received_quantity), 0);
         return (
           <div className="text-sm text-fg-muted">
             {received} / {ordered}

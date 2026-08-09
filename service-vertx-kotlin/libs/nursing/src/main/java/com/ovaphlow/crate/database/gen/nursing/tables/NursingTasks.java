@@ -265,7 +265,7 @@ public class NursingTasks extends TableImpl<NursingTasksRecord> {
     public List<Check<NursingTasksRecord>> getChecks() {
         return Arrays.asList(
             Internal.createCheck(this, DSL.name("nursing_tasks_status_check"), "(((status)::text = ANY ((ARRAY['ACTIVE'::character varying, 'COMPLETED'::character varying, 'CANCELLED'::character varying])::text[])))", true),
-            Internal.createCheck(this, DSL.name("nursing_tasks_task_type_check"), "(((task_type)::text = ANY ((ARRAY['NURSING'::character varying, 'REHABILITATION'::character varying, 'LIVING_CARE'::character varying, 'HEALTH_EDUCATION'::character varying, 'OTHER'::character varying])::text[])))", true)
+            Internal.createCheck(this, DSL.name("nursing_tasks_task_type_check"), "(((task_type)::text = ANY ((ARRAY['NURSING'::character varying, 'REHABILITATION'::character varying, 'LIVING_CARE'::character varying, 'HEALTH_EDUCATION'::character varying, 'OTHER'::character varying, 'MEDICATION'::character varying, 'TREATMENT'::character varying])::text[])))", true)
         );
     }
 

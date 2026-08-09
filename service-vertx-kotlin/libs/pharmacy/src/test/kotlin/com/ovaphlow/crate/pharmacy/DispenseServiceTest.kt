@@ -6,6 +6,7 @@ import io.vertx.core.Future
 import io.vertx.core.json.JsonObject
 import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.SqlConnection
+import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertInstanceOf
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
@@ -22,13 +23,14 @@ class DispenseServiceTest {
 
     private lateinit var pool: Pool
     private lateinit var reader: MedicalOrderReader
+    private lateinit var outboundPort: InventoryOutboundPort
     private lateinit var service: DispenseService
 
     @BeforeEach
     fun setUp() {
         pool = mockk()
         reader = mockk()
-        val outboundPort = mockk<InventoryOutboundPort>()
+        outboundPort = mockk()
         service = DispenseService(pool, reader, outboundPort)
     }
 
@@ -65,7 +67,7 @@ class DispenseServiceTest {
             .put("medical_order_id", "order-1")
             .put("warehouse", "西药库")
             .put("material_id", "mat-1")
-            .put("dispensed_quantity", 5)
+            .put("dispensed_quantity", "5")
 
     @Test
     fun `createFromMedicalOrder rejects missing medical order id`() {
@@ -92,7 +94,7 @@ class DispenseServiceTest {
                     .put("medical_order_id", "order-1")
                     .put("warehouse", "西药库")
                     .put("material_id", "mat-1")
-                    .put("dispensed_quantity", 0),
+                    .put("dispensed_quantity", "0"),
             ),
         )
         assertTrue(error.message!!.contains("dispensed_quantity"))
@@ -106,7 +108,7 @@ class DispenseServiceTest {
                     .put("medical_order_id", "order-1")
                     .put("warehouse", "西药库")
                     .put("material_id", "mat-1")
-                    .put("dispensed_quantity", 5)
+                    .put("dispensed_quantity", "5")
                     .put("unit", "PACKAGE"),
             ),
         )
@@ -170,5 +172,63 @@ class DispenseServiceTest {
         val error = failureOf(service.createFromMedicalOrder(dispenseBody()))
         assertInstanceOf(ConflictException::class.java, error)
         assertTrue(error.message!!.contains("nurse-checked"), "got: ${error.message}")
+    }
+
+    @Test
+    fun `createFromMedicalOrder 传出的发药数量为精确十进制文本构造`() {
+        val connection = mockk<SqlConnection>()
+        val pq = mockk<io.vertx.sqlclient.PreparedQuery<io.vertx.sqlclient.RowSet<io.vertx.sqlclient.Row>>>()
+        every { connection.preparedQuery(any<String>()) } returns pq
+        every { connection.preparedQuery(any<String>(), any()) } returns pq
+        every { pq.execute(any<io.vertx.sqlclient.Tuple>()) } returns
+            Future.succeededFuture(mockk<io.vertx.sqlclient.RowSet<io.vertx.sqlclient.Row>>(relaxed = true))
+        every { pq.execute() } returns
+            Future.succeededFuture(mockk<io.vertx.sqlclient.RowSet<io.vertx.sqlclient.Row>>(relaxed = true))
+        every { pool.withTransaction<JsonObject>(any()) } answers {
+            firstArg<JavaFunction<SqlConnection, Future<JsonObject>>>().apply(connection)
+        }
+        every { reader.lockMedicationOrder(connection, "order-1") } returns
+            Future.succeededFuture(unCheckedSnapshot(nurseCheckedBy = "nurse-1", nurseCheckedAt = OffsetDateTime.parse("2026-08-01T10:00:00+08:00")))
+        val outboundSlot = io.mockk.slot<OutboundCommand>()
+        every { outboundPort.validateOutbound(connection, capture(outboundSlot)) } returns Future.succeededFuture(null)
+
+        service.createFromMedicalOrder(
+            JsonObject()
+                .put("medical_order_id", "order-1")
+                .put("warehouse", "西药库")
+                .put("material_id", "mat-1")
+                .put("dispensed_quantity", "0.1"),
+        ).toCompletionStage().toCompletableFuture().get()
+
+        // 0.1 必须以十进制文本精确进入库存出库端口，绝无 double 二进制尾差
+        assertEquals(BigDecimal("0.1"), outboundSlot.captured.quantity, "实际: ${outboundSlot.captured.quantity}")
+    }
+
+    @Test
+    fun `createFromMedicalOrder 拒绝超过6位小数的发药数量`() {
+        val error = failureOf(
+            service.createFromMedicalOrder(
+                JsonObject()
+                    .put("medical_order_id", "order-1")
+                    .put("warehouse", "西药库")
+                    .put("material_id", "mat-1")
+                    .put("dispensed_quantity", "0.1234567"),
+            ),
+        )
+        assertTrue(error.message!!.contains("6 decimals"), "got: ${error.message}")
+    }
+
+    @Test
+    fun `createFromMedicalOrder rejects numeric JSON quantity`() {
+        val error = failureOf(
+            service.createFromMedicalOrder(
+                JsonObject()
+                    .put("medical_order_id", "order-1")
+                    .put("warehouse", "西药库")
+                    .put("material_id", "mat-1")
+                    .put("dispensed_quantity", 5),
+            ),
+        )
+        assertTrue(error.message!!.contains("decimal text"))
     }
 }

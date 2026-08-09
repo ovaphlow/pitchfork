@@ -174,9 +174,10 @@ export default function RequisitionsSection() {
     for (const stock of stocks) {
       const existing = byMaterial.get(stock.material_id);
       if (!existing) {
-        byMaterial.set(stock.material_id, { ...stock, available_quantity: 0 });
+        byMaterial.set(stock.material_id, { ...stock, available_quantity: "0" });
       }
-      byMaterial.get(stock.material_id)!.available_quantity += stock.available_quantity;
+      const aggregate = byMaterial.get(stock.material_id)!;
+      aggregate.available_quantity = String(Number(aggregate.available_quantity) + Number(stock.available_quantity));
     }
     return [...byMaterial.values()];
   }, [stocks]);
@@ -200,7 +201,7 @@ export default function RequisitionsSection() {
           warehouse: createForm.warehouse.trim(),
           destination_warehouse: createForm.destinationWarehouse.trim(),
           department: createForm.department.trim(),
-          items: createForm.rows.map((row) => ({ material_id: row.materialId, requested_quantity: Number(row.quantity) })),
+          items: createForm.rows.map((row) => ({ material_id: row.materialId, requested_quantity: row.quantity.trim() })),
         },
         idempotencyKey,
       );
@@ -233,7 +234,7 @@ export default function RequisitionsSection() {
     if (!approveTarget) return new Map<string, InventoryStockAvailability[]>();
     const byMaterial = new Map<string, InventoryStockAvailability[]>();
     for (const stock of stocks) {
-      if (stock.available_quantity <= 0) continue;
+      if (Number(stock.available_quantity) <= 0) continue;
       const list = byMaterial.get(stock.material_id) ?? [];
       list.push(stock);
       byMaterial.set(stock.material_id, list);
@@ -243,13 +244,13 @@ export default function RequisitionsSection() {
 
   const handleApprove = async () => {
     if (!approveTarget) return;
-    const items: Array<{ id: string; approved_quantity: number; lot_id: string | null }> = [];
+    const items: Array<{ id: string; approved_quantity: string; lot_id: string | null }> = [];
     for (const row of approveRows) {
       const quantity = Number(row.approvedQuantity);
       if (Number.isNaN(quantity) || quantity < 0) {
         return setApproveError("批准数量必须为不小于 0 的数字");
       }
-      items.push({ id: row.itemId, approved_quantity: quantity, lot_id: row.lotId || null });
+      items.push({ id: row.itemId, approved_quantity: row.approvedQuantity.trim(), lot_id: row.lotId || null });
     }
     setApproveSaving(true);
     setApproveError("");

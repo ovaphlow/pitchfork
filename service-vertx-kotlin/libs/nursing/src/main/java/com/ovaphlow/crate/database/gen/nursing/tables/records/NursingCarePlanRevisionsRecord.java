@@ -63,28 +63,32 @@ public class NursingCarePlanRevisionsRecord extends UpdatableRecordImpl<NursingC
     }
 
     /**
-     * Setter for <code>nursing.nursing_care_plan_revisions.assessment_id</code>.
+     * Setter for
+     * <code>nursing.nursing_care_plan_revisions.assessment_id</code>.
      */
     public void setAssessmentId(String value) {
         set(3, value);
     }
 
     /**
-     * Getter for <code>nursing.nursing_care_plan_revisions.assessment_id</code>.
+     * Getter for
+     * <code>nursing.nursing_care_plan_revisions.assessment_id</code>.
      */
     public String getAssessmentId() {
         return (String) get(3);
     }
 
     /**
-     * Setter for <code>nursing.nursing_care_plan_revisions.previous_plan_id</code>.
+     * Setter for
+     * <code>nursing.nursing_care_plan_revisions.previous_plan_id</code>.
      */
     public void setPreviousPlanId(String value) {
         set(4, value);
     }
 
     /**
-     * Getter for <code>nursing.nursing_care_plan_revisions.previous_plan_id</code>.
+     * Getter for
+     * <code>nursing.nursing_care_plan_revisions.previous_plan_id</code>.
      */
     public String getPreviousPlanId() {
         return (String) get(4);

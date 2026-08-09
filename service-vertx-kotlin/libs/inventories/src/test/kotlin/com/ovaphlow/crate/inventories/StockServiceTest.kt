@@ -112,6 +112,13 @@ class StockServiceTest {
         validateUnitCost(BigDecimal("0.12345678"))
     }
 
+    @Test
+    fun `request decimal accepts text and rejects JSON numbers`() {
+        assertEquals(BigDecimal("99999999999999.123456"), requestDecimalText("99999999999999.123456"))
+        assertNull(requestDecimalText(0.1))
+        assertNull(requestDecimalText(BigDecimal("0.1")))
+    }
+
     // ========================================================================
     //  availableStockToJson：单一基础数量口径，无包装投影
     // ========================================================================
@@ -136,11 +143,11 @@ class StockServiceTest {
 
         val json = StockService.availableStockToJson(mockRow)
         assertEquals("stock-1", json.getString("id"))
-        assertEquals(48.0, json.getDouble("quantity"), 0.001)
-        assertEquals(5.0, json.getDouble("locked_quantity"), 0.001)
-        assertEquals(43.0, json.getDouble("available_quantity"), 0.001)
+        assertEquals("48", json.getString("quantity"))
+        assertEquals("5", json.getString("locked_quantity"))
+        assertEquals("43", json.getString("available_quantity"))
         assertEquals("片", json.getString("unit"))
-        assertEquals(5.0, json.getDouble("unit_cost"), 0.001)
+        assertEquals("5.00000000", json.getString("unit_cost"))
         assertNull(json.getValue("package_unit"))
         assertNull(json.getValue("base_quantity"))
         assertNull(json.getValue("split_ratio"))
@@ -165,8 +172,30 @@ class StockServiceTest {
         }
 
         val json = StockService.availableStockToJson(mockRow)
-        assertEquals(0.0, json.getDouble("quantity"), 0.001)
-        assertEquals(0.0, json.getDouble("unit_cost"), 0.001)
+        assertEquals("0", json.getString("quantity"))
+        assertEquals("0", json.getString("unit_cost"))
+    }
+
+    @Test
+    fun `availableStockToJson preserves full NUMERIC precision as decimal text`() {
+        val quantity = BigDecimal("99999999999999.123456")
+        val mockRow = mockk<Row>(relaxed = true) {
+            every { getValue("id") } returns "stock-precision"
+            every { getValue("warehouse") } returns "一号护理站"
+            every { getValue("material_id") } returns "mat-precision"
+            every { getValue("material_code") } returns "NC-999"
+            every { getValue("material_name") } returns "精度测试物资"
+            every { getValue("material_category") } returns "耗材"
+            every { getValue("unit") } returns "mL"
+            every { getValue("quantity") } returns quantity
+            every { getValue("locked_quantity") } returns BigDecimal.ZERO
+            every { getValue("total_cost") } returns BigDecimal.ZERO
+            every { getValue("lot_id") } returns null
+            every { getValue("batch_no") } returns null
+            every { getValue("expiry_date") } returns null
+        }
+
+        assertEquals(quantity.toPlainString(), StockService.availableStockToJson(mockRow).getString("quantity"))
     }
 
     // ========================================================================
@@ -188,9 +217,9 @@ class StockServiceTest {
         }
 
         val json = StockService.detailToJson(mockRow)
-        assertEquals(5.0, json.getDouble("quantity"), 0.001)
+        assertEquals("5", json.getString("quantity"))
         assertEquals("片", json.getString("unit"))
-        assertEquals(0.85, json.getDouble("unit_cost"), 0.001)
+        assertEquals("0.85", json.getString("unit_cost"))
         assertNull(json.getValue("split_quantity"))
         assertNull(json.getValue("unit_spec_id"))
         assertNull(json.getValue("base_quantity"))
@@ -230,6 +259,87 @@ class StockServiceTest {
     }
 
     // ========================================================================
+    //  批次校验（validateOutbound 批次分支，事务前失败）
+    // ========================================================================
+
+    @Test
+    fun `validateOutbound rejects missing lot for batch controlled material`() {
+        val conn = mockk<io.vertx.sqlclient.SqlConnection>()
+        // 第 1 次查询：loadStock → 存在一行无批次库存；第 2 次查询：loadMaterial → 批次控制物资
+        mockClientQueries(
+            conn,
+            stockRowSet(lotId = null, quantity = BigDecimal.TEN, locked = BigDecimal.ZERO),
+            materialRowSet(batchControl = true),
+        )
+
+        val error = failureOf(
+            service.validateOutbound(
+                conn,
+                StockService.OutboundCommand("西药库", "mat-1", null, BigDecimal.ONE, null),
+            ),
+        )
+        assertInstanceOf(ConflictException::class.java, error)
+        assertTrue(error.message!!.contains("requires a lot"), "实际: ${error.message}")
+    }
+
+    @Test
+    fun `validateOutbound rejects lot for non batch controlled material`() {
+        val conn = mockk<io.vertx.sqlclient.SqlConnection>()
+        mockClientQueries(
+            conn,
+            stockRowSet(lotId = "lot-1", quantity = BigDecimal.TEN, locked = BigDecimal.ZERO),
+            materialRowSet(batchControl = false),
+        )
+
+        val error = failureOf(
+            service.validateOutbound(
+                conn,
+                StockService.OutboundCommand("西药库", "mat-1", "lot-1", BigDecimal.ONE, null),
+            ),
+        )
+        assertInstanceOf(ConflictException::class.java, error)
+        assertTrue(error.message!!.contains("does not use batch control"), "实际: ${error.message}")
+    }
+
+    @Test
+    fun `validateOutbound accepts lot for batch controlled material`() {
+        val conn = mockk<io.vertx.sqlclient.SqlConnection>()
+        // 批次物资 + 批次库存：批次校验通过，进入第 3 次查询（lot 归属/效期）
+        mockClientQueries(
+            conn,
+            stockRowSet(lotId = "lot-1", quantity = BigDecimal.TEN, locked = BigDecimal.ZERO),
+            materialRowSet(batchControl = true),
+            lotRowSet(materialId = "mat-1", expired = false),
+        )
+
+        val result = service.validateOutbound(
+            conn,
+            StockService.OutboundCommand("西药库", "mat-1", "lot-1", BigDecimal.ONE, null),
+        ).toCompletionStage().toCompletableFuture().get()
+        assertNull(result)
+    }
+
+    @Test
+    fun `validateOutbound rejects expired lot`() {
+        val conn = mockk<io.vertx.sqlclient.SqlConnection>()
+        mockClientQueries(
+            conn,
+            stockRowSet(lotId = "lot-1", quantity = BigDecimal.TEN, locked = BigDecimal.ZERO),
+            materialRowSet(batchControl = true),
+            lotRowSet(materialId = "mat-1", expired = true),
+        )
+
+        val error = failureOf(
+            service.validateOutbound(
+                conn,
+                StockService.OutboundCommand("西药库", "mat-1", "lot-1", BigDecimal.ONE, null),
+            ),
+        )
+        assertInstanceOf(ConflictException::class.java, error)
+        assertTrue(error.message!!.contains("expired"), "实际: ${error.message}")
+    }
+
+    // ========================================================================
     //  辅助
     // ========================================================================
 
@@ -239,6 +349,69 @@ class StockServiceTest {
         quantity: BigDecimal,
         unitCost: BigDecimal = BigDecimal.TEN,
     ) = StockService.InboundItem(materialId, lotId, quantity, unitCost)
+
+    /** 顺序 mock 客户端查询：validateOutbound 依次执行 loadStock → loadMaterial → lot 查询。 */
+    private fun mockClientQueries(client: io.vertx.sqlclient.SqlClient, vararg rowSets: io.vertx.sqlclient.RowSet<io.vertx.sqlclient.Row>) {
+        val pq = mockk<io.vertx.sqlclient.PreparedQuery<io.vertx.sqlclient.RowSet<io.vertx.sqlclient.Row>>>()
+        every { client.preparedQuery(any<String>()) } returns pq
+        every { client.preparedQuery(any<String>(), any()) } returns pq
+        val queue = ArrayDeque(rowSets.toList())
+        every { pq.execute(any<io.vertx.sqlclient.Tuple>()) } answers {
+            if (queue.isEmpty()) throw AssertionError("unexpected extra database query")
+            io.vertx.core.Future.succeededFuture(queue.removeFirst())
+        }
+        every { pq.execute() } returns io.vertx.core.Future.succeededFuture(mockk(relaxed = true))
+    }
+
+    /** loadStock 行：getValue(0..4) 为 id/lot_id/quantity/locked_quantity/total_cost。 */
+    private fun stockRowSet(lotId: String?, quantity: BigDecimal, locked: BigDecimal): io.vertx.sqlclient.RowSet<io.vertx.sqlclient.Row> {
+        val row = mockk<io.vertx.sqlclient.Row>(relaxed = true) {
+            every { getValue(0) } returns "stock-1"
+            every { getValue(1) } returns lotId
+            every { getValue(2) } returns quantity
+            every { getValue(3) } returns locked
+            every { getValue(4) } returns BigDecimal.TEN
+        }
+        return mockk<io.vertx.sqlclient.RowSet<io.vertx.sqlclient.Row>>(relaxed = true) {
+            every { size() } returns 1
+            every { iterator() } returns iteratorOf(row)
+        }
+    }
+
+    /** loadMaterial 行：getValue(0..3) 为 status/base_unit/quantity_scale/batch_control。 */
+    private fun materialRowSet(batchControl: Boolean): io.vertx.sqlclient.RowSet<io.vertx.sqlclient.Row> {
+        val row = mockk<io.vertx.sqlclient.Row>(relaxed = true) {
+            every { getValue(0) } returns "ACTIVE"
+            every { getValue(1) } returns "片"
+            every { getValue(2) } returns 0
+            every { getValue(3) } returns batchControl
+        }
+        return mockk<io.vertx.sqlclient.RowSet<io.vertx.sqlclient.Row>>(relaxed = true) {
+            every { size() } returns 1
+            every { iterator() } returns iteratorOf(row)
+        }
+    }
+
+    /** lot 行：getValue(0)=material_id、getValue(1)=expiry_date。 */
+    private fun lotRowSet(materialId: String, expired: Boolean): io.vertx.sqlclient.RowSet<io.vertx.sqlclient.Row> {
+        val expiry = if (expired) java.time.LocalDate.now().minusDays(1) else java.time.LocalDate.now().plusDays(30)
+        val row = mockk<io.vertx.sqlclient.Row>(relaxed = true) {
+            every { getValue(0) } returns materialId
+            every { getValue(1) } returns expiry
+        }
+        return mockk<io.vertx.sqlclient.RowSet<io.vertx.sqlclient.Row>>(relaxed = true) {
+            every { size() } returns 1
+            every { iterator() } returns iteratorOf(row)
+        }
+    }
+
+    private fun iteratorOf(vararg rows: io.vertx.sqlclient.Row): io.vertx.sqlclient.RowIterator<io.vertx.sqlclient.Row> {
+        val delegate = rows.iterator()
+        return mockk<io.vertx.sqlclient.RowIterator<io.vertx.sqlclient.Row>> {
+            every { hasNext() } answers { delegate.hasNext() }
+            every { next() } answers { delegate.next() }
+        }
+    }
 
     private fun failureOf(future: io.vertx.core.Future<*>): Throwable {
         val failures = mutableListOf<Throwable>()

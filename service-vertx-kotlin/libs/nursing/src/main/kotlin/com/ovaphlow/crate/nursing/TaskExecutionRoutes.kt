@@ -288,9 +288,9 @@ object TaskExecutionRoutes {
                         NursingRoutes.respond(ctx, 400, "invalid consumption at index $i: unsupported field $legacyField")
                         return@handler
                     }
-                    val qty = item.getValue("quantity")?.toString()?.toBigDecimalOrNull()
+                    val qty = (item.getValue("quantity") as? String)?.toBigDecimalOrNull()
                     if (qty == null || qty <= BigDecimal.ZERO) {
-                        NursingRoutes.respond(ctx, 400, "invalid consumption at index $i: quantity must be > 0")
+                        NursingRoutes.respond(ctx, 400, "invalid consumption at index $i: quantity must be decimal text > 0")
                         return@handler
                     }
 

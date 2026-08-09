@@ -7,6 +7,7 @@ package com.ovaphlow.crate.database.gen.nursing.tables;
 import com.ovaphlow.crate.database.gen.nursing.Indexes;
 import com.ovaphlow.crate.database.gen.nursing.Keys;
 import com.ovaphlow.crate.database.gen.nursing.Nursing;
+import com.ovaphlow.crate.database.gen.nursing.tables.NursingCarePlanRevisions.NursingCarePlanRevisionsPath;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingPlanItems.NursingPlanItemsPath;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingServicePeriods.NursingServicePeriodsPath;
 import com.ovaphlow.crate.database.gen.nursing.tables.records.NursingPlansRecord;
@@ -217,6 +218,34 @@ public class NursingPlans extends TableImpl<NursingPlansRecord> {
             _nursingServicePeriods = new NursingServicePeriodsPath(this, Keys.NURSING_PLANS__NURSING_PLANS_PERIOD_ID_FKEY, null);
 
         return _nursingServicePeriods;
+    }
+
+    private transient NursingCarePlanRevisionsPath _nursingCarePlanRevisionsNewPlanIdFkey;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>nursing.nursing_care_plan_revisions</code> table, via the
+     * <code>nursing_care_plan_revisions_new_plan_id_fkey</code> key
+     */
+    public NursingCarePlanRevisionsPath nursingCarePlanRevisionsNewPlanIdFkey() {
+        if (_nursingCarePlanRevisionsNewPlanIdFkey == null)
+            _nursingCarePlanRevisionsNewPlanIdFkey = new NursingCarePlanRevisionsPath(this, null, Keys.NURSING_CARE_PLAN_REVISIONS__NURSING_CARE_PLAN_REVISIONS_NEW_PLAN_ID_FKEY.getInverseKey());
+
+        return _nursingCarePlanRevisionsNewPlanIdFkey;
+    }
+
+    private transient NursingCarePlanRevisionsPath _nursingCarePlanRevisionsPreviousPlanIdFkey;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>nursing.nursing_care_plan_revisions</code> table, via the
+     * <code>nursing_care_plan_revisions_previous_plan_id_fkey</code> key
+     */
+    public NursingCarePlanRevisionsPath nursingCarePlanRevisionsPreviousPlanIdFkey() {
+        if (_nursingCarePlanRevisionsPreviousPlanIdFkey == null)
+            _nursingCarePlanRevisionsPreviousPlanIdFkey = new NursingCarePlanRevisionsPath(this, null, Keys.NURSING_CARE_PLAN_REVISIONS__NURSING_CARE_PLAN_REVISIONS_PREVIOUS_PLAN_ID_FKEY.getInverseKey());
+
+        return _nursingCarePlanRevisionsPreviousPlanIdFkey;
     }
 
     private transient NursingPlanItemsPath _nursingPlanItems;

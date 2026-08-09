@@ -7,6 +7,7 @@ package com.ovaphlow.crate.database.gen.nursing.tables;
 import com.ovaphlow.crate.database.gen.nursing.Indexes;
 import com.ovaphlow.crate.database.gen.nursing.Keys;
 import com.ovaphlow.crate.database.gen.nursing.Nursing;
+import com.ovaphlow.crate.database.gen.nursing.tables.NursingCarePlanRevisions.NursingCarePlanRevisionsPath;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingServicePeriods.NursingServicePeriodsPath;
 import com.ovaphlow.crate.database.gen.nursing.tables.records.NursingAssessmentsRecord;
 
@@ -219,6 +220,19 @@ public class NursingAssessments extends TableImpl<NursingAssessmentsRecord> {
             _nursingServicePeriods = new NursingServicePeriodsPath(this, Keys.NURSING_ASSESSMENTS__NURSING_ASSESSMENTS_PERIOD_ID_FKEY, null);
 
         return _nursingServicePeriods;
+    }
+
+    private transient NursingCarePlanRevisionsPath _nursingCarePlanRevisions;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>nursing.nursing_care_plan_revisions</code> table
+     */
+    public NursingCarePlanRevisionsPath nursingCarePlanRevisions() {
+        if (_nursingCarePlanRevisions == null)
+            _nursingCarePlanRevisions = new NursingCarePlanRevisionsPath(this, null, Keys.NURSING_CARE_PLAN_REVISIONS__NURSING_CARE_PLAN_REVISIONS_ASSESSMENT_ID_FKEY.getInverseKey());
+
+        return _nursingCarePlanRevisions;
     }
 
     @Override

@@ -53,7 +53,7 @@ class ReturnServiceTest {
                     .put("dispense_item_id", "di-1")
                     .put("return_reason", "不良反应")
                     .put("operator", "user-1")
-                    .put("quantity", 0)
+                    .put("quantity", "0")
                     .put("restockable", true),
             ),
         )
@@ -69,15 +69,47 @@ class ReturnServiceTest {
                     .put("dispense_item_id", "di-1")
                     .put("return_reason", "不良反应")
                     .put("operator", "user-1")
-                    .put("quantity", 2),
+                    .put("quantity", "2"),
             ),
         )
         assertTrue(error.message!!.contains("restockable"))
     }
 
     @Test
+    fun `createFromDispense 拒绝超过6位小数的退药数量`() {
+        val error = failureOf(
+            service.createFromDispense(
+                JsonObject()
+                    .put("dispense_id", "d-1")
+                    .put("dispense_item_id", "di-1")
+                    .put("return_reason", "不良反应")
+                    .put("operator", "user-1")
+                    .put("quantity", "0.1234567")
+                    .put("restockable", true),
+            ),
+        )
+        assertTrue(error.message!!.contains("6 decimals"), "got: ${error.message}")
+    }
+
+    @Test
     fun `confirm requires operator`() {
         val error = failureOf(service.confirm("return-1", JsonObject()))
         assertTrue(error.message!!.contains("operator"))
+    }
+
+    @Test
+    fun `createFromDispense rejects numeric JSON quantity`() {
+        val error = failureOf(
+            service.createFromDispense(
+                JsonObject()
+                    .put("dispense_id", "d-1")
+                    .put("dispense_item_id", "di-1")
+                    .put("return_reason", "不良反应")
+                    .put("operator", "user-1")
+                    .put("quantity", 2)
+                    .put("restockable", true),
+            ),
+        )
+        assertTrue(error.message!!.contains("decimal text"))
     }
 }

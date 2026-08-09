@@ -51,7 +51,7 @@ class ReturnService(
             .put("status", row.getValue("status")?.toString())
             .put("operator", row.getValue("operator")?.toString())
             .put("metadata", row.getValue("metadata") as? JsonObject)
-            .put("total_quantity", (row.getValue("total_quantity") as? BigDecimal)?.toDouble())
+            .put("total_quantity", decimalApi(row.getValue("total_quantity") as? BigDecimal))
             .put("created_at", row.getValue("created_at")?.toString())
             .put("confirmed_at", row.getValue("confirmed_at")?.toString())
 
@@ -59,10 +59,10 @@ class ReturnService(
             .put("id", row.getValue("id")?.toString())
             .put("return_id", row.getValue("return_id")?.toString())
             .put("dispense_item_id", row.getValue("dispense_item_id")?.toString())
-            .put("quantity", (row.getValue("quantity") as? BigDecimal)?.toDouble())
+            .put("quantity", decimalApi(row.getValue("quantity") as? BigDecimal))
             .put("stock_operation_detail_id", row.getValue("stock_operation_detail_id")?.toString())
-            .put("unit_cost", (row.getValue("unit_cost") as? BigDecimal)?.toDouble())
-            .put("total_cost", (row.getValue("total_cost") as? BigDecimal)?.toDouble())
+            .put("unit_cost", decimalApi(row.getValue("unit_cost") as? BigDecimal))
+            .put("total_cost", decimalApi(row.getValue("total_cost") as? BigDecimal))
             .put("metadata", row.getValue("metadata") as? JsonObject)
     }
 
@@ -74,20 +74,26 @@ class ReturnService(
         val dispenseItemId = body.getString("dispense_item_id")?.trim().orEmpty()
         val returnReason = body.getString("return_reason")?.trim().orEmpty()
         val operator = body.getString("operator")?.trim().orEmpty()
-        val quantity = body.getDouble("quantity")
+        val quantity = requestDecimalText(body.getValue("quantity"))
         val restockable = body.getBoolean("restockable")
 
         if (dispenseId.isBlank()) return Future.failedFuture(IllegalArgumentException("dispense_id is required"))
         if (dispenseItemId.isBlank()) return Future.failedFuture(IllegalArgumentException("dispense_item_id is required"))
         if (returnReason.isBlank()) return Future.failedFuture(IllegalArgumentException("return_reason is required"))
         if (operator.isBlank()) return Future.failedFuture(IllegalArgumentException("operator is required"))
-        if (quantity == null || quantity <= 0) return Future.failedFuture(IllegalArgumentException("quantity must be positive"))
+        if (quantity == null) return Future.failedFuture(IllegalArgumentException("quantity must be decimal text"))
+        if (quantity <= BigDecimal.ZERO) return Future.failedFuture(IllegalArgumentException("quantity must be positive"))
+        try {
+            validateQuantityPrecision(quantity, "quantity")
+        } catch (error: IllegalArgumentException) {
+            return Future.failedFuture(error)
+        }
         if (restockable != true) return Future.failedFuture(IllegalArgumentException("restockable confirmation is required"))
 
         return pool.withTransaction<JsonObject> { connection ->
             loadDispenseSource(connection, dispenseId, dispenseItemId).compose { source ->
                 validateDispenseSource(source)
-                val requested = BigDecimal.valueOf(quantity)
+                val requested = quantity
                 if (requested > source.quantity) {
                     return@compose Future.failedFuture(ConflictException("return quantity exceeds dispensed quantity"))
                 }

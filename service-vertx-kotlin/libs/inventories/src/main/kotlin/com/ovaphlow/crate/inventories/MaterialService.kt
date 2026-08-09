@@ -66,7 +66,7 @@ class MaterialService(
             .set(t.SPEC, body.getString("spec"))
             .set(t.BASE_UNIT, baseUnit)
             .set(t.PACKAGE_UNIT, body.getString("package_unit"))
-            .set(t.PACKAGE_SIZE, body.getValue("package_size")?.let { jsonDecimal(it) })
+            .set(t.PACKAGE_SIZE, body.getValue("package_size")?.let { requestDecimalText(it) })
             .set(t.QUANTITY_SCALE, scale)
             .set(t.ENABLE_BATCH_CONTROL, body.getBoolean("enable_batch_control"))
             .set(t.COST_METHOD, body.getString("cost_method"))
@@ -86,7 +86,7 @@ class MaterialService(
                     .put("spec", body.getString("spec"))
                     .put("base_unit", baseUnit)
                     .put("package_unit", body.getString("package_unit"))
-                    .put("package_size", body.getValue("package_size")?.let { jsonDecimal(it) })
+                    .put("package_size", body.getValue("package_size")?.let { requestDecimalText(it)?.toPlainString() })
                     .put("quantity_scale", scale)
                     .put("enable_batch_control", body.getBoolean("enable_batch_control"))
                     .put("cost_method", body.getString("cost_method"))
@@ -212,7 +212,7 @@ class MaterialService(
             q = q.set(t.PACKAGE_UNIT, body.getString("package_unit"))
         }
         if (body.containsKey("package_size")) {
-            q = q.set(t.PACKAGE_SIZE, body.getValue("package_size")?.let { jsonDecimal(it) })
+            q = q.set(t.PACKAGE_SIZE, body.getValue("package_size")?.let { requestDecimalText(it) })
         }
         if (body.containsKey("quantity_scale")) {
             q = q.set(t.QUANTITY_SCALE, parseScale(body.getValue("quantity_scale")))
@@ -253,7 +253,8 @@ class MaterialService(
         if (unit.isNullOrBlank() || sizeRaw == null) {
             throw IllegalArgumentException("package_unit and package_size must be both set or both empty")
         }
-        val size = jsonDecimal(sizeRaw) ?: throw IllegalArgumentException("package_size must be a number")
+        val size = requestDecimalText(sizeRaw)
+            ?: throw IllegalArgumentException("package_size must be a decimal text")
         if (size <= BigDecimal.ZERO) throw IllegalArgumentException("package_size must be greater than 0")
     }
 
@@ -283,7 +284,7 @@ class MaterialService(
                 .put("spec", row.getValue("spec")?.toString())
                 .put("base_unit", row.getValue("base_unit")?.toString())
                 .put("package_unit", row.getValue("package_unit")?.toString())
-                .put("package_size", (row.getValue("package_size") as? Number)?.toDouble())
+                .put("package_size", jsonDecimal(row.getValue("package_size"))?.toPlainString())
                 .put("quantity_scale", (row.getValue("quantity_scale") as? Number)?.toInt())
                 .put("enable_batch_control", row.getValue("enable_batch_control") as? Boolean)
                 .put("cost_method", row.getValue("cost_method")?.toString())

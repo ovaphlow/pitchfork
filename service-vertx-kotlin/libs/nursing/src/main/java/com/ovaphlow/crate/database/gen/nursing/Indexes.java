@@ -6,8 +6,12 @@ package com.ovaphlow.crate.database.gen.nursing;
 
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingAssessments;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingCarePlanRevisions;
+import com.ovaphlow.crate.database.gen.nursing.tables.NursingIncidentActions;
+import com.ovaphlow.crate.database.gen.nursing.tables.NursingIncidents;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingPlans;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingServicePeriods;
+import com.ovaphlow.crate.database.gen.nursing.tables.NursingShiftHandoverItems;
+import com.ovaphlow.crate.database.gen.nursing.tables.NursingShiftHandovers;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingTaskExecutions;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingTasks;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingVisitSchedules;
@@ -30,12 +34,22 @@ public class Indexes {
 
     public static final Index IDX_ASSESS_ENCOUNTER = Internal.createIndex(DSL.name("idx_assess_encounter"), NursingAssessments.NURSING_ASSESSMENTS, new OrderField[] { NursingAssessments.NURSING_ASSESSMENTS.ENCOUNTER_ID }, false);
     public static final Index IDX_ASSESS_PERIOD = Internal.createIndex(DSL.name("idx_assess_period"), NursingAssessments.NURSING_ASSESSMENTS, new OrderField[] { NursingAssessments.NURSING_ASSESSMENTS.PERIOD_ID }, false);
-    public static final Index IDX_CARE_PLAN_REVISION_PERIOD = Internal.createIndex(DSL.name("idx_care_plan_revision_period"), NursingCarePlanRevisions.NURSING_CARE_PLAN_REVISIONS, new OrderField[] { NursingCarePlanRevisions.NURSING_CARE_PLAN_REVISIONS.PERIOD_ID }, false);
     public static final Index IDX_CARE_PLAN_REVISION_ASSESSMENT = Internal.createIndex(DSL.name("idx_care_plan_revision_assessment"), NursingCarePlanRevisions.NURSING_CARE_PLAN_REVISIONS, new OrderField[] { NursingCarePlanRevisions.NURSING_CARE_PLAN_REVISIONS.ASSESSMENT_ID }, false);
+    public static final Index IDX_CARE_PLAN_REVISION_PERIOD = Internal.createIndex(DSL.name("idx_care_plan_revision_period"), NursingCarePlanRevisions.NURSING_CARE_PLAN_REVISIONS, new OrderField[] { NursingCarePlanRevisions.NURSING_CARE_PLAN_REVISIONS.PERIOD_ID }, false);
     public static final Index IDX_CARE_PLAN_REVISION_PREVIOUS_PLAN = Internal.createIndex(DSL.name("idx_care_plan_revision_previous_plan"), NursingCarePlanRevisions.NURSING_CARE_PLAN_REVISIONS, new OrderField[] { NursingCarePlanRevisions.NURSING_CARE_PLAN_REVISIONS.PREVIOUS_PLAN_ID }, false);
+    public static final Index IDX_EXEC_PLANNED_TIME = Internal.createIndex(DSL.name("idx_exec_planned_time"), NursingTaskExecutions.NURSING_TASK_EXECUTIONS, new OrderField[] { NursingTaskExecutions.NURSING_TASK_EXECUTIONS.PLANNED_TIME }, false);
+    public static final Index IDX_EXEC_STATUS_PLANNED = Internal.createIndex(DSL.name("idx_exec_status_planned"), NursingTaskExecutions.NURSING_TASK_EXECUTIONS, new OrderField[] { NursingTaskExecutions.NURSING_TASK_EXECUTIONS.STATUS, NursingTaskExecutions.NURSING_TASK_EXECUTIONS.PLANNED_TIME }, false);
     public static final Index IDX_EXEC_TASK = Internal.createIndex(DSL.name("idx_exec_task"), NursingTaskExecutions.NURSING_TASK_EXECUTIONS, new OrderField[] { NursingTaskExecutions.NURSING_TASK_EXECUTIONS.TASK_ID }, false);
+    public static final Index IDX_EXEC_TASK_PLANNED = Internal.createIndex(DSL.name("idx_exec_task_planned"), NursingTaskExecutions.NURSING_TASK_EXECUTIONS, new OrderField[] { NursingTaskExecutions.NURSING_TASK_EXECUTIONS.TASK_ID, NursingTaskExecutions.NURSING_TASK_EXECUTIONS.PLANNED_TIME }, true);
+    public static final Index IDX_INCIDENT_ACTION_INCIDENT = Internal.createIndex(DSL.name("idx_incident_action_incident"), NursingIncidentActions.NURSING_INCIDENT_ACTIONS, new OrderField[] { NursingIncidentActions.NURSING_INCIDENT_ACTIONS.INCIDENT_ID, NursingIncidentActions.NURSING_INCIDENT_ACTIONS.CREATED_AT, NursingIncidentActions.NURSING_INCIDENT_ACTIONS.ID }, false);
+    public static final Index IDX_INCIDENT_ENCOUNTER_OCCURRED = Internal.createIndex(DSL.name("idx_incident_encounter_occurred"), NursingIncidents.NURSING_INCIDENTS, new OrderField[] { NursingIncidents.NURSING_INCIDENTS.ENCOUNTER_ID, NursingIncidents.NURSING_INCIDENTS.OCCURRED_AT.desc() }, false);
+    public static final Index IDX_INCIDENT_PERIOD_OCCURRED = Internal.createIndex(DSL.name("idx_incident_period_occurred"), NursingIncidents.NURSING_INCIDENTS, new OrderField[] { NursingIncidents.NURSING_INCIDENTS.PERIOD_ID, NursingIncidents.NURSING_INCIDENTS.OCCURRED_AT.desc() }, false);
+    public static final Index IDX_INCIDENT_PERIOD_STATUS_OPEN = Internal.createIndex(DSL.name("idx_incident_period_status_open"), NursingIncidents.NURSING_INCIDENTS, new OrderField[] { NursingIncidents.NURSING_INCIDENTS.PERIOD_ID, NursingIncidents.NURSING_INCIDENTS.STATUS }, false);
     public static final Index IDX_PERIOD_ENCOUNTER_STATUS = Internal.createIndex(DSL.name("idx_period_encounter_status"), NursingServicePeriods.NURSING_SERVICE_PERIODS, new OrderField[] { NursingServicePeriods.NURSING_SERVICE_PERIODS.ENCOUNTER_ID, NursingServicePeriods.NURSING_SERVICE_PERIODS.STATUS }, false);
     public static final Index IDX_PLAN_PERIOD = Internal.createIndex(DSL.name("idx_plan_period"), NursingPlans.NURSING_PLANS, new OrderField[] { NursingPlans.NURSING_PLANS.PERIOD_ID }, false);
+    public static final Index IDX_SHIFT_HANDOVER_ITEM_ENCOUNTER = Internal.createIndex(DSL.name("idx_shift_handover_item_encounter"), NursingShiftHandoverItems.NURSING_SHIFT_HANDOVER_ITEMS, new OrderField[] { NursingShiftHandoverItems.NURSING_SHIFT_HANDOVER_ITEMS.ENCOUNTER_ID, NursingShiftHandoverItems.NURSING_SHIFT_HANDOVER_ITEMS.HANDOVER_ID }, false);
+    public static final Index IDX_SHIFT_HANDOVER_ITEM_HANDOVER = Internal.createIndex(DSL.name("idx_shift_handover_item_handover"), NursingShiftHandoverItems.NURSING_SHIFT_HANDOVER_ITEMS, new OrderField[] { NursingShiftHandoverItems.NURSING_SHIFT_HANDOVER_ITEMS.HANDOVER_ID, NursingShiftHandoverItems.NURSING_SHIFT_HANDOVER_ITEMS.CREATED_AT, NursingShiftHandoverItems.NURSING_SHIFT_HANDOVER_ITEMS.ID }, false);
+    public static final Index IDX_SHIFT_HANDOVER_SCOPE_DATE = Internal.createIndex(DSL.name("idx_shift_handover_scope_date"), NursingShiftHandovers.NURSING_SHIFT_HANDOVERS, new OrderField[] { NursingShiftHandovers.NURSING_SHIFT_HANDOVERS.BUSINESS_DATE.desc(), NursingShiftHandovers.NURSING_SHIFT_HANDOVERS.SHIFT }, false);
     public static final Index IDX_TASK_PERIOD = Internal.createIndex(DSL.name("idx_task_period"), NursingTasks.NURSING_TASKS, new OrderField[] { NursingTasks.NURSING_TASKS.PERIOD_ID }, false);
     public static final Index IDX_VISIT_PERIOD = Internal.createIndex(DSL.name("idx_visit_period"), NursingVisitSchedules.NURSING_VISIT_SCHEDULES, new OrderField[] { NursingVisitSchedules.NURSING_VISIT_SCHEDULES.PERIOD_ID }, false);
     public static final Index UQ_NURSING_SERVICE_PERIODS_ENCOUNTER_ID = Internal.createIndex(DSL.name("uq_nursing_service_periods_encounter_id"), NursingServicePeriods.NURSING_SERVICE_PERIODS, new OrderField[] { NursingServicePeriods.NURSING_SERVICE_PERIODS.ENCOUNTER_ID }, true);

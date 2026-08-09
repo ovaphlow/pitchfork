@@ -3,6 +3,7 @@ package com.ovaphlow.crate.healthcare
 import com.ovaphlow.crate.common.Ulid
 import com.ovaphlow.crate.database.DatabaseConfig
 import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalRecords
+import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalRecords.MEDICAL_RECORDS
 import com.ovaphlow.crate.database.gen.healthcare.tables.Diagnoses.DIAGNOSES
 import com.ovaphlow.crate.database.gen.healthcare.tables.Encounters.ENCOUNTERS
 import com.ovaphlow.crate.database.gen.healthcare.tables.Patients.PATIENTS
@@ -10,11 +11,14 @@ import com.ovaphlow.crate.database.gen.healthcare.tables.ProgressNotes.PROGRESS_
 import com.ovaphlow.crate.database.gen.healthcare.tables.records.EncountersRecord
 import com.ovaphlow.crate.database.gen.healthcare.tables.records.MedicalRecordsRecord
 import com.ovaphlow.crate.database.gen.healthcare.tables.records.PatientsRecord
+import com.ovaphlow.crate.database.gen.nursing.tables.NursingServicePeriods.NURSING_SERVICE_PERIODS
 import com.ovaphlow.crate.nursing.CarePlanRevisionService
 import com.ovaphlow.crate.nursing.ConflictException
 import com.ovaphlow.crate.nursing.ElderlyDischargeHandoverSnapshotService
+import com.ovaphlow.crate.nursing.NursingIncidentService
 import com.ovaphlow.crate.nursing.PlanService
 import com.ovaphlow.crate.nursing.ServicePeriodService
+import com.ovaphlow.crate.nursing.ShiftHandoverService
 import com.ovaphlow.crate.nursing.TaskService
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
@@ -43,11 +47,18 @@ class HealthcareService(
     private val planService = PlanService(pool)
     private val medicalOrderService = MedicalOrderService(pool, taskService)
     private val carePlanRevisionService = CarePlanRevisionService(pool)
+    private val nursingIncidentService = NursingIncidentService(pool)
+    private val shiftHandoverService = ShiftHandoverService(
+        pool,
+        ensureCareUnitActive = { client, careUnit -> ensureCareUnitActiveForHandover(client, careUnit) },
+    )
     companion object {
         private val patientStatuses = setOf("ACTIVE", "INACTIVE", "DECEASED")
         private val encounterStatuses = setOf("ACTIVE", "DISCHARGED", "TRANSFERRED")
         private val diagnosisTypes = setOf("PRIMARY", "SECONDARY")
         private val businessZone = ZoneId.of("Asia/Shanghai")
+        /** 交班快照只收集开放照护周期下的活动养老入住。 */
+        private val HANDOVER_PERIOD_OPEN_STATUSES = setOf("ACTIVE", "SUSPENDED")
 
         private fun patientJson(row: Row): JsonObject =
             JsonObject()
@@ -1286,6 +1297,425 @@ class HealthcareService(
                 nursingRecordResponse(id, encounterId ?: "", periodId ?: "", "CORRECTION", correctionTitle.take(100), content, recordTime, recordDate, author, taskExecId, taskId, recordId, now)
             }
         }
+    }
+
+    // ========================================================================
+    //  017 院内护理异常事件
+    //  创建/追加处置/关闭走外层事务；列表与详情只读，绝不产生写副作用。
+    // ========================================================================
+
+    /** 上报异常事件：锁定 encounter 与精确 period，写入事件与首条审计事实。 */
+    fun createIncident(encounterId: String, body: JsonObject, userId: String): Future<JsonObject> {
+        val request = try {
+            validateIncidentCreateInput(body)
+        } catch (error: IllegalArgumentException) {
+            return Future.failedFuture(error)
+        }
+        return pool.withTransaction<JsonObject> { connection ->
+            lockEncounter(connection, encounterId).compose { encounter ->
+                if (encounter.getString("encounter_type") != "ELDERLY_CARE") {
+                    return@compose Future.failedFuture(IllegalArgumentException("encounter is not an elderly admission"))
+                }
+                if (encounter.getString("status") != "ACTIVE") {
+                    return@compose Future.failedFuture(ConflictException("encounter is not active"))
+                }
+                val patientId = requireNotNull(encounter.getString("patient_id"))
+                carePlanRevisionService.lockPeriodForEncounter(connection, encounterId, patientId).compose { period ->
+                    val periodStart = period.getString("start_date")?.let { runCatching { LocalDate.parse(it) }.getOrNull() }
+                    val occurredBusinessDate = NursingIncidentService.businessDateOf(request.occurredAt)
+                    if (periodStart != null && occurredBusinessDate.isBefore(periodStart)) {
+                        return@compose Future.failedFuture(
+                            IllegalArgumentException("occurred_at cannot be earlier than the care period start date")
+                        )
+                    }
+                    nursingIncidentService.createIncident(
+                        connection,
+                        NursingIncidentService.IncidentCreateInput(
+                            encounterId = encounterId,
+                            periodId = requireNotNull(period.getString("id")),
+                            periodStartDate = periodStart,
+                            incidentType = request.incidentType,
+                            severity = request.severity,
+                            occurredAt = request.occurredAt,
+                            description = request.description,
+                            reporter = userId,
+                            initialAction = request.initialAction,
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
+    /** 按精确 encounter 分页列出异常事件；status/date 过滤与分页参数均受控。 */
+    fun listIncidents(
+        encounterId: String,
+        status: String?,
+        dateFrom: String?,
+        dateTo: String?,
+        limit: Int,
+        offset: Int,
+    ): Future<JsonObject> {
+        status?.takeIf(String::isNotBlank)?.let {
+            if (it !in NursingIncidentService.VALID_STATUSES) {
+                return Future.failedFuture(IllegalArgumentException("invalid status, must be one of: ${NursingIncidentService.VALID_STATUSES}"))
+            }
+        }
+        val from = try {
+            dateFrom?.takeIf(String::isNotBlank)?.let { LocalDate.parse(it) }
+        } catch (_: RuntimeException) {
+            return Future.failedFuture(IllegalArgumentException("invalid date_from"))
+        }
+        val to = try {
+            dateTo?.takeIf(String::isNotBlank)?.let { LocalDate.parse(it) }
+        } catch (_: RuntimeException) {
+            return Future.failedFuture(IllegalArgumentException("invalid date_to"))
+        }
+        return getEncounter(encounterId).compose { encounter ->
+            if (encounter.getString("encounter_type") != "ELDERLY_CARE") {
+                return@compose Future.failedFuture(IllegalArgumentException("encounter is not an elderly admission"))
+            }
+            nursingIncidentService.listIncidents(encounterId, status, from, to, limit, offset)
+        }
+    }
+
+    /** 事件详情：主事实 + 全部追加审计事实（只读，按 encounter 精确隔离）。 */
+    fun getIncident(encounterId: String, id: String): Future<JsonObject> =
+        nursingIncidentService.getIncident(encounterId, id)
+
+    /** 追加处置/通知/观察；事件必须归属 [encounterId]，跨入住返回 404；
+     *  事件已关闭或周期终态返回 409。 */
+    fun addIncidentAction(encounterId: String, incidentId: String, body: JsonObject, userId: String): Future<JsonObject> {
+        val input = try {
+            validateIncidentActionInput(body)
+        } catch (error: IllegalArgumentException) {
+            return Future.failedFuture(error)
+        }
+        return pool.withTransaction<JsonObject> { connection ->
+            nursingIncidentService.appendAction(connection, encounterId, incidentId, input, userId)
+        }
+    }
+
+    /** 关闭事件：只接受关闭说明；事件必须归属 [encounterId]，跨入住返回 404；
+     *  重复关闭返回 409。 */
+    fun closeIncident(encounterId: String, incidentId: String, body: JsonObject, userId: String): Future<JsonObject> {
+        val closeNote = try {
+            rejectUnknownKeys(body, setOf("close_note"), "request")
+            val note = requiredText(body, "close_note")
+            if (note.length > 2000) throw IllegalArgumentException("close_note must not exceed 2000 characters")
+            note
+        } catch (error: IllegalArgumentException) {
+            return Future.failedFuture(error)
+        }
+        return pool.withTransaction<JsonObject> { connection ->
+            nursingIncidentService.closeIncident(connection, encounterId, incidentId, closeNote, userId)
+        }
+    }
+
+    // ========================================================================
+    //  017 班次交接
+    //  创建要求 Idempotency-Key；照护单元由服务端从锚定入住 department 推导。
+    // ========================================================================
+
+    /**
+     * 创建班次交接单：首次 201，同键同内容重试 200，其余冲突 409。
+     * 活动养老入住与护理记录快照由本服务在连接上收集（生成表类），
+     * Nursing 侧只补齐未完成执行与未关闭事件后冻结为交班事项。
+     */
+    fun createShiftHandover(body: JsonObject, userId: String, idempotencyKey: String?): Future<Pair<Boolean, JsonObject>> {
+        val request = try {
+            validateHandoverCreateInput(body, idempotencyKey)
+        } catch (error: IllegalArgumentException) {
+            return Future.failedFuture(error)
+        }
+        return pool.withTransaction<Pair<Boolean, JsonObject>> { connection ->
+            lockEncounter(connection, request.encounterId).compose { encounter ->
+                if (encounter.getString("encounter_type") != "ELDERLY_CARE") {
+                    return@compose Future.failedFuture(IllegalArgumentException("encounter is not an elderly admission"))
+                }
+                if (encounter.getString("status") != "ACTIVE") {
+                    return@compose Future.failedFuture(ConflictException("encounter is not active"))
+                }
+                val careUnit = encounter.getString("department")?.trim()?.takeIf(String::isNotBlank)
+                    ?: return@compose Future.failedFuture(
+                        ConflictException("care unit is not verifiable for this admission")
+                    )
+                collectHandoverSnapshot(connection, careUnit, request.businessDate).compose { snapshot ->
+                    if (snapshot.getJsonArray("admissions").isEmpty()) {
+                        return@compose Future.failedFuture(
+                            ConflictException("care unit has no active elderly admission; cannot create handover")
+                        )
+                    }
+                    shiftHandoverService.createHandover(
+                        connection,
+                        ShiftHandoverService.HandoverCreateInput(
+                            encounterId = request.encounterId,
+                            careUnit = careUnit,
+                            businessDate = request.businessDate,
+                            shift = request.shift,
+                            manualItems = request.manualItems,
+                            handoverBy = userId,
+                            idempotencyKey = request.idempotencyKey,
+                        ),
+                        snapshot,
+                    )
+                }
+            }
+        }
+    }
+
+    /** 按照护单元分页列出交接单；business_date/shift 过滤均为可选项。 */
+    fun listShiftHandovers(
+        careUnit: String?,
+        businessDate: String?,
+        shift: String?,
+        limit: Int,
+        offset: Int,
+    ): Future<JsonObject> {
+        if (careUnit.isNullOrBlank()) {
+            return Future.failedFuture(IllegalArgumentException("care_unit is required"))
+        }
+        shift?.takeIf(String::isNotBlank)?.let {
+            if (it !in ShiftHandoverService.VALID_SHIFTS) {
+                return Future.failedFuture(IllegalArgumentException("invalid shift, must be one of: ${ShiftHandoverService.VALID_SHIFTS}"))
+            }
+        }
+        val date = try {
+            businessDate?.takeIf(String::isNotBlank)?.let { LocalDate.parse(it) }
+        } catch (_: RuntimeException) {
+            return Future.failedFuture(IllegalArgumentException("invalid business_date"))
+        }
+        return shiftHandoverService.listHandovers(careUnit, date, shift, limit, offset)
+    }
+
+    /** 交接单详情：头 + 全部冻结/补充事项（只读）。 */
+    fun getShiftHandover(id: String): Future<JsonObject> = shiftHandoverService.getHandover(id)
+
+    /** 接班：接班人来自认证主体，只允许一次；请求体必须为空对象。 */
+    fun receiveShiftHandover(id: String, body: JsonObject, userId: String): Future<JsonObject> {
+        if (!body.isEmpty) {
+            return Future.failedFuture(IllegalArgumentException("receive request must be an empty object"))
+        }
+        return pool.withTransaction<JsonObject> { connection ->
+            shiftHandoverService.receiveHandover(connection, id, userId)
+        }
+    }
+
+    /** 补充事项：只接受正文；来源关联与创建人由服务端写入。 */
+    fun appendShiftHandoverItem(id: String, body: JsonObject, userId: String): Future<JsonObject> {
+        val content = try {
+            rejectUnknownKeys(body, setOf("content"), "request")
+            val text = requiredText(body, "content")
+            if (text.length > 2000) throw IllegalArgumentException("content must not exceed 2000 characters")
+            text
+        } catch (error: IllegalArgumentException) {
+            return Future.failedFuture(error)
+        }
+        return pool.withTransaction<JsonObject> { connection ->
+            shiftHandoverService.appendItem(connection, id, content, userId)
+        }
+    }
+
+    // ——— 017 交班快照收集（Healthcare 侧，生成表类；Nursing 不直接读 Healthcare 表） ———
+
+    /**
+     * 在调用方连接上收集交班只读快照：该照护单元下活动养老入住（含精确
+     * 开放照护周期）与本业务日新增护理记录。返回
+     * `{ "admissions": [...], "records": [...] }`，供 [ShiftHandoverService]
+     * 补齐 Nursing 侧执行/事件后冻结为交班事项。绝不产生任何写副作用。
+     */
+    private fun collectHandoverSnapshot(client: SqlClient, careUnit: String, businessDate: LocalDate): Future<JsonObject> {
+        val encounterQuery = ctx.select(
+            ENCOUNTERS.ID.`as`("encounter_id"),
+            ENCOUNTERS.PATIENT_ID,
+            ENCOUNTERS.ENCOUNTER_NO,
+            ENCOUNTERS.WARD,
+            PATIENTS.NAME.`as`("patient_name"),
+        )
+            .from(ENCOUNTERS)
+            .join(PATIENTS).on(ENCOUNTERS.PATIENT_ID.eq(PATIENTS.ID))
+            .where(
+                ENCOUNTERS.ENCOUNTER_TYPE.eq("ELDERLY_CARE")
+                    .and(ENCOUNTERS.STATUS.eq("ACTIVE"))
+                    .and(ENCOUNTERS.DEPARTMENT.eq(careUnit)),
+            )
+            .orderBy(ENCOUNTERS.ADMIT_DATE.asc(), ENCOUNTERS.ID.asc())
+
+        return execute(client, encounterQuery).compose { rows ->
+            val admissions = rows.map { row ->
+                JsonObject()
+                    .put("encounter_id", row.getString("encounter_id"))
+                    .put("patient_id", row.getString("patient_id"))
+                    .put("patient_name", row.getString("patient_name"))
+                    .put("encounter_no", row.getString("encounter_no"))
+                    .put("ward", row.getString("ward"))
+            }
+            if (admissions.isEmpty()) {
+                return@compose Future.succeededFuture(
+                    JsonObject().put("admissions", JsonArray()).put("records", JsonArray())
+                )
+            }
+            val encounterIds = admissions.mapNotNull { it.getString("encounter_id") }
+            val periodQuery = ctx.selectFrom(NURSING_SERVICE_PERIODS)
+                .where(
+                    NURSING_SERVICE_PERIODS.ENCOUNTER_ID.`in`(encounterIds)
+                        .and(NURSING_SERVICE_PERIODS.STATUS.`in`(HANDOVER_PERIOD_OPEN_STATUSES)),
+                )
+            execute(client, periodQuery).compose { periodRows ->
+                val periodByEncounter = periodRows.associateBy { it.getString("encounter_id") }
+                val withPeriods = admissions.mapNotNull { enc ->
+                    val period = periodByEncounter[enc.getString("encounter_id")] ?: return@mapNotNull null
+                    enc.copy()
+                        .put("period_id", period.getString("id"))
+                        .put("period_start_date", period.getLocalDate("start_date")?.toString())
+                }
+                val periodIds = withPeriods.mapNotNull { it.getString("period_id") }
+                if (periodIds.isEmpty()) {
+                    return@compose Future.succeededFuture(
+                        JsonObject().put("admissions", JsonArray(withPeriods)).put("records", JsonArray())
+                    )
+                }
+                val periodIdField = DSL.field("{0} ->> {1}", String::class.java, MEDICAL_RECORDS.METADATA, DSL.inline("period_id"))
+                val recordsQuery = ctx.select(
+                    MEDICAL_RECORDS.ID,
+                    MEDICAL_RECORDS.TITLE,
+                    MEDICAL_RECORDS.CONTENT,
+                    MEDICAL_RECORDS.RECORD_DATE,
+                    MEDICAL_RECORDS.METADATA,
+                )
+                    .from(MEDICAL_RECORDS)
+                    .where(
+                        MEDICAL_RECORDS.RECORD_TYPE.eq("NURSING_RECORD")
+                            .and(MEDICAL_RECORDS.RECORD_DATE.eq(businessDate))
+                            .and(periodIdField.`in`(periodIds)),
+                    )
+                    .orderBy(MEDICAL_RECORDS.CREATED_AT.asc(), MEDICAL_RECORDS.ID.asc())
+                execute(client, recordsQuery).map { recordRows ->
+                    val records = recordRows.map { row ->
+                        val meta = row.getValue("metadata") as? JsonObject ?: JsonObject()
+                        JsonObject()
+                            .put("id", row.getString("id"))
+                            .put("period_id", meta.getString("period_id"))
+                            .put("title", row.getString("title"))
+                            .put("content", row.getString("content"))
+                            .put("record_date", row.getLocalDate("record_date")?.toString())
+                    }
+                    JsonObject().put("admissions", JsonArray(withPeriods)).put("records", JsonArray(records))
+                }
+            }
+        }
+    }
+
+    /** 校验照护单元仍存在活动养老入住（读 healthcare.encounters，生成表类）。
+     *  由 [ShiftHandoverService] 以连接绑定端口调用；无活动入住时交接单只读。 */
+    private fun ensureCareUnitActiveForHandover(client: SqlClient, careUnit: String): Future<Void> {
+        val query = ctx.selectOne()
+            .from(ENCOUNTERS)
+            .where(
+                ENCOUNTERS.ENCOUNTER_TYPE.eq("ELDERLY_CARE")
+                    .and(ENCOUNTERS.STATUS.eq("ACTIVE"))
+                    .and(ENCOUNTERS.DEPARTMENT.eq(careUnit)),
+            )
+        return execute(client, query).compose { rows ->
+            if (rows.size() == 0) {
+                return@compose Future.failedFuture(
+                    ConflictException("care unit has no active elderly admission; handover is read-only")
+                )
+            }
+            Future.succeededFuture()
+        }
+    }
+
+    // ——— 017 私有校验 ———
+
+    private data class IncidentRequest(
+        val incidentType: String,
+        val severity: String,
+        val occurredAt: OffsetDateTime,
+        val description: String,
+        val initialAction: NursingIncidentService.ActionInput?,
+    )
+
+    private data class HandoverRequest(
+        val encounterId: String,
+        val businessDate: LocalDate,
+        val shift: String,
+        val manualItems: List<String>,
+        val idempotencyKey: String,
+    )
+
+    private fun validateIncidentCreateInput(body: JsonObject): IncidentRequest {
+        rejectUnknownKeys(body, setOf("incident_type", "severity", "occurred_at", "description", "initial_action"), "request")
+        val incidentType = requiredText(body, "incident_type")
+        if (incidentType !in NursingIncidentService.VALID_INCIDENT_TYPES) {
+            throw IllegalArgumentException("invalid incident_type, must be one of: ${NursingIncidentService.VALID_INCIDENT_TYPES}")
+        }
+        val severity = requiredText(body, "severity")
+        if (severity !in NursingIncidentService.VALID_SEVERITIES) {
+            throw IllegalArgumentException("invalid severity, must be one of: ${NursingIncidentService.VALID_SEVERITIES}")
+        }
+        val occurredAt = offsetDateTime(requiredText(body, "occurred_at"), "occurred_at")
+        if (occurredAt.isAfter(OffsetDateTime.now())) {
+            throw IllegalArgumentException("occurred_at cannot be in the future")
+        }
+        val description = requiredText(body, "description")
+        if (description.length > 2000) {
+            throw IllegalArgumentException("description must not exceed 2000 characters")
+        }
+        val initialAction = body.getValue("initial_action")?.let { value ->
+            if (value !is JsonObject) throw IllegalArgumentException("initial_action must be a JSON object")
+            validateIncidentActionInput(value)
+        }
+        return IncidentRequest(incidentType, severity, occurredAt, description, initialAction)
+    }
+
+    private fun validateIncidentActionInput(body: JsonObject): NursingIncidentService.ActionInput {
+        rejectUnknownKeys(body, setOf("action_type", "body", "notified_party", "notification_result"), "request")
+        val actionType = requiredText(body, "action_type")
+        if (actionType !in NursingIncidentService.VALID_ACTION_TYPES) {
+            throw IllegalArgumentException("invalid action_type, must be one of: ${NursingIncidentService.VALID_ACTION_TYPES}")
+        }
+        val actionBody = requiredText(body, "body")
+        if (actionBody.length > 2000) {
+            throw IllegalArgumentException("body must not exceed 2000 characters")
+        }
+        val notifiedParty = optionalText(body, "notified_party")?.let {
+            if (it.length > 200) throw IllegalArgumentException("notified_party must not exceed 200 characters")
+            it
+        }
+        val notificationResult = optionalText(body, "notification_result")?.let {
+            if (it.length > 500) throw IllegalArgumentException("notification_result must not exceed 500 characters")
+            it
+        }
+        return NursingIncidentService.ActionInput(actionType, actionBody, notifiedParty, notificationResult)
+    }
+
+    private fun validateHandoverCreateInput(body: JsonObject, idempotencyKey: String?): HandoverRequest {
+        if (idempotencyKey.isNullOrBlank()) {
+            throw IllegalArgumentException("Idempotency-Key header is required")
+        }
+        rejectUnknownKeys(body, setOf("encounter_id", "business_date", "shift", "manual_items"), "request")
+        val encounterId = requiredText(body, "encounter_id")
+        val businessDate = localDate(requiredText(body, "business_date"), "business_date")
+        if (businessDate.isAfter(businessDate(OffsetDateTime.now()))) {
+            throw IllegalArgumentException("business_date cannot be in the future")
+        }
+        val shift = requiredText(body, "shift")
+        if (shift !in ShiftHandoverService.VALID_SHIFTS) {
+            throw IllegalArgumentException("invalid shift, must be one of: ${ShiftHandoverService.VALID_SHIFTS}")
+        }
+        val manualItems = body.getValue("manual_items")?.let { value ->
+            if (value !is JsonArray) throw IllegalArgumentException("manual_items must be an array of strings")
+            value.map { item ->
+                if (item !is String) throw IllegalArgumentException("manual_items must be an array of strings")
+                val trimmed = item.trim()
+                if (trimmed.isBlank()) throw IllegalArgumentException("manual_items must not contain blank strings")
+                if (trimmed.length > 500) throw IllegalArgumentException("manual_items must not exceed 500 characters per item")
+                trimmed
+            }
+        } ?: emptyList()
+        if (manualItems.size > 50) throw IllegalArgumentException("manual_items must not exceed 50 items")
+        return HandoverRequest(encounterId, businessDate, shift, manualItems, idempotencyKey.trim())
     }
 
     // ——— 病程记录与诊断私有辅助方法 ———

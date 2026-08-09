@@ -14,7 +14,7 @@
                     <inputSchema>nursing</inputSchema>
                 </schema>
             </schemata>
-            <includes>nursing_service_periods|nursing_assessments|nursing_plans|nursing_plan_items|nursing_tasks|nursing_task_executions|nursing_visit_schedules|nursing_care_plan_revisions</includes>
+            <includes>nursing_service_periods|nursing_assessments|nursing_plans|nursing_plan_items|nursing_tasks|nursing_task_executions|nursing_visit_schedules|nursing_care_plan_revisions|nursing_incidents|nursing_incident_actions|nursing_shift_handovers|nursing_shift_handover_items</includes>
         </database>
         <target>
             <packageName>com.ovaphlow.crate.database.gen.nursing</packageName>

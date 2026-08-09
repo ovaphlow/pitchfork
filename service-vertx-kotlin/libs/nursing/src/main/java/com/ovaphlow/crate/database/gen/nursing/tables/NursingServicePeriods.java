@@ -4,9 +4,12 @@
 package com.ovaphlow.crate.database.gen.nursing.tables;
 
 
+import com.ovaphlow.crate.database.gen.nursing.Indexes;
 import com.ovaphlow.crate.database.gen.nursing.Keys;
 import com.ovaphlow.crate.database.gen.nursing.Nursing;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingAssessments.NursingAssessmentsPath;
+import com.ovaphlow.crate.database.gen.nursing.tables.NursingCarePlanRevisions.NursingCarePlanRevisionsPath;
+import com.ovaphlow.crate.database.gen.nursing.tables.NursingIncidents.NursingIncidentsPath;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingPlans.NursingPlansPath;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingTasks.NursingTasksPath;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingVisitSchedules.NursingVisitSchedulesPath;
@@ -22,6 +25,7 @@ import org.jooq.Check;
 import org.jooq.Condition;
 import org.jooq.Field;
 import org.jooq.ForeignKey;
+import org.jooq.Index;
 import org.jooq.InverseForeignKey;
 import org.jooq.JSONB;
 import org.jooq.Name;
@@ -95,11 +99,6 @@ public class NursingServicePeriods extends TableImpl<NursingServicePeriodsRecord
     public final TableField<NursingServicePeriodsRecord, String> COORDINATOR = createField(DSL.name("coordinator"), SQLDataType.VARCHAR, this, "");
 
     /**
-     * The column <code>nursing.nursing_service_periods.encounter_id</code>.
-     */
-    public final TableField<NursingServicePeriodsRecord, String> ENCOUNTER_ID = createField(DSL.name("encounter_id"), SQLDataType.VARCHAR(32), this, "");
-
-    /**
      * The column <code>nursing.nursing_service_periods.status</code>.
      */
     public final TableField<NursingServicePeriodsRecord, String> STATUS = createField(DSL.name("status"), SQLDataType.VARCHAR.defaultValue(DSL.field(DSL.raw("'ACTIVE'::character varying"), SQLDataType.VARCHAR)), this, "");
@@ -118,6 +117,11 @@ public class NursingServicePeriods extends TableImpl<NursingServicePeriodsRecord
      * The column <code>nursing.nursing_service_periods.updated_at</code>.
      */
     public final TableField<NursingServicePeriodsRecord, OffsetDateTime> UPDATED_AT = createField(DSL.name("updated_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6).defaultValue(DSL.field(DSL.raw("now()"), SQLDataType.TIMESTAMPWITHTIMEZONE)), this, "");
+
+    /**
+     * The column <code>nursing.nursing_service_periods.encounter_id</code>.
+     */
+    public final TableField<NursingServicePeriodsRecord, String> ENCOUNTER_ID = createField(DSL.name("encounter_id"), SQLDataType.VARCHAR(32), this, "");
 
     private NursingServicePeriods(Name alias, Table<NursingServicePeriodsRecord> aliased) {
         this(alias, aliased, (Field<?>[]) null, null);
@@ -189,6 +193,11 @@ public class NursingServicePeriods extends TableImpl<NursingServicePeriodsRecord
     }
 
     @Override
+    public List<Index> getIndexes() {
+        return Arrays.asList(Indexes.IDX_PERIOD_ENCOUNTER_STATUS, Indexes.UQ_NURSING_SERVICE_PERIODS_ENCOUNTER_ID);
+    }
+
+    @Override
     public UniqueKey<NursingServicePeriodsRecord> getPrimaryKey() {
         return Keys.NURSING_SERVICE_PERIODS_PKEY;
     }
@@ -204,6 +213,32 @@ public class NursingServicePeriods extends TableImpl<NursingServicePeriodsRecord
             _nursingAssessments = new NursingAssessmentsPath(this, null, Keys.NURSING_ASSESSMENTS__NURSING_ASSESSMENTS_PERIOD_ID_FKEY.getInverseKey());
 
         return _nursingAssessments;
+    }
+
+    private transient NursingCarePlanRevisionsPath _nursingCarePlanRevisions;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>nursing.nursing_care_plan_revisions</code> table
+     */
+    public NursingCarePlanRevisionsPath nursingCarePlanRevisions() {
+        if (_nursingCarePlanRevisions == null)
+            _nursingCarePlanRevisions = new NursingCarePlanRevisionsPath(this, null, Keys.NURSING_CARE_PLAN_REVISIONS__NURSING_CARE_PLAN_REVISIONS_PERIOD_ID_FKEY.getInverseKey());
+
+        return _nursingCarePlanRevisions;
+    }
+
+    private transient NursingIncidentsPath _nursingIncidents;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>nursing.nursing_incidents</code> table
+     */
+    public NursingIncidentsPath nursingIncidents() {
+        if (_nursingIncidents == null)
+            _nursingIncidents = new NursingIncidentsPath(this, null, Keys.NURSING_INCIDENTS__NURSING_INCIDENTS_PERIOD_ID_FKEY.getInverseKey());
+
+        return _nursingIncidents;
     }
 
     private transient NursingPlansPath _nursingPlans;
@@ -248,8 +283,8 @@ public class NursingServicePeriods extends TableImpl<NursingServicePeriodsRecord
     @Override
     public List<Check<NursingServicePeriodsRecord>> getChecks() {
         return Arrays.asList(
+            Internal.createCheck(this, DSL.name("chk_elderly_care_encounter_link"), "(((((service_type)::text = 'ELDERLY_CARE'::text) AND (encounter_id IS NOT NULL)) OR (((service_type)::text <> 'ELDERLY_CARE'::text) AND (encounter_id IS NULL))))", true),
             Internal.createCheck(this, DSL.name("nursing_service_periods_service_type_check"), "(((service_type)::text = ANY ((ARRAY['HOME_CARE'::character varying, 'COMMUNITY_CARE'::character varying, 'HOSPICE'::character varying, 'ELDERLY_CARE'::character varying])::text[])))", true),
-            Internal.createCheck(this, DSL.name("chk_elderly_care_encounter_link"), "(((service_type = 'ELDERLY_CARE'::character varying) AND (encounter_id IS NOT NULL)) OR ((service_type <> 'ELDERLY_CARE'::character varying) AND (encounter_id IS NULL)))", true),
             Internal.createCheck(this, DSL.name("nursing_service_periods_status_check"), "(((status)::text = ANY ((ARRAY['ACTIVE'::character varying, 'SUSPENDED'::character varying, 'COMPLETED'::character varying, 'CANCELLED'::character varying])::text[])))", true)
         );
     }

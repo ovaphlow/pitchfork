@@ -4,6 +4,7 @@
 package com.ovaphlow.crate.database.gen.nursing.tables;
 
 
+import com.ovaphlow.crate.database.gen.nursing.Indexes;
 import com.ovaphlow.crate.database.gen.nursing.Keys;
 import com.ovaphlow.crate.database.gen.nursing.Nursing;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingAssessments.NursingAssessmentsPath;
@@ -16,9 +17,11 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 
+import org.jooq.Check;
 import org.jooq.Condition;
 import org.jooq.Field;
 import org.jooq.ForeignKey;
+import org.jooq.Index;
 import org.jooq.InverseForeignKey;
 import org.jooq.Name;
 import org.jooq.Path;
@@ -34,6 +37,7 @@ import org.jooq.TableField;
 import org.jooq.TableOptions;
 import org.jooq.UniqueKey;
 import org.jooq.impl.DSL;
+import org.jooq.impl.Internal;
 import org.jooq.impl.SQLDataType;
 import org.jooq.impl.TableImpl;
 
@@ -47,7 +51,8 @@ public class NursingCarePlanRevisions extends TableImpl<NursingCarePlanRevisions
     private static final long serialVersionUID = 1L;
 
     /**
-     * The reference instance of <code>nursing.nursing_care_plan_revisions</code>
+     * The reference instance of
+     * <code>nursing.nursing_care_plan_revisions</code>
      */
     public static final NursingCarePlanRevisions NURSING_CARE_PLAN_REVISIONS = new NursingCarePlanRevisions();
 
@@ -75,12 +80,14 @@ public class NursingCarePlanRevisions extends TableImpl<NursingCarePlanRevisions
     public final TableField<NursingCarePlanRevisionsRecord, String> ENCOUNTER_ID = createField(DSL.name("encounter_id"), SQLDataType.VARCHAR(32).nullable(false), this, "");
 
     /**
-     * The column <code>nursing.nursing_care_plan_revisions.assessment_id</code>.
+     * The column
+     * <code>nursing.nursing_care_plan_revisions.assessment_id</code>.
      */
     public final TableField<NursingCarePlanRevisionsRecord, String> ASSESSMENT_ID = createField(DSL.name("assessment_id"), SQLDataType.VARCHAR(32).nullable(false), this, "");
 
     /**
-     * The column <code>nursing.nursing_care_plan_revisions.previous_plan_id</code>.
+     * The column
+     * <code>nursing.nursing_care_plan_revisions.previous_plan_id</code>.
      */
     public final TableField<NursingCarePlanRevisionsRecord, String> PREVIOUS_PLAN_ID = createField(DSL.name("previous_plan_id"), SQLDataType.VARCHAR(32), this, "");
 
@@ -108,14 +115,16 @@ public class NursingCarePlanRevisions extends TableImpl<NursingCarePlanRevisions
     }
 
     /**
-     * Create an aliased <code>nursing.nursing_care_plan_revisions</code> table reference
+     * Create an aliased <code>nursing.nursing_care_plan_revisions</code> table
+     * reference
      */
     public NursingCarePlanRevisions(String alias) {
         this(DSL.name(alias), NURSING_CARE_PLAN_REVISIONS);
     }
 
     /**
-     * Create an aliased <code>nursing.nursing_care_plan_revisions</code> table reference
+     * Create an aliased <code>nursing.nursing_care_plan_revisions</code> table
+     * reference
      */
     public NursingCarePlanRevisions(Name alias) {
         this(alias, NURSING_CARE_PLAN_REVISIONS);
@@ -167,41 +176,30 @@ public class NursingCarePlanRevisions extends TableImpl<NursingCarePlanRevisions
     }
 
     @Override
+    public List<Index> getIndexes() {
+        return Arrays.asList(Indexes.IDX_CARE_PLAN_REVISION_ASSESSMENT, Indexes.IDX_CARE_PLAN_REVISION_PERIOD, Indexes.IDX_CARE_PLAN_REVISION_PREVIOUS_PLAN);
+    }
+
+    @Override
     public UniqueKey<NursingCarePlanRevisionsRecord> getPrimaryKey() {
         return Keys.NURSING_CARE_PLAN_REVISIONS_PKEY;
     }
 
     @Override
     public List<UniqueKey<NursingCarePlanRevisionsRecord>> getUniqueKeys() {
-        return Arrays.asList(
-            Keys.UQ_NURSING_CARE_PLAN_REVISIONS_PERIOD_REVISION,
-            Keys.UQ_NURSING_CARE_PLAN_REVISIONS_NEW_PLAN_ID
-        );
+        return Arrays.asList(Keys.NURSING_CARE_PLAN_REVISIONS_NEW_PLAN_ID_KEY, Keys.UQ_NURSING_CARE_PLAN_REVISIONS_PERIOD_REVISION);
     }
 
     @Override
     public List<ForeignKey<NursingCarePlanRevisionsRecord, ?>> getReferences() {
-        return Arrays.asList(Keys.NURSING_CARE_PLAN_REVISIONS__NURSING_CARE_PLAN_REVISIONS_PERIOD_ID_FKEY, Keys.NURSING_CARE_PLAN_REVISIONS__NURSING_CARE_PLAN_REVISIONS_ASSESSMENT_ID_FKEY, Keys.NURSING_CARE_PLAN_REVISIONS__NURSING_CARE_PLAN_REVISIONS_PREVIOUS_PLAN_ID_FKEY, Keys.NURSING_CARE_PLAN_REVISIONS__NURSING_CARE_PLAN_REVISIONS_NEW_PLAN_ID_FKEY);
-    }
-
-    private transient NursingServicePeriodsPath _nursingServicePeriods;
-
-    /**
-     * Get the implicit join path to the <code>nursing.nursing_service_periods</code>
-     * table.
-     */
-    public NursingServicePeriodsPath nursingServicePeriods() {
-        if (_nursingServicePeriods == null)
-            _nursingServicePeriods = new NursingServicePeriodsPath(this, Keys.NURSING_CARE_PLAN_REVISIONS__NURSING_CARE_PLAN_REVISIONS_PERIOD_ID_FKEY, null);
-
-        return _nursingServicePeriods;
+        return Arrays.asList(Keys.NURSING_CARE_PLAN_REVISIONS__NURSING_CARE_PLAN_REVISIONS_ASSESSMENT_ID_FKEY, Keys.NURSING_CARE_PLAN_REVISIONS__NURSING_CARE_PLAN_REVISIONS_NEW_PLAN_ID_FKEY, Keys.NURSING_CARE_PLAN_REVISIONS__NURSING_CARE_PLAN_REVISIONS_PERIOD_ID_FKEY, Keys.NURSING_CARE_PLAN_REVISIONS__NURSING_CARE_PLAN_REVISIONS_PREVIOUS_PLAN_ID_FKEY);
     }
 
     private transient NursingAssessmentsPath _nursingAssessments;
 
     /**
-     * Get the implicit join path to the <code>nursing.nursing_assessments</code>
-     * table.
+     * Get the implicit join path to the
+     * <code>nursing.nursing_assessments</code> table.
      */
     public NursingAssessmentsPath nursingAssessments() {
         if (_nursingAssessments == null)
@@ -210,32 +208,52 @@ public class NursingCarePlanRevisions extends TableImpl<NursingCarePlanRevisions
         return _nursingAssessments;
     }
 
-    private transient NursingPlansPath _nursingPlans;
+    private transient NursingPlansPath _nursingCarePlanRevisionsNewPlanIdFkey;
 
     /**
-     * Get the implicit to-one join path to the
-     * <code>nursing.nursing_plans</code> table via the
-     * <code>nursing_care_plan_revisions_previous_plan_id_fkey</code> foreign key
+     * Get the implicit join path to the <code>nursing.nursing_plans</code>
+     * table, via the <code>nursing_care_plan_revisions_new_plan_id_fkey</code>
+     * key.
      */
-    public NursingPlansPath nursingPlans() {
-        if (_nursingPlans == null)
-            _nursingPlans = new NursingPlansPath(this, Keys.NURSING_CARE_PLAN_REVISIONS__NURSING_CARE_PLAN_REVISIONS_PREVIOUS_PLAN_ID_FKEY, null);
+    public NursingPlansPath nursingCarePlanRevisionsNewPlanIdFkey() {
+        if (_nursingCarePlanRevisionsNewPlanIdFkey == null)
+            _nursingCarePlanRevisionsNewPlanIdFkey = new NursingPlansPath(this, Keys.NURSING_CARE_PLAN_REVISIONS__NURSING_CARE_PLAN_REVISIONS_NEW_PLAN_ID_FKEY, null);
 
-        return _nursingPlans;
+        return _nursingCarePlanRevisionsNewPlanIdFkey;
     }
 
-    private transient NursingPlansPath _nursingPlans_;
+    private transient NursingServicePeriodsPath _nursingServicePeriods;
 
     /**
-     * Get the implicit to-one join path to the
-     * <code>nursing.nursing_plans</code> table via the
-     * <code>nursing_care_plan_revisions_new_plan_id_fkey</code> foreign key
+     * Get the implicit join path to the
+     * <code>nursing.nursing_service_periods</code> table.
      */
-    public NursingPlansPath nursingPlans_() {
-        if (_nursingPlans_ == null)
-            _nursingPlans_ = new NursingPlansPath(this, Keys.NURSING_CARE_PLAN_REVISIONS__NURSING_CARE_PLAN_REVISIONS_NEW_PLAN_ID_FKEY, null);
+    public NursingServicePeriodsPath nursingServicePeriods() {
+        if (_nursingServicePeriods == null)
+            _nursingServicePeriods = new NursingServicePeriodsPath(this, Keys.NURSING_CARE_PLAN_REVISIONS__NURSING_CARE_PLAN_REVISIONS_PERIOD_ID_FKEY, null);
 
-        return _nursingPlans_;
+        return _nursingServicePeriods;
+    }
+
+    private transient NursingPlansPath _nursingCarePlanRevisionsPreviousPlanIdFkey;
+
+    /**
+     * Get the implicit join path to the <code>nursing.nursing_plans</code>
+     * table, via the
+     * <code>nursing_care_plan_revisions_previous_plan_id_fkey</code> key.
+     */
+    public NursingPlansPath nursingCarePlanRevisionsPreviousPlanIdFkey() {
+        if (_nursingCarePlanRevisionsPreviousPlanIdFkey == null)
+            _nursingCarePlanRevisionsPreviousPlanIdFkey = new NursingPlansPath(this, Keys.NURSING_CARE_PLAN_REVISIONS__NURSING_CARE_PLAN_REVISIONS_PREVIOUS_PLAN_ID_FKEY, null);
+
+        return _nursingCarePlanRevisionsPreviousPlanIdFkey;
+    }
+
+    @Override
+    public List<Check<NursingCarePlanRevisionsRecord>> getChecks() {
+        return Arrays.asList(
+            Internal.createCheck(this, DSL.name("nursing_care_plan_revisions_revision_no_check"), "((revision_no > 0))", true)
+        );
     }
 
     @Override

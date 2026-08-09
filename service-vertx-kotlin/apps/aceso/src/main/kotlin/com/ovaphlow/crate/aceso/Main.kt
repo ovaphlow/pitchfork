@@ -139,7 +139,12 @@ fun main() {
     )
     apiRouter.route("/inventories/v1/*").subRouter(InventoriesRoutes.create(vertx, pool))
     apiRouter.route("/healthcare/v1/*").subRouter(
-        HealthcareRoutes.create(vertx, pool, idpSessionAuthHandler(vertx, idpBaseUrl)),
+        HealthcareRoutes.create(
+            vertx,
+            pool,
+            idpSessionAuthHandler(vertx, idpBaseUrl),
+            idpSessionAuthHandler(vertx, idpBaseUrl),
+        ),
     )
     apiRouter.route("/nursing/v1/*").subRouter(NursingRoutes.create(vertx, pool))
     apiRouter.route("/pharmacy/v1/*").subRouter(

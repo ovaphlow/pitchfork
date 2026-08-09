@@ -653,7 +653,7 @@ class TaskExecutionService(
                     JsonObject()
                         .put("count", result.detailResults.size)
                         .put("warehouse", warehouse.ifBlank { result.detailResults.firstOrNull()?.warehouse ?: "" })
-                        .put("total_cost", result.detailResults.sumOf { it.totalCost.toDouble() })
+                        .put("total_cost", result.detailResults.fold(BigDecimal.ZERO) { total, detail -> total.add(detail.totalCost) }.toPlainString())
 
                 val details = JsonArray()
                 for (dr in result.detailResults) {
@@ -665,10 +665,10 @@ class TaskExecutionService(
                             .put("material_id", dr.materialId)
                             .put("lot_id", dr.lotId)
                             .put("warehouse", dr.warehouse)
-                            .put("quantity", dr.quantity.toDouble())
+                            .put("quantity", dr.quantity.toPlainString())
                             .put("unit", dr.unit)
-                            .put("unit_cost", dr.unitCost.toDouble())
-                            .put("total_cost", dr.totalCost.toDouble())
+                            .put("unit_cost", dr.unitCost.toPlainString())
+                            .put("total_cost", dr.totalCost.toPlainString())
                     )
                 }
                 record.put("consumption_summary", summary)

@@ -1,6 +1,7 @@
 package com.ovaphlow.crate.healthcare
 
 import com.ovaphlow.crate.nursing.ConflictException
+import com.ovaphlow.crate.nursing.NotFoundException
 import io.vertx.core.Handler
 import io.vertx.core.Vertx
 import io.vertx.core.json.JsonObject
@@ -16,7 +17,12 @@ class DuplicateNursingRecordException(message: String) : Exception(message)
 object HealthcareRoutes {
     private val log = LoggerFactory.getLogger(HealthcareRoutes::class.java)
 
-    fun create(vertx: Vertx, pool: Pool, nurseCheckAuthHandler: Handler<RoutingContext>? = null): Router {
+    fun create(
+        vertx: Vertx,
+        pool: Pool,
+        nurseCheckAuthHandler: Handler<RoutingContext>? = null,
+        incidentHandoverAuthHandler: Handler<RoutingContext>? = null,
+    ): Router {
         val router = Router.router(vertx)
         val service = HealthcareService(pool)
 
@@ -258,7 +264,112 @@ object HealthcareRoutes {
                 .onFailure { respondCreateFailure(ctx, it) }
         }
 
+        // ========================================================================
+        //  017 院内护理异常事件与班次交接
+        //  认证中间件由 App 编排层注入；未注入时业务处理器保持 401 兜底。
+        // ========================================================================
+        if (incidentHandoverAuthHandler != null) {
+            router.post("/encounters/:id/nursing-incidents").handler(incidentHandoverAuthHandler)
+            router.get("/encounters/:id/nursing-incidents").handler(incidentHandoverAuthHandler)
+            router.get("/encounters/:id/nursing-incidents/:incidentId").handler(incidentHandoverAuthHandler)
+            router.post("/encounters/:id/nursing-incidents/:incidentId/actions").handler(incidentHandoverAuthHandler)
+            router.post("/encounters/:id/nursing-incidents/:incidentId/close").handler(incidentHandoverAuthHandler)
+            router.post("/nursing-shift-handovers").handler(incidentHandoverAuthHandler)
+            router.get("/nursing-shift-handovers").handler(incidentHandoverAuthHandler)
+            router.get("/nursing-shift-handovers/:id").handler(incidentHandoverAuthHandler)
+            router.post("/nursing-shift-handovers/:id/receive").handler(incidentHandoverAuthHandler)
+            router.post("/nursing-shift-handovers/:id/items").handler(incidentHandoverAuthHandler)
+        }
+
+        // 异常事件：创建（只接受 incident_type/severity/occurred_at/description/initial_action）
+        router.post("/encounters/:id/nursing-incidents").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            service.createIncident(requiredId(ctx), body(ctx), userId)
+                .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.get("/encounters/:id/nursing-incidents").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            service.listIncidents(
+                encounterId = requiredId(ctx),
+                status = ctx.request().getParam("status"),
+                dateFrom = ctx.request().getParam("date_from"),
+                dateTo = ctx.request().getParam("date_to"),
+                limit = limit(ctx),
+                offset = offset(ctx),
+            ).onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 事件详情/追加处置/关闭：作用域路径（encounter + incidentId），跨入住读写一律 404
+        router.get("/encounters/:id/nursing-incidents/:incidentId").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            service.getIncident(requiredId(ctx), requiredPathParam(ctx, "incidentId"))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.post("/encounters/:id/nursing-incidents/:incidentId/actions").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            service.addIncidentAction(requiredId(ctx), requiredPathParam(ctx, "incidentId"), body(ctx), userId)
+                .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.post("/encounters/:id/nursing-incidents/:incidentId/close").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            service.closeIncident(requiredId(ctx), requiredPathParam(ctx, "incidentId"), body(ctx), userId)
+                .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+
+        // 班次交接：创建（Idempotency-Key 幂等）/列表/详情/接班/补充
+        router.post("/nursing-shift-handovers").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            service.createShiftHandover(body(ctx), userId, ctx.request().getHeader("Idempotency-Key"))
+                .onSuccess { (created, handover) ->
+                    if (created) ctx.response().setStatusCode(201)
+                    ctx.json(handover)
+                }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.get("/nursing-shift-handovers").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            service.listShiftHandovers(
+                careUnit = ctx.request().getParam("care_unit"),
+                businessDate = ctx.request().getParam("business_date"),
+                shift = ctx.request().getParam("shift"),
+                limit = limit(ctx),
+                offset = offset(ctx),
+            ).onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.get("/nursing-shift-handovers/:id").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            service.getShiftHandover(requiredId(ctx))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.post("/nursing-shift-handovers/:id/receive").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            service.receiveShiftHandover(requiredId(ctx), body(ctx), userId)
+                .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.post("/nursing-shift-handovers/:id/items").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            service.appendShiftHandoverItem(requiredId(ctx), body(ctx), userId)
+                .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+
         return router
+    }
+
+    private fun userId(ctx: RoutingContext): String? {
+        val value = ctx.get<String>("userId")
+        if (value.isNullOrBlank()) {
+            respond(ctx, 401, "authentication required")
+            return null
+        }
+        return value
     }
 
     private fun body(ctx: RoutingContext): JsonObject = ctx.body().asJsonObject() ?: JsonObject()
@@ -266,6 +377,10 @@ object HealthcareRoutes {
     private fun requiredId(ctx: RoutingContext): String =
         ctx.pathParam("id")?.takeIf(String::isNotBlank)
             ?: throw IllegalArgumentException("id is required")
+
+    private fun requiredPathParam(ctx: RoutingContext, name: String): String =
+        ctx.pathParam(name)?.takeIf(String::isNotBlank)
+            ?: throw IllegalArgumentException("$name is required")
 
     private fun limit(ctx: RoutingContext): Int =
         ctx.request().getParam("limit")?.toIntOrNull()?.coerceIn(1, 100) ?: 50
@@ -277,6 +392,7 @@ object HealthcareRoutes {
         when (error) {
             is IllegalArgumentException -> respond(ctx, 400, error.message)
             is HealthcareNotFoundException -> respond(ctx, 404, error.message)
+            is NotFoundException -> respond(ctx, 404, error.message)
             is ConflictException -> respond(ctx, 409, error.message)
             else -> {
                 log.error("healthcare route error", error)

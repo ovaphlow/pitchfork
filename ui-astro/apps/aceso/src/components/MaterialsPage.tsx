@@ -16,14 +16,14 @@ function errorMessage(error: unknown, fallback: string): string {
 function parsePackageSpec(
   unit: string,
   size: string,
-): { ok: true; unit: string | null; size?: number } | { ok: false; error: string } {
+): { ok: true; unit: string | null; size?: string } | { ok: false; error: string } {
   const u = unit.trim();
   const s = size.trim();
   if (!u && !s) return { ok: true, unit: null };
   if (!u || !s) return { ok: false, error: "包装单位与每包含量需同时填写或同时留空" };
   const n = Number(s);
   if (!Number.isFinite(n) || n <= 0) return { ok: false, error: "每包含量必须为正数" };
-  return { ok: true, unit: u, size: n };
+  return { ok: true, unit: u, size: s };
 }
 
 /** 新建物资：一次性提交 base_unit 与 quantity_scale；包装规格可选 */

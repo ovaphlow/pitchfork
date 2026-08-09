@@ -191,7 +191,7 @@ public class NursingTaskExecutions extends TableImpl<NursingTaskExecutionsRecord
 
     @Override
     public List<Index> getIndexes() {
-        return Arrays.asList(Indexes.IDX_EXEC_TASK);
+        return Arrays.asList(Indexes.IDX_EXEC_PLANNED_TIME, Indexes.IDX_EXEC_STATUS_PLANNED, Indexes.IDX_EXEC_TASK, Indexes.IDX_EXEC_TASK_PLANNED);
     }
 
     @Override

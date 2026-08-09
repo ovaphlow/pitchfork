@@ -6,9 +6,13 @@ package com.ovaphlow.crate.database.gen.nursing;
 
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingAssessments;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingCarePlanRevisions;
+import com.ovaphlow.crate.database.gen.nursing.tables.NursingIncidentActions;
+import com.ovaphlow.crate.database.gen.nursing.tables.NursingIncidents;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingPlanItems;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingPlans;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingServicePeriods;
+import com.ovaphlow.crate.database.gen.nursing.tables.NursingShiftHandoverItems;
+import com.ovaphlow.crate.database.gen.nursing.tables.NursingShiftHandovers;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingTaskExecutions;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingTasks;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingVisitSchedules;
@@ -31,6 +35,16 @@ public class Tables {
     public static final NursingCarePlanRevisions NURSING_CARE_PLAN_REVISIONS = NursingCarePlanRevisions.NURSING_CARE_PLAN_REVISIONS;
 
     /**
+     * The table <code>nursing.nursing_incident_actions</code>.
+     */
+    public static final NursingIncidentActions NURSING_INCIDENT_ACTIONS = NursingIncidentActions.NURSING_INCIDENT_ACTIONS;
+
+    /**
+     * The table <code>nursing.nursing_incidents</code>.
+     */
+    public static final NursingIncidents NURSING_INCIDENTS = NursingIncidents.NURSING_INCIDENTS;
+
+    /**
      * The table <code>nursing.nursing_plan_items</code>.
      */
     public static final NursingPlanItems NURSING_PLAN_ITEMS = NursingPlanItems.NURSING_PLAN_ITEMS;
@@ -44,6 +58,16 @@ public class Tables {
      * The table <code>nursing.nursing_service_periods</code>.
      */
     public static final NursingServicePeriods NURSING_SERVICE_PERIODS = NursingServicePeriods.NURSING_SERVICE_PERIODS;
+
+    /**
+     * The table <code>nursing.nursing_shift_handover_items</code>.
+     */
+    public static final NursingShiftHandoverItems NURSING_SHIFT_HANDOVER_ITEMS = NursingShiftHandoverItems.NURSING_SHIFT_HANDOVER_ITEMS;
+
+    /**
+     * The table <code>nursing.nursing_shift_handovers</code>.
+     */
+    public static final NursingShiftHandovers NURSING_SHIFT_HANDOVERS = NursingShiftHandovers.NURSING_SHIFT_HANDOVERS;
 
     /**
      * The table <code>nursing.nursing_task_executions</code>.

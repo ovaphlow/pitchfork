@@ -36,7 +36,7 @@ class RequisitionServiceTest {
 
     private fun item(
         materialId: String = "mat-1",
-        requestedQuantity: Int = 10,
+        requestedQuantity: String = "10",
     ): JsonObject =
         JsonObject()
             .put("material_id", materialId)
@@ -72,7 +72,7 @@ class RequisitionServiceTest {
                 .add(item(materialId = "mat-1")),
         )
         val nonPositive = createBody(
-            JsonArray().add(item(requestedQuantity = 0)),
+            JsonArray().add(item(requestedQuantity = "0")),
         )
         assertTrue(failureOf(service.create(duplicate, "key-1", "user-1")).message!!.contains("duplicate"))
         assertTrue(failureOf(service.create(nonPositive, "key-1", "user-1")).message!!.contains("positive"))
@@ -81,10 +81,10 @@ class RequisitionServiceTest {
     @Test
     fun `approve rejects unknown fields and negative approved quantity`() {
         val unknown = JsonObject(
-            """{"items":[{"id":"item-1","approved_quantity":5,"unit":"PACKAGE"}]}""",
+            """{"items":[{"id":"item-1","approved_quantity":"5","unit":"PACKAGE"}]}""",
         )
         val negative = JsonObject(
-            """{"items":[{"id":"item-1","approved_quantity":-1}]}""",
+            """{"items":[{"id":"item-1","approved_quantity":"-1"}]}""",
         )
         assertTrue(failureOf(service.approve("req-1", unknown, "user-1")).message!!.contains("unknown fields"))
         assertTrue(failureOf(service.approve("req-1", negative, "user-1")).message!!.contains("not be negative"))
@@ -100,5 +100,15 @@ class RequisitionServiceTest {
     fun `cancel requires reason`() {
         val error = failureOf(service.cancel("req-1", JsonObject(), "user-1"))
         assertTrue(error.message!!.contains("reason"))
+    }
+
+    @Test
+    fun `create and approve reject numeric JSON quantities`() {
+        val create = createBody()
+        create.getJsonArray("items").getJsonObject(0).put("requested_quantity", 10)
+        val approve = JsonObject("""{"items":[{"id":"item-1","approved_quantity":5}]}""")
+
+        assertTrue(failureOf(service.create(create, "key-1", "user-1")).message!!.contains("decimal text"))
+        assertTrue(failureOf(service.approve("req-1", approve, "user-1")).message!!.contains("decimal text"))
     }
 }

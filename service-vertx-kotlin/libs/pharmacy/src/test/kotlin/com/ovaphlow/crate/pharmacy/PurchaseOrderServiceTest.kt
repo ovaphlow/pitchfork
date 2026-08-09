@@ -36,7 +36,7 @@ class PurchaseOrderServiceTest {
                 JsonArray().add(
                     JsonObject()
                         .put("material_id", "mat-1")
-                        .put("ordered_quantity", 100),
+                        .put("ordered_quantity", "100"),
                 ),
             )
 
@@ -47,7 +47,7 @@ class PurchaseOrderServiceTest {
                 JsonArray().add(
                     JsonObject()
                         .put("purchase_order_item_id", "poi-1")
-                        .put("received_quantity", 10)
+                        .put("received_quantity", "10")
                         .put("unit_cost", "1.25"),
                 ),
             )
@@ -70,12 +70,12 @@ class PurchaseOrderServiceTest {
         val duplicate = orderBody().put(
             "items",
             JsonArray()
-                .add(JsonObject().put("material_id", "mat-1").put("ordered_quantity", 1))
-                .add(JsonObject().put("material_id", "mat-1").put("ordered_quantity", 1)),
+                .add(JsonObject().put("material_id", "mat-1").put("ordered_quantity", "1"))
+                .add(JsonObject().put("material_id", "mat-1").put("ordered_quantity", "1")),
         )
         val nonPositive = orderBody().put(
             "items",
-            JsonArray().add(JsonObject().put("material_id", "mat-1").put("ordered_quantity", 0)),
+            JsonArray().add(JsonObject().put("material_id", "mat-1").put("ordered_quantity", "0")),
         )
         assertTrue(failureOf(service.create(duplicate, "key-1", "user-1")).message!!.contains("duplicate"))
         assertTrue(failureOf(service.create(nonPositive, "key-1", "user-1")).message!!.contains("positive"))
@@ -96,7 +96,7 @@ class PurchaseOrderServiceTest {
     @Test
     fun `receive rejects unknown receipt fields`() {
         val body = JsonObject(
-            """{"items":[{"purchase_order_item_id":"poi-1","received_quantity":10,"unit_cost":"1.25","unit":"PACKAGE"}]}""",
+            """{"items":[{"purchase_order_item_id":"poi-1","received_quantity":"10","unit_cost":"1.25","unit":"PACKAGE"}]}""",
         )
         val error = failureOf(service.receive("po-1", body, "key-1", "user-1"))
         assertTrue(error.message!!.contains("unknown fields"))
@@ -105,10 +105,21 @@ class PurchaseOrderServiceTest {
     @Test
     fun `receive rejects non positive quantity and negative cost`() {
         val nonPositive = receiptBody()
-        nonPositive.getJsonArray("items").getJsonObject(0).put("received_quantity", 0)
+        nonPositive.getJsonArray("items").getJsonObject(0).put("received_quantity", "0")
         val negativeCost = receiptBody()
-        negativeCost.getJsonArray("items").getJsonObject(0).put("unit_cost", -1)
+        negativeCost.getJsonArray("items").getJsonObject(0).put("unit_cost", "-1")
         assertTrue(failureOf(service.receive("po-1", nonPositive, "key-1", "user-1")).message!!.contains("positive"))
         assertTrue(failureOf(service.receive("po-1", negativeCost, "key-1", "user-1")).message!!.contains("not be negative"))
+    }
+
+    @Test
+    fun `create and receive reject numeric JSON decimals`() {
+        val order = orderBody()
+        order.getJsonArray("items").getJsonObject(0).put("ordered_quantity", 100)
+        val receipt = receiptBody()
+        receipt.getJsonArray("items").getJsonObject(0).put("unit_cost", 1.25)
+
+        assertTrue(failureOf(service.create(order, "key-1", "user-1")).message!!.contains("decimal text"))
+        assertTrue(failureOf(service.receive("po-1", receipt, "key-1", "user-1")).message!!.contains("decimal text"))
     }
 }

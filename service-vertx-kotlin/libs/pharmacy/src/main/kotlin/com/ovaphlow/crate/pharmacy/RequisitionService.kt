@@ -612,9 +612,9 @@ class RequisitionService(
                 .put("id", row.getValue("id")?.toString())
                 .put("requisition_id", row.getValue("requisition_id")?.toString())
                 .put("material_id", row.getValue("material_id")?.toString())
-                .put("requested_quantity", qtyOf(row.getValue("requested_quantity"))?.toDouble())
-                .put("approved_quantity", qtyOf(row.getValue("approved_quantity"))?.toDouble())
-                .put("dispensed_quantity", qtyOf(row.getValue("dispensed_quantity"))?.toDouble())
+                .put("requested_quantity", decimalApi(qtyOf(row.getValue("requested_quantity"))))
+                .put("approved_quantity", decimalApi(qtyOf(row.getValue("approved_quantity"))))
+                .put("dispensed_quantity", decimalApi(qtyOf(row.getValue("dispensed_quantity"))))
                 .put("lot_id", row.getValue("lot_id")?.toString())
                 .put("outbound_stock_operation_detail_id", row.getValue("outbound_stock_operation_detail_id")?.toString())
                 .put("inbound_stock_operation_detail_id", row.getValue("inbound_stock_operation_detail_id")?.toString())
@@ -630,10 +630,9 @@ class RequisitionService(
         }
 
         private fun toBigDecimal(value: Any?): BigDecimal = when (value) {
-            is BigDecimal -> value
-            is Number -> BigDecimal(value.toString())
-            is String -> BigDecimal(value)
-            else -> throw IllegalArgumentException("quantity must be a number")
+            is String -> value.toBigDecimalOrNull()
+                ?: throw IllegalArgumentException("quantity must be decimal text")
+            else -> throw IllegalArgumentException("quantity must be decimal text")
         }
     }
 
@@ -668,7 +667,7 @@ class RequisitionService(
             val qty = try {
                 toBigDecimal(item.getValue("requested_quantity"))
             } catch (e: Exception) {
-                return IllegalArgumentException("items[$i].requested_quantity must be a number")
+                return IllegalArgumentException("items[$i].requested_quantity must be decimal text")
             }
             if (qty.compareTo(BigDecimal.ZERO) <= 0) {
                 return IllegalArgumentException("items[$i].requested_quantity must be positive")
@@ -693,7 +692,7 @@ class RequisitionService(
             val qty = try {
                 toBigDecimal(item.getValue("approved_quantity"))
             } catch (e: Exception) {
-                return IllegalArgumentException("items[$i].approved_quantity must be a number")
+                return IllegalArgumentException("items[$i].approved_quantity must be decimal text")
             }
             if (qty.compareTo(BigDecimal.ZERO) < 0) {
                 return IllegalArgumentException("items[$i].approved_quantity must not be negative")

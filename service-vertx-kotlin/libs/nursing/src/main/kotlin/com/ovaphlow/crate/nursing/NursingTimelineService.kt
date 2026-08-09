@@ -1,6 +1,9 @@
 package com.ovaphlow.crate.nursing
 
 import com.ovaphlow.crate.database.DatabaseConfig
+import com.ovaphlow.crate.database.gen.nursing.tables.NursingIncidents.NURSING_INCIDENTS
+import com.ovaphlow.crate.database.gen.nursing.tables.NursingShiftHandoverItems.NURSING_SHIFT_HANDOVER_ITEMS
+import com.ovaphlow.crate.database.gen.nursing.tables.NursingShiftHandovers.NURSING_SHIFT_HANDOVERS
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
@@ -27,7 +30,11 @@ class NursingTimelineService(
 
     companion object {
         /** 事件模型列名 */
-        private val STABLE_TYPES = setOf("ASSESSMENT", "CARE_PLAN", "TASK", "TASK_EXECUTION", "NURSING_RECORD")
+        private val STABLE_TYPES = setOf(
+            "ASSESSMENT", "CARE_PLAN", "TASK", "TASK_EXECUTION", "NURSING_RECORD",
+            "NURSING_INCIDENT", "SHIFT_HANDOVER",
+        )
+        private val businessZone = java.time.ZoneId.of("Asia/Shanghai")
     }
 
     /**
@@ -79,17 +86,25 @@ class NursingTimelineService(
                 loadExecutionsByPeriod(periodId, dateFrom, dateTo) else Future.succeededFuture(emptyList())
             val recordFuture = if (types.isEmpty() || "NURSING_RECORD" in types)
                 loadNursingRecords(encounterId, periodId, dateFrom, dateTo) else Future.succeededFuture(emptyList())
+            val incidentFuture = if (types.isEmpty() || "NURSING_INCIDENT" in types)
+                loadIncidents(periodId, encounterId, dateFrom, dateTo) else Future.succeededFuture(emptyList())
+            val handoverFuture = if (types.isEmpty() || "SHIFT_HANDOVER" in types)
+                loadShiftHandovers(periodId, encounterId, dateFrom, dateTo) else Future.succeededFuture(emptyList())
 
-            io.vertx.core.CompositeFuture.all(assessmentFuture, planFuture, taskFuture, executionFuture, recordFuture)
+            io.vertx.core.CompositeFuture.all(
+                listOf(assessmentFuture, planFuture, taskFuture, executionFuture, recordFuture, incidentFuture, handoverFuture),
+            )
                 .compose { composite ->
                     val assessments = composite.resultAt<List<JsonObject>>(0)
                     val plans = composite.resultAt<List<JsonObject>>(1)
                     val tasks = composite.resultAt<List<JsonObject>>(2)
                     val executions = composite.resultAt<List<JsonObject>>(3)
                     val records = composite.resultAt<List<JsonObject>>(4)
+                    val incidents = composite.resultAt<List<JsonObject>>(5)
+                    val handovers = composite.resultAt<List<JsonObject>>(6)
 
                     // 合并所有事件并排序
-                    val allEvents = (assessments + plans + tasks + executions + records)
+                    val allEvents = (assessments + plans + tasks + executions + records + incidents + handovers)
                         .sortedByDescending { it.getString("occurred_at") ?: "" }
 
                     val total = allEvents.size.toLong()
@@ -419,6 +434,128 @@ class NursingTimelineService(
             .put("actor", physician)
             .put("source", JsonObject().put("resource", "medical_record").put("id", id))
             .put("metadata", rowMeta)
+    }
+
+    // ========================================================================
+    //  异常事件与班次交接时间线来源（017 计划）
+    //  批量读取后内存映射；读取绝不产生新事件、交班、任务、执行、库存或护理记录。
+    // ========================================================================
+
+    private fun loadIncidents(periodId: String, encounterId: String, dateFrom: String?, dateTo: String?): Future<List<JsonObject>> {
+        val conditions = mutableListOf<org.jooq.Condition>()
+        conditions.add(NURSING_INCIDENTS.PERIOD_ID.eq(periodId))
+        conditions.add(NURSING_INCIDENTS.ENCOUNTER_ID.eq(encounterId))
+        dateFrom?.let { d ->
+            try {
+                conditions.add(NURSING_INCIDENTS.OCCURRED_AT.ge(LocalDate.parse(d).atStartOfDay(businessZone).toOffsetDateTime()))
+            } catch (_: Exception) {}
+        }
+        dateTo?.let { d ->
+            try {
+                conditions.add(NURSING_INCIDENTS.OCCURRED_AT.lt(LocalDate.parse(d).plusDays(1).atStartOfDay(businessZone).toOffsetDateTime()))
+            } catch (_: Exception) {}
+        }
+
+        val query = ctx.select(
+            NURSING_INCIDENTS.ID,
+            NURSING_INCIDENTS.INCIDENT_TYPE,
+            NURSING_INCIDENTS.SEVERITY,
+            NURSING_INCIDENTS.STATUS,
+            NURSING_INCIDENTS.OCCURRED_AT,
+            NURSING_INCIDENTS.DESCRIPTION,
+            NURSING_INCIDENTS.REPORTER,
+        )
+            .from(NURSING_INCIDENTS)
+            .where(conditions)
+            .orderBy(NURSING_INCIDENTS.OCCURRED_AT.desc(), NURSING_INCIDENTS.CREATED_AT.desc())
+
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
+            .map { rows -> rows.map { row -> mapIncidentEvent(row) } }
+    }
+
+    private fun loadShiftHandovers(periodId: String, encounterId: String, dateFrom: String?, dateTo: String?): Future<List<JsonObject>> {
+        val conditions = mutableListOf<org.jooq.Condition>()
+        conditions.add(NURSING_SHIFT_HANDOVER_ITEMS.ENCOUNTER_ID.eq(encounterId))
+        conditions.add(NURSING_SHIFT_HANDOVER_ITEMS.PERIOD_ID.eq(periodId))
+        dateFrom?.let { d ->
+            try {
+                conditions.add(NURSING_SHIFT_HANDOVERS.HANDED_OVER_AT.ge(LocalDate.parse(d).atStartOfDay(businessZone).toOffsetDateTime()))
+            } catch (_: Exception) {}
+        }
+        dateTo?.let { d ->
+            try {
+                conditions.add(NURSING_SHIFT_HANDOVERS.HANDED_OVER_AT.lt(LocalDate.parse(d).plusDays(1).atStartOfDay(businessZone).toOffsetDateTime()))
+            } catch (_: Exception) {}
+        }
+
+        val query = ctx.select(
+            NURSING_SHIFT_HANDOVERS.ID,
+            NURSING_SHIFT_HANDOVERS.CARE_UNIT,
+            NURSING_SHIFT_HANDOVERS.BUSINESS_DATE,
+            NURSING_SHIFT_HANDOVERS.SHIFT,
+            NURSING_SHIFT_HANDOVERS.HANDOVER_BY,
+            NURSING_SHIFT_HANDOVERS.HANDED_OVER_AT,
+            NURSING_SHIFT_HANDOVERS.RECEIVED_BY,
+            NURSING_SHIFT_HANDOVERS.STATUS,
+        )
+            .from(NURSING_SHIFT_HANDOVERS)
+            .join(NURSING_SHIFT_HANDOVER_ITEMS)
+            .on(NURSING_SHIFT_HANDOVERS.ID.eq(NURSING_SHIFT_HANDOVER_ITEMS.HANDOVER_ID))
+            .where(conditions)
+            .orderBy(NURSING_SHIFT_HANDOVERS.HANDED_OVER_AT.desc(), NURSING_SHIFT_HANDOVERS.CREATED_AT.desc())
+
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
+            .map { rows -> rows.map { row -> mapHandoverEvent(row) } }
+    }
+
+    private fun mapIncidentEvent(row: Row): JsonObject {
+        val id = row.getString("id") ?: ""
+        val occurredAt = row.getOffsetDateTime("occurred_at") ?: OffsetDateTime.now()
+        val incidentType = row.getString("incident_type") ?: ""
+        val severity = row.getString("severity") ?: ""
+        val status = row.getString("status") ?: ""
+        val description = row.getString("description") ?: ""
+
+        return JsonObject()
+            .put("id", "incident:$id")
+            .put("event_type", "NURSING_INCIDENT")
+            .put("occurred_at", occurredAt.toString())
+            .put("title", "异常事件：$incidentType")
+            .put("summary", "严重程度：$severity · 状态：$status · ${description.take(80).replace("\n", " ")}".take(200))
+            .put("actor", row.getString("reporter"))
+            .put("status", status)
+            .put("source", JsonObject().put("resource", "nursing_incident").put("id", id))
+            .put("metadata", JsonObject()
+                .put("incident_type", incidentType)
+                .put("severity", severity)
+                .put("status", status))
+    }
+
+    private fun mapHandoverEvent(row: Row): JsonObject {
+        val id = row.getString("id") ?: ""
+        val handedOverAt = row.getOffsetDateTime("handed_over_at") ?: OffsetDateTime.now()
+        val careUnit = row.getString("care_unit") ?: ""
+        val businessDate = row.getLocalDate("business_date")?.toString() ?: ""
+        val shift = row.getString("shift") ?: ""
+        val status = row.getString("status") ?: ""
+
+        return JsonObject()
+            .put("id", "handover:$id")
+            .put("event_type", "SHIFT_HANDOVER")
+            .put("occurred_at", handedOverAt.toString())
+            .put("title", "$businessDate $shift 班次交接")
+            .put("summary", "照护单元：$careUnit · ${if (status == "已接班") "已接班" else "待接班"}".take(200))
+            .put("actor", row.getString("handover_by"))
+            .put("status", status)
+            .put("source", JsonObject().put("resource", "nursing_shift_handover").put("id", id))
+            .put("metadata", JsonObject()
+                .put("care_unit", careUnit)
+                .put("business_date", businessDate)
+                .put("shift", shift)
+                .put("status", status)
+                .put("received_by", row.getString("received_by")))
     }
 
     // ========================================================================

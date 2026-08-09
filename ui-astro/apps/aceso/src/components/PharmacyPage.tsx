@@ -314,7 +314,7 @@ export default function PharmacyPage() {
     setStocksLoading(true);
     try {
       const response = await listInventoryStocks({ warehouse, limit: 200 });
-      setStocks(response.records.filter((stock) => stock.available_quantity > 0));
+      setStocks(response.records.filter((stock) => Number(stock.available_quantity) > 0));
     } catch (error) {
       setStocks([]);
       setCreateError(errorMessage(error, "无法加载可用库存"));
@@ -328,7 +328,7 @@ export default function PharmacyPage() {
     [stocks, createForm.stockId],
   );
 
-  const createAvailableQuantity = selectedStock?.available_quantity ?? 0;
+  const createAvailableQuantity = Number(selectedStock?.available_quantity ?? "0");
 
   const handleCreateDispense = async () => {
     if (!createTarget) return;
@@ -353,7 +353,7 @@ export default function PharmacyPage() {
         warehouse: createForm.warehouse,
         material_id: createForm.materialId,
         ...(createForm.lotId ? { lot_id: createForm.lotId } : {}),
-        dispensed_quantity: quantity,
+        dispensed_quantity: createForm.quantity.trim(),
       });
       setCreateTarget(null);
       void loadOrders();
@@ -438,7 +438,7 @@ export default function PharmacyPage() {
     if (!returnForm.operator.trim()) return setReturnError("请选择操作人");
     const selectedItem = returnTarget.items.find((item) => item.id === returnForm.itemId);
     if (!selectedItem) return setReturnError("请选择退药明细");
-    if (!quantity || quantity <= 0 || (selectedItem.dispensed_quantity != null && quantity > selectedItem.dispensed_quantity)) {
+    if (!quantity || quantity <= 0 || (selectedItem.dispensed_quantity != null && quantity > Number(selectedItem.dispensed_quantity))) {
       return setReturnError("退药数量必须大于 0 且不超过原发药数量");
     }
     setReturnSaving(true);
@@ -447,7 +447,7 @@ export default function PharmacyPage() {
       await createPharmacyReturnFromDispense({
         dispense_id: returnTarget.id,
         dispense_item_id: returnForm.itemId,
-        quantity,
+        quantity: returnForm.quantity.trim(),
         return_reason: returnForm.reason.trim(),
         operator: returnForm.operator.trim(),
         restockable: true,

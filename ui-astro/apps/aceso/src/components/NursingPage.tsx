@@ -1,22 +1,30 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Badge, Button, Card, EmptyState, Input, Modal, Table, type Column } from "@pitchfork/ui";
 import {
+  appendShiftHandoverItem,
+  closeNursingIncident,
   createCarePlanRevision,
   createNursingAssessment,
+  createNursingIncident,
+  createNursingIncidentAction,
   createNursingPlan,
   createNursingRecord,
   createNursingRecordCorrection,
   createNursingTask,
   createNursingTaskExecution,
+  createShiftHandover,
   enrollElderlyAdmissionCarePeriod,
   getCarePlanRevision,
   getCurrentSession,
+  getNursingIncident,
   getNursingPlan,
   getNursingRecord,
+  getShiftHandover,
   listActiveElderlyAdmissions,
   listCarePlanRevisions,
   listIdentitySubjects,
   listNursingAssessments,
+  listNursingIncidents,
   listNursingPlans,
   listNursingServicePeriods,
   listNursingTaskExecutions,
@@ -25,7 +33,9 @@ import {
   listNursingTodayExecutions,
   listMedicalOrders,
   listPatients,
+  listShiftHandovers,
   nurseCheckMedicalOrder,
+  receiveShiftHandover,
   updateNursingPlanStatus,
   updateNursingTaskExecutionStatus,
   updateNursingTaskStatus,
@@ -38,6 +48,8 @@ import {
   type Encounter,
   type IdentitySubject,
   type NursingAssessment,
+  type NursingIncident,
+  type NursingIncidentDetail,
   type NursingPlan,
   type NursingServicePeriod,
   type NursingTask,
@@ -50,11 +62,13 @@ import {
   type MedicalOrder,
   type NursingConsumptionInput,
   type NursingExecutionConsumption,
+  type ShiftHandover,
+  type ShiftHandoverDetail,
   type WarehouseOption,
 } from "@pitchfork/shared/aceso";
 import NursingExecutionStatisticsPanel from "./NursingExecutionStatisticsPanel";
 
-type Tab = "overview" | "assessments" | "plans" | "tasks" | "orders" | "timeline";
+type Tab = "overview" | "assessments" | "plans" | "tasks" | "orders" | "incidents" | "handovers" | "timeline";
 type MainView = "today" | "resident";
 
 interface ActiveAdmission extends Encounter {
@@ -320,6 +334,46 @@ export default function NursingPage() {
   const [recordDetailOpen, setRecordDetailOpen] = useState(false);
   const [correctionOpen, setCorrectionOpen] = useState(false);
   const [correctionForm, setCorrectionForm] = useState({ content: "", recordTime: new Date().toISOString().slice(0, 16) });
+  // ——— 异常事件（017） ———
+  const [incidents, setIncidents] = useState<NursingIncident[]>([]);
+  const [incidentLoading, setIncidentLoading] = useState(false);
+  const [incidentError, setIncidentError] = useState("");
+  const [incidentCreateOpen, setIncidentCreateOpen] = useState(false);
+  const [incidentForm, setIncidentForm] = useState({
+    incidentType: "跌倒/坠床",
+    severity: "一般",
+    occurredAt: new Date().toISOString().slice(0, 16),
+    description: "",
+    initialAction: "",
+  });
+  const [incidentSaving, setIncidentSaving] = useState(false);
+  const [incidentDetail, setIncidentDetail] = useState<NursingIncidentDetail | null>(null);
+  const [incidentDetailOpen, setIncidentDetailOpen] = useState(false);
+  const [incidentActionOpen, setIncidentActionOpen] = useState(false);
+  const [incidentActionForm, setIncidentActionForm] = useState({
+    actionType: "处置",
+    body: "",
+    notifiedParty: "",
+    notificationResult: "",
+  });
+  const [incidentActionSaving, setIncidentActionSaving] = useState(false);
+  const [incidentCloseOpen, setIncidentCloseOpen] = useState(false);
+  const [incidentCloseNote, setIncidentCloseNote] = useState("");
+  const [incidentCloseSaving, setIncidentCloseSaving] = useState(false);
+  // ——— 班次交接（017） ———
+  const [handovers, setHandovers] = useState<ShiftHandover[]>([]);
+  const [handoverLoading, setHandoverLoading] = useState(false);
+  const [handoverError, setHandoverError] = useState("");
+  const [handoverCreateOpen, setHandoverCreateOpen] = useState(false);
+  const [handoverIdemKey, setHandoverIdemKey] = useState("");
+  const [handoverForm, setHandoverForm] = useState({ businessDate: today(), shift: "早班", manualItems: "" });
+  const [handoverSaving, setHandoverSaving] = useState(false);
+  const [handoverDetail, setHandoverDetail] = useState<ShiftHandoverDetail | null>(null);
+  const [handoverDetailOpen, setHandoverDetailOpen] = useState(false);
+  const [handoverReceivingId, setHandoverReceivingId] = useState<string | null>(null);
+  const [handoverAppendOpen, setHandoverAppendOpen] = useState(false);
+  const [handoverAppendContent, setHandoverAppendContent] = useState("");
+  const [handoverAppendSaving, setHandoverAppendSaving] = useState(false);
   // ——— 今日执行工作台 ———
   const [mainView, setMainView] = useState<MainView>("today");
   const [todayDate, setTodayDate] = useState(today());
@@ -538,6 +592,236 @@ export default function NursingPage() {
   }, [timelineDateFrom, timelineDateTo, timelineEventType]);
 
   // ========================================================================
+  //  异常事件与班次交接（017）— 数据加载
+  // ========================================================================
+
+  const loadIncidents = useCallback(async (encounterId: string) => {
+    setIncidentLoading(true);
+    setIncidentError("");
+    try {
+      const response = await listNursingIncidents({ encounter_id: encounterId, limit: 100 });
+      setIncidents(response.records);
+    } catch (error) {
+      setIncidentError(errorMessage(error, "无法加载异常事件"));
+    } finally {
+      setIncidentLoading(false);
+    }
+  }, []);
+
+  const loadHandovers = useCallback(async (careUnit: string) => {
+    setHandoverLoading(true);
+    setHandoverError("");
+    try {
+      const response = await listShiftHandovers({ care_unit: careUnit, limit: 100 });
+      setHandovers(response.records);
+    } catch (error) {
+      setHandoverError(errorMessage(error, "无法加载班次交接"));
+    } finally {
+      setHandoverLoading(false);
+    }
+  }, []);
+
+  // 切换入住长者时刷新异常事件与所在照护单元的交接单
+  useEffect(() => {
+    if (!selectedAdmission) {
+      setIncidents([]);
+      setHandovers([]);
+      return;
+    }
+    void loadIncidents(selectedAdmission.id);
+    if (selectedAdmission.department) {
+      void loadHandovers(selectedAdmission.department);
+    } else {
+      setHandovers([]);
+    }
+  }, [selectedAdmission, loadIncidents, loadHandovers]);
+
+  // ========================================================================
+  //  异常事件 — 操作处理
+  // ========================================================================
+
+  async function handleCreateIncident() {
+    if (!selectedAdmission || !period) {
+      setIncidentError("请先选择入住长者并建立照护周期");
+      return;
+    }
+    if (!incidentForm.description.trim()) {
+      setIncidentError("事件说明不能为空");
+      return;
+    }
+    setIncidentSaving(true);
+    setIncidentError("");
+    try {
+      await createNursingIncident(selectedAdmission.id, {
+        incident_type: incidentForm.incidentType,
+        severity: incidentForm.severity,
+        occurred_at: incidentForm.occurredAt ? new Date(incidentForm.occurredAt).toISOString() : new Date().toISOString(),
+        description: incidentForm.description.trim(),
+        ...(incidentForm.initialAction.trim()
+          ? { initial_action: { action_type: "处置", body: incidentForm.initialAction.trim() } }
+          : {}),
+      });
+      setIncidentCreateOpen(false);
+      setIncidentForm((current) => ({ ...current, description: "", initialAction: "" }));
+      await loadIncidents(selectedAdmission.id);
+      if (period) await loadTimeline(period.id, selectedAdmission.id);
+    } catch (error) {
+      setIncidentError(errorMessage(error, "无法上报异常事件"));
+    } finally {
+      setIncidentSaving(false);
+    }
+  }
+
+  async function openIncidentDetail(id: string, encounterId: string) {
+    setIncidentError("");
+    try {
+      const detail = await getNursingIncident(encounterId, id);
+      setIncidentDetail(detail);
+      setIncidentDetailOpen(true);
+    } catch (error) {
+      setIncidentError(errorMessage(error, "无法加载事件详情"));
+    }
+  }
+
+  async function handleAddIncidentAction() {
+    if (!incidentDetail) return;
+    if (!incidentActionForm.body.trim()) {
+      setIncidentError("处置正文不能为空");
+      return;
+    }
+    setIncidentActionSaving(true);
+    setIncidentError("");
+    try {
+      await createNursingIncidentAction(incidentDetail.encounter_id, incidentDetail.id, {
+        action_type: incidentActionForm.actionType,
+        body: incidentActionForm.body.trim(),
+        notified_party: incidentActionForm.notifiedParty.trim() || undefined,
+        notification_result: incidentActionForm.notificationResult.trim() || undefined,
+      });
+      setIncidentActionOpen(false);
+      setIncidentActionForm({ actionType: "处置", body: "", notifiedParty: "", notificationResult: "" });
+      const refreshed = await getNursingIncident(incidentDetail.encounter_id, incidentDetail.id);
+      setIncidentDetail(refreshed);
+      await loadIncidents(refreshed.encounter_id);
+    } catch (error) {
+      setIncidentError(errorMessage(error, "无法追加处置"));
+    } finally {
+      setIncidentActionSaving(false);
+    }
+  }
+
+  async function handleCloseIncident() {
+    if (!incidentDetail) return;
+    if (!incidentCloseNote.trim()) {
+      setIncidentError("关闭说明不能为空");
+      return;
+    }
+    setIncidentCloseSaving(true);
+    setIncidentError("");
+    try {
+      await closeNursingIncident(incidentDetail.encounter_id, incidentDetail.id, { close_note: incidentCloseNote.trim() });
+      setIncidentCloseOpen(false);
+      setIncidentCloseNote("");
+      const refreshed = await getNursingIncident(incidentDetail.encounter_id, incidentDetail.id);
+      setIncidentDetail(refreshed);
+      await loadIncidents(refreshed.encounter_id);
+    } catch (error) {
+      setIncidentError(errorMessage(error, "无法关闭事件"));
+    } finally {
+      setIncidentCloseSaving(false);
+    }
+  }
+
+  // ========================================================================
+  //  班次交接 — 操作处理
+  // ========================================================================
+
+  function openHandoverCreate() {
+    setHandoverForm({ businessDate: today(), shift: "早班", manualItems: "" });
+    setHandoverIdemKey(`nursing-handover-${Date.now()}`);
+    setHandoverError("");
+    setHandoverCreateOpen(true);
+  }
+
+  async function handleCreateHandover() {
+    if (!selectedAdmission) return;
+    if (!selectedAdmission.department) {
+      setHandoverError("当前入住未设置照护单元，无法创建班次交接");
+      return;
+    }
+    if (!handoverForm.businessDate) {
+      setHandoverError("业务日期不能为空");
+      return;
+    }
+    setHandoverSaving(true);
+    setHandoverError("");
+    try {
+      await createShiftHandover(
+        {
+          encounter_id: selectedAdmission.id,
+          business_date: handoverForm.businessDate,
+          shift: handoverForm.shift,
+          manual_items: handoverForm.manualItems.split("\n").map((s) => s.trim()).filter(Boolean),
+        },
+        handoverIdemKey,
+      );
+      setHandoverCreateOpen(false);
+      await loadHandovers(selectedAdmission.department);
+      if (period) await loadTimeline(period.id, selectedAdmission.id);
+    } catch (error) {
+      setHandoverError(errorMessage(error, "无法创建班次交接"));
+    } finally {
+      setHandoverSaving(false);
+    }
+  }
+
+  async function openHandoverDetail(id: string) {
+    setHandoverError("");
+    try {
+      const detail = await getShiftHandover(id);
+      setHandoverDetail(detail);
+      setHandoverDetailOpen(true);
+    } catch (error) {
+      setHandoverError(errorMessage(error, "无法加载交接单详情"));
+    }
+  }
+
+  async function handleReceiveHandover(id: string) {
+    setHandoverReceivingId(id);
+    setHandoverError("");
+    try {
+      await receiveShiftHandover(id);
+      await loadHandovers(selectedAdmission?.department ?? "");
+      if (period && selectedAdmission) await loadTimeline(period.id, selectedAdmission.id);
+    } catch (error) {
+      setHandoverError(errorMessage(error, "无法确认接班"));
+    } finally {
+      setHandoverReceivingId(null);
+    }
+  }
+
+  async function handleAppendHandoverItem() {
+    if (!handoverDetail) return;
+    if (!handoverAppendContent.trim()) {
+      setHandoverError("补充内容不能为空");
+      return;
+    }
+    setHandoverAppendSaving(true);
+    setHandoverError("");
+    try {
+      const refreshed = await appendShiftHandoverItem(handoverDetail.id, handoverAppendContent.trim());
+      setHandoverDetail(refreshed);
+      setHandoverAppendOpen(false);
+      setHandoverAppendContent("");
+      await loadHandovers(selectedAdmission?.department ?? "");
+    } catch (error) {
+      setHandoverError(errorMessage(error, "无法补充交接事项"));
+    } finally {
+      setHandoverAppendSaving(false);
+    }
+  }
+
+  // ========================================================================
   //  护理记录 — 操作处理
   // ========================================================================
 
@@ -696,7 +980,7 @@ export default function NursingPage() {
         // 带耗材完成
         const consumptions: NursingConsumptionInput[] = consumeItems.map((item) => ({
           stock_id: item.stock_id,
-          quantity: item.quantity,
+          quantity: String(item.quantity),
         }));
         await updateNursingTaskExecutionStatusWithConsumptions(
           actionTarget.id,
@@ -751,7 +1035,7 @@ export default function NursingPage() {
         material_name: stock.material_name,
         material_id: stock.material_id,
         unit: stock.unit,
-        available_quantity: stock.available_quantity,
+        available_quantity: Number(stock.available_quantity),
       },
     ]);
   }
@@ -787,7 +1071,7 @@ export default function NursingPage() {
       { key: "note", header: "备注", className: "min-w-[120px]", render: (row) => row.note ? <span className="text-xs text-fg-muted max-w-[120px] truncate block" title={row.note}>{row.note}</span> : "-" },
       { key: "consumptions", header: "耗材", className: "min-w-[100px]", render: (row) => {
         if (!row.consumption_summary || row.consumption_summary.count === 0) return <span className="text-xs text-fg-dimmed">—</span>;
-        return <button type="button" className="text-xs text-accent hover:underline" onClick={() => void openConsumptionDetail(row.id)} title={`${row.consumption_summary.warehouse} · 共 ${row.consumption_summary.total_cost.toFixed(2)} 元`}>已用 {row.consumption_summary.count} 项</button>;
+        return <button type="button" className="text-xs text-accent hover:underline" onClick={() => void openConsumptionDetail(row.id)} title={`${row.consumption_summary.warehouse} · 共 ${row.consumption_summary.total_cost} 元`}>已用 {row.consumption_summary.count} 项</button>;
       } },
     ];
     if (mounted) {
@@ -1320,7 +1604,7 @@ export default function NursingPage() {
                 </div>
 
                 <div className="flex flex-wrap gap-1 border-b border-border">
-                  {([ ["overview", "概览"], ["assessments", "护理评估"], ["plans", "照护计划"], ["tasks", "任务执行"], ["orders", "医嘱核对"], ["timeline", "照护时间线"] ] as [Tab, string][]).map(([tab, label]) => (
+                  {([ ["overview", "概览"], ["assessments", "护理评估"], ["plans", "照护计划"], ["tasks", "任务执行"], ["orders", "医嘱核对"], ["incidents", "异常事件"], ["handovers", "班次交接"], ["timeline", "照护时间线"] ] as [Tab, string][]).map(([tab, label]) => (
                     <button key={tab} type="button" onClick={() => setActiveTab(tab)} className={`border-b-2 px-4 py-3 text-sm font-medium transition-colors ${activeTab === tab ? "border-accent text-accent" : "border-transparent text-fg-muted hover:text-fg"}`}>{label}</button>
                   ))}
                 </div>
@@ -1375,6 +1659,131 @@ export default function NursingPage() {
 
                 {activeTab === "tasks" && <Card className="min-w-0 overflow-hidden" title="照护任务" actions={<Button size="sm" onClick={openTask}>创建任务</Button>}><Table columns={taskColumns} data={tasks} loading={false} emptyMessage="暂无照护任务，可从计划措施创建或直接添加任务。" /></Card>}
 
+                {activeTab === "incidents" && (
+                  <Card
+                    className="min-w-0 overflow-hidden"
+                    title="异常事件"
+                    actions={<Button size="sm" onClick={() => { setIncidentForm((current) => ({ ...current, occurredAt: new Date().toISOString().slice(0, 16) })); setIncidentError(""); setIncidentCreateOpen(true); }}>上报事件</Button>}
+                  >
+                    {incidentError && <div className="mb-3 rounded-lg border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">{incidentError}</div>}
+                    {incidentLoading ? (
+                      <div className="py-12 text-center text-sm text-fg-dimmed">正在加载异常事件…</div>
+                    ) : incidents.length === 0 ? (
+                      <div className="py-12 text-center text-sm text-fg-dimmed">暂无异常事件。发现跌倒/坠床、走失、压疮等情况时请立即上报。</div>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <table className="w-full min-w-[760px] text-sm">
+                          <thead>
+                            <tr className="border-b border-border text-left text-xs text-fg-muted">
+                              <th className="px-3 py-2 font-medium">类别</th>
+                              <th className="px-3 py-2 font-medium">严重程度</th>
+                              <th className="px-3 py-2 font-medium">状态</th>
+                              <th className="px-3 py-2 font-medium">发生时间</th>
+                              <th className="px-3 py-2 font-medium">说明</th>
+                              <th className="px-3 py-2 font-medium">操作</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {incidents.map((incident) => (
+                              <tr key={incident.id} className="border-b border-border last:border-0">
+                                <td className="px-3 py-2.5"><Badge variant={incident.incident_type === "其他" ? "default" : "danger"}>{incident.incident_type}</Badge></td>
+                                <td className="px-3 py-2.5">{incident.severity}</td>
+                                <td className="px-3 py-2.5">
+                                  <Badge variant={incident.status === "已关闭" ? "default" : incident.status === "处理中" ? "warning" : "danger"}>{incident.status}</Badge>
+                                </td>
+                                <td className="px-3 py-2.5 text-fg-muted">{formatDateTime(incident.occurred_at)}</td>
+                                <td className="max-w-[240px] truncate px-3 py-2.5 text-fg-muted" title={incident.description}>{incident.description}</td>
+                                <td className="px-3 py-2.5">
+                                  <Button size="sm" variant="link" onClick={() => void openIncidentDetail(incident.id, incident.encounter_id)}>详情</Button>
+                                  {incident.status !== "已关闭" && (
+                                    <Button size="sm" variant="link" onClick={() => {
+                                      void (async () => {
+                                        try {
+                                          const detail = await getNursingIncident(incident.encounter_id, incident.id);
+                                          setIncidentDetail(detail);
+                                          setIncidentActionForm({ actionType: "处置", body: "", notifiedParty: "", notificationResult: "" });
+                                          setIncidentError("");
+                                          setIncidentActionOpen(true);
+                                        } catch (error) {
+                                          setIncidentError(errorMessage(error, "无法加载事件详情"));
+                                        }
+                                      })();
+                                    }}>处置</Button>
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </Card>
+                )}
+
+                {activeTab === "handovers" && (
+                  <Card
+                    className="min-w-0 overflow-hidden"
+                    title={`班次交接${selectedAdmission?.department ? ` · ${selectedAdmission.department}` : ""}`}
+                    actions={
+                      <>
+                        {selectedAdmission?.department && (
+                          <Button size="sm" onClick={openHandoverCreate}>创建交接单</Button>
+                        )}
+                      </>
+                    }
+                  >
+                    {!selectedAdmission?.department && (
+                      <div className="py-10 text-center text-sm text-fg-muted">当前入住未设置照护单元，无法进行班次交接。请在入住管理中补充照护单元/病区信息。</div>
+                    )}
+                    {selectedAdmission?.department && (
+                      <>
+                        {handoverError && <div className="mb-3 rounded-lg border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">{handoverError}</div>}
+                        {handoverLoading ? (
+                          <div className="py-12 text-center text-sm text-fg-dimmed">正在加载交接单…</div>
+                        ) : handovers.length === 0 ? (
+                          <div className="py-12 text-center text-sm text-fg-dimmed">该照护单元暂无交接单。交班时创建交接单，冻结本班未完成事项供接班人确认。</div>
+                        ) : (
+                          <div className="overflow-x-auto">
+                            <table className="w-full min-w-[720px] text-sm">
+                              <thead>
+                                <tr className="border-b border-border text-left text-xs text-fg-muted">
+                                  <th className="px-3 py-2 font-medium">业务日期</th>
+                                  <th className="px-3 py-2 font-medium">班次</th>
+                                  <th className="px-3 py-2 font-medium">状态</th>
+                                  <th className="px-3 py-2 font-medium">交班人</th>
+                                  <th className="px-3 py-2 font-medium">接班人</th>
+                                  <th className="px-3 py-2 font-medium">事项数</th>
+                                  <th className="px-3 py-2 font-medium">操作</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {handovers.map((handover) => (
+                                  <tr key={handover.id} className="border-b border-border last:border-0">
+                                    <td className="px-3 py-2.5">{handover.business_date}</td>
+                                    <td className="px-3 py-2.5">{handover.shift}</td>
+                                    <td className="px-3 py-2.5">
+                                      <Badge variant={handover.status === "已接班" ? "success" : "warning"}>{handover.status}</Badge>
+                                    </td>
+                                    <td className="px-3 py-2.5 text-fg-muted">{subjectMap.get(handover.handover_by ?? "") ?? handover.handover_by ?? "-"}</td>
+                                    <td className="px-3 py-2.5 text-fg-muted">{subjectMap.get(handover.received_by ?? "") ?? handover.received_by ?? "-"}</td>
+                                    <td className="px-3 py-2.5">{handover.item_count ?? 0}</td>
+                                    <td className="px-3 py-2.5">
+                                      <Button size="sm" variant="link" onClick={() => void openHandoverDetail(handover.id)}>详情</Button>
+                                      {handover.status === "待接班" && (
+                                        <Button size="sm" variant="link" loading={handoverReceivingId === handover.id} onClick={() => void handleReceiveHandover(handover.id)}>接班</Button>
+                                      )}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </Card>
+                )}
+
                 {activeTab === "timeline" && (
                   <div className="space-y-4">
                     <Card bodyClassName="space-y-3">
@@ -1390,6 +1799,8 @@ export default function NursingPage() {
                             <option value="ASSESSMENT">护理评估</option>
                             <option value="CARE_PLAN">照护计划</option>
                             <option value="TASK">照护任务</option>
+                            <option value="NURSING_INCIDENT">异常事件</option>
+                            <option value="SHIFT_HANDOVER">班次交接</option>
                           </select>
                         </div>
                         <Button variant="secondary" onClick={() => openRecordCreation()} loading={recordSaving}>新增护理记录</Button>
@@ -1413,6 +1824,8 @@ export default function NursingPage() {
                                   : event.event_type === "TASK_EXECUTION" ? "border-green-500 bg-green-100"
                                   : event.event_type === "ASSESSMENT" ? "border-blue-500 bg-blue-100"
                                   : event.event_type === "CARE_PLAN" ? "border-purple-500 bg-purple-100"
+                                  : event.event_type === "NURSING_INCIDENT" ? "border-red-500 bg-red-100"
+                                  : event.event_type === "SHIFT_HANDOVER" ? "border-amber-500 bg-amber-100"
                                   : "border-gray-400 bg-gray-100"
                                 }`} />
                                 {idx < timelineEvents.length - 1 && <div className="w-px flex-1 bg-border" />}
@@ -1425,12 +1838,16 @@ export default function NursingPage() {
                                       event.event_type === "NURSING_RECORD" ? "info" as const
                                       : event.event_type === "TASK_EXECUTION" ? "success" as const
                                       : event.event_type === "ASSESSMENT" ? "warning" as const
+                                      : event.event_type === "NURSING_INCIDENT" ? "danger" as const
+                                      : event.event_type === "SHIFT_HANDOVER" ? "warning" as const
                                       : "default" as const
                                     }>{
                                       event.event_type === "NURSING_RECORD" ? (event.metadata?.record_kind === "CORRECTION" ? "更正" : "护理记录")
                                       : event.event_type === "TASK_EXECUTION" ? "任务执行"
                                       : event.event_type === "ASSESSMENT" ? "护理评估"
                                       : event.event_type === "CARE_PLAN" ? "照护计划"
+                                      : event.event_type === "NURSING_INCIDENT" ? "异常事件"
+                                      : event.event_type === "SHIFT_HANDOVER" ? "班次交接"
                                       : "照护任务"
                                     }</Badge>
                                     <span className="text-xs text-fg-dimmed">{formatDateTime(event.occurred_at)}</span>
@@ -1449,6 +1866,12 @@ export default function NursingPage() {
                                       const recordId = event.source.id;
                                       void getNursingRecord(recordId).then((r) => openCorrection(r)).catch(() => {});
                                     }}>更正记录</Button>
+                                  )}
+                                  {event.event_type === "NURSING_INCIDENT" && (
+                                    <Button size="sm" variant="link" onClick={() => void openIncidentDetail(event.source.id, selectedEncounterId)}>查看详情</Button>
+                                  )}
+                                  {event.event_type === "SHIFT_HANDOVER" && (
+                                    <Button size="sm" variant="link" onClick={() => void openHandoverDetail(event.source.id)}>查看交接单</Button>
                                   )}
                                 </div>
                               </div>
@@ -1636,7 +2059,7 @@ export default function NursingPage() {
                       {item.quantity} {item.unit}
                     </div>
                     {item.batch_no && <div className="mt-0.5">批次：{item.batch_no}</div>}
-                    {item.total_cost != null && <div className="mt-0.5">￥{item.total_cost.toFixed(2)}</div>}
+                    {item.total_cost != null && <div className="mt-0.5">￥{item.total_cost}</div>}
                   </div>
                 </div>
               </div>
@@ -1854,6 +2277,249 @@ export default function NursingPage() {
             </div>
           </form>
         )}
+      </Modal>
+
+      {/* ——— 异常事件：上报 ——— */}
+      <Modal open={incidentCreateOpen} onClose={() => { if (!incidentSaving) { setIncidentCreateOpen(false); setIncidentError(""); } }} title="上报护理异常事件">
+        <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void handleCreateIncident(); }}>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="flex flex-col gap-1.5">
+              <label className="text-sm font-medium text-fg-muted" htmlFor="incident-type">事件类别 <span className="text-danger">*</span></label>
+              <select id="incident-type" className={selectClass} value={incidentForm.incidentType} onChange={(event) => setIncidentForm((current) => ({ ...current, incidentType: event.target.value }))}>
+                <option value="跌倒/坠床">跌倒/坠床</option>
+                <option value="走失">走失</option>
+                <option value="压疮">压疮</option>
+                <option value="误吸/噎食">误吸/噎食</option>
+                <option value="用药差错">用药差错</option>
+                <option value="感染暴露">感染暴露</option>
+                <option value="其他">其他</option>
+              </select>
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <label className="text-sm font-medium text-fg-muted" htmlFor="incident-severity">严重程度 <span className="text-danger">*</span></label>
+              <select id="incident-severity" className={selectClass} value={incidentForm.severity} onChange={(event) => setIncidentForm((current) => ({ ...current, severity: event.target.value }))}>
+                <option value="一般">一般</option>
+                <option value="较重">较重</option>
+                <option value="严重">严重</option>
+              </select>
+            </div>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm font-medium text-fg-muted" htmlFor="incident-occurred">发生时间 <span className="text-danger">*</span></label>
+            <input id="incident-occurred" type="datetime-local" className={selectClass} value={incidentForm.occurredAt} onChange={(event) => setIncidentForm((current) => ({ ...current, occurredAt: event.target.value }))} />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm font-medium text-fg-muted" htmlFor="incident-description">事件说明 <span className="text-danger">*</span></label>
+            <textarea id="incident-description" rows={4} className={textareaClass} value={incidentForm.description} onChange={(event) => setIncidentForm((current) => ({ ...current, description: event.target.value }))} placeholder="客观描述发生了什么、发现过程和现场情况" required />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm font-medium text-fg-muted" htmlFor="incident-initial-action">即时处置（可选）</label>
+            <textarea id="incident-initial-action" rows={2} className={textareaClass} value={incidentForm.initialAction} onChange={(event) => setIncidentForm((current) => ({ ...current, initialAction: event.target.value }))} placeholder="例如：已扶起老人并评估伤情、通知家属（填写后事件直接进入处理中）" />
+          </div>
+          {incidentError && <p className="text-sm text-danger">{incidentError}</p>}
+          <div className="flex justify-end gap-3">
+            <Button type="button" variant="ghost" onClick={() => { setIncidentCreateOpen(false); setIncidentError(""); }} disabled={incidentSaving}>取消</Button>
+            <Button type="submit" loading={incidentSaving} disabled={!incidentForm.description.trim()}>上报事件</Button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* ——— 异常事件：只读详情 ——— */}
+      <Modal open={incidentDetailOpen} onClose={() => { setIncidentDetailOpen(false); setIncidentDetail(null); }} title="异常事件详情">
+        {incidentDetail && (
+          <div className="space-y-4">
+            <div className="rounded-md bg-surface-alt px-3 py-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant="danger">{incidentDetail.incident_type}</Badge>
+                <Badge variant="warning">{incidentDetail.severity}</Badge>
+                <Badge variant={incidentDetail.status === "已关闭" ? "default" : "warning"}>{incidentDetail.status}</Badge>
+                <span className="text-xs text-fg-dimmed">{formatDateTime(incidentDetail.occurred_at)}</span>
+              </div>
+              <h4 className="mt-2 text-base font-semibold text-fg-emphasis">{incidentDetail.description}</h4>
+              {incidentDetail.reporter && <p className="mt-2 text-xs text-fg-dimmed">上报人：{subjectMap.get(incidentDetail.reporter) ?? incidentDetail.reporter}</p>}
+            </div>
+            <div>
+              <h5 className="text-sm font-semibold text-fg-emphasis">处置记录（追加式，不可改写）</h5>
+              <div className="mt-3 space-y-3">
+                {incidentDetail.actions.length === 0 ? (
+                  <p className="text-sm text-fg-dimmed">暂无处置记录</p>
+                ) : (
+                  incidentDetail.actions.map((action) => (
+                    <div key={action.id} className="rounded-md border border-border p-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge variant={action.action_type === "关闭" ? "default" : action.action_type === "上报" ? "danger" : "info"}>
+                          {action.action_type === "上报" ? "上报" : action.action_type === "处置" ? "处置" : action.action_type === "通知" ? "通知/联系" : action.action_type === "观察" ? "观察" : "关闭"}
+                        </Badge>
+                        <span className="text-xs text-fg-dimmed">{formatDateTime(action.occurred_at)}</span>
+                        <span className="text-xs text-fg-muted">操作人：{subjectMap.get(action.actor ?? "") ?? action.actor ?? "-"}</span>
+                      </div>
+                      <p className="mt-2 whitespace-pre-wrap text-sm text-fg">{action.body}</p>
+                      {(action.notified_party || action.notification_result) && (
+                        <p className="mt-1 text-xs text-fg-dimmed">
+                          通知对象：{action.notified_party || "-"} · 通知结果：{action.notification_result || "-"}
+                        </p>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+            <div className="flex flex-wrap justify-end gap-3">
+              {incidentDetail.status !== "已关闭" && (
+                <>
+                  <Button variant="secondary" onClick={() => { setIncidentDetailOpen(false); setIncidentActionForm({ actionType: "处置", body: "", notifiedParty: "", notificationResult: "" }); setIncidentError(""); setIncidentActionOpen(true); }}>追加处置/通知</Button>
+                  <Button variant="secondary" onClick={() => { setIncidentCloseNote(""); setIncidentError(""); setIncidentCloseOpen(true); }}>关闭事件</Button>
+                </>
+              )}
+              <Button variant="ghost" onClick={() => { setIncidentDetailOpen(false); setIncidentDetail(null); }}>关闭</Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* ——— 异常事件：追加处置/通知/观察 ——— */}
+      <Modal open={incidentActionOpen} onClose={() => { if (!incidentActionSaving) { setIncidentActionOpen(false); } }} title="追加处置/通知/观察">
+        <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void handleAddIncidentAction(); }}>
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm font-medium text-fg-muted" htmlFor="action-type">动作类别 <span className="text-danger">*</span></label>
+            <select id="action-type" className={selectClass} value={incidentActionForm.actionType} onChange={(event) => setIncidentActionForm((current) => ({ ...current, actionType: event.target.value }))}>
+              <option value="处置">处置</option>
+              <option value="通知">通知/联系</option>
+              <option value="观察">观察</option>
+            </select>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm font-medium text-fg-muted" htmlFor="action-body">正文 <span className="text-danger">*</span></label>
+            <textarea id="action-body" rows={4} className={textareaClass} value={incidentActionForm.body} onChange={(event) => setIncidentActionForm((current) => ({ ...current, body: event.target.value }))} placeholder="记录处置措施、通知/联系事实或观察结果" required />
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="flex flex-col gap-1.5">
+              <label className="text-sm font-medium text-fg-muted" htmlFor="action-party">通知对象（可选）</label>
+              <input id="action-party" className={selectClass} value={incidentActionForm.notifiedParty} onChange={(event) => setIncidentActionForm((current) => ({ ...current, notifiedParty: event.target.value }))} placeholder="如：家属 / 值班医生" />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <label className="text-sm font-medium text-fg-muted" htmlFor="action-result">通知结果（可选）</label>
+              <input id="action-result" className={selectClass} value={incidentActionForm.notificationResult} onChange={(event) => setIncidentActionForm((current) => ({ ...current, notificationResult: event.target.value }))} placeholder="如：已接通 / 未接通" />
+            </div>
+          </div>
+          {incidentError && <p className="text-sm text-danger">{incidentError}</p>}
+          <div className="flex justify-end gap-3">
+            <Button type="button" variant="ghost" onClick={() => { setIncidentActionOpen(false); setIncidentError(""); }} disabled={incidentActionSaving}>取消</Button>
+            <Button type="submit" loading={incidentActionSaving} disabled={!incidentActionForm.body.trim()}>追加记录</Button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* ——— 异常事件：关闭 ——— */}
+      <Modal open={incidentCloseOpen} onClose={() => { if (!incidentCloseSaving) { setIncidentCloseOpen(false); } }} title="关闭异常事件">
+        <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void handleCloseIncident(); }}>
+          <p className="text-sm text-fg-muted">关闭后事件不可重开、编辑或删除；如发现新的风险请新建事件。</p>
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm font-medium text-fg-muted" htmlFor="close-note">关闭说明 <span className="text-danger">*</span></label>
+            <textarea id="close-note" rows={4} className={textareaClass} value={incidentCloseNote} onChange={(event) => setIncidentCloseNote(event.target.value)} placeholder="说明最终处置结果与跟进结论" required />
+          </div>
+          {incidentError && <p className="text-sm text-danger">{incidentError}</p>}
+          <div className="flex justify-end gap-3">
+            <Button type="button" variant="ghost" onClick={() => { setIncidentCloseOpen(false); setIncidentError(""); }} disabled={incidentCloseSaving}>取消</Button>
+            <Button type="submit" loading={incidentCloseSaving} disabled={!incidentCloseNote.trim()}>确认关闭</Button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* ——— 班次交接：创建 ——— */}
+      <Modal open={handoverCreateOpen} onClose={() => { if (!handoverSaving) { setHandoverCreateOpen(false); setHandoverError(""); } }} title="创建班次交接单">
+        <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void handleCreateHandover(); }}>
+          <div className="rounded-md bg-surface-alt px-3 py-2 text-sm text-fg-muted">
+            照护单元：<span className="font-medium text-fg-emphasis">{selectedAdmission?.department || "-"}</span>
+            <p className="mt-1 text-xs">交接单将冻结该照护单元下未完成执行、未关闭事件、本业务日护理记录与活动入住快照，同时保留你填写的重点事项。</p>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="flex flex-col gap-1.5">
+              <label className="text-sm font-medium text-fg-muted" htmlFor="handover-date">业务日期 <span className="text-danger">*</span></label>
+              <input id="handover-date" type="date" className={selectClass} value={handoverForm.businessDate} onChange={(event) => setHandoverForm((current) => ({ ...current, businessDate: event.target.value }))} />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <label className="text-sm font-medium text-fg-muted" htmlFor="handover-shift">班次 <span className="text-danger">*</span></label>
+              <select id="handover-shift" className={selectClass} value={handoverForm.shift} onChange={(event) => setHandoverForm((current) => ({ ...current, shift: event.target.value }))}>
+                <option value="早班">早班</option>
+                <option value="中班">中班</option>
+                <option value="夜班">夜班</option>
+              </select>
+            </div>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm font-medium text-fg-muted" htmlFor="handover-manual">重点事项（可选，每行一条）</label>
+            <textarea id="handover-manual" rows={4} className={textareaClass} value={handoverForm.manualItems} onChange={(event) => setHandoverForm((current) => ({ ...current, manualItems: event.target.value }))} placeholder={"例如：\n下午重点关注张奶奶饮水情况\n2 床家属要求晚 8 点前联系"} />
+          </div>
+          {handoverError && <p className="text-sm text-danger">{handoverError}</p>}
+          <div className="flex justify-end gap-3">
+            <Button type="button" variant="ghost" onClick={() => { setHandoverCreateOpen(false); setHandoverError(""); }} disabled={handoverSaving}>取消</Button>
+            <Button type="submit" loading={handoverSaving}>创建交接单</Button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* ——— 班次交接：只读详情 ——— */}
+      <Modal open={handoverDetailOpen} onClose={() => { setHandoverDetailOpen(false); setHandoverDetail(null); }} title="班次交接单详情">
+        {handoverDetail && (
+          <div className="space-y-4">
+            <div className="rounded-md bg-surface-alt px-3 py-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant="info">{handoverDetail.shift}</Badge>
+                <Badge variant={handoverDetail.status === "已接班" ? "success" : "warning"}>{handoverDetail.status}</Badge>
+                <span className="text-xs text-fg-dimmed">{handoverDetail.business_date} · {handoverDetail.care_unit}</span>
+              </div>
+              <p className="mt-2 text-xs text-fg-dimmed">
+                交班人：{subjectMap.get(handoverDetail.handover_by ?? "") ?? handoverDetail.handover_by ?? "-"}
+                {handoverDetail.handed_over_at ? ` · ${formatDateTime(handoverDetail.handed_over_at)}` : ""}
+                {handoverDetail.received_by ? ` · 接班人：${subjectMap.get(handoverDetail.received_by) ?? handoverDetail.received_by}${handoverDetail.received_at ? ` · ${formatDateTime(handoverDetail.received_at)}` : ""}` : ""}
+              </p>
+            </div>
+            <div>
+              <h5 className="text-sm font-semibold text-fg-emphasis">冻结事项（快照，不可改写）</h5>
+              <div className="mt-3 space-y-2">
+                {handoverDetail.items.length === 0 ? (
+                  <p className="text-sm text-fg-dimmed">暂无交接事项</p>
+                ) : (
+                  handoverDetail.items.map((item) => (
+                    <div key={item.id} className="rounded-md border border-border p-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge variant={item.item_kind === "事件" ? "danger" : item.item_kind === "执行" ? "warning" : item.item_kind === "护理记录" ? "info" : item.item_kind === "手工" ? "success" : "default"}>
+                          {item.item_kind === "手工" ? "手工补充" : item.item_kind}
+                        </Badge>
+                        <span className="text-xs text-fg-dimmed">快照：{formatDateTime(item.snapshot_at)}</span>
+                      </div>
+                      <p className="mt-2 whitespace-pre-wrap text-sm text-fg">{item.summary}</p>
+                      {item.created_by && <p className="mt-1 text-xs text-fg-dimmed">记录人：{subjectMap.get(item.created_by) ?? item.created_by}</p>}
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+            <div className="flex flex-wrap justify-end gap-3">
+              <Button variant="secondary" onClick={() => { setHandoverAppendContent(""); setHandoverError(""); setHandoverAppendOpen(true); }}>补充事项</Button>
+              {handoverDetail.status === "待接班" && (
+                <Button loading={handoverReceivingId === handoverDetail.id} onClick={() => void handleReceiveHandover(handoverDetail.id).then(() => { setHandoverDetailOpen(false); setHandoverDetail(null); })}>确认接班</Button>
+              )}
+              <Button variant="ghost" onClick={() => { setHandoverDetailOpen(false); setHandoverDetail(null); }}>关闭</Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* ——— 班次交接：补充事项 ——— */}
+      <Modal open={handoverAppendOpen} onClose={() => { if (!handoverAppendSaving) { setHandoverAppendOpen(false); } }} title="补充交接事项">
+        <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void handleAppendHandoverItem(); }}>
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm font-medium text-fg-muted" htmlFor="append-content">补充内容 <span className="text-danger">*</span></label>
+            <textarea id="append-content" rows={4} className={textareaClass} value={handoverAppendContent} onChange={(event) => setHandoverAppendContent(event.target.value)} placeholder="已冻结事项不可修改，新增内容以新事项追加并保留补充人和时间" required />
+          </div>
+          {handoverError && <p className="text-sm text-danger">{handoverError}</p>}
+          <div className="flex justify-end gap-3">
+            <Button type="button" variant="ghost" onClick={() => { setHandoverAppendOpen(false); setHandoverError(""); }} disabled={handoverAppendSaving}>取消</Button>
+            <Button type="submit" loading={handoverAppendSaving} disabled={!handoverAppendContent.trim()}>追加事项</Button>
+          </div>
+        </form>
       </Modal>
     </div>
   );

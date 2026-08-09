@@ -1127,7 +1127,7 @@ export interface NursingRecordCorrectionInput {
 /** 时间线事件 */
 export interface NursingTimelineEvent {
   id: string;
-  event_type: "ASSESSMENT" | "CARE_PLAN" | "TASK" | "TASK_EXECUTION" | "NURSING_RECORD";
+  event_type: "ASSESSMENT" | "CARE_PLAN" | "TASK" | "TASK_EXECUTION" | "NURSING_RECORD" | "NURSING_INCIDENT" | "SHIFT_HANDOVER";
   occurred_at: string;
   title: string;
   summary: string | null;
@@ -1168,6 +1168,215 @@ export function getNursingRecord(id: string): Promise<NursingRecord> {
   return request<NursingRecord>(`/healthcare/v1/nursing-records/${encodeURIComponent(id)}`);
 }
 
+// ========================================================================
+//  Healthcare API — 院内护理异常事件（017）
+// ========================================================================
+
+export interface NursingIncident {
+  id: string;
+  encounter_id: string;
+  period_id: string;
+  incident_type: string;
+  severity: string;
+  status: "已上报" | "处理中" | "已关闭";
+  occurred_at: string;
+  description: string;
+  reporter: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface NursingIncidentAction {
+  id: string;
+  incident_id: string;
+  action_type: string;
+  body: string;
+  actor: string | null;
+  occurred_at: string;
+  notified_party: string | null;
+  notification_result: string | null;
+  created_at: string;
+}
+
+export interface NursingIncidentDetail extends NursingIncident {
+  actions: NursingIncidentAction[];
+}
+
+export interface NursingIncidentCreateInput {
+  incident_type: string;
+  severity: string;
+  occurred_at: string;
+  description: string;
+  initial_action?: {
+    action_type: string;
+    body: string;
+    notified_party?: string;
+    notification_result?: string;
+  };
+}
+
+export interface NursingIncidentActionInput {
+  action_type: string;
+  body: string;
+  notified_party?: string;
+  notification_result?: string;
+}
+
+export interface NursingIncidentCloseInput {
+  close_note: string;
+}
+
+export function createNursingIncident(
+  encounterId: string,
+  input: NursingIncidentCreateInput,
+): Promise<NursingIncident> {
+  return request<NursingIncident>(
+    `/healthcare/v1/encounters/${encodeURIComponent(encounterId)}/nursing-incidents`,
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+export function listNursingIncidents(params: {
+  encounter_id: string;
+  status?: string;
+  date_from?: string;
+  date_to?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<NursingPage<NursingIncident>> {
+  const query = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== "") query.set(key, String(value));
+  });
+  return request<NursingPage<NursingIncident>>(
+    `/healthcare/v1/encounters/${encodeURIComponent(params.encounter_id)}/nursing-incidents?${query.toString()}`,
+  );
+}
+
+export function getNursingIncident(
+  encounterId: string,
+  id: string,
+): Promise<NursingIncidentDetail> {
+  return request<NursingIncidentDetail>(
+    `/healthcare/v1/encounters/${encodeURIComponent(encounterId)}/nursing-incidents/${encodeURIComponent(id)}`,
+  );
+}
+
+export function createNursingIncidentAction(
+  encounterId: string,
+  id: string,
+  input: NursingIncidentActionInput,
+): Promise<{ incident: NursingIncident; action: NursingIncidentAction }> {
+  return request(
+    `/healthcare/v1/encounters/${encodeURIComponent(encounterId)}/nursing-incidents/${encodeURIComponent(id)}/actions`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export function closeNursingIncident(
+  encounterId: string,
+  id: string,
+  input: NursingIncidentCloseInput,
+): Promise<{ incident: NursingIncident; action: NursingIncidentAction }> {
+  return request(
+    `/healthcare/v1/encounters/${encodeURIComponent(encounterId)}/nursing-incidents/${encodeURIComponent(id)}/close`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+// ========================================================================
+//  Healthcare API — 班次交接（017）
+// ========================================================================
+
+export interface ShiftHandoverItem {
+  id: string;
+  handover_id: string;
+  item_kind: "执行" | "事件" | "护理记录" | "入住" | "手工";
+  encounter_id: string | null;
+  period_id: string | null;
+  source_id: string | null;
+  summary: string;
+  created_by: string | null;
+  snapshot_at: string | null;
+  created_at: string;
+}
+
+export interface ShiftHandover {
+  id: string;
+  care_unit: string;
+  business_date: string;
+  shift: "早班" | "中班" | "夜班";
+  handover_by: string | null;
+  handed_over_at: string | null;
+  received_by: string | null;
+  received_at: string | null;
+  status: "待接班" | "已接班";
+  item_count?: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ShiftHandoverDetail extends ShiftHandover {
+  items: ShiftHandoverItem[];
+}
+
+export interface ShiftHandoverCreateInput {
+  /** 当前照护单元内任一活动养老入住；服务端据此推导并验证照护单元 */
+  encounter_id: string;
+  business_date: string;
+  shift: string;
+  manual_items?: string[];
+}
+
+export function createShiftHandover(
+  input: ShiftHandoverCreateInput,
+  idempotencyKey: string,
+): Promise<ShiftHandoverDetail> {
+  return request<ShiftHandoverDetail>("/healthcare/v1/nursing-shift-handovers", {
+    method: "POST",
+    body: JSON.stringify(input),
+    headers: { "Idempotency-Key": idempotencyKey },
+  });
+}
+
+export function listShiftHandovers(params: {
+  care_unit: string;
+  business_date?: string;
+  shift?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<NursingPage<ShiftHandover>> {
+  const query = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== "") query.set(key, String(value));
+  });
+  return request<NursingPage<ShiftHandover>>(`/healthcare/v1/nursing-shift-handovers?${query.toString()}`);
+}
+
+export function getShiftHandover(id: string): Promise<ShiftHandoverDetail> {
+  return request<ShiftHandoverDetail>(`/healthcare/v1/nursing-shift-handovers/${encodeURIComponent(id)}`);
+}
+
+export function receiveShiftHandover(id: string): Promise<ShiftHandoverDetail> {
+  return request<ShiftHandoverDetail>(`/healthcare/v1/nursing-shift-handovers/${encodeURIComponent(id)}/receive`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export function appendShiftHandoverItem(id: string, content: string): Promise<ShiftHandoverDetail> {
+  return request<ShiftHandoverDetail>(`/healthcare/v1/nursing-shift-handovers/${encodeURIComponent(id)}/items`, {
+    method: "POST",
+    body: JSON.stringify({ content }),
+  });
+}
+
 export function createNursingRecordCorrection(
   id: string,
   input: NursingRecordCorrectionInput,
@@ -1198,11 +1407,14 @@ export function listNursingTimeline(params: {
 //  Nursing API — Consumptions (耗材)
 // ========================================================================
 
+/** 与后端 NUMERIC 对应的无损十进制文本。 */
+export type DecimalText = string;
+
 /** 耗材摘要 */
 export interface NursingConsumptionSummary {
   count: number;
   warehouse: string;
-  total_cost: number;
+  total_cost: DecimalText;
 }
 
 /** 耗材明细（016：单一基础数量与基础单位快照） */
@@ -1215,17 +1427,17 @@ export interface NursingExecutionConsumption {
   lot_id: string | null;
   batch_no?: string | null;
   warehouse: string;
-  quantity: number;
+  quantity: DecimalText;
   unit: string;
-  unit_cost: number;
-  total_cost: number;
+  unit_cost: DecimalText;
+  total_cost: DecimalText;
   created_at: string;
 }
 
 /** 耗材输入项（016）：客户端只提交 stock_id + 基础数量 */
 export interface NursingConsumptionInput {
   stock_id: string;
-  quantity: number;
+  quantity: DecimalText;
 }
 
 /** 带耗材的状态更新 */
@@ -1264,10 +1476,10 @@ export interface InventoryStockAvailability {
   lot_id: string | null;
   batch_no: string | null;
   expiry_date: string | null;
-  quantity: number;
-  locked_quantity: number;
-  available_quantity: number;
-  unit_cost: number;
+  quantity: DecimalText;
+  locked_quantity: DecimalText;
+  available_quantity: DecimalText;
+  unit_cost: DecimalText;
   unit: string;
 }
 
@@ -1288,8 +1500,8 @@ export function listInventoryStocks(params: {
 export interface InventoryInboundItem {
   material_id: string;
   lot_id?: string;
-  quantity: number;
-  unit_cost: number;
+  quantity: DecimalText;
+  unit_cost: DecimalText;
 }
 
 /** 确认入库 */
@@ -1319,7 +1531,7 @@ export interface InventoryMaterial {
   base_unit: string;
   quantity_scale: number;
   package_unit: string | null;
-  package_size: number | null;
+  package_size: DecimalText | null;
   enable_batch_control: boolean | null;
   cost_method: string | null;
   metadata: Record<string, unknown> | null;
@@ -1359,7 +1571,7 @@ export function createInventoryMaterial(input: {
   quantity_scale?: number;
   spec?: string;
   package_unit?: string;
-  package_size?: number;
+  package_size?: DecimalText;
   enable_batch_control?: boolean;
   cost_method?: string;
   status?: string;
@@ -1825,11 +2037,11 @@ export interface PharmacyDispenseItem {
   order_execution_id: string | null;
   material_id: string | null;
   lot_id: string | null;
-  prescribed_quantity: number | null;
-  dispensed_quantity: number | null;
+  prescribed_quantity: DecimalText | null;
+  dispensed_quantity: DecimalText | null;
   stock_operation_detail_id: string | null;
-  unit_cost: number | null;
-  total_cost: number | null;
+  unit_cost: DecimalText | null;
+  total_cost: DecimalText | null;
   metadata: Record<string, unknown> | null;
 }
 
@@ -1858,10 +2070,10 @@ export interface PharmacyReturnItem {
   id: string;
   return_id: string;
   dispense_item_id: string;
-  quantity: number | null;
+  quantity: DecimalText | null;
   stock_operation_detail_id: string | null;
-  unit_cost: number | null;
-  total_cost: number | null;
+  unit_cost: DecimalText | null;
+  total_cost: DecimalText | null;
   metadata: Record<string, unknown> | null;
 }
 
@@ -1876,7 +2088,7 @@ export interface PharmacyReturn {
   metadata: Record<string, unknown> | null;
   created_at: string;
   confirmed_at: string | null;
-  total_quantity?: number | null;
+  total_quantity?: DecimalText | null;
   items: PharmacyReturnItem[];
 }
 
@@ -1888,7 +2100,7 @@ export interface PharmacyReturnList {
 export interface PharmacyReturnFromDispenseInput {
   dispense_id: string;
   dispense_item_id: string;
-  quantity: number;
+  quantity: DecimalText;
   return_reason: string;
   operator: string;
   restockable: true;
@@ -1901,7 +2113,7 @@ export interface PharmacyDispenseFromMedicalOrderInput {
   warehouse: string;
   material_id: string;
   lot_id?: string;
-  dispensed_quantity: number;
+  dispensed_quantity: DecimalText;
 }
 
 /** 审方/调配/确认/取消入参 */
@@ -2042,9 +2254,9 @@ export interface PharmacyRequisitionItem {
   id: string;
   requisition_id: string;
   material_id: string;
-  requested_quantity: number | null;
-  approved_quantity: number | null;
-  dispensed_quantity: number | null;
+  requested_quantity: DecimalText | null;
+  approved_quantity: DecimalText | null;
+  dispensed_quantity: DecimalText | null;
   lot_id: string | null;
   outbound_stock_operation_detail_id: string | null;
   inbound_stock_operation_detail_id: string | null;
@@ -2082,7 +2294,7 @@ export interface PharmacyRequisitionList {
 
 export interface PharmacyRequisitionCreateItemInput {
   material_id: string;
-  requested_quantity: number;
+  requested_quantity: DecimalText;
 }
 
 export interface PharmacyRequisitionCreateInput {
@@ -2094,7 +2306,7 @@ export interface PharmacyRequisitionCreateInput {
 
 export interface PharmacyRequisitionApproveItemInput {
   id: string;
-  approved_quantity: number;
+  approved_quantity: DecimalText;
   lot_id: string | null;
 }
 
@@ -2185,9 +2397,9 @@ export interface PharmacyPurchaseOrderItem {
   id: string;
   purchase_order_id: string;
   material_id: string;
-  ordered_quantity: number;
-  received_quantity: number;
-  remaining_quantity: number;
+  ordered_quantity: DecimalText;
+  received_quantity: DecimalText;
+  remaining_quantity: DecimalText;
 }
 
 export interface PharmacyPurchaseOrderReceiptSummary {
@@ -2227,7 +2439,7 @@ export interface PharmacyPurchaseOrderList {
 
 export interface PharmacyPurchaseOrderCreateItemInput {
   material_id: string;
-  ordered_quantity: number;
+  ordered_quantity: DecimalText;
 }
 
 export interface PharmacyPurchaseOrderCreateInput {
@@ -2238,12 +2450,12 @@ export interface PharmacyPurchaseOrderCreateInput {
 
 export interface PharmacyPurchaseReceiptLineInput {
   purchase_order_item_id: string;
-  received_quantity: number;
+  received_quantity: DecimalText;
   batch_no?: string | null;
   production_date?: string | null;
   expiry_date?: string | null;
   manufacturer?: string | null;
-  unit_cost: number;
+  unit_cost: DecimalText;
 }
 
 export interface PharmacyPurchaseReceiptCreateInput {
@@ -2256,9 +2468,9 @@ export interface PharmacyPurchaseReceiptItem {
   purchase_order_item_id: string;
   material_id: string;
   lot_id: string | null;
-  received_quantity: number;
-  unit_cost: number;
-  total_cost: number;
+  received_quantity: DecimalText;
+  unit_cost: DecimalText;
+  total_cost: DecimalText;
   stock_operation_detail_id: string;
 }
 

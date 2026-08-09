@@ -114,20 +114,6 @@ public class NursingServicePeriodsRecord extends UpdatableRecordImpl<NursingServ
     }
 
     /**
-     * Setter for <code>nursing.nursing_service_periods.encounter_id</code>.
-     */
-    public void setEncounterId(String value) {
-        set(10, value);
-    }
-
-    /**
-     * Getter for <code>nursing.nursing_service_periods.encounter_id</code>.
-     */
-    public String getEncounterId() {
-        return (String) get(10);
-    }
-
-    /**
      * Getter for <code>nursing.nursing_service_periods.status</code>.
      */
     public String getStatus() {
@@ -174,6 +160,20 @@ public class NursingServicePeriodsRecord extends UpdatableRecordImpl<NursingServ
      */
     public OffsetDateTime getUpdatedAt() {
         return (OffsetDateTime) get(9);
+    }
+
+    /**
+     * Setter for <code>nursing.nursing_service_periods.encounter_id</code>.
+     */
+    public void setEncounterId(String value) {
+        set(10, value);
+    }
+
+    /**
+     * Getter for <code>nursing.nursing_service_periods.encounter_id</code>.
+     */
+    public String getEncounterId() {
+        return (String) get(10);
     }
 
     // -------------------------------------------------------------------------

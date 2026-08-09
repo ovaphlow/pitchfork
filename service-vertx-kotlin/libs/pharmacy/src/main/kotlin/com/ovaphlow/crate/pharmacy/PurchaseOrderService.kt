@@ -666,9 +666,9 @@ class PurchaseOrderService(
                         JsonObject()
                             .put("id", row.getValue("id")?.toString())
                             .put("material_id", row.getValue("material_id")?.toString())
-                            .put("ordered_quantity", ordered.toDouble())
-                            .put("received_quantity", received.toDouble())
-                            .put("remaining_quantity", ordered.subtract(received).toDouble()),
+                            .put("ordered_quantity", ordered.toPlainString())
+                            .put("received_quantity", received.toPlainString())
+                            .put("remaining_quantity", ordered.subtract(received).toPlainString()),
                     )
                 }
                 byOrder
@@ -825,9 +825,9 @@ class PurchaseOrderService(
                 .put("id", row.getValue("id")?.toString())
                 .put("purchase_order_id", row.getValue("purchase_order_id")?.toString())
                 .put("material_id", row.getValue("material_id")?.toString())
-                .put("ordered_quantity", ordered.toDouble())
-                .put("received_quantity", received.toDouble())
-                .put("remaining_quantity", ordered.subtract(received).toDouble())
+                .put("ordered_quantity", ordered.toPlainString())
+                .put("received_quantity", received.toPlainString())
+                .put("remaining_quantity", ordered.subtract(received).toPlainString())
         }
 
         fun receiptToJson(row: Row): JsonObject =
@@ -849,9 +849,9 @@ class PurchaseOrderService(
                 .put("purchase_order_item_id", row.getValue("purchase_order_item_id")?.toString())
                 .put("material_id", row.getValue("material_id")?.toString())
                 .put("lot_id", row.getValue("lot_id")?.toString())
-                .put("received_quantity", qtyOf(row.getValue("received_quantity"))?.toDouble())
-                .put("unit_cost", qtyOf(row.getValue("unit_cost"))?.toDouble())
-                .put("total_cost", qtyOf(row.getValue("total_cost"))?.toDouble())
+                .put("received_quantity", decimalApi(qtyOf(row.getValue("received_quantity"))))
+                .put("unit_cost", decimalApi(qtyOf(row.getValue("unit_cost"))))
+                .put("total_cost", decimalApi(qtyOf(row.getValue("total_cost"))))
                 .put("stock_operation_detail_id", row.getValue("stock_operation_detail_id")?.toString())
 
         fun qtyOf(value: Any?): BigDecimal? = when (value) {
@@ -862,10 +862,9 @@ class PurchaseOrderService(
         }
 
         private fun toBigDecimal(value: Any?): BigDecimal = when (value) {
-            is BigDecimal -> value
-            is Number -> BigDecimal(value.toString())
-            is String -> BigDecimal(value)
-            else -> throw IllegalArgumentException("quantity must be a number")
+            is String -> value.toBigDecimalOrNull()
+                ?: throw IllegalArgumentException("quantity must be decimal text")
+            else -> throw IllegalArgumentException("quantity must be decimal text")
         }
     }
 
@@ -898,7 +897,7 @@ class PurchaseOrderService(
             val qty = try {
                 toBigDecimal(item.getValue("ordered_quantity"))
             } catch (e: Exception) {
-                return IllegalArgumentException("items[$i].ordered_quantity must be a number")
+                return IllegalArgumentException("items[$i].ordered_quantity must be decimal text")
             }
             if (qty.compareTo(BigDecimal.ZERO) <= 0) {
                 return IllegalArgumentException("items[$i].ordered_quantity must be positive")
@@ -944,7 +943,7 @@ class PurchaseOrderService(
             val qty = try {
                 toBigDecimal(item.getValue("received_quantity"))
             } catch (e: Exception) {
-                return IllegalArgumentException("items[$i].received_quantity must be a number")
+                return IllegalArgumentException("items[$i].received_quantity must be decimal text")
             }
             if (qty.compareTo(BigDecimal.ZERO) <= 0) {
                 return IllegalArgumentException("items[$i].received_quantity must be positive")
@@ -952,7 +951,7 @@ class PurchaseOrderService(
             val cost = try {
                 toBigDecimal(item.getValue("unit_cost"))
             } catch (e: Exception) {
-                return IllegalArgumentException("items[$i].unit_cost must be a number")
+                return IllegalArgumentException("items[$i].unit_cost must be decimal text")
             }
             if (cost.compareTo(BigDecimal.ZERO) < 0) {
                 return IllegalArgumentException("items[$i].unit_cost must not be negative")

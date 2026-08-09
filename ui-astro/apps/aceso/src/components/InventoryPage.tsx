@@ -18,12 +18,13 @@ function errorMessage(error: unknown, fallback: string): string {
 }
 
 /** 整包 + 余数展示：按物资包装规格换算基础数量（库存账本仍为基础单位） */
-function packageBreakdown(material: InventoryMaterial | undefined, baseQty: number): string | null {
-  if (!material?.package_unit || !material.package_size || material.package_size <= 0) return null;
+function packageBreakdown(material: InventoryMaterial | undefined, baseQty: string): string | null {
+  const quantity = Number(baseQty);
+  const packageSize = material?.package_size ? Number(material.package_size) : NaN;
+  if (!material?.package_unit || !Number.isFinite(quantity) || !Number.isFinite(packageSize) || packageSize <= 0) return null;
   const scale = material.quantity_scale ?? 0;
-  const size = material.package_size;
-  const whole = Math.floor(baseQty / size);
-  const remainder = Number((baseQty - whole * size).toFixed(Math.max(scale, 0)));
+  const whole = Math.floor(quantity / packageSize);
+  const remainder = Number((quantity - whole * packageSize).toFixed(Math.max(scale, 0)));
   const base = material.base_unit;
   const fmt = (n: number) => Number(n.toFixed(scale)).toString();
   if (whole === 0) return `${fmt(remainder)} ${base}`;
@@ -32,8 +33,8 @@ function packageBreakdown(material: InventoryMaterial | undefined, baseQty: numb
 }
 
 /** 整包数 × 每包含量 + 余数 = 基础数量 */
-function computeBaseTotal(pkgQty: string, remQty: string, size: number): number {
-  return (Number(pkgQty) || 0) * size + (Number(remQty) || 0);
+function computeBaseTotal(pkgQty: string, remQty: string, size: string): number {
+  return (Number(pkgQty) || 0) * (Number(size) || 0) + (Number(remQty) || 0);
 }
 
 /** 入库明细行：基础数量 + 每基础单位成本；包装物资用 pkgQty/remQty 录入 */
@@ -136,25 +137,25 @@ export default function InventoryPage() {
         return null;
       }
       const packaged = material?.package_unit && material.package_size ? material : undefined;
-      let quantity: number;
+      let quantity: string;
       if (packaged) {
-        const size = packaged.package_size!;
+        const size = Number(packaged.package_size);
         const p = Number(row.pkgQty) || 0;
         const r = Number(row.remQty) || 0;
         if (p < 0 || r < 0) {
           setInboundError("整包数与余数不能为负数");
           return null;
         }
-        quantity = p * size + r;
+        quantity = String(p * size + r);
       } else {
-        quantity = Number(row.quantity);
+        quantity = row.quantity.trim();
       }
-      if (!Number.isFinite(quantity) || quantity <= 0) {
+      if (!Number.isFinite(Number(quantity)) || Number(quantity) <= 0) {
         setInboundError("基础数量必须为正数");
         return null;
       }
-      const unitCost = Number(row.unitCost);
-      if (!Number.isFinite(unitCost) || unitCost < 0) {
+      const unitCost = row.unitCost.trim();
+      if (!Number.isFinite(Number(unitCost)) || Number(unitCost) < 0) {
         setInboundError("单位成本必须 ≥ 0");
         return null;
       }
@@ -226,8 +227,8 @@ export default function InventoryPage() {
         return (
           <div className="flex flex-col gap-0.5 tabular-nums">
             <span>
-              {row.quantity.toFixed(6)} / {row.locked_quantity.toFixed(6)} /{" "}
-              <b className="text-fg-emphasis">{row.available_quantity.toFixed(6)}</b> {row.unit}
+              {row.quantity} / {row.locked_quantity} /{" "}
+              <b className="text-fg-emphasis">{row.available_quantity}</b> {row.unit}
             </span>
             {pkg && <span className="text-xs text-fg-dimmed">整包：{pkg}</span>}
           </div>
@@ -238,7 +239,7 @@ export default function InventoryPage() {
       key: "unit_cost",
       header: "单位成本",
       className: "min-w-[110px] text-right font-mono text-xs tabular-nums",
-      render: (row) => row.unit_cost.toFixed(8),
+      render: (row) => row.unit_cost,
     },
   ];
 
