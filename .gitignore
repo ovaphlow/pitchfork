@@ -1,4 +1,6 @@
 node_modules/
+__pycache__/
+*.pyc
 .vscode/
 .data/
 .pi-subagents/
@@ -9,3 +11,4 @@ node_modules/
 .codebase-memory/
 .hermes/loop/
 .hermes/kanban-loop.lock
+kanban_history.txt
