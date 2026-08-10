@@ -12,6 +12,8 @@ interface MenuChild {
   path: string;
   icon: string;
   domains: Domain[];
+  /** 按路线自定义排序；未配置的项保持数组原有相对顺序 */
+  order?: Partial<Record<Domain, number>>;
 }
 
 interface GroupItem {
@@ -36,12 +38,12 @@ const items: Item[] = [
   },
   {
     type: "group", label: "诊疗护理", domainLabels: { 养老: "照护服务", 儿保: "儿童保健" }, children: [
-      { label: "住院护理", domainLabels: { 养老: "照护管理" }, path: "/dashboard/inpatient", icon: "🏥", domains: ["医疗", "养老"] },
-      { label: "医生诊疗", path: "/dashboard/orders", icon: "📝", domains: ["养老"] },
-      { label: "医嘱核对", path: "/dashboard/orders-check", icon: "✅", domains: ["养老"] },
-      { label: "体检管理",   path: "/dashboard/checkup",      icon: "🩻", domains: ["医疗", "养老", "儿保"] },
-      { label: "药房管理",   path: "/dashboard/pharmacy",     icon: "💊", domains: ["医疗", "养老"] },
-      { label: "库存计量",   path: "/dashboard/inventory",    icon: "📦", domains: ["医疗", "养老"] },
+      { label: "住院护理", domainLabels: { 养老: "照护管理" }, path: "/dashboard/inpatient", icon: "🏥", domains: ["医疗", "养老"], order: { 养老: 1 } },
+      { label: "医生诊疗", path: "/dashboard/orders", icon: "📝", domains: ["养老"], order: { 养老: 2 } },
+      { label: "医嘱核对", path: "/dashboard/orders-check", icon: "✅", domains: ["养老"], order: { 养老: 3 } },
+      { label: "药房管理",   path: "/dashboard/pharmacy",     icon: "💊", domains: ["医疗", "养老"], order: { 养老: 4 } },
+      { label: "库存计量",   path: "/dashboard/inventory",    icon: "📦", domains: ["医疗", "养老"], order: { 养老: 5 } },
+      { label: "体检管理",   path: "/dashboard/checkup",      icon: "🩻", domains: ["医疗", "养老", "儿保"], order: { 养老: 6 } },
     ],
   },
   {
@@ -105,7 +107,9 @@ export default function Sidebar({ currentPath }: SidebarProps) {
 
       <nav className="flex flex-col gap-1 p-3">
         {items.map((group, gi) => {
-          const visibleChildren = group.children.filter((c) => c.domains.includes(domain));
+          const visibleChildren = group.children
+            .filter((c) => c.domains.includes(domain))
+            .sort((a, b) => (a.order?.[domain] ?? Number.MAX_SAFE_INTEGER) - (b.order?.[domain] ?? Number.MAX_SAFE_INTEGER));
           if (visibleChildren.length === 0) return null;
 
           return (
