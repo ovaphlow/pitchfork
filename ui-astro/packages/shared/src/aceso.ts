@@ -1012,6 +1012,8 @@ export function listNursingTodayExecutions(params: {
   executor?: string;
   status?: string;
   overdue?: boolean;
+  /** 按任务类型过滤（如 REHABILITATION 康复活动） */
+  task_type?: string;
   limit?: number;
   offset?: number;
 } = {}): Promise<NursingPage<NursingTodayExecution>> {
@@ -1075,6 +1077,8 @@ export function listNursingExecutionStatistics(params: {
   date_to: string;
   period_id?: string;
   executor?: string;
+  /** 按任务类型过滤（如 REHABILITATION 康复活动） */
+  task_type?: string;
   limit?: number;
   offset?: number;
 }): Promise<NursingExecutionStatisticsPage> {
@@ -2582,3 +2586,202 @@ export function receivePharmacyPurchaseOrder(
 export function getPharmacyPurchaseReceipt(id: string): Promise<PharmacyPurchaseReceipt> {
   return request<PharmacyPurchaseReceipt>(`/pharmacy/v1/purchase-receipts/${encodeURIComponent(id)}`);
 }
+
+// ─── 随访管理 (Followup · healthcare) ────────────────────────────────────
+// 养老/福利院方向：离院老人回访 + 在院慢病老人定期随访。
+// 业务枚举（中文值）：随访类型 出院后随访/慢病随访/常规电话随访；
+// 方式 电话/上门/门诊；结果 正常/异常/需复访/需转诊；状态 待随访/已完成/已取消
+// （「已逾期」由查询计算：待随访且计划日早于今天，不落库）。
+
+/** 生命体征测量值（JSONB vitals），字段由前端表单固定 */
+export interface FollowupVitals {
+  systolic?: number | null;
+  diastolic?: number | null;
+  heart_rate?: number | null;
+  blood_glucose?: number | null;
+  temperature?: number | null;
+}
+
+export interface FollowupPlan {
+  id: string;
+  patient_id: string;
+  patient_name: string | null;
+  encounter_id: string;
+  encounter_no: string | null;
+  followup_type: string;
+  planned_date: string;
+  planned_way: string;
+  assignee: string;
+  /** 待随访/已完成/已取消；待随访且计划日早于今天时返回 已逾期（查询计算） */
+  status: "待随访" | "已完成" | "已取消" | "已逾期";
+  completed_at: string | null;
+  cancel_reason: string | null;
+  remark: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FollowupPlanList {
+  records: FollowupPlan[];
+  meta: { total: number };
+}
+
+export interface FollowupRecord {
+  id: string;
+  plan_id: string | null;
+  patient_id: string;
+  patient_name: string | null;
+  encounter_id: string;
+  encounter_no: string | null;
+  followup_type: string;
+  followup_way: string;
+  followup_date: string;
+  contact_object: string | null;
+  condition_summary: string | null;
+  vitals: FollowupVitals | null;
+  guidance: string | null;
+  result: string;
+  next_followup_date: string | null;
+  operator: string;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FollowupRecordList {
+  records: FollowupRecord[];
+  meta: { total: number };
+}
+
+export interface FollowupPlanStats {
+  today_pending: number;
+  overdue: number;
+  month_completed: number;
+}
+
+export interface FollowupPatientTimeline {
+  plans: FollowupPlan[];
+  records: FollowupRecord[];
+}
+
+export interface FollowupPlanInput {
+  patient_id: string;
+  encounter_id: string;
+  followup_type: string;
+  planned_date: string;
+  planned_way?: string;
+  remark?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface FollowupRecordInput {
+  plan_id?: string | null;
+  patient_id: string;
+  encounter_id: string;
+  followup_type: string;
+  followup_way?: string;
+  followup_date?: string;
+  contact_object?: string;
+  condition_summary?: string;
+  vitals?: FollowupVitals;
+  guidance?: string;
+  result: string;
+  next_followup_date?: string;
+  metadata?: Record<string, unknown>;
+}
+
+/** 计划状态流转：已完成 须带 record 或 record_id；已取消 必须带 cancel_reason */
+export interface FollowupPlanStatusInput {
+  status: "已完成" | "已取消";
+  record_id?: string;
+  record?: Omit<FollowupRecordInput, "plan_id" | "patient_id" | "encounter_id">;
+  cancel_reason?: string;
+}
+
+/** 顶部概览统计 */
+export function getFollowupPlanStats(): Promise<FollowupPlanStats> {
+  return request<FollowupPlanStats>("/healthcare/v1/followup-plans/stats");
+}
+
+export function listFollowupPlans(params: {
+  status?: string;
+  followup_type?: string;
+  patient_id?: string;
+  date_from?: string;
+  date_to?: string;
+  overdue?: boolean;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<FollowupPlanList> {
+  const query = new URLSearchParams();
+  if (params.status?.trim()) query.set("status", params.status.trim());
+  if (params.followup_type?.trim()) query.set("followup_type", params.followup_type.trim());
+  if (params.patient_id?.trim()) query.set("patient_id", params.patient_id.trim());
+  if (params.date_from?.trim()) query.set("date_from", params.date_from.trim());
+  if (params.date_to?.trim()) query.set("date_to", params.date_to.trim());
+  if (params.overdue) query.set("overdue", "true");
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<FollowupPlanList>(`/healthcare/v1/followup-plans${suffix}`);
+}
+
+export function getFollowupPlan(id: string): Promise<FollowupPlan> {
+  return request<FollowupPlan>(`/healthcare/v1/followup-plans/${encodeURIComponent(id)}`);
+}
+
+export function createFollowupPlan(input: FollowupPlanInput): Promise<FollowupPlan> {
+  return request<FollowupPlan>("/healthcare/v1/followup-plans", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateFollowupPlanStatus(id: string, input: FollowupPlanStatusInput): Promise<FollowupPlan> {
+  return request<FollowupPlan>(`/healthcare/v1/followup-plans/${encodeURIComponent(id)}/status`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export function listFollowupRecords(params: {
+  patient_id?: string;
+  encounter_id?: string;
+  followup_type?: string;
+  result?: string;
+  date_from?: string;
+  date_to?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<FollowupRecordList> {
+  const query = new URLSearchParams();
+  if (params.patient_id?.trim()) query.set("patient_id", params.patient_id.trim());
+  if (params.encounter_id?.trim()) query.set("encounter_id", params.encounter_id.trim());
+  if (params.followup_type?.trim()) query.set("followup_type", params.followup_type.trim());
+  if (params.result?.trim()) query.set("result", params.result.trim());
+  if (params.date_from?.trim()) query.set("date_from", params.date_from.trim());
+  if (params.date_to?.trim()) query.set("date_to", params.date_to.trim());
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<FollowupRecordList>(`/healthcare/v1/followup-records${suffix}`);
+}
+
+export function getFollowupRecord(id: string): Promise<FollowupRecord> {
+  return request<FollowupRecord>(`/healthcare/v1/followup-records/${encodeURIComponent(id)}`);
+}
+
+/** 新增随访记录；带 plan_id 时服务端同一事务内将计划置为已完成 */
+export function createFollowupRecord(input: FollowupRecordInput): Promise<FollowupRecord> {
+  return request<FollowupRecord>("/healthcare/v1/followup-records", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+/** 老人随访历史时间线（详情页用）：plans 与 records 各按时间倒序 */
+export function listPatientFollowups(patientId: string): Promise<FollowupPatientTimeline> {
+  return request<FollowupPatientTimeline>(`/healthcare/v1/patients/${encodeURIComponent(patientId)}/followups`);
+}
+

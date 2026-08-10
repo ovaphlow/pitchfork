@@ -1,15 +1,8 @@
 ---
 import DashboardLayout from "../../layouts/DashboardLayout.astro";
+import FollowupPage from "../../components/FollowupPage.tsx";
 ---
 
 <DashboardLayout title="随访管理">
-  <div class="space-y-6">
-    <div>
-      <h2 class="text-lg font-semibold text-fg-emphasis">随访管理</h2>
-      <p class="text-sm text-fg-muted mt-1">（待实现）</p>
-    </div>
-    <div class="flex items-center justify-center py-24 border border-dashed border-border rounded-lg text-fg-dimmed text-sm">
-      随访管理 页面（待实现）
-    </div>
-  </div>
+  <FollowupPage client:only="react" />
 </DashboardLayout>
