@@ -104,50 +104,50 @@ export default function DepartmentsManagement() {
 	}
 
 	return (
-		<div class="space-y-4">
-			<div class="flex items-center justify-between">
-				<h2 class="text-lg font-semibold text-fg">部门管理</h2>
+		<div className="space-y-4">
+			<div className="flex items-center justify-between">
+				<h2 className="text-lg font-semibold text-fg">部门管理</h2>
 				<button
 					onClick={() => { resetForm(); setShowForm(true); }}
-					class="cursor-pointer h-9 rounded-md bg-accent px-4 text-sm font-medium text-white hover:opacity-90 transition-opacity"
+					className="cursor-pointer h-9 rounded-md bg-accent px-4 text-sm font-medium text-white hover:opacity-90 transition-opacity"
 				>
 					新增部门
 				</button>
 			</div>
 
 			{showForm && (
-				<div class="rounded-lg border border-border bg-surface p-4 space-y-3">
+				<div className="rounded-lg border border-border bg-surface p-4 space-y-3">
 					{error && (
-						<div class="rounded-md bg-danger/10 border border-danger/20 px-3 py-2 text-sm text-danger">
+						<div className="rounded-md bg-danger/10 border border-danger/20 px-3 py-2 text-sm text-danger">
 							{error}
 						</div>
 					)}
-					<div class="grid grid-cols-2 gap-3">
+					<div className="grid grid-cols-2 gap-3">
 						<div>
-							<label class="block text-xs text-fg-muted mb-1">名称</label>
+							<label className="block text-xs text-fg-muted mb-1">名称</label>
 							<input
 								type="text"
 								value={form.name}
 								onChange={(e) => setForm({ ...form, name: e.target.value })}
-								class="h-9 w-full rounded-md border border-border bg-surface-alt px-3 text-sm text-fg placeholder:text-fg-dimmed focus:outline-none focus:ring-2 focus:ring-accent"
+								className="h-9 w-full rounded-md border border-border bg-surface-alt px-3 text-sm text-fg placeholder:text-fg-dimmed focus:outline-none focus:ring-2 focus:ring-accent"
 							/>
 						</div>
 						<div>
-							<label class="block text-xs text-fg-muted mb-1">编码</label>
+							<label className="block text-xs text-fg-muted mb-1">编码</label>
 							<input
 								type="text"
 								value={form.code}
 								onChange={(e) => setForm({ ...form, code: e.target.value })}
 								disabled={!!editing}
-								class="h-9 w-full rounded-md border border-border bg-surface-alt px-3 text-sm text-fg placeholder:text-fg-dimmed focus:outline-none focus:ring-2 focus:ring-accent disabled:opacity-50"
+								className="h-9 w-full rounded-md border border-border bg-surface-alt px-3 text-sm text-fg placeholder:text-fg-dimmed focus:outline-none focus:ring-2 focus:ring-accent disabled:opacity-50"
 							/>
 						</div>
 						<div>
-							<label class="block text-xs text-fg-muted mb-1">上级部门</label>
+							<label className="block text-xs text-fg-muted mb-1">上级部门</label>
 							<select
 								value={form.parent_code}
 								onChange={(e) => setForm({ ...form, parent_code: e.target.value })}
-								class="h-9 w-full rounded-md border border-border bg-surface-alt px-3 text-sm text-fg focus:outline-none focus:ring-2 focus:ring-accent"
+								className="h-9 w-full rounded-md border border-border bg-surface-alt px-3 text-sm text-fg focus:outline-none focus:ring-2 focus:ring-accent"
 							>
 								<option value="">（顶级部门）</option>
 								{departments
@@ -160,25 +160,25 @@ export default function DepartmentsManagement() {
 							</select>
 						</div>
 						<div>
-							<label class="block text-xs text-fg-muted mb-1">描述</label>
+							<label className="block text-xs text-fg-muted mb-1">描述</label>
 							<input
 								type="text"
 								value={form.description}
 								onChange={(e) => setForm({ ...form, description: e.target.value })}
-								class="h-9 w-full rounded-md border border-border bg-surface-alt px-3 text-sm text-fg placeholder:text-fg-dimmed focus:outline-none focus:ring-2 focus:ring-accent"
+								className="h-9 w-full rounded-md border border-border bg-surface-alt px-3 text-sm text-fg placeholder:text-fg-dimmed focus:outline-none focus:ring-2 focus:ring-accent"
 							/>
 						</div>
 					</div>
-					<div class="flex gap-2 justify-end">
+					<div className="flex gap-2 justify-end">
 						<button
 							onClick={resetForm}
-							class="cursor-pointer h-8 rounded-md border border-border px-3 text-xs text-fg-muted hover:bg-surface-alt transition-colors"
+							className="cursor-pointer h-8 rounded-md border border-border px-3 text-xs text-fg-muted hover:bg-surface-alt transition-colors"
 						>
 							取消
 						</button>
 						<button
 							onClick={handleSave}
-							class="cursor-pointer h-8 rounded-md bg-accent px-3 text-xs text-white hover:opacity-90 transition-opacity"
+							className="cursor-pointer h-8 rounded-md bg-accent px-3 text-xs text-white hover:opacity-90 transition-opacity"
 						>
 							{editing ? "保存" : "创建"}
 						</button>
@@ -186,55 +186,55 @@ export default function DepartmentsManagement() {
 				</div>
 			)}
 
-			<div class="overflow-hidden rounded-lg border border-border">
-				<table class="w-full text-sm">
-					<thead class="bg-surface-alt">
+			<div className="overflow-hidden rounded-lg border border-border">
+				<table className="w-full text-sm">
+					<thead className="bg-surface-alt">
 						<tr>
-							<th class="px-4 py-3 text-left text-fg-muted font-medium">名称</th>
-							<th class="px-4 py-3 text-left text-fg-muted font-medium">编码</th>
-							<th class="px-4 py-3 text-left text-fg-muted font-medium">上级部门</th>
-							<th class="px-4 py-3 text-left text-fg-muted font-medium">描述</th>
-							<th class="px-4 py-3 text-left text-fg-muted font-medium">操作</th>
+							<th className="px-4 py-3 text-left text-fg-muted font-medium">名称</th>
+							<th className="px-4 py-3 text-left text-fg-muted font-medium">编码</th>
+							<th className="px-4 py-3 text-left text-fg-muted font-medium">上级部门</th>
+							<th className="px-4 py-3 text-left text-fg-muted font-medium">描述</th>
+							<th className="px-4 py-3 text-left text-fg-muted font-medium">操作</th>
 						</tr>
 					</thead>
-					<tbody class="divide-y divide-border">
+					<tbody className="divide-y divide-border">
 						{loading ? (
 							<tr>
-								<td colspan="5" class="px-4 py-8 text-center text-fg-dimmed">加载中...</td>
+								<td colSpan={5} className="px-4 py-8 text-center text-fg-dimmed">加载中...</td>
 							</tr>
 						) : sorted.length === 0 ? (
 							<tr>
-								<td colspan="5" class="px-4 py-8 text-center text-fg-dimmed">暂无部门</td>
+								<td colSpan={5} className="px-4 py-8 text-center text-fg-dimmed">暂无部门</td>
 							</tr>
 						) : (
 							sorted.map((d) => {
 								const dpt = depth(d.code);
 								return (
-									<tr key={d.id} class="hover:bg-surface/50">
+									<tr key={d.id} className="hover:bg-surface/50">
 										<td
-											class="px-4 py-3 text-fg"
+											className="px-4 py-3 text-fg"
 											style={{ paddingLeft: `${16 + (dpt - 1) * 24}px` }}
 										>
 											{dpt > 1 && (
-												<span class="text-fg-dimmed mr-2 select-none">
+												<span className="text-fg-dimmed mr-2 select-none">
 													{dpt === 2 ? "└ " : "  "}
 												</span>
 											)}
 											{d.payload?.name || "-"}
 										</td>
-										<td class="px-4 py-3 text-fg-muted font-mono text-xs">{d.code}</td>
-										<td class="px-4 py-3 text-fg-muted">{parentName(d.parent_code) || "-"}</td>
-										<td class="px-4 py-3 text-fg-muted">{d.payload?.description || "-"}</td>
-										<td class="px-4 py-3 space-x-1">
+										<td className="px-4 py-3 text-fg-muted font-mono text-xs">{d.code}</td>
+										<td className="px-4 py-3 text-fg-muted">{parentName(d.parent_code) || "-"}</td>
+										<td className="px-4 py-3 text-fg-muted">{d.payload?.description || "-"}</td>
+										<td className="px-4 py-3 space-x-1">
 											<button
 												onClick={() => startEdit(d)}
-												class="cursor-pointer rounded px-2 py-1 text-xs font-medium border border-border text-fg-muted hover:bg-surface-alt hover:text-fg transition-colors"
+												className="cursor-pointer rounded px-2 py-1 text-xs font-medium border border-border text-fg-muted hover:bg-surface-alt hover:text-fg transition-colors"
 											>
 												编辑
 											</button>
 											<button
 												onClick={() => handleDelete(d.id)}
-												class="cursor-pointer rounded px-2 py-1 text-xs font-medium border border-border text-danger hover:bg-danger/10 transition-colors"
+												className="cursor-pointer rounded px-2 py-1 text-xs font-medium border border-border text-danger hover:bg-danger/10 transition-colors"
 											>
 												删除
 											</button>
