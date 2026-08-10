@@ -217,10 +217,28 @@ def run_agent_mode(card_id, original_title, target, issue_number=None, content_i
     except Exception:
         pass
     
+    # 读取 Issue 的 comments（如果有）
+    comments = []
+    if issue_number:
+        try:
+            comments_data = json.loads(subprocess.check_output([
+                "gh", "issue", "view", str(issue_number),
+                "--repo", REPO_DIR, "--json", "comments",
+            ]))
+            comments = comments_data.get("comments", [])
+        except Exception:
+            pass
+    
     prompt = STAGE_PROMPTS[current]
     prompt += f"\n\n看板标题：{original_title}"
     if card_body:
         prompt += f"\n\n看板描述：\n{card_body}"
+    if comments:
+        prompt += "\n\n---\n\nIssue 评论记录："
+        for c in comments[-5:]:  # 最近5条评论
+            author = c.get("author", {}).get("login", "unknown")
+            body = c.get("body", "")
+            prompt += f"\n\n**{author}**: {body[:500]}"
 
     print(f"[agent] 开始: {original_title!r} ({current} -> {target})")
     mark_in_progress(card_id, original_title, issue_number)
