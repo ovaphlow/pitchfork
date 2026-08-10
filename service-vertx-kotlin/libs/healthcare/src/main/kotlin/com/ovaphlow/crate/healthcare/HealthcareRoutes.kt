@@ -22,9 +22,13 @@ object HealthcareRoutes {
         pool: Pool,
         nurseCheckAuthHandler: Handler<RoutingContext>? = null,
         incidentHandoverAuthHandler: Handler<RoutingContext>? = null,
+        followupAuthHandler: Handler<RoutingContext>? = null,
+        chronicDiseaseAuthHandler: Handler<RoutingContext>? = null,
     ): Router {
         val router = Router.router(vertx)
         val service = HealthcareService(pool)
+        val chronicDiseaseService = ChronicDiseaseService(pool)
+        val followupService = FollowupService(pool, chronicDiseaseService = chronicDiseaseService)
 
         router.route().handler(BodyHandler.create())
 
@@ -357,6 +361,126 @@ object HealthcareRoutes {
             val userId = userId(ctx) ?: return@handler
             service.appendShiftHandoverItem(requiredId(ctx), body(ctx), userId)
                 .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+
+        // ========================================================================
+        //  随访管理 (Followup) — 养老/福利院方向
+        //  写路由的认证中间件由 App 编排层注入；未注入时业务处理器保持 401 兜底。
+        // ========================================================================
+        if (followupAuthHandler != null) {
+            router.post("/followup-plans").handler(followupAuthHandler)
+            router.patch("/followup-plans/:id/status").handler(followupAuthHandler)
+            router.post("/followup-records").handler(followupAuthHandler)
+        }
+        // 静态路径 stats 必须先于泛型 /followup-plans/:id
+        router.get("/followup-plans/stats").handler { ctx ->
+            followupService.getPlanStats()
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.get("/followup-plans").handler { ctx ->
+            followupService.listPlans(
+                status = ctx.request().getParam("status"),
+                followupType = ctx.request().getParam("followup_type"),
+                patientId = ctx.request().getParam("patient_id"),
+                dateFrom = ctx.request().getParam("date_from"),
+                dateTo = ctx.request().getParam("date_to"),
+                overdue = ctx.request().getParam("overdue"),
+                limit = limit(ctx),
+                offset = offset(ctx),
+            ).onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.post("/followup-plans").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            followupService.createPlan(body(ctx), userId)
+                .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.get("/followup-plans/:id").handler { ctx ->
+            followupService.getPlan(requiredId(ctx))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.patch("/followup-plans/:id/status").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            followupService.updatePlanStatus(requiredId(ctx), body(ctx), userId)
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.get("/followup-records").handler { ctx ->
+            followupService.listRecords(
+                patientId = ctx.request().getParam("patient_id"),
+                encounterId = ctx.request().getParam("encounter_id"),
+                followupType = ctx.request().getParam("followup_type"),
+                result = ctx.request().getParam("result"),
+                dateFrom = ctx.request().getParam("date_from"),
+                dateTo = ctx.request().getParam("date_to"),
+                limit = limit(ctx),
+                offset = offset(ctx),
+            ).onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.post("/followup-records").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            followupService.createRecord(body(ctx), userId)
+                .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.get("/followup-records/:id").handler { ctx ->
+            followupService.getRecord(requiredId(ctx))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 老人随访历史时间线（详情页用）
+        router.get("/patients/:id/followups").handler { ctx ->
+            followupService.listPatientFollowups(requiredId(ctx))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+
+        // ========================================================================
+        //  慢病档案 (Chronic Disease Registrations) — 养老方向
+        //  慢病登记 + 病程记录，与随访联动（登记/随访完成自动生成慢病随访计划）。
+        //  写路由的认证中间件由 App 编排层注入；未注入时业务处理器保持 401 兜底。
+        // ========================================================================
+        if (chronicDiseaseAuthHandler != null) {
+            router.post("/chronic-diseases").handler(chronicDiseaseAuthHandler)
+            router.patch("/chronic-diseases/:id/status").handler(chronicDiseaseAuthHandler)
+        }
+        router.post("/chronic-diseases").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            chronicDiseaseService.createRegistration(body(ctx), userId)
+                .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.get("/chronic-diseases").handler { ctx ->
+            chronicDiseaseService.listRegistrations(
+                patientId = ctx.request().getParam("patient_id"),
+                diseaseName = ctx.request().getParam("disease_name"),
+                controlStatus = ctx.request().getParam("control_status"),
+                status = ctx.request().getParam("status"),
+                limit = limit(ctx),
+                offset = offset(ctx),
+            ).onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 档案时间线：静态多段路径位于泛型 /chronic-diseases/:id 之前
+        router.get("/chronic-diseases/:id/timeline").handler { ctx ->
+            chronicDiseaseService.getRegistrationTimeline(requiredId(ctx))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.get("/chronic-diseases/:id").handler { ctx ->
+            chronicDiseaseService.getRegistration(requiredId(ctx))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.patch("/chronic-diseases/:id/status").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            chronicDiseaseService.updateRegistrationStatus(requiredId(ctx), body(ctx), userId)
+                .onSuccess { ctx.json(it) }
                 .onFailure { respondFailure(ctx, it) }
         }
 
