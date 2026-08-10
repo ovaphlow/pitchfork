@@ -4,14 +4,20 @@
 package com.ovaphlow.crate.database.gen.healthcare;
 
 
+import com.ovaphlow.crate.database.gen.healthcare.tables.ChronicDiseaseRegistrations;
 import com.ovaphlow.crate.database.gen.healthcare.tables.Diagnoses;
 import com.ovaphlow.crate.database.gen.healthcare.tables.Encounters;
+import com.ovaphlow.crate.database.gen.healthcare.tables.FollowupPlans;
+import com.ovaphlow.crate.database.gen.healthcare.tables.FollowupRecords;
 import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalOrders;
 import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalRecords;
 import com.ovaphlow.crate.database.gen.healthcare.tables.Patients;
 import com.ovaphlow.crate.database.gen.healthcare.tables.ProgressNotes;
+import com.ovaphlow.crate.database.gen.healthcare.tables.records.ChronicDiseaseRegistrationsRecord;
 import com.ovaphlow.crate.database.gen.healthcare.tables.records.DiagnosesRecord;
 import com.ovaphlow.crate.database.gen.healthcare.tables.records.EncountersRecord;
+import com.ovaphlow.crate.database.gen.healthcare.tables.records.FollowupPlansRecord;
+import com.ovaphlow.crate.database.gen.healthcare.tables.records.FollowupRecordsRecord;
 import com.ovaphlow.crate.database.gen.healthcare.tables.records.MedicalOrdersRecord;
 import com.ovaphlow.crate.database.gen.healthcare.tables.records.MedicalRecordsRecord;
 import com.ovaphlow.crate.database.gen.healthcare.tables.records.PatientsRecord;
@@ -35,9 +41,12 @@ public class Keys {
     // UNIQUE and PRIMARY KEY definitions
     // -------------------------------------------------------------------------
 
+    public static final UniqueKey<ChronicDiseaseRegistrationsRecord> CHRONIC_DISEASE_REGISTRATIONS_PKEY = Internal.createUniqueKey(ChronicDiseaseRegistrations.CHRONIC_DISEASE_REGISTRATIONS, DSL.name("chronic_disease_registrations_pkey"), new TableField[] { ChronicDiseaseRegistrations.CHRONIC_DISEASE_REGISTRATIONS.ID }, true);
     public static final UniqueKey<DiagnosesRecord> DIAGNOSES_PKEY = Internal.createUniqueKey(Diagnoses.DIAGNOSES, DSL.name("diagnoses_pkey"), new TableField[] { Diagnoses.DIAGNOSES.ID }, true);
     public static final UniqueKey<EncountersRecord> ENCOUNTERS_PKEY = Internal.createUniqueKey(Encounters.ENCOUNTERS, DSL.name("encounters_pkey"), new TableField[] { Encounters.ENCOUNTERS.ID }, true);
     public static final UniqueKey<EncountersRecord> UQ_ENCOUNTERS_ENCOUNTER_NO = Internal.createUniqueKey(Encounters.ENCOUNTERS, DSL.name("uq_encounters_encounter_no"), new TableField[] { Encounters.ENCOUNTERS.ENCOUNTER_NO }, true);
+    public static final UniqueKey<FollowupPlansRecord> FOLLOWUP_PLANS_PKEY = Internal.createUniqueKey(FollowupPlans.FOLLOWUP_PLANS, DSL.name("followup_plans_pkey"), new TableField[] { FollowupPlans.FOLLOWUP_PLANS.ID }, true);
+    public static final UniqueKey<FollowupRecordsRecord> FOLLOWUP_RECORDS_PKEY = Internal.createUniqueKey(FollowupRecords.FOLLOWUP_RECORDS, DSL.name("followup_records_pkey"), new TableField[] { FollowupRecords.FOLLOWUP_RECORDS.ID }, true);
     public static final UniqueKey<MedicalOrdersRecord> MEDICAL_ORDERS_PKEY = Internal.createUniqueKey(MedicalOrders.MEDICAL_ORDERS, DSL.name("medical_orders_pkey"), new TableField[] { MedicalOrders.MEDICAL_ORDERS.ID }, true);
     public static final UniqueKey<MedicalRecordsRecord> MEDICAL_RECORDS_PKEY = Internal.createUniqueKey(MedicalRecords.MEDICAL_RECORDS, DSL.name("medical_records_pkey"), new TableField[] { MedicalRecords.MEDICAL_RECORDS.ID }, true);
     public static final UniqueKey<PatientsRecord> PATIENTS_ID_CARD_NO_KEY = Internal.createUniqueKey(Patients.PATIENTS, DSL.name("patients_id_card_no_key"), new TableField[] { Patients.PATIENTS.ID_CARD_NO }, true);
@@ -48,8 +57,15 @@ public class Keys {
     // FOREIGN KEY definitions
     // -------------------------------------------------------------------------
 
+    public static final ForeignKey<ChronicDiseaseRegistrationsRecord, EncountersRecord> CHRONIC_DISEASE_REGISTRATIONS__CHRONIC_DISEASE_REGISTRATIONS_ENCOUNTER_ID_FKEY = Internal.createForeignKey(ChronicDiseaseRegistrations.CHRONIC_DISEASE_REGISTRATIONS, DSL.name("chronic_disease_registrations_encounter_id_fkey"), new TableField[] { ChronicDiseaseRegistrations.CHRONIC_DISEASE_REGISTRATIONS.ENCOUNTER_ID }, Keys.ENCOUNTERS_PKEY, new TableField[] { Encounters.ENCOUNTERS.ID }, true);
+    public static final ForeignKey<ChronicDiseaseRegistrationsRecord, PatientsRecord> CHRONIC_DISEASE_REGISTRATIONS__CHRONIC_DISEASE_REGISTRATIONS_PATIENT_ID_FKEY = Internal.createForeignKey(ChronicDiseaseRegistrations.CHRONIC_DISEASE_REGISTRATIONS, DSL.name("chronic_disease_registrations_patient_id_fkey"), new TableField[] { ChronicDiseaseRegistrations.CHRONIC_DISEASE_REGISTRATIONS.PATIENT_ID }, Keys.PATIENTS_PKEY, new TableField[] { Patients.PATIENTS.ID }, true);
     public static final ForeignKey<DiagnosesRecord, EncountersRecord> DIAGNOSES__DIAGNOSES_ENCOUNTER_ID_FKEY = Internal.createForeignKey(Diagnoses.DIAGNOSES, DSL.name("diagnoses_encounter_id_fkey"), new TableField[] { Diagnoses.DIAGNOSES.ENCOUNTER_ID }, Keys.ENCOUNTERS_PKEY, new TableField[] { Encounters.ENCOUNTERS.ID }, true);
     public static final ForeignKey<EncountersRecord, PatientsRecord> ENCOUNTERS__ENCOUNTERS_PATIENT_ID_FKEY = Internal.createForeignKey(Encounters.ENCOUNTERS, DSL.name("encounters_patient_id_fkey"), new TableField[] { Encounters.ENCOUNTERS.PATIENT_ID }, Keys.PATIENTS_PKEY, new TableField[] { Patients.PATIENTS.ID }, true);
+    public static final ForeignKey<FollowupPlansRecord, EncountersRecord> FOLLOWUP_PLANS__FOLLOWUP_PLANS_ENCOUNTER_ID_FKEY = Internal.createForeignKey(FollowupPlans.FOLLOWUP_PLANS, DSL.name("followup_plans_encounter_id_fkey"), new TableField[] { FollowupPlans.FOLLOWUP_PLANS.ENCOUNTER_ID }, Keys.ENCOUNTERS_PKEY, new TableField[] { Encounters.ENCOUNTERS.ID }, true);
+    public static final ForeignKey<FollowupPlansRecord, PatientsRecord> FOLLOWUP_PLANS__FOLLOWUP_PLANS_PATIENT_ID_FKEY = Internal.createForeignKey(FollowupPlans.FOLLOWUP_PLANS, DSL.name("followup_plans_patient_id_fkey"), new TableField[] { FollowupPlans.FOLLOWUP_PLANS.PATIENT_ID }, Keys.PATIENTS_PKEY, new TableField[] { Patients.PATIENTS.ID }, true);
+    public static final ForeignKey<FollowupRecordsRecord, EncountersRecord> FOLLOWUP_RECORDS__FOLLOWUP_RECORDS_ENCOUNTER_ID_FKEY = Internal.createForeignKey(FollowupRecords.FOLLOWUP_RECORDS, DSL.name("followup_records_encounter_id_fkey"), new TableField[] { FollowupRecords.FOLLOWUP_RECORDS.ENCOUNTER_ID }, Keys.ENCOUNTERS_PKEY, new TableField[] { Encounters.ENCOUNTERS.ID }, true);
+    public static final ForeignKey<FollowupRecordsRecord, PatientsRecord> FOLLOWUP_RECORDS__FOLLOWUP_RECORDS_PATIENT_ID_FKEY = Internal.createForeignKey(FollowupRecords.FOLLOWUP_RECORDS, DSL.name("followup_records_patient_id_fkey"), new TableField[] { FollowupRecords.FOLLOWUP_RECORDS.PATIENT_ID }, Keys.PATIENTS_PKEY, new TableField[] { Patients.PATIENTS.ID }, true);
+    public static final ForeignKey<FollowupRecordsRecord, FollowupPlansRecord> FOLLOWUP_RECORDS__FOLLOWUP_RECORDS_PLAN_ID_FKEY = Internal.createForeignKey(FollowupRecords.FOLLOWUP_RECORDS, DSL.name("followup_records_plan_id_fkey"), new TableField[] { FollowupRecords.FOLLOWUP_RECORDS.PLAN_ID }, Keys.FOLLOWUP_PLANS_PKEY, new TableField[] { FollowupPlans.FOLLOWUP_PLANS.ID }, true);
     public static final ForeignKey<MedicalOrdersRecord, EncountersRecord> MEDICAL_ORDERS__MEDICAL_ORDERS_ENCOUNTER_ID_FKEY = Internal.createForeignKey(MedicalOrders.MEDICAL_ORDERS, DSL.name("medical_orders_encounter_id_fkey"), new TableField[] { MedicalOrders.MEDICAL_ORDERS.ENCOUNTER_ID }, Keys.ENCOUNTERS_PKEY, new TableField[] { Encounters.ENCOUNTERS.ID }, true);
     public static final ForeignKey<MedicalRecordsRecord, EncountersRecord> MEDICAL_RECORDS__MEDICAL_RECORDS_ENCOUNTER_ID_FKEY = Internal.createForeignKey(MedicalRecords.MEDICAL_RECORDS, DSL.name("medical_records_encounter_id_fkey"), new TableField[] { MedicalRecords.MEDICAL_RECORDS.ENCOUNTER_ID }, Keys.ENCOUNTERS_PKEY, new TableField[] { Encounters.ENCOUNTERS.ID }, true);
     public static final ForeignKey<ProgressNotesRecord, EncountersRecord> PROGRESS_NOTES__PROGRESS_NOTES_ENCOUNTER_ID_FKEY = Internal.createForeignKey(ProgressNotes.PROGRESS_NOTES, DSL.name("progress_notes_encounter_id_fkey"), new TableField[] { ProgressNotes.PROGRESS_NOTES.ENCOUNTER_ID }, Keys.ENCOUNTERS_PKEY, new TableField[] { Encounters.ENCOUNTERS.ID }, true);

@@ -4,8 +4,11 @@
 package com.ovaphlow.crate.database.gen.healthcare;
 
 
+import com.ovaphlow.crate.database.gen.healthcare.tables.ChronicDiseaseRegistrations;
 import com.ovaphlow.crate.database.gen.healthcare.tables.Diagnoses;
 import com.ovaphlow.crate.database.gen.healthcare.tables.Encounters;
+import com.ovaphlow.crate.database.gen.healthcare.tables.FollowupPlans;
+import com.ovaphlow.crate.database.gen.healthcare.tables.FollowupRecords;
 import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalOrders;
 import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalRecords;
 import com.ovaphlow.crate.database.gen.healthcare.tables.Patients;
@@ -19,6 +22,11 @@ import com.ovaphlow.crate.database.gen.healthcare.tables.ProgressNotes;
 public class Tables {
 
     /**
+     * 慢病登记档案：患者级、跨入住周期的长期管理档案（养老方向）
+     */
+    public static final ChronicDiseaseRegistrations CHRONIC_DISEASE_REGISTRATIONS = ChronicDiseaseRegistrations.CHRONIC_DISEASE_REGISTRATIONS;
+
+    /**
      * 诊断/评估记录，涵盖疾病、发育筛查、功能评估等
      */
     public static final Diagnoses DIAGNOSES = Diagnoses.DIAGNOSES;
@@ -27,6 +35,16 @@ public class Tables {
      * 就诊/住院/入住周期表，一个 encounter 对应一次持续的服务接触
      */
     public static final Encounters ENCOUNTERS = Encounters.ENCOUNTERS;
+
+    /**
+     * 随访计划：预先安排的随访任务（养老/福利院）
+     */
+    public static final FollowupPlans FOLLOWUP_PLANS = FollowupPlans.FOLLOWUP_PLANS;
+
+    /**
+     * 随访记录：一次实际随访的事实（只增不改，可审计）
+     */
+    public static final FollowupRecords FOLLOWUP_RECORDS = FollowupRecords.FOLLOWUP_RECORDS;
 
     /**
      * 医嘱主表，公共流程字段在此，具体业务细节在 order_details JSONB

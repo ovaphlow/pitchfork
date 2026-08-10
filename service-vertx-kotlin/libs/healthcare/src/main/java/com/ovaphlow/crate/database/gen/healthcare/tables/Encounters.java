@@ -8,6 +8,8 @@ import com.ovaphlow.crate.database.gen.healthcare.Healthcare;
 import com.ovaphlow.crate.database.gen.healthcare.Indexes;
 import com.ovaphlow.crate.database.gen.healthcare.Keys;
 import com.ovaphlow.crate.database.gen.healthcare.tables.Diagnoses.DiagnosesPath;
+import com.ovaphlow.crate.database.gen.healthcare.tables.FollowupPlans.FollowupPlansPath;
+import com.ovaphlow.crate.database.gen.healthcare.tables.FollowupRecords.FollowupRecordsPath;
 import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalOrders.MedicalOrdersPath;
 import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalRecords.MedicalRecordsPath;
 import com.ovaphlow.crate.database.gen.healthcare.tables.Patients.PatientsPath;
@@ -262,6 +264,32 @@ public class Encounters extends TableImpl<EncountersRecord> {
         return _diagnoses;
     }
 
+    private transient FollowupPlansPath _followupPlans;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>healthcare.followup_plans</code> table
+     */
+    public FollowupPlansPath followupPlans() {
+        if (_followupPlans == null)
+            _followupPlans = new FollowupPlansPath(this, null, Keys.FOLLOWUP_PLANS__FOLLOWUP_PLANS_ENCOUNTER_ID_FKEY.getInverseKey());
+
+        return _followupPlans;
+    }
+
+    private transient FollowupRecordsPath _followupRecords;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>healthcare.followup_records</code> table
+     */
+    public FollowupRecordsPath followupRecords() {
+        if (_followupRecords == null)
+            _followupRecords = new FollowupRecordsPath(this, null, Keys.FOLLOWUP_RECORDS__FOLLOWUP_RECORDS_ENCOUNTER_ID_FKEY.getInverseKey());
+
+        return _followupRecords;
+    }
+
     private transient MedicalOrdersPath _medicalOrders;
 
     /**
@@ -300,6 +328,7 @@ public class Encounters extends TableImpl<EncountersRecord> {
 
         return _progressNotes;
     }
+
 
     @Override
     public Encounters as(String alias) {

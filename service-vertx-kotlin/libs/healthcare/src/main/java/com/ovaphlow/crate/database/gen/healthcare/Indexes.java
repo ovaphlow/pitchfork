@@ -4,8 +4,11 @@
 package com.ovaphlow.crate.database.gen.healthcare;
 
 
+import com.ovaphlow.crate.database.gen.healthcare.tables.ChronicDiseaseRegistrations;
 import com.ovaphlow.crate.database.gen.healthcare.tables.Diagnoses;
 import com.ovaphlow.crate.database.gen.healthcare.tables.Encounters;
+import com.ovaphlow.crate.database.gen.healthcare.tables.FollowupPlans;
+import com.ovaphlow.crate.database.gen.healthcare.tables.FollowupRecords;
 import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalOrders;
 import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalRecords;
 import com.ovaphlow.crate.database.gen.healthcare.tables.Patients;
@@ -27,12 +30,21 @@ public class Indexes {
     // INDEX definitions
     // -------------------------------------------------------------------------
 
+    public static final Index IDX_CHRONIC_DISEASE_ENCOUNTER = Internal.createIndex(DSL.name("idx_chronic_disease_encounter"), ChronicDiseaseRegistrations.CHRONIC_DISEASE_REGISTRATIONS, new OrderField[] { ChronicDiseaseRegistrations.CHRONIC_DISEASE_REGISTRATIONS.ENCOUNTER_ID }, false);
+    public static final Index IDX_CHRONIC_DISEASE_PATIENT = Internal.createIndex(DSL.name("idx_chronic_disease_patient"), ChronicDiseaseRegistrations.CHRONIC_DISEASE_REGISTRATIONS, new OrderField[] { ChronicDiseaseRegistrations.CHRONIC_DISEASE_REGISTRATIONS.PATIENT_ID }, false);
+    public static final Index IDX_CHRONIC_DISEASE_STATUS = Internal.createIndex(DSL.name("idx_chronic_disease_status"), ChronicDiseaseRegistrations.CHRONIC_DISEASE_REGISTRATIONS, new OrderField[] { ChronicDiseaseRegistrations.CHRONIC_DISEASE_REGISTRATIONS.STATUS }, false);
     public static final Index IDX_DIAGNOSES_ENCOUNTER = Internal.createIndex(DSL.name("idx_diagnoses_encounter"), Diagnoses.DIAGNOSES, new OrderField[] { Diagnoses.DIAGNOSES.ENCOUNTER_ID }, false);
     public static final Index IDX_DIAGNOSES_ICD = Internal.createIndex(DSL.name("idx_diagnoses_icd"), Diagnoses.DIAGNOSES, new OrderField[] { Diagnoses.DIAGNOSES.ICD_CODE }, false);
     public static final Index IDX_ENCOUNTERS_ADMIT = Internal.createIndex(DSL.name("idx_encounters_admit"), Encounters.ENCOUNTERS, new OrderField[] { Encounters.ENCOUNTERS.ADMIT_DATE }, false);
     public static final Index IDX_ENCOUNTERS_ENCOUNTER_NO = Internal.createIndex(DSL.name("idx_encounters_encounter_no"), Encounters.ENCOUNTERS, new OrderField[] { Encounters.ENCOUNTERS.ENCOUNTER_NO }, false);
     public static final Index IDX_ENCOUNTERS_PATIENT = Internal.createIndex(DSL.name("idx_encounters_patient"), Encounters.ENCOUNTERS, new OrderField[] { Encounters.ENCOUNTERS.PATIENT_ID }, false);
     public static final Index IDX_ENCOUNTERS_STATUS = Internal.createIndex(DSL.name("idx_encounters_status"), Encounters.ENCOUNTERS, new OrderField[] { Encounters.ENCOUNTERS.STATUS }, false);
+    public static final Index IDX_FOLLOWUP_PLANS_ENCOUNTER = Internal.createIndex(DSL.name("idx_followup_plans_encounter"), FollowupPlans.FOLLOWUP_PLANS, new OrderField[] { FollowupPlans.FOLLOWUP_PLANS.ENCOUNTER_ID }, false);
+    public static final Index IDX_FOLLOWUP_PLANS_PATIENT = Internal.createIndex(DSL.name("idx_followup_plans_patient"), FollowupPlans.FOLLOWUP_PLANS, new OrderField[] { FollowupPlans.FOLLOWUP_PLANS.PATIENT_ID }, false);
+    public static final Index IDX_FOLLOWUP_PLANS_STATUS_DATE = Internal.createIndex(DSL.name("idx_followup_plans_status_date"), FollowupPlans.FOLLOWUP_PLANS, new OrderField[] { FollowupPlans.FOLLOWUP_PLANS.STATUS, FollowupPlans.FOLLOWUP_PLANS.PLANNED_DATE }, false);
+    public static final Index IDX_FOLLOWUP_RECORDS_DATE = Internal.createIndex(DSL.name("idx_followup_records_date"), FollowupRecords.FOLLOWUP_RECORDS, new OrderField[] { FollowupRecords.FOLLOWUP_RECORDS.FOLLOWUP_DATE.desc() }, false);
+    public static final Index IDX_FOLLOWUP_RECORDS_PATIENT = Internal.createIndex(DSL.name("idx_followup_records_patient"), FollowupRecords.FOLLOWUP_RECORDS, new OrderField[] { FollowupRecords.FOLLOWUP_RECORDS.PATIENT_ID }, false);
+    public static final Index IDX_FOLLOWUP_RECORDS_PLAN = Internal.createIndex(DSL.name("idx_followup_records_plan"), FollowupRecords.FOLLOWUP_RECORDS, new OrderField[] { FollowupRecords.FOLLOWUP_RECORDS.PLAN_ID }, false);
     public static final Index IDX_MEDICAL_RECORDS_NURSING_QUERY = Internal.createIndex(DSL.name("idx_medical_records_nursing_query"), MedicalRecords.MEDICAL_RECORDS, new OrderField[] { MedicalRecords.MEDICAL_RECORDS.RECORD_TYPE, MedicalRecords.MEDICAL_RECORDS.ENCOUNTER_ID, MedicalRecords.MEDICAL_RECORDS.RECORD_DATE.desc() }, false);
     public static final Index IDX_ORDERS_ENCOUNTER = Internal.createIndex(DSL.name("idx_orders_encounter"), MedicalOrders.MEDICAL_ORDERS, new OrderField[] { MedicalOrders.MEDICAL_ORDERS.ENCOUNTER_ID }, false);
     public static final Index IDX_ORDERS_NURSE_CHECKED_MEDICATION = Internal.createIndex(DSL.name("idx_orders_nurse_checked_medication"), MedicalOrders.MEDICAL_ORDERS, new OrderField[] { MedicalOrders.MEDICAL_ORDERS.ENCOUNTER_ID, MedicalOrders.MEDICAL_ORDERS.CREATED_AT }, false);
@@ -46,5 +58,6 @@ public class Indexes {
     public static final Index IDX_PROGRESS_TYPE = Internal.createIndex(DSL.name("idx_progress_type"), ProgressNotes.PROGRESS_NOTES, new OrderField[] { ProgressNotes.PROGRESS_NOTES.NOTE_TYPE }, false);
     public static final Index IDX_RECORDS_ENCOUNTER = Internal.createIndex(DSL.name("idx_records_encounter"), MedicalRecords.MEDICAL_RECORDS, new OrderField[] { MedicalRecords.MEDICAL_RECORDS.ENCOUNTER_ID }, false);
     public static final Index IDX_RECORDS_TYPE = Internal.createIndex(DSL.name("idx_records_type"), MedicalRecords.MEDICAL_RECORDS, new OrderField[] { MedicalRecords.MEDICAL_RECORDS.RECORD_TYPE }, false);
+    public static final Index UQ_CHRONIC_DISEASE_ACTIVE = Internal.createIndex(DSL.name("uq_chronic_disease_active"), ChronicDiseaseRegistrations.CHRONIC_DISEASE_REGISTRATIONS, new OrderField[] { ChronicDiseaseRegistrations.CHRONIC_DISEASE_REGISTRATIONS.PATIENT_ID, ChronicDiseaseRegistrations.CHRONIC_DISEASE_REGISTRATIONS.DISEASE_NAME }, true);
     public static final Index UQ_ENCOUNTERS_ACTIVE_ELDERLY_CARE = Internal.createIndex(DSL.name("uq_encounters_active_elderly_care"), Encounters.ENCOUNTERS, new OrderField[] { Encounters.ENCOUNTERS.PATIENT_ID }, true);
 }

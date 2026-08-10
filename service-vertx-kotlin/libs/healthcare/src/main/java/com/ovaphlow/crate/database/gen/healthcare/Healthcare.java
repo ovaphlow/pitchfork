@@ -4,8 +4,11 @@
 package com.ovaphlow.crate.database.gen.healthcare;
 
 
+import com.ovaphlow.crate.database.gen.healthcare.tables.ChronicDiseaseRegistrations;
 import com.ovaphlow.crate.database.gen.healthcare.tables.Diagnoses;
 import com.ovaphlow.crate.database.gen.healthcare.tables.Encounters;
+import com.ovaphlow.crate.database.gen.healthcare.tables.FollowupPlans;
+import com.ovaphlow.crate.database.gen.healthcare.tables.FollowupRecords;
 import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalOrders;
 import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalRecords;
 import com.ovaphlow.crate.database.gen.healthcare.tables.Patients;
@@ -33,6 +36,11 @@ public class Healthcare extends SchemaImpl {
     public static final Healthcare HEALTHCARE = new Healthcare();
 
     /**
+     * 慢病登记档案：患者级、跨入住周期的长期管理档案（养老方向）
+     */
+    public final ChronicDiseaseRegistrations CHRONIC_DISEASE_REGISTRATIONS = ChronicDiseaseRegistrations.CHRONIC_DISEASE_REGISTRATIONS;
+
+    /**
      * 诊断/评估记录，涵盖疾病、发育筛查、功能评估等
      */
     public final Diagnoses DIAGNOSES = Diagnoses.DIAGNOSES;
@@ -41,6 +49,16 @@ public class Healthcare extends SchemaImpl {
      * 就诊/住院/入住周期表，一个 encounter 对应一次持续的服务接触
      */
     public final Encounters ENCOUNTERS = Encounters.ENCOUNTERS;
+
+    /**
+     * 随访计划：预先安排的随访任务（养老/福利院）
+     */
+    public final FollowupPlans FOLLOWUP_PLANS = FollowupPlans.FOLLOWUP_PLANS;
+
+    /**
+     * 随访记录：一次实际随访的事实（只增不改，可审计）
+     */
+    public final FollowupRecords FOLLOWUP_RECORDS = FollowupRecords.FOLLOWUP_RECORDS;
 
     /**
      * 医嘱主表，公共流程字段在此，具体业务细节在 order_details JSONB
@@ -78,8 +96,11 @@ public class Healthcare extends SchemaImpl {
     @Override
     public final List<Table<?>> getTables() {
         return Arrays.asList(
+            ChronicDiseaseRegistrations.CHRONIC_DISEASE_REGISTRATIONS,
             Diagnoses.DIAGNOSES,
             Encounters.ENCOUNTERS,
+            FollowupPlans.FOLLOWUP_PLANS,
+            FollowupRecords.FOLLOWUP_RECORDS,
             MedicalOrders.MEDICAL_ORDERS,
             MedicalRecords.MEDICAL_RECORDS,
             Patients.PATIENTS,
