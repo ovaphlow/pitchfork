@@ -6,9 +6,15 @@
 后台 agent：pi 完成文件改动 → 自己调 gh 更新看板状态。
 
 Todo 列不处理（手动控制），从「需求」开始：
-  需求 -> 「需求 agent」分析需求、形成文档   -> 开发
+  需求 -> 「需求 agent」分析需求、形成文档
+          ├─ 不分解：-> 开发
+          └─ 分解：输出 JSON 计划列表 → 脚本创建 N 张子任务卡（落「计划」列，带「子任务」标签）
+             → 父卡打「已分解」标签并移入「计划」列，等待全部子卡 Done 后自动 Done
+  计划 -> 「评审 agent」评估/修订计划卡（通过或修订后都）-> 开发
   开发 -> 「开发 agent」编码实现             -> 测试
-  测试 -> 「测试 agent」验证                 -> Done
+  测试 -> 「测试 agent」验证                 -> Done（子任务卡 Done 时自动 close issue）
+
+「评审」列为预留状态（测试结束后的专门评审阶段），当前与 Todo 一样不自动处理。
 
 每列并发限制：同一次运行中，每个 status 列最多起一个 agent。
 防重复触发（任务执行状态，Issue 卡以标签代替锁文件）：
@@ -23,8 +29,17 @@ Todo 列不处理（手动控制），从「需求」开始：
 （卡片留在测试列并加评论说明）。Issue 卡失败次数以「❌ 测试失败 N」标签记录
 （代替失败状态文件，卡片上直接可见）；人工修复后运行 `--reset <card_id>`（摘除失败标签）
 恢复，或直接在 GitHub 上移除失败标签。
+父卡/子卡规则：
+  - 防重复分解：「已分解」标签为主闸，subIssues 查询兜底（有子卡但缺标签时自动补打）；
+    建卡由脚本完成（解析需求 agent 的 JSON），agent 不直接调 gh 建卡。
+  - 子任务卡（带「子任务」标签）永不分解；测试失败只回退「开发」或「计划」
+    （输出「需求」会被强制改为「计划」，避免触发父卡重新分解）。
+  - 父卡聚合：每轮扫描更新「📊 子卡进度」评论（原地 PATCH 不刷屏）；全部子卡 Done 后
+    父卡移 Done + 汇总评论 + close 父 issue + 摘「已分解」标签；父卡本身永不启动 agent。
+
 标签路由：给 Issue 卡加「需要重新计划」/「需要改动」标签，扫描时先把卡片移入
-「需求」/「开发」列（与处理阶段一致），再按对应阶段启动 agent，并自动清除 halt 停止状态。
+「需求」/「开发」列（与处理阶段一致），再按对应阶段启动 agent，并自动清除 halt 停止状态
+（父卡忽略并摘除路由标签）。
 测试失败判定以输出开头的 ❌ 标记为准，避免 "0 failures"/"无需 ❌ 标记" 等通过措辞误判。
 """
 import subprocess
@@ -70,16 +85,27 @@ STATUS_FIELD_ID = "PVTSSF_lAHOAAOE884AYQefzgPghq8"
 OPTION_IDS = {
     "Todo": "f75ad846",
     "需求": "6ff7dcda",
+    "计划": "9a427661",
     "开发": "47fc9ee4",
     "测试": "ceaca6cd",
+    "评审": "6aa4326a",
     "Done": "98236657",
 }
+OPTION_MISSING = set()  # resolve_option_ids() 填充：Status 字段缺失的选项名
 
 TRANSITIONS = {
-    "需求": "开发",
+    "需求": "开发",   # 需求 agent 输出分解时，实际目标改为「计划」（父卡）
+    "计划": "开发",   # 评审 agent 评估/修订计划卡
     "开发": "测试",
     "测试": "Done",
 }
+
+# 需求分解为子任务
+MAX_PLANS = 8                       # 单个需求最多分解的子任务数
+CHILD_LABEL = "子任务"              # 子任务卡标记（需求 agent 建卡时打上）
+DECOMPOSED_LABEL = "已分解"         # 父卡标记：已分解，等待子卡收尾（防重复分解主闸）
+DECOMPOSED_LABEL_COLOR = "0E8A16"
+PROGRESS_MARKER = "<!-- kanban-progress -->"  # 父卡进度评论标记（原地 PATCH 用）
 
 # 标签路由：给 Issue 卡加标签即可改变自动流转方向（优先级高于列状态与 halt 停止）：
 #   「需要重新计划」→ 卡片先移到「需求」列，再由需求 agent 重新分析/修订计划（目标：开发）
@@ -114,7 +140,25 @@ STAGE_PROMPTS = {
               "**不要包含任何 e2e 测试、数据库集成测试、浏览器验收类条目**（如「需在真实环境验证」「集成/E2E 验收」）——" \
               "本流程不做这些验证，写了只会导致卡片反复流转浪费时间。\n\n" \
               "如果评论中已有测试失败报告，请重点解决其中提出的需求/验收口径问题（如口径不清、" \
-              "需求缺失或矛盾、需要需求/计划角色决策的点），输出修订后的完整需求规格说明。",
+              "需求缺失或矛盾、需要需求/计划角色决策的点），输出修订后的完整需求规格说明。\n\n" \
+              "如果需要把该需求分解为多个**相互独立**的实施子任务，请在规格说明之后输出一个 JSON 代码块：\n" \
+              "```json\n[{\"title\": \"子任务标题\", \"body\": \"背景说明\", \"acceptance\": \"验收标准\"}]\n```\n" \
+              "要求：子任务之间必须相互独立（无代码依赖），有依赖就合并为一条；" \
+              "每条验收标准同样必须可通过构建/单元测试/路由测试验证；最多 8 条；\n" \
+              "不需要分解就不要输出 JSON 代码块。注意：如果看板卡片是子任务（Issue 带「子任务」标签），" \
+              "只输出规格说明，不要输出 JSON 代码块。",
+    "计划": "你是评审 agent（计划评估）。请评估看板上的计划卡片（可能是父需求分解出的子任务，也可能是独立计划）。\n" \
+              "卡片描述与评论中包含计划内容（背景、目标、验收标准）。\n\n" \
+              "评估要点：\n" \
+              "1. 完整性：计划是否覆盖卡片要求的全部内容；\n" \
+              "2. 可实现性：是否能在现有代码库中实现；\n" \
+              "3. 可验证性：每条验收标准必须可以通过程序构建、单元测试/路由测试验证，" \
+              "**不要包含任何 e2e 测试、数据库集成测试、浏览器验收类条目**（本流程不做这些验证）；\n" \
+              "4. 一致性：如果评论中有测试失败报告，必须解决其中提出的问题（修订验收口径或补充缺失内容）。\n\n" \
+              "输出要求（直接输出，不要写入文件）：\n" \
+              "- 计划没有问题：输出「✅ 评审通过」并简述结论即可；\n" \
+              "- 计划需要修改：输出修订后的完整计划（背景、目标、验收标准），开头包含「❌ 需要修订」。\n" \
+              "两条路径都表示评审完成，卡片随后进入开发。",
     "开发": "你是开发 agent。卡片描述或 Issue 评论中包含完整的需求规格说明（背景、目标、验收标准）。" \
               "请仔细阅读描述与评论，根据验收标准实现编码，不要询问用户。",
     "测试": "你是测试 agent。卡片描述中包含验收标准。" \
@@ -127,7 +171,9 @@ STAGE_PROMPTS = {
               "- 代码/构建/单元测试层面的实现缺陷 → `回退目标：开发`；\n" \
               "- 验收标准本身有问题（口径不清、需求缺失或矛盾、需要需求/计划角色决策，" \
               "例如评论中提出的计划决策点）→ `回退目标：需求`。\n" \
-              "失败时必须且只能输出其中一行（放在 ❌ 标记之后）；通过时不要输出。",
+              "失败时必须且只能输出其中一行（放在 ❌ 标记之后）；通过时不要输出。\n\n" \
+              "如果这是子任务卡片（Issue 带「子任务」标签），回退目标只能输出「开发」或「计划」——" \
+              "验收口径问题输出 `回退目标：计划`（由评审 agent 修订计划），不要输出「需求」。",
 }
 
 
@@ -647,6 +693,213 @@ def log_step(title, target_status):
         f.write(f"{ts}  {title}: {target_status}\n")
 
 
+# ---------- 状态选项解析 ----------
+
+def resolve_option_ids():
+    """启动时按名称解析 Status 字段选项 ID（field-list），失败用硬编码兜底。
+    返回缺失的选项名集合（如项目设置里还没加「计划」）。"""
+    global OPTION_IDS, OPTION_MISSING
+    ids = dict(OPTION_IDS)
+    missing = set()
+    try:
+        fields = json.loads(subprocess.check_output(
+            ["gh", "project", "field-list", PROJECT_NUMBER, "--owner", OWNER,
+             "--format", "json"], cwd=REPO_DIR))
+        for f in fields.get("fields", []):
+            if f.get("id") == STATUS_FIELD_ID:
+                for opt in f.get("options", []):
+                    ids[opt["name"]] = opt["id"]
+    except (subprocess.CalledProcessError, json.JSONDecodeError, KeyError, TypeError):
+        pass
+    for name in ("Todo", "需求", "计划", "开发", "测试", "评审", "Done"):
+        if name not in ids:
+            missing.add(name)
+    OPTION_IDS = ids
+    OPTION_MISSING = missing
+    if missing:
+        print(f"{ts()} [field] Status 字段缺少选项: {sorted(missing)}（请在项目设置添加）", flush=True)
+    return missing
+
+
+# ---------- 需求分解 / 子任务 ----------
+
+def parse_plan_json(text):
+    """从需求 agent 输出中解析计划列表（```json 围栏或纯 JSON）。
+    格式不符/超限/缺字段时返回 None（调用方降级为单卡流程）。"""
+    m = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
+    candidate = m.group(1) if m else text.strip()
+    if not candidate.lstrip().startswith("["):
+        return None
+    try:
+        plans = json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(plans, list) or not plans or len(plans) > MAX_PLANS:
+        return None
+    out = []
+    for p in plans:
+        if not isinstance(p, dict):
+            return None
+        title = str(p.get("title", "")).strip()
+        body = str(p.get("body", "")).strip()
+        acceptance = str(p.get("acceptance", "")).strip()
+        if not title or not acceptance:
+            return None
+        out.append({"title": title, "body": body, "acceptance": acceptance})
+    return out
+
+
+def split_spec_and_json(text):
+    """截取规格说明部分：去掉末尾的 JSON 代码块（分解计划）。无代码块则原样返回。"""
+    m = re.search(r"```(?:json)?\s*\[", text)
+    if m:
+        return text[:m.start()].rstrip()
+    if text.lstrip().startswith("[") and text.rstrip().endswith("]"):
+        return ""  # 纯 JSON 输出：无规格文本
+    return text
+
+
+def create_plan_children(parent_number, plans):
+    """把需求 agent 的 JSON 计划列表落成子任务卡：
+    gh issue create --parent 关联 → 加入看板 → 置「计划」列 → 打「子任务」标签。
+    返回 [(issue_number, title)]；全部失败返回 []。"""
+    if "计划" in OPTION_MISSING:
+        print(f"{ts()} [plan] Status 字段缺少「计划」选项，无法创建子卡（请在项目设置添加）", flush=True)
+        return []
+    created = []
+    for p in plans:
+        title = f"[#{parent_number}] {p['title']}"
+        body = f"## 背景\n{p['body'] or '（由父卡需求分解生成）'}\n\n## 验收标准\n{p['acceptance']}"
+        try:
+            url = subprocess.check_output(
+                ["gh", "issue", "create", "--parent", str(parent_number),
+                 "--title", title, "--body", body],
+                cwd=REPO_DIR, text=True).strip()
+            number = int(url.rstrip("/").split("/")[-1])
+            item_id = subprocess.check_output(
+                ["gh", "project", "item-add", PROJECT_NUMBER, "--owner", OWNER,
+                 "--url", url, "--format", "json", "--jq", ".id"],
+                cwd=REPO_DIR, text=True).strip().strip('"')
+            gh_edit(id=item_id, field_id=STATUS_FIELD_ID,
+                    single_select_option_id=OPTION_IDS["计划"])
+            add_label(number, label=CHILD_LABEL)
+            created.append((number, title))
+            print(f"{ts()} [plan] 已创建子卡 #{number} {p['title']!r}", flush=True)
+        except (subprocess.CalledProcessError, ValueError) as e:
+            print(f"{ts()} [plan] 创建子卡失败 {p['title']!r}: {e}", flush=True)
+    return created
+
+
+def get_subissue_numbers(issue_number):
+    """查询 Issue 的直接子任务编号列表（GraphQL）。失败返回 None。"""
+    owner, _, repo = repo_name().partition("/")
+    query = """query($owner:String!,$repo:String!,$number:Int!){
+      repository(owner:$owner,name:$repo){
+        issue(number:$number){
+          subIssues(first:50){nodes{number}}
+        }
+      }
+    }"""
+    try:
+        out = json.loads(subprocess.check_output(
+            ["gh", "api", "graphql", "-f", f"query={query}",
+             "-F", f"owner={owner}", "-F", f"repo={repo}",
+             "-F", f"number={issue_number}"],
+            cwd=REPO_DIR))
+        return [n["number"] for n in out["data"]["repository"]["issue"]["subIssues"]["nodes"]]
+    except (subprocess.CalledProcessError, json.JSONDecodeError, KeyError, TypeError):
+        return None
+
+
+def update_progress_comment(issue_number, body):
+    """维护父卡进度评论：带 PROGRESS_MARKER 的评论原地 PATCH（不刷屏），不存在则创建。"""
+    try:
+        comments = json.loads(subprocess.check_output(
+            ["gh", "api", f"repos/{repo_name()}/issues/{issue_number}/comments",
+             "--jq", "[.[] | {id: .id, body: .body}]"],
+            cwd=REPO_DIR))
+        for c in comments:
+            if PROGRESS_MARKER in c.get("body", ""):
+                if c["body"].strip() == body.strip():
+                    return
+                subprocess.run(
+                    ["gh", "api", "-X", "PATCH",
+                     f"repos/{repo_name()}/issues/comments/{c['id']}",
+                     "-f", f"body={body}"],
+                    cwd=REPO_DIR, check=True, capture_output=True)
+                return
+    except (subprocess.CalledProcessError, json.JSONDecodeError, KeyError):
+        pass
+    add_comment(issue_number, body)
+
+
+def aggregate_parent(card, issue_number, labels, items_by_number):
+    """父卡聚合（每轮扫描调用）：
+    - 全部子卡 Done → 父卡移 Done + close 父 issue + 摘「已分解」标签 + 最终评论；
+    - 否则更新「📊 子卡进度」评论（含卡住/未入板告警）。
+    返回 True = 已按父卡处理（本轮跳过）；False = 非父卡（正常流程继续）。"""
+    if DECOMPOSED_LABEL in labels:
+        subissue_numbers = get_subissue_numbers(issue_number) or []
+    else:
+        subs = get_subissue_numbers(issue_number)
+        if not subs:
+            return False
+        subissue_numbers = subs
+        # 有子卡但缺「已分解」标签（异常残留）：补打，防止重复分解
+        ensure_label(DECOMPOSED_LABEL, color=DECOMPOSED_LABEL_COLOR)
+        add_label(issue_number, label=DECOMPOSED_LABEL)
+        print(f"{ts()} 补打已分解标签: {card['title']!r}", flush=True)
+
+    total = 0
+    done = 0
+    halted = []
+    missing = []
+    for n in subissue_numbers:
+        item = items_by_number.get(n)
+        if not item:
+            missing.append(n)
+            continue
+        total += 1
+        if item.get("status") == "Done":
+            done += 1
+        elif fail_count_from_labels(get_issue_labels(n)) >= MAX_TEST_FAILURES:
+            halted.append(item["title"])
+
+    if total == 0:
+        # 已标记分解但没有任何子卡在板（建卡失败/被移出）：提示人工，不自动流转
+        update_progress_comment(
+            issue_number, f"⚠️ 已标记分解但板上没有子卡，请人工检查（可能建卡失败）。\n\n{PROGRESS_MARKER}")
+        print(f"{ts()} 跳过(父卡异常): {card['title']!r} 无子卡在板", flush=True)
+        return True
+
+    if done == total:
+        update_progress_comment(
+            issue_number, f"## ✅ 全部 {total} 个子任务已完成，父卡移至 Done。\n\n{PROGRESS_MARKER}")
+        gh_edit(id=card["id"], field_id=STATUS_FIELD_ID,
+                single_select_option_id=OPTION_IDS["Done"])
+        remove_label(issue_number, label=DECOMPOSED_LABEL)
+        try:
+            subprocess.run(["gh", "issue", "close", str(issue_number)],
+                           cwd=REPO_DIR, check=True, capture_output=True)
+            print(f"{ts()} 已关闭父 issue #{issue_number}", flush=True)
+        except subprocess.CalledProcessError as e:
+            print(f"{ts()} [aggregate] 关闭父 issue 失败: {e}", flush=True)
+        log_step(card["title"], "Done(子任务全部完成)")
+        print(f"{ts()} [aggregate] 父卡完成: {card['title']!r} -> Done", flush=True)
+        return True
+
+    parts = [f"📊 子卡进度：{done}/{total} 完成"]
+    if halted:
+        parts.append(f"⛔ 卡住：{'、'.join(halted)}")
+    if missing:
+        parts.append(f"⚠️ 未入板：{'、'.join(str(m) for m in missing)}")
+    body = "\n".join(parts) + f"\n\n{PROGRESS_MARKER}"
+    update_progress_comment(issue_number, body)
+    print(f"{ts()} 跳过(父卡等待子任务): {card['title']!r} {done}/{total}"
+          + (f" 卡住:{len(halted)}" if halted else ""), flush=True)
+    return True
+
+
 # ---------- 模式一：后台 agent（被主脚本 fork） ----------
 
 def _has_fail_marker(text):
@@ -688,11 +941,14 @@ def parse_fallback_target(output):
     return m.group(1) if m else TEST_FAIL_TARGET
 
 
-def run_agent_mode(card_id, original_title, target, issue_number=None, content_id=None):
-    """单张卡的 agent 执行：mark → pi → gh 更新 → unmark。"""
-    # 从 target 反推 current（用于选 prompt）
-    reverse = {v: k for k, v in TRANSITIONS.items()}
-    current = reverse.get(target, "需求")
+def run_agent_mode(card_id, original_title, current, target, issue_number=None, content_id=None):
+    """单张卡的 agent 执行：mark → pi → gh 更新 → unmark。
+    current = 卡片当前列（决定 prompt 与处理逻辑），target = 目标列（通常 TRANSITIONS[current]）。"""
+    resolve_option_ids()
+    # 子任务判定（带「子任务」标签）
+    is_child = False
+    if issue_number:
+        is_child = CHILD_LABEL in get_issue_labels(issue_number)
 
     # 读取卡片描述
     card_body = ""
@@ -721,6 +977,8 @@ def run_agent_mode(card_id, original_title, target, issue_number=None, content_i
             pass
 
     prompt = STAGE_PROMPTS[current]
+    if current == "需求" and is_child:
+        prompt += "\n\n注意：这是子任务卡片，只输出规格说明，不要输出 JSON 分解块。"
     prompt += f"\n\n看板标题：{original_title}"
     if card_body:
         prompt += f"\n\n看板描述：\n{card_body}"
@@ -734,8 +992,8 @@ def run_agent_mode(card_id, original_title, target, issue_number=None, content_i
     print(f"{ts()} [agent] 开始: {original_title!r} ({current} -> {target})")
     mark_in_progress(card_id, original_title, issue_number)
 
-    # 需求和测试阶段捕获输出
-    capture = current in ("需求", "测试")
+    # 需求/计划/测试阶段捕获输出
+    capture = current in ("需求", "计划", "测试")
     ok, output, timed_out = run_agent(prompt, capture_output=capture)
 
     # 检查测试是否失败（通过输出中的标志）
@@ -747,19 +1005,54 @@ def run_agent_mode(card_id, original_title, target, issue_number=None, content_i
         print(f"{ts()} [agent] 测试未通过，将回退到开发")
 
     if ok and not test_failed:
-        # 需求阶段：写入需求计划。Issue 卡写评论，DraftIssue 卡追加到描述
+        target_status = target
+
+        # 需求阶段：写规格说明；若输出 JSON 计划列表且非子任务 → 分解为子任务卡
         if current == "需求" and output:
-            plan = output.strip()
-            if plan:
+            plan_output = output.strip()
+            spec_text = split_spec_and_json(plan_output)
+            plans = None if is_child else parse_plan_json(plan_output)
+            if plans and issue_number:
+                if spec_text:
+                    add_comment(issue_number, spec_text)
+                    print(f"{ts()} [agent] 已追加需求规格到 Issue 评论: {len(spec_text)} chars")
+                children = create_plan_children(issue_number, plans)
+                if children:
+                    ensure_label(DECOMPOSED_LABEL, color=DECOMPOSED_LABEL_COLOR)
+                    add_label(issue_number, label=DECOMPOSED_LABEL)
+                    listing = "\n".join(f"- [#{num}] {t}" for num, t in children)
+                    add_comment(issue_number, f"## 📋 已分解为 {len(children)} 个子任务\n\n{listing}")
+                    update_progress_comment(
+                        issue_number, f"📊 子卡进度：0/{len(children)} 完成\n\n{PROGRESS_MARKER}")
+                    target_status = "计划"  # 父卡移入计划列等待子卡收尾
+                    log_step(original_title, f"计划(分解为{len(children)}个子任务)")
+                    print(f"{ts()} [agent] 已分解: {original_title!r} -> {len(children)} 张子卡")
+                else:
+                    add_comment(issue_number, "⚠️ 需求分解建卡失败（0 张子卡），按单卡流程继续。")
+            elif spec_text:
                 if issue_number:
-                    add_comment(issue_number, plan)
-                    print(f"{ts()} [agent] 已追加计划到 Issue 评论: {len(plan)} chars")
+                    add_comment(issue_number, spec_text)
+                    print(f"{ts()} [agent] 已追加计划到 Issue 评论: {len(spec_text)} chars")
                 else:
                     try:
-                        append_draft_body(card_id, content_id, plan)
-                        print(f"{ts()} [agent] 已追加计划到描述: {len(plan)} chars")
+                        append_draft_body(card_id, content_id, spec_text)
+                        print(f"{ts()} [agent] 已追加计划到描述: {len(spec_text)} chars")
                     except subprocess.CalledProcessError as e:
                         print(f"{ts()} [agent] 写入卡片描述失败: {e}")
+
+        # 计划阶段（评审 agent）：把评审结论写回卡片（通过/修订记录）
+        if current == "计划" and output:
+            verdict = "通过" if "需要修订" not in output[:200] else "修订"
+            record = f"## 评审记录（{verdict}）\n\n{output.strip()}"
+            if issue_number:
+                add_comment(issue_number, record)
+                print(f"{ts()} [agent] 已写评审记录到 Issue 评论: {len(record)} chars")
+            else:
+                try:
+                    append_draft_body(card_id, content_id, record)
+                    print(f"{ts()} [agent] 已写评审记录到描述: {len(record)} chars")
+                except subprocess.CalledProcessError as e:
+                    print(f"{ts()} [agent] 写入评审记录失败: {e}")
 
         # 移状态前先摘「处理中」标签：卡片不带标签进入目标列。
         # 标签语义 = 当前列里正在被处理的那张卡；锁文件条目最后再清（防误重启）
@@ -769,14 +1062,26 @@ def run_agent_mode(card_id, original_title, target, issue_number=None, content_i
         remove_column_route_label(issue_number, current)
 
         gh_edit(id=card_id, field_id=STATUS_FIELD_ID,
-                single_select_option_id=OPTION_IDS[target])
+                single_select_option_id=OPTION_IDS[target_status])
         clear_fail_state(card_id, issue_number)  # 正向流转成功，清零失败计数
-        log_step(original_title, target)
-        print(f"{ts()} [agent] 完成: {original_title!r} -> {target}")
+        if target_status == "Done" and is_child:
+            # 子任务完成 → close 子 issue
+            try:
+                subprocess.run(["gh", "issue", "close", str(issue_number)],
+                               cwd=REPO_DIR, check=True, capture_output=True)
+                print(f"{ts()} [agent] 已关闭子任务 issue #{issue_number}")
+            except subprocess.CalledProcessError as e:
+                print(f"{ts()} [agent] 关闭子任务 issue 失败: {e}")
+        log_step(original_title, target_status)
+        print(f"{ts()} [agent] 完成: {original_title!r} -> {target_status}")
     elif test_failed:
         # 测试失败：记录失败次数；由测试 agent 声明回退目标（需求/开发），未超限则回退，超限则停止自动流转
         fail_count, halted = record_test_failure(card_id, original_title, issue_number)
         fail_target = parse_fallback_target(output or "")
+        if is_child and fail_target == "需求":
+            # 子卡不回需求（防止触发父卡重新分解），改由评审 agent 修订计划
+            fail_target = "计划"
+            print(f"{ts()} [agent] 子卡回退目标「需求」已强制改为「计划」")
         fail_body = f"## 测试失败报告（第 {fail_count} 次）\n\n**失败时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n**失败原因**:\n\n{failure_reason}"
 
         # 失败报告：Issue 卡写评论（body 无法用 item-edit 更新），DraftIssue 卡追加到描述
@@ -806,7 +1111,7 @@ def run_agent_mode(card_id, original_title, target, issue_number=None, content_i
                          f"或直接在 GitHub 上移除该卡全部「❌ 测试失败」标签，\n"
                          f"    或给卡片添加标签「需要重新计划」（退回需求重新计划）或「需要改动」（退回开发实现），\n"
                          f"    下一轮扫描会自动按标签路由处理；\n"
-                         f"3. 也可手动把卡片移到「开发」或「需求」列继续。")
+                         f"3. 也可手动把卡片移到「计划」列（评审 agent 修订计划）或「开发」/「需求」列继续。")
             if issue_number:
                 add_comment(issue_number, halt_body)
             else:
@@ -845,11 +1150,11 @@ def run_agent_mode(card_id, original_title, target, issue_number=None, content_i
 
 # ---------- 模式二：主脚本（cron 调用） ----------
 
-def launch_agent(card_id, original_title, target, issue_number, content_id, reason=""):
-    """起后台 agent: --agent card_id title target [issue_number] [content_id]。reason 用于日志。"""
+def launch_agent(card_id, original_title, current, target, issue_number, content_id, reason=""):
+    """起后台 agent: --agent card_id title current target [issue_number] [content_id]。reason 用于日志。"""
     cmd = ["timeout", str(AGENT_TIMEOUT + 120),
            sys.executable, __file__, "--agent",
-           card_id, original_title, target]
+           card_id, original_title, current, target]
     if issue_number:
         cmd.append(str(issue_number))
     if content_id:
@@ -870,6 +1175,15 @@ def run_scan_mode():
     items = get_items()
     busy_columns = set()
     launched = 0
+    resolve_option_ids()
+
+    # issue 编号 → 看板条目 映射（父卡聚合用）
+    items_by_number = {}
+    for card in items:
+        content = card.get("content", {})
+        n = content.get("number") if content.get("type") == "Issue" else None
+        if n:
+            items_by_number[n] = card
 
     for card in items:
         title = card["title"]
@@ -882,6 +1196,16 @@ def run_scan_mode():
         content_id = content.get("id")  # DI_ 前缀，用于 DraftIssue body
         issue_number = content.get("number") if content.get("type") == "Issue" else None
         labels = get_issue_labels(issue_number) if issue_number else set()
+
+        # 父卡聚合（优先级最高）：已分解或有子任务的卡永不启动 agent，
+        # 全部子卡 Done 后自动移 Done；父卡忽略路由标签
+        if issue_number and current not in (None, "Done") and CHILD_LABEL not in labels:
+            route = next((l for l in ROUTE_LABELS if l in labels), None)
+            if route:
+                remove_label(issue_number, label=route)
+                print(f"{ts()} 父卡忽略路由标签: {title!r}")
+            if aggregate_parent(card, issue_number, labels, items_by_number):
+                continue
 
         # 标签路由：需要重新计划 -> 需求 agent（目标开发）；需要改动 -> 开发 agent（目标测试）
         route_label = None
@@ -919,13 +1243,15 @@ def run_scan_mode():
                 log_step(original_title, f"{virtual}(标签路由:{route_label})")
             except subprocess.CalledProcessError as e:
                 print(f"{ts()} [label] 移列失败: {e}")
-            launch_agent(card_id, original_title, route_target, issue_number, content_id,
+            launch_agent(card_id, original_title, virtual, route_target, issue_number, content_id,
                          reason=f"标签路由:{route_label}")
             launched += 1
             continue
 
-        if current in (None, "Todo"):
-            print(f"{ts()} 跳过(手动控制): {title!r} 状态 {current!r}，请手动移到「需求」")
+        if current in (None, "Todo", "评审"):
+            note = "预留" if current == "评审" else "手动控制"
+            print(f"{ts()} 跳过({note}): {title!r} 状态 {current!r}"
+                  + ("" if current == "评审" else "，请手动移到「需求」"))
             continue
         if current == "Done":
             print(f"{ts()} 跳过(已完成): {title!r}")
@@ -954,7 +1280,7 @@ def run_scan_mode():
         target = TRANSITIONS[current]
 
         # 起后台 agent
-        launch_agent(card_id, original_title, target, issue_number, content_id)
+        launch_agent(card_id, original_title, current, target, issue_number, content_id)
         launched += 1
 
     print(f"{ts()} 完成，共启动 {launched} 个后台 agent")
@@ -1019,23 +1345,25 @@ def main():
         return
 
     # --agent 模式：后台 agent 直接执行
-    # 参数顺序: card_id title target [issue_number] [content_id]
+    # 参数顺序: card_id title current target [issue_number] [content_id]
     if "--agent" in sys.argv:
         # 外层 timeout 杀 python 时，先清理 pi 进程组与空闲 daemon 再退出
         signal.signal(signal.SIGTERM, _sigterm_handler)
         idx = sys.argv.index("--agent") + 1
+        card_id, title, current, target = (sys.argv[idx], sys.argv[idx + 1],
+                                           sys.argv[idx + 2], sys.argv[idx + 3])
         issue_num = None
         content_id = None
-        # 检查第4个参数（idx+3）是否为数字（issue_number）
-        if len(sys.argv) > idx + 3 and sys.argv[idx + 3].isdigit():
-            issue_num = int(sys.argv[idx + 3])
-            # 如果有 issue_number，content_id 在 idx+4
-            if len(sys.argv) > idx + 4:
-                content_id = sys.argv[idx + 4]
-        elif len(sys.argv) > idx + 3:
-            # 没有 issue_number，content_id 在 idx+3
-            content_id = sys.argv[idx + 3]
-        run_agent_mode(sys.argv[idx], sys.argv[idx + 1], sys.argv[idx + 2], issue_num, content_id)
+        # 检查第5个参数（idx+4）是否为数字（issue_number）
+        if len(sys.argv) > idx + 4 and sys.argv[idx + 4].isdigit():
+            issue_num = int(sys.argv[idx + 4])
+            # 如果有 issue_number，content_id 在 idx+5
+            if len(sys.argv) > idx + 5:
+                content_id = sys.argv[idx + 5]
+        elif len(sys.argv) > idx + 4:
+            # 没有 issue_number，content_id 在 idx+4
+            content_id = sys.argv[idx + 4]
+        run_agent_mode(card_id, title, current, target, issue_num, content_id)
         return
 
     # cron 重叠防护
