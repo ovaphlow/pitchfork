@@ -11,11 +11,18 @@ Todo 列不处理（手动控制），从「需求」开始：
   测试 -> 「测试 agent」验证                 -> Done
 
 每列并发限制：同一次运行中，每个 status 列最多起一个 agent。
-防重复触发：后台 agent 通过锁文件标记处理中状态。
+防重复触发（任务执行状态，Issue 卡以标签代替锁文件）：
+  Issue 卡以「⏳ 处理中」标签为任务执行状态。开始处理时**先摘除再添加**该标签，
+  使 GitHub 时间线（LabeledEvent）记录本次运行的开始时间；扫描时标签存在即视为处理中，
+  标签存在超过 LABEL_STALE_AFTER（高于外层 timeout 硬上限，仍在运行的 agent 不会被判过期）
+  才视为残留并清除。agent 崩溃后残留标签最迟约 1 小时后由扫描清除并重新启动流程。
+  DraftIssue 卡无标签能力，仍回退锁文件（/tmp/kanban_automator.lock）。
 
 防死循环：测试失败由测试 agent 决定回退「需求」或「开发」（验收口径/需求问题退需求，
 实现缺陷退开发），最多 MAX_TEST_FAILURES 次；超过后停止自动流转
-（卡片留在测试列并加评论说明），人工修复后用 `--reset <card_id>` 恢复。
+（卡片留在测试列并加评论说明）。Issue 卡失败次数以「❌ 测试失败 N」标签记录
+（代替失败状态文件，卡片上直接可见）；人工修复后运行 `--reset <card_id>`（摘除失败标签）
+恢复，或直接在 GitHub 上移除失败标签。
 标签路由：给 Issue 卡加「需要重新计划」/「需要改动」标签，扫描时先把卡片移入
 「需求」/「开发」列（与处理阶段一致），再按对应阶段启动 agent，并自动清除 halt 停止状态。
 测试失败判定以输出开头的 ❌ 标记为准，避免 "0 failures"/"无需 ❌ 标记" 等通过措辞误判。
@@ -28,7 +35,7 @@ import re
 import time
 import fcntl
 import signal
-from datetime import datetime
+from datetime import datetime, timezone
 
 PROJECT_NUMBER = "8"
 OWNER = "@me"
@@ -38,7 +45,9 @@ REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 CRON_LOCK = "/tmp/kanban_automator_cron.lock"
 LOG_FILE = "kanban_history.txt"
 LOG_OUTPUT = "/tmp/kanban_automator.log"
+# DraftIssue 卡无标签能力，处理中/失败状态仍回退这两个文件；Issue 卡全部走标签
 LOCK_FILE = "/tmp/kanban_automator.lock"
+FAIL_STATE_FILE = "/tmp/kanban_automator_fails.json"
 
 IN_PROGRESS_LABEL = "⏳ 处理中"
 STALE_GRACE = 60
@@ -50,6 +59,11 @@ AGENT_CMD = ["pi", "-p", "--mode", "text"]
 if AGENT_MODEL:
     AGENT_CMD += ["--model", AGENT_MODEL]
 AGENT_CMD += ["--approve"]
+
+# Issue 卡「⏳ 处理中」标签过期阈值：外层 timeout(AGENT_TIMEOUT+120) 之后再加余量。
+# 仍在运行的 agent 最迟在 AGENT_TIMEOUT+120 被外层 timeout 杀死，因此该阈值保证
+# 活着的 agent 永远不会被判过期（不重复启动）；崩溃残留的标签最迟约 1 小时后清除。
+LABEL_STALE_AFTER = AGENT_TIMEOUT + 120 + STALE_GRACE
 
 # Status 字段（single-select）及其选项 ID
 STATUS_FIELD_ID = "PVTSSF_lAHOAAOE884AYQefzgPghq8"
@@ -88,8 +102,10 @@ TEST_FAIL_TARGET = "开发"
 # 测试失败最大次数；超过后停止自动流转，等待人工介入
 MAX_TEST_FAILURES = 2
 
-# 失败次数持久化（跨 agent 进程、跨轮次存活）
-FAIL_STATE_FILE = "/tmp/kanban_automator_fails.json"
+# Issue 卡失败次数以标签记录（代替失败状态文件）：第 N 次失败加「❌ 测试失败 N」，
+# 标签数即失败次数；手动摘除全部失败标签（或 --reset）即可恢复流转
+FAIL_LABEL_COLOR = "B60205"
+FAIL_LABELS = [f"❌ 测试失败 {i}" for i in range(1, MAX_TEST_FAILURES + 1)]
 
 STAGE_PROMPTS = {
     "需求": "你是需求分析 agent。请分析看板卡片的需求，形成清晰的需求规格说明。" \
@@ -139,7 +155,119 @@ def get_items():
     return out["items"]
 
 
-# ---------- 处理中标记 / 锁 ----------
+# ---------- 标签工具（Issue 卡状态载体） ----------
+
+def add_label(issue_number, label=IN_PROGRESS_LABEL):
+    """给 Issue 添加标签"""
+    try:
+        subprocess.run(
+            ["gh", "issue", "edit", str(issue_number), "--add-label", label],
+            cwd=REPO_DIR, check=True, capture_output=True,
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"{ts()} [label] 添加标签失败: {e}")
+
+
+def remove_label(issue_number, label=IN_PROGRESS_LABEL):
+    """移除 Issue 的指定标签（默认处理中标签）；标签不存在时忽略"""
+    try:
+        subprocess.run(
+            ["gh", "issue", "edit", str(issue_number), "--remove-label", label],
+            cwd=REPO_DIR, check=True, capture_output=True,
+        )
+    except subprocess.CalledProcessError:
+        pass
+
+
+def ensure_label(name, color=FAIL_LABEL_COLOR, description="看板自动流转状态标签"):
+    """确保标签存在（幂等；已存在则更新属性）。"""
+    try:
+        subprocess.run(
+            ["gh", "label", "create", name, "--color", color,
+             "--description", description, "--force"],
+            cwd=REPO_DIR, check=True, capture_output=True,
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"{ts()} [label] 创建标签失败: {e}")
+
+
+def get_issue_labels(issue_number):
+    """获取 Issue 的标签集合（DraftIssue 无标签，返回空集）。"""
+    try:
+        out = json.loads(subprocess.check_output(
+            ["gh", "issue", "view", str(issue_number), "--json", "labels"],
+            cwd=REPO_DIR))
+        return {l["name"] for l in out.get("labels", [])}
+    except (subprocess.CalledProcessError, json.JSONDecodeError, KeyError):
+        return set()
+
+
+def remove_column_route_label(issue_number, column):
+    """卡片离开某列前，摘除该列对应的路由标签（防止残留标签再次触发路由）。
+    例：需求列对应「需要重新计划」，开发列对应「需要改动」；测试列无对应标签。"""
+    if not issue_number:
+        return
+    label = COLUMN_ROUTE_LABELS.get(column)
+    if label:
+        remove_label(issue_number, label=label)
+
+
+REPO_NAME_WITH_OWNER = None
+
+
+def repo_name():
+    """缓存仓库名（owner/repo），供 GraphQL 查询使用。"""
+    global REPO_NAME_WITH_OWNER
+    if REPO_NAME_WITH_OWNER is None:
+        out = json.loads(subprocess.check_output(
+            ["gh", "repo", "view", "--json", "nameWithOwner"], cwd=REPO_DIR))
+        REPO_NAME_WITH_OWNER = out["nameWithOwner"]
+    return REPO_NAME_WITH_OWNER
+
+
+def get_label_added_at(issue_number, label):
+    """查询标签最近一次被添加到该 Issue 的时间（GraphQL LabeledEvent，时间线按时间升序）。
+    失败返回 None。"""
+    owner, _, repo = repo_name().partition("/")
+    query = """query($owner:String!,$repo:String!,$number:Int!){
+      repository(owner:$owner,name:$repo){
+        issue(number:$number){
+          timelineItems(itemTypes:[LABELED_EVENT], first:20){
+            nodes{... on LabeledEvent{createdAt label{name}}}
+          }
+        }
+      }
+    }"""
+    try:
+        out = json.loads(subprocess.check_output(
+            ["gh", "api", "graphql", "-f", f"query={query}",
+             "-F", f"owner={owner}", "-F", f"repo={repo}",
+             "-F", f"number={issue_number}"],
+            cwd=REPO_DIR))
+        nodes = out["data"]["repository"]["issue"]["timelineItems"]["nodes"]
+        for n in nodes:
+            if n.get("label", {}).get("name") == label:
+                return datetime.fromisoformat(n["createdAt"].replace("Z", "+00:00"))
+    except (subprocess.CalledProcessError, json.JSONDecodeError,
+            KeyError, TypeError, ValueError):
+        pass
+    return None
+
+
+def label_is_stale(issue_number):
+    """「⏳ 处理中」标签已存在，判断其是否过期（上次运行已死、标签残留）。
+    阈值 LABEL_STALE_AFTER 高于外层 timeout（AGENT_TIMEOUT+120）的硬上限：
+    仍在运行的 agent 永远不会被判过期（杜绝重复启动）；崩溃/被杀后残留的标签
+    最迟约 1 小时后由下一轮扫描清除并重新启动流程。
+    查询失败时保守返回 False（视为处理中，不误启动）。"""
+    added = get_label_added_at(issue_number, IN_PROGRESS_LABEL)
+    if added is None:
+        return False
+    age = (datetime.now(timezone.utc) - added).total_seconds()
+    return age > LABEL_STALE_AFTER
+
+
+# ---------- 处理中标记 / 锁（DraftIssue 卡回退） ----------
 
 def load_lock():
     """读取锁文件。损坏时备份并返回 None——调用方必须保守处理，不得当作「全部空闲」。"""
@@ -185,53 +313,15 @@ def load_modify_save(modify):
         fd.close()
 
 
-def add_label(issue_number):
-    """给 Issue 添加处理中标签"""
-    try:
-        subprocess.run(
-            ["gh", "issue", "edit", str(issue_number), "--add-label", IN_PROGRESS_LABEL],
-            cwd=REPO_DIR, check=True, capture_output=True,
-        )
-    except subprocess.CalledProcessError as e:
-        print(f"{ts()} [label] 添加标签失败: {e}")
-
-
-def remove_label(issue_number, label=IN_PROGRESS_LABEL):
-    """移除 Issue 的指定标签（默认处理中标签）"""
-    try:
-        subprocess.run(
-            ["gh", "issue", "edit", str(issue_number), "--remove-label", label],
-            cwd=REPO_DIR, check=True, capture_output=True,
-        )
-    except subprocess.CalledProcessError:
-        pass
-
-
-def get_issue_labels(issue_number):
-    """获取 Issue 的标签集合（DraftIssue 无标签，返回空集）。"""
-    try:
-        out = json.loads(subprocess.check_output(
-            ["gh", "issue", "view", str(issue_number), "--json", "labels"],
-            cwd=REPO_DIR))
-        return {l["name"] for l in out.get("labels", [])}
-    except (subprocess.CalledProcessError, json.JSONDecodeError, KeyError):
-        return set()
-
-
-def remove_column_route_label(issue_number, column):
-    """卡片离开某列前，摘除该列对应的路由标签（防止残留标签再次触发路由）。
-    例：需求列对应「需要重新计划」，开发列对应「需要改动」；测试列无对应标签。"""
-    if not issue_number:
-        return
-    label = COLUMN_ROUTE_LABELS.get(column)
-    if label:
-        remove_label(issue_number, label=label)
-
-
 def mark_in_progress(card_id, original_title, issue_number=None):
-    # 添加标签（在页面可见）
+    """标记处理中。Issue 卡：以「⏳ 处理中」标签为任务执行状态——
+    先摘除再添加，保证每次运行都产生新的 LabeledEvent 时间戳（供过期判定），
+    即使上次运行崩溃残留了旧标签也会被刷新。
+    DraftIssue 卡：无标签能力，回退锁文件。"""
     if issue_number:
+        remove_label(issue_number)  # 先摘：残留旧标签时刷新时间戳；无标签时忽略失败
         add_label(issue_number)
+        return
 
     def _mark(lock):
         lock[card_id] = {
@@ -244,7 +334,12 @@ def mark_in_progress(card_id, original_title, issue_number=None):
     load_modify_save(_mark)
 
 
-def unmark_in_progress(card_id, fallback_title=None):
+def unmark_in_progress(card_id, issue_number=None):
+    """解除处理中标记。Issue 卡：摘「⏳ 处理中」标签；DraftIssue 卡：清锁文件条目。"""
+    if issue_number:
+        remove_label(issue_number)
+        return
+
     def _unmark(lock):
         return lock.pop(card_id, None)
 
@@ -266,10 +361,42 @@ def is_stale(entry):
     return age > STALE_GRACE
 
 
-# ---------- 测试失败次数持久化（防死循环） ----------
+def in_progress_state(card_id, issue_number, labels):
+    """判断卡片是否处理中。返回 (in_progress, fatal)。
+    Issue 卡：以「⏳ 处理中」标签为任务执行状态；标签过期（上次 agent 早已被杀）时
+    清除残留标签并按空闲处理。DraftIssue 卡：回退锁文件；锁文件损坏时 fatal=True，
+    本轮应中止（保守，不误启动）。"""
+    if issue_number:
+        if IN_PROGRESS_LABEL in labels:
+            if label_is_stale(issue_number):
+                print(f"{ts()} 清除残留处理中标签: {card_id} 处理已超时")
+                remove_label(issue_number)
+                return False, False
+            return True, False
+        return False, False
+
+    lock = load_lock()
+    if lock is None:
+        print(f"{ts()} [lock] 锁文件损坏，本轮不启动任何 agent，请人工检查 {LOCK_FILE}")
+        return False, True
+    entry = lock.get(card_id)
+    if entry:
+        if not is_stale(entry):
+            return True, False
+        print(f"{ts()} 清除残留标记: {card_id}")
+        unmark_in_progress(card_id)
+    return False, False
+
+
+# ---------- 测试失败次数（防死循环；Issue 卡以标签记录） ----------
+
+def fail_count_from_labels(labels):
+    """从标签集合统计测试失败次数（「❌ 测试失败 N」标签的数量）。"""
+    return sum(1 for l in FAIL_LABELS if l in labels)
+
 
 def load_fail_state():
-    """读取失败状态。损坏时备份重建，不影响主流程。"""
+    """读取失败状态（DraftIssue 卡回退）。损坏时备份重建，不影响主流程。"""
     try:
         with open(FAIL_STATE_FILE, encoding="utf-8") as f:
             return json.load(f)
@@ -287,7 +414,7 @@ def save_fail_state(state):
 
 
 def fail_state_modify(modify):
-    """flock 串行化读-改-写失败状态。"""
+    """flock 串行化读-改-写失败状态（DraftIssue 卡回退）。"""
     fd = open(FAIL_STATE_FILE + ".flock", "w")
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
@@ -300,8 +427,19 @@ def fail_state_modify(modify):
         fd.close()
 
 
-def record_test_failure(card_id, title):
-    """记录一次测试失败，返回 (fail_count, halted)。达 MAX_TEST_FAILURES 后 halted=True。"""
+def record_test_failure(card_id, title, issue_number=None):
+    """记录一次测试失败，返回 (fail_count, halted)。达 MAX_TEST_FAILURES 后 halted=True。
+    Issue 卡：加「❌ 测试失败 N」标签（标签即计数）；DraftIssue 卡：回退失败状态文件。"""
+    if issue_number:
+        labels = get_issue_labels(issue_number)
+        n = fail_count_from_labels(labels) + 1
+        if n > MAX_TEST_FAILURES:
+            n = MAX_TEST_FAILURES  # 已超限（人工加过标签等边界情况），不再叠加
+        else:
+            ensure_label(FAIL_LABELS[n - 1])
+            add_label(issue_number, label=FAIL_LABELS[n - 1])
+        return n, n >= MAX_TEST_FAILURES
+
     def _m(state):
         entry = state.get(card_id, {})
         entry["fail_count"] = entry.get("fail_count", 0) + 1
@@ -314,19 +452,43 @@ def record_test_failure(card_id, title):
     return fail_state_modify(_m)
 
 
-def clear_fail_state(card_id):
-    """成功流转（任何正向移动）后清零失败计数。"""
+def clear_fail_state(card_id, issue_number=None):
+    """成功流转（任何正向移动）后清零失败计数。
+    Issue 卡：摘除全部「❌ 测试失败 N」标签；DraftIssue 卡：清失败状态文件条目。"""
+    if issue_number:
+        for label in FAIL_LABELS:
+            remove_label(issue_number, label=label)
+        return
+
     def _m(state):
         state.pop(card_id, None)
 
     fail_state_modify(_m)
 
 
-def is_halted(card_id):
-    """该卡是否已因测试失败次数超限被停止自动流转。"""
+def is_halted(card_id, issue_number=None, labels=None):
+    """该卡是否已因测试失败次数超限被停止自动流转。
+    Issue 卡：失败标签数量达 MAX_TEST_FAILURES；DraftIssue 卡：回退失败状态文件。"""
+    if issue_number:
+        if labels is None:
+            labels = get_issue_labels(issue_number)
+        return fail_count_from_labels(labels) >= MAX_TEST_FAILURES
     state = load_fail_state()
     entry = state.get(card_id)
     return bool(entry and entry.get("halted"))
+
+
+def find_issue_number(card_id):
+    """根据卡片 ID 反查 Issue 编号（--reset 用）。DraftIssue 返回 None。"""
+    try:
+        for item in get_items():
+            if item["id"] == card_id:
+                content = item.get("content", {})
+                if content.get("type") == "Issue":
+                    return content.get("number")
+    except (subprocess.CalledProcessError, json.JSONDecodeError):
+        pass
+    return None
 
 
 # ---------- agent / 状态 ----------
@@ -531,7 +693,7 @@ def run_agent_mode(card_id, original_title, target, issue_number=None, content_i
     # 从 target 反推 current（用于选 prompt）
     reverse = {v: k for k, v in TRANSITIONS.items()}
     current = reverse.get(target, "需求")
-    
+
     # 读取卡片描述
     card_body = ""
     try:
@@ -545,7 +707,7 @@ def run_agent_mode(card_id, original_title, target, issue_number=None, content_i
                 break
     except Exception:
         pass
-    
+
     # 读取 Issue 的 comments（如果有）
     comments = []
     if issue_number:
@@ -557,7 +719,7 @@ def run_agent_mode(card_id, original_title, target, issue_number=None, content_i
             comments = comments_data.get("comments", [])
         except Exception:
             pass
-    
+
     prompt = STAGE_PROMPTS[current]
     prompt += f"\n\n看板标题：{original_title}"
     if card_body:
@@ -608,15 +770,15 @@ def run_agent_mode(card_id, original_title, target, issue_number=None, content_i
 
         gh_edit(id=card_id, field_id=STATUS_FIELD_ID,
                 single_select_option_id=OPTION_IDS[target])
-        clear_fail_state(card_id)  # 正向流转成功，清零失败计数
+        clear_fail_state(card_id, issue_number)  # 正向流转成功，清零失败计数
         log_step(original_title, target)
         print(f"{ts()} [agent] 完成: {original_title!r} -> {target}")
     elif test_failed:
         # 测试失败：记录失败次数；由测试 agent 声明回退目标（需求/开发），未超限则回退，超限则停止自动流转
-        fail_count, halted = record_test_failure(card_id, original_title)
+        fail_count, halted = record_test_failure(card_id, original_title, issue_number)
         fail_target = parse_fallback_target(output or "")
         fail_body = f"## 测试失败报告（第 {fail_count} 次）\n\n**失败时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n**失败原因**:\n\n{failure_reason}"
-        
+
         # 失败报告：Issue 卡写评论（body 无法用 item-edit 更新），DraftIssue 卡追加到描述
         if issue_number:
             add_comment(issue_number, fail_body)
@@ -627,7 +789,7 @@ def run_agent_mode(card_id, original_title, target, issue_number=None, content_i
                 print(f"{ts()} [agent] 已记录失败原因到描述")
             except Exception as e:
                 print(f"{ts()} [agent] 更新描述失败: {e}")
-        
+
         # 回退/停止前先摘标签（卡片不带标签进入目标列或停驻测试列）
         if issue_number:
             remove_label(issue_number)
@@ -639,8 +801,10 @@ def run_agent_mode(card_id, original_title, target, issue_number=None, content_i
             halt_body = (f"## ⛔ 已停止自动流转\n\n该卡测试失败已达 **{MAX_TEST_FAILURES} 次**，"
                          f"为避免死循环已停止自动流转。请人工介入：\n\n"
                          f"1. 检查最近失败报告，修复问题或调整验收口径（数据库类验收项在无授权环境时不得判失败）；\n"
-                         f"2. 恢复自动流转：运行 `python3 kanban_automator.py --reset {card_id}`，\n"
-                         f"    或直接给卡片添加标签「需要重新计划」（退回需求重新计划）或「需要改动」（退回开发实现），\n"
+                         f"2. 恢复自动流转：运行 `python3 kanban_automator.py --reset {card_id}`"
+                         f"（会摘除本卡全部「❌ 测试失败」标签），"
+                         f"或直接在 GitHub 上移除该卡全部「❌ 测试失败」标签，\n"
+                         f"    或给卡片添加标签「需要重新计划」（退回需求重新计划）或「需要改动」（退回开发实现），\n"
                          f"    下一轮扫描会自动按标签路由处理；\n"
                          f"3. 也可手动把卡片移到「开发」或「需求」列继续。")
             if issue_number:
@@ -652,7 +816,7 @@ def run_agent_mode(card_id, original_title, target, issue_number=None, content_i
                     print(f"{ts()} [agent] 写入停止流转说明失败: {e}")
             log_step(original_title, f"停止流转({fail_count}次测试失败)")
             print(f"{ts()} [agent] 已停止自动流转: {original_title!r}（测试失败 {fail_count}/{MAX_TEST_FAILURES} 次，请人工介入）")
-            unmark_in_progress(card_id, original_title)
+            unmark_in_progress(card_id, issue_number)
             return
 
         # 未超限：按测试 agent 声明的目标回退（默认开发）
@@ -676,7 +840,7 @@ def run_agent_mode(card_id, original_title, target, issue_number=None, content_i
                 except Exception as e:
                     print(f"{ts()} [agent] 记录超时现场失败: {e}")
 
-    unmark_in_progress(card_id, original_title)
+    unmark_in_progress(card_id, issue_number)
 
 
 # ---------- 模式二：主脚本（cron 调用） ----------
@@ -717,33 +881,23 @@ def run_scan_mode():
         content = card.get("content", {})
         content_id = content.get("id")  # DI_ 前缀，用于 DraftIssue body
         issue_number = content.get("number") if content.get("type") == "Issue" else None
+        labels = get_issue_labels(issue_number) if issue_number else set()
 
         # 标签路由：需要重新计划 -> 需求 agent（目标开发）；需要改动 -> 开发 agent（目标测试）
         route_label = None
         route_target = None
-        if issue_number:
-            labels = get_issue_labels(issue_number)
-            for label, target in ROUTE_LABELS.items():
-                if label in labels:
-                    route_label, route_target = label, target
-                    break
+        for label, target in ROUTE_LABELS.items():
+            if label in labels:
+                route_label, route_target = label, target
+                break
         if route_target:
             # 虚拟列 = 该目标对应的处理列（需求->开发 由需求 agent 处理；开发->测试 由开发 agent 处理）
             virtual = "需求" if route_target == "开发" else "开发"
 
-            # 处理中标记检查（通过锁文件）
-            lock = load_lock()
-            if lock is None:
-                print(f"{ts()} [lock] 锁文件损坏，本轮不启动任何 agent，请人工检查 {LOCK_FILE}")
+            # 处理中标记检查：Issue 卡看「⏳ 处理中」标签，DraftIssue 卡看锁文件
+            in_progress, fatal = in_progress_state(card_id, issue_number, labels)
+            if fatal:
                 return
-            entry = lock.get(card_id)
-            in_progress = False
-            if entry:
-                if not is_stale(entry):
-                    in_progress = True
-                else:
-                    print(f"{ts()} 清除残留标记: {title!r}")
-                    unmark_in_progress(card_id)
             if in_progress:
                 print(f"{ts()} 跳过(处理中): {title!r}")
                 busy_columns.add(virtual)
@@ -755,7 +909,7 @@ def run_scan_mode():
 
             # 摘路由标签（避免下轮重复触发），并清除可能的 halt 停止标记
             remove_label(issue_number, label=route_label)
-            clear_fail_state(card_id)
+            clear_fail_state(card_id, issue_number)
 
             # 先把卡片移到对应处理列（需要重新计划 -> 需求；需要改动 -> 开发），
             # 看板状态与实际处理阶段保持一致；随后同轮直接启动 agent
@@ -777,27 +931,17 @@ def run_scan_mode():
             print(f"{ts()} 跳过(已完成): {title!r}")
             continue
 
-        # 处理中标记检查（通过锁文件）
-        lock = load_lock()
-        if lock is None:
-            print(f"{ts()} [lock] 锁文件损坏，本轮不启动任何 agent，请人工检查 {LOCK_FILE}")
+        # 处理中标记检查：Issue 卡看「⏳ 处理中」标签，DraftIssue 卡看锁文件
+        in_progress, fatal = in_progress_state(card_id, issue_number, labels)
+        if fatal:
             return
-        entry = lock.get(card_id)
-        in_progress = False
-        if entry:
-            if not is_stale(entry):
-                in_progress = True
-            else:
-                print(f"{ts()} 清除残留标记: {title!r}")
-                unmark_in_progress(card_id)
-
         if in_progress:
             print(f"{ts()} 跳过(处理中): {title!r}")
             busy_columns.add(current)
             continue
 
         # 已因测试失败超限停止流转的卡：不再自动处理，直到人工 --reset 或加路由标签
-        if is_halted(card_id):
+        if is_halted(card_id, issue_number, labels):
             print(f"{ts()} 跳过(已停止流转): {title!r} 测试失败达 {MAX_TEST_FAILURES} 次，"
                   f"请人工介入后运行 --reset {card_id} 或加路由标签")
             continue
@@ -860,7 +1004,8 @@ def main():
             print(f"{ts()} 用法: {sys.argv[0]} --reset <card_id>")
             sys.exit(1)
         card_id = sys.argv[idx]
-        clear_fail_state(card_id)
+        issue_number = find_issue_number(card_id)
+        clear_fail_state(card_id, issue_number)
         print(f"{ts()} 已清除卡片 {card_id} 的失败状态，可重新自动流转")
         return
 
