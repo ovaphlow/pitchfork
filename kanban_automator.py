@@ -1225,7 +1225,9 @@ def launch_agent(card_id, original_title, current, target, issue_number, content
         stdin=subprocess.DEVNULL,
     )
     suffix = f"（{reason}）" if reason else ""
-    print(f"{ts()} 已启动后台 agent{suffix}: {original_title!r} -> {target}", flush=True)
+    stage = {"需求": "需求 agent", "计划": "评审 agent", "开发": "开发 agent",
+             "测试": "测试 agent"}.get(current, current)
+    print(f"{ts()} 已启动后台 {stage}{suffix}: {original_title!r} ({current} -> {target})", flush=True)
 
 
 def run_scan_mode():
