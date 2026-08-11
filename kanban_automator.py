@@ -111,7 +111,8 @@ TRANSITIONS = {
 }
 
 # 需求分解为子任务
-MAX_PLANS = 10                      # 单个需求最多分解的子任务数（逻辑最小单位拆分后中型功能约 5-10 张）
+MAX_PLANS = 50                      # 单个需求最多分解的子任务数（宽松兜底：每列并发 1，
+                               # 卡数只影响排队时长不影响正确性；对齐 subIssues 查询上限留余量）
 CHILD_LABEL = "子任务"              # 子任务卡标记（需求 agent 建卡时打上）
 DECOMPOSED_LABEL = "已分解"         # 父卡标记：已分解，等待子卡收尾（防重复分解主闸）
 DECOMPOSED_LABEL_COLOR = "0E8A16"
@@ -220,7 +221,7 @@ def gh_edit(**kwargs):
 def get_items():
     out = json.loads(subprocess.check_output([
         "gh", "project", "item-list", PROJECT_NUMBER,
-        "--owner", OWNER, "--format", "json", "--limit", "100",
+        "--owner", OWNER, "--format", "json", "--limit", "500",
     ]))
     return out["items"]
 
@@ -705,7 +706,7 @@ def append_draft_body(card_id, content_id, text, max_len=6000):
     """DraftIssue 卡：把 text 追加到卡片描述末尾（body 只能用 DI_ content_id 更新）。"""
     items = json.loads(subprocess.check_output([
         "gh", "project", "item-list", PROJECT_NUMBER,
-        "--owner", OWNER, "--format", "json", "--limit", "100",
+        "--owner", OWNER, "--format", "json", "--limit", "500",
     ]))
     current_body = ""
     for item in items["items"]:
@@ -786,6 +787,9 @@ def parse_plan_json(text):
     except json.JSONDecodeError:
         return None
     if not isinstance(plans, list) or not plans or len(plans) > MAX_PLANS:
+        if isinstance(plans, list) and len(plans) > MAX_PLANS:
+            print(f"{ts()} [plan] 需求 agent 输出 {len(plans)} 条计划超过上限 {MAX_PLANS}，"
+                  f"本次不分解（降级单卡流程）", flush=True)
         return None
     out = []
     for p in plans:
@@ -850,7 +854,7 @@ def get_subissue_numbers(issue_number):
     query = """query($owner:String!,$repo:String!,$number:Int!){
       repository(owner:$owner,name:$repo){
         issue(number:$number){
-          subIssues(first:50){nodes{number}}
+          subIssues(first:100){nodes{number}}
         }
       }
     }"""
@@ -1009,7 +1013,7 @@ def run_agent_mode(card_id, original_title, current, target, issue_number=None, 
     try:
         items = json.loads(subprocess.check_output([
             "gh", "project", "item-list", PROJECT_NUMBER,
-            "--owner", OWNER, "--format", "json", "--limit", "100",
+            "--owner", OWNER, "--format", "json", "--limit", "500",
         ]))
         for item in items["items"]:
             if item["id"] == card_id:
