@@ -14,9 +14,11 @@ Todo 列不处理（手动控制），从「需求分解」开始：
              单卡控制在 agent 一轮可完成粒度（详见「需求分解」阶段 prompt）
   计划评审 -> 「评审 agent」评估/修订计划卡（通过或修订后都）-> 开发
   开发 -> 「开发 agent」编码实现             -> 测试
-  测试 -> 「测试 agent」验证                 -> Done（子任务卡 Done 时自动 close issue）
+  测试 -> 「测试 agent」验证                 -> 终审
+  终审 -> 「终审 agent」独立最终验收（评审角色）-> Done（子任务卡 Done 时自动 close issue）
 
-「终审」列为预留状态（测试结束后的专门评审阶段），当前与 Todo 一样不自动处理。
+「终审」列为最终验收阶段：终审 agent（评审角色）只读审查开发 diff、测试证据与残余风险，
+通过才移 Done；发现问题回退开发/需求分解（子任务回退开发/计划评审），复用 ❌ 测试失败计数防死循环。
 
 每列并发限制：同一次运行中，每个 status 列最多起一个 agent。
 防重复触发（任务执行状态，Issue 卡以标签代替锁文件）：
@@ -107,7 +109,8 @@ TRANSITIONS = {
     "需求分解": "开发",   # 需求分解 agent 输出分解时，实际目标改为「计划评审」（父卡）
     "计划评审": "开发",   # 评审 agent 评估/修订计划卡
     "开发": "测试",
-    "测试": "Done",
+    "测试": "终审",
+    "终审": "Done",   # 终审 agent（评审角色）最终验收后 Done
 }
 
 # 需求分解为子任务
@@ -198,7 +201,20 @@ STAGE_PROMPTS = {
               "例如评论中提出的计划决策点）→ `回退目标：需求分解`。\n" \
               "失败时必须且只能输出其中一行（放在 ❌ 标记之后）；通过时不要输出。\n\n" \
               "如果这是子任务卡片（Issue 带「子任务」标签），回退目标只能输出「开发」或「计划评审」——" \
-              "验收口径问题输出 `回退目标：计划`（由评审 agent 修订计划），不要输出「需求分解」。",
+              "验收口径问题输出 `回退目标：计划评审`（由评审 agent 修订计划），不要输出「需求分解」。",
+    "终审": "你是终审 agent（评审角色，最终验收）。测试 agent 已验证通过，卡片进入终审列。\n" \
+              "请对候选版本做**独立最终验收**，只读审查，不修改生产代码、测试、UI 或文档：\n" \
+              "1. 审查实现证据：读取卡片描述与 Issue 评论中的测试报告、评审记录，用 git log / git show 核对提交 diff；\n" \
+              "2. 核对计划口径：验收标准是否全部满足、有无范围外改动、有无副作用或未闭环的问题；\n" \
+              "3. 只抽查与结论相关的 1-3 条关键命令复核，不要全面复跑测试（那是测试角色的职责）；\n" \
+              "4. 构建通过/单测通过不代表终审通过：发现实现缺陷、口径不符、副作用或验收标准本身的问题都应返工。\n\n" \
+              "输出要求（直接输出，不要写入文件）：\n" \
+              "- 验收通过：输出「✅ 终审通过」并简述审查结论（证据、抽查结果、残余风险）；\n" \
+              "- 需要返工：输出开头包含 ❌ 标记，说明原因，并输出一行**回退目标**：\n" \
+              "  - 实现缺陷/副作用 → `回退目标：开发`；\n" \
+              "  - 验收口径本身有问题（需要需求/计划角色决策）→ `回退目标：需求分解`。\n" \
+              "如果这是子任务卡片（Issue 带「子任务」标签），回退目标只能输出「开发」或「计划评审」——\n" \
+              "验收口径问题输出 `回退目标：计划评审`（由评审 agent 修订计划），不要输出「需求分解」。",
 }
 
 
@@ -504,8 +520,9 @@ def fail_state_modify(modify):
 
 
 def record_test_failure(card_id, title, issue_number=None):
-    """记录一次测试失败，返回 (fail_count, halted)。达 MAX_TEST_FAILURES 后 halted=True。
-    Issue 卡：加「❌ 测试失败 N」标签（标签即计数）；DraftIssue 卡：回退失败状态文件。"""
+    """记录一次测试/终审失败，返回 (fail_count, halted)。达 MAX_TEST_FAILURES 后 halted=True。
+    Issue 卡：加「❌ 测试失败 N」标签（标签即计数，终审返工复用同一防死循环计数）；
+    DraftIssue 卡：回退失败状态文件。"""
     if issue_number:
         labels = get_issue_labels(issue_number)
         n = fail_count_from_labels(labels) + 1
@@ -995,7 +1012,7 @@ def parse_fallback_target(output):
     未声明或格式不符时默认回退开发。"""
     if not output:
         return TEST_FAIL_TARGET
-    m = re.search(r"回退目标\s*[:：]\s*(需求分解|需求|开发)", output)
+    m = re.search(r"回退目标\s*[:：]\s*(需求分解|需求|计划评审|开发)", output)
     return m.group(1) if m else TEST_FAIL_TARGET
 
 
@@ -1051,16 +1068,17 @@ def run_agent_mode(card_id, original_title, current, target, issue_number=None, 
     mark_in_progress(card_id, original_title, issue_number)
 
     # 需求分解/计划/测试阶段捕获输出
-    capture = current in ("需求分解", "计划评审", "测试")
+    capture = current in ("需求分解", "计划评审", "测试", "终审")
     ok, output, timed_out = run_agent(prompt, capture_output=capture)
 
     # 检查测试是否失败（通过输出中的标志）
     test_failed = False
     failure_reason = None
-    if ok and current == "测试" and output and is_test_failure(output):
+    if ok and current in ("测试", "终审") and output and is_test_failure(output):
         test_failed = True
         failure_reason = output.strip()[-4000:] if len(output) > 4000 else output.strip()
-        print(f"{ts()} [agent] 测试未通过，将回退到开发")
+        stage_note = "测试未通过" if current == "测试" else "终审不通过（返工）"
+        print(f"{ts()} [agent] {stage_note}，将回退")
 
     if ok and not test_failed:
         target_status = target
@@ -1098,9 +1116,12 @@ def run_agent_mode(card_id, original_title, current, target, issue_number=None, 
                     except subprocess.CalledProcessError as e:
                         print(f"{ts()} [agent] 写入卡片描述失败: {e}")
 
-        # 计划阶段（评审 agent）：把评审结论写回卡片（通过/修订记录）
-        if current == "计划评审" and output:
-            verdict = "通过" if "需要修订" not in output[:200] else "修订"
+        # 计划阶段（评审 agent）与终审（最终验收）：把结论写回卡片
+        if current in ("计划评审", "终审") and output:
+            if current == "计划评审":
+                verdict = "通过" if "需要修订" not in output[:200] else "修订"
+            else:
+                verdict = "返工" if is_test_failure(output) else "通过"
             record = f"## 评审记录（{verdict}）\n\n{output.strip()}"
             if issue_number:
                 add_comment(issue_number, record)
@@ -1226,7 +1247,7 @@ def launch_agent(card_id, original_title, current, target, issue_number, content
     )
     suffix = f"（{reason}）" if reason else ""
     stage = {"需求分解": "需求分解 agent", "计划评审": "评审 agent", "开发": "开发 agent",
-             "测试": "测试 agent"}.get(current, current)
+             "测试": "测试 agent", "终审": "终审 agent"}.get(current, current)
     print(f"{ts()} 已启动后台 {stage}{suffix}: {original_title!r} ({current} -> {target})", flush=True)
 
 
@@ -1313,10 +1334,8 @@ def run_scan_mode():
             launched += 1
             continue
 
-        if current in (None, "Todo", "终审"):
-            note = "预留" if current == "终审" else "手动控制"
-            print(f"{ts()} 跳过({note}): {title!r} 状态 {current!r}"
-                  + ("" if current == "终审" else "，请手动移到「需求分解」"), flush=True)
+        if current in (None, "Todo"):
+            print(f"{ts()} 跳过(手动控制): {title!r} 状态 {current!r}，请手动移到「需求分解」", flush=True)
             continue
         if current == "Done":
             print(f"{ts()} 跳过(已完成): {title!r}", flush=True)
