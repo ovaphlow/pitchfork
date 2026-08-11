@@ -1309,6 +1309,9 @@ def run_loop_mode(interval=300):
         else:
             try:
                 run_scan_mode()
+            except Exception as e:
+                # 单轮失败（如 API 限流、gh 抖动）不退出循环，记日志下轮重试
+                print(f"{ts()} [loop] 本轮扫描失败: {e!r}，下轮重试", flush=True)
             finally:
                 if cron_lock_fd:
                     fcntl.flock(cron_lock_fd, fcntl.LOCK_UN)
