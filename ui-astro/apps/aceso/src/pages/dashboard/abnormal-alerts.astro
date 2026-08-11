@@ -1,0 +1,8 @@
+---
+import DashboardLayout from "../../layouts/DashboardLayout.astro";
+import AbnormalAlertsPage from "../../components/AbnormalAlertsPage.tsx";
+---
+
+<DashboardLayout title="异常告警">
+  <AbnormalAlertsPage client:only="react" />
+</DashboardLayout>

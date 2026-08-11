@@ -49,6 +49,8 @@ const items: Item[] = [
   {
     type: "group", label: "健康服务", children: [
       { label: "健康监测",   path: "/dashboard/health-monitor", icon: "❤️", domains: ["养老", "儿保"] },
+      { label: "异常告警",   path: "/dashboard/abnormal-alerts", icon: "🔔", domains: ["养老"] },
+      { label: "慢病档案",   path: "/dashboard/chronic",        icon: "🩺", domains: ["养老"] },
       { label: "膳食营养",   path: "/dashboard/dining",        icon: "🍱", domains: ["养老"] },
       { label: "康复活动",   path: "/dashboard/activities",    icon: "🎯", domains: ["养老"] },
     ],

@@ -23,12 +23,14 @@ object HealthcareRoutes {
         nurseCheckAuthHandler: Handler<RoutingContext>? = null,
         incidentHandoverAuthHandler: Handler<RoutingContext>? = null,
         followupAuthHandler: Handler<RoutingContext>? = null,
+        vitalSignAuthHandler: Handler<RoutingContext>? = null,
         chronicDiseaseAuthHandler: Handler<RoutingContext>? = null,
     ): Router {
         val router = Router.router(vertx)
         val service = HealthcareService(pool)
         val chronicDiseaseService = ChronicDiseaseService(pool)
         val followupService = FollowupService(pool, chronicDiseaseService = chronicDiseaseService)
+        val vitalSignService = VitalSignService(pool)
 
         router.route().handler(BodyHandler.create())
 
@@ -131,6 +133,12 @@ object HealthcareRoutes {
         }
         router.get("/orders/:id").handler { ctx ->
             service.getOrder(requiredId(ctx))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 给药明细（只读）：本卡片的给药汇总与明细，按 task 关联不串其他入住
+        router.get("/orders/:id/administrations").handler { ctx ->
+            service.getOrderAdministrations(requiredId(ctx))
                 .onSuccess { ctx.json(it) }
                 .onFailure { respondFailure(ctx, it) }
         }
@@ -481,6 +489,108 @@ object HealthcareRoutes {
             val userId = userId(ctx) ?: return@handler
             chronicDiseaseService.updateRegistrationStatus(requiredId(ctx), body(ctx), userId)
                 .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+
+        // ========================================================================
+        //  生命体征 (Vital Signs) — 养老方向
+        //  写路由（创建/修正/删除）的认证中间件由 App 编排层注入；未注入时业务处理器保持 401 兜底。
+        // ========================================================================
+        if (vitalSignAuthHandler != null) {
+            router.post("/vital-signs").handler(vitalSignAuthHandler)
+            router.patch("/vital-signs/:id").handler(vitalSignAuthHandler)
+            router.delete("/vital-signs/:id").handler(vitalSignAuthHandler)
+            router.post("/vital-signs/:id/review").handler(vitalSignAuthHandler)
+            router.post("/vital-signs/:id/refer").handler(vitalSignAuthHandler)
+        }
+        // 批量创建：请求体为 JSON 数组（血压一次提交收缩/舒张两条）
+        router.post("/vital-signs").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            val body = try {
+                ctx.body().asJsonArray()
+            } catch (_: RuntimeException) {
+                null
+            }
+            if (body == null) {
+                respond(ctx, 400, "body must be a JSON array of vital sign records")
+                return@handler
+            }
+            vitalSignService.createVitalSigns(body, userId)
+                .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.get("/vital-signs").handler { ctx ->
+            vitalSignService.listVitalSigns(
+                patientId = ctx.request().getParam("patient_id"),
+                type = ctx.request().getParam("type"),
+                dateFrom = ctx.request().getParam("date_from"),
+                dateTo = ctx.request().getParam("date_to"),
+                limit = limit(ctx),
+                offset = offset(ctx),
+            ).onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 异常告警：静态路径必须先于泛型 /vital-signs/:id
+        router.get("/vital-signs/abnormal/summary").handler { ctx ->
+            vitalSignService.getAbnormalSummary()
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.get("/vital-signs/abnormal").handler { ctx ->
+            vitalSignService.listAbnormalSigns(
+                patientId = ctx.request().getParam("patient_id"),
+                type = ctx.request().getParam("type"),
+                reviewStatus = ctx.request().getParam("review_status"),
+                dateFrom = ctx.request().getParam("date_from"),
+                dateTo = ctx.request().getParam("date_to"),
+                limit = limit(ctx),
+                offset = offset(ctx),
+            ).onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.get("/vital-signs/:id").handler { ctx ->
+            vitalSignService.getVitalSign(requiredId(ctx))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.patch("/vital-signs/:id").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            vitalSignService.updateVitalSign(requiredId(ctx), body(ctx), userId)
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 复核/转诊：写操作走认证 handler（401 兑底），复核人/责任人取认证主体
+        router.post("/vital-signs/:id/review").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            vitalSignService.reviewVitalSign(requiredId(ctx), body(ctx), userId)
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.post("/vital-signs/:id/refer").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            vitalSignService.referVitalSign(requiredId(ctx), body(ctx), userId)
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.delete("/vital-signs/:id").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            vitalSignService.deleteVitalSign(requiredId(ctx), userId)
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 快照/趋势：静态路径位于泛型路由之前（/patients/:id 为单段，无冲突）
+        router.get("/patients/:id/vital-signs/snapshot").handler { ctx ->
+            vitalSignService.getSnapshot(requiredId(ctx))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.get("/patients/:id/vital-signs/trend").handler { ctx ->
+            vitalSignService.getTrend(
+                patientId = requiredId(ctx),
+                type = ctx.request().getParam("type"),
+                dateFrom = ctx.request().getParam("date_from"),
+                dateTo = ctx.request().getParam("date_to"),
+            ).onSuccess { ctx.json(it) }
                 .onFailure { respondFailure(ctx, it) }
         }
 

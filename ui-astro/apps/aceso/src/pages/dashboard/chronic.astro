@@ -1,0 +1,8 @@
+---
+import DashboardLayout from "../../layouts/DashboardLayout.astro";
+import ChronicDiseasePage from "../../components/ChronicDiseasePage.tsx";
+---
+
+<DashboardLayout title="慢病档案">
+  <ChronicDiseasePage client:only="react" />
+</DashboardLayout>

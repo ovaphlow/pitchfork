@@ -140,6 +140,22 @@ class TaskExecutionService(
          * 计算单条执行记录的逾期派生字段。
          * 纯函数，不依赖任何外部状态。
          */
+        /**
+         * 排期生成与今日看板的任务参与条件：
+         * - 任务归属活跃照护周期（既有行为，覆盖 NURSING / MEDICATION / LIVING_CARE 等全部类型）；
+         * - 或为无周期归属的全院性康复活动（task_type = REHABILITATION 且 period_id 为空，
+         *   机构服务项目不挂老人，如集体操课、文娱活动）。
+         * 仅 REHABILITATION 允许无周期归属参与排期与今日看板，其它任务类型行为不变。
+         */
+        fun taskParticipationCondition(
+            taskPeriodId: org.jooq.Field<String?>,
+            taskType: org.jooq.Field<String?>,
+            periodStatus: org.jooq.Field<String?>,
+        ): org.jooq.Condition =
+            periodStatus.eq("ACTIVE").or(
+                taskPeriodId.isNull().and(taskType.eq("REHABILITATION")),
+            )
+
         fun computeOverdueFields(
             status: String?,
             plannedTime: OffsetDateTime?,
@@ -892,10 +908,16 @@ class TaskExecutionService(
                     DSL.field("t.metadata").`as`("t_metadata"),
                     DSL.field("t.period_id").`as`("t_period_id"),
                 ).from(DSL.table(DSL.name("nursing", "nursing_tasks")).`as`("t"))
-                .join(DSL.table(DSL.name("nursing", "nursing_service_periods")).`as`("ps"))
+                .leftJoin(DSL.table(DSL.name("nursing", "nursing_service_periods")).`as`("ps"))
                 .on(DSL.field("t.period_id").eq(DSL.field("ps.id")))
                 .where(DSL.field("t.status").eq("ACTIVE"))
-                .and(DSL.field("ps.status").eq("ACTIVE"))
+                .and(
+                    taskParticipationCondition(
+                        taskPeriodId = DSL.field("t.period_id", String::class.java),
+                        taskType = DSL.field("t.task_type", String::class.java),
+                        periodStatus = DSL.field("ps.status", String::class.java),
+                    ),
+                )
                 .let { q ->
                     var qq = q
                     if (periodId != null) qq = qq.and(DSL.field("t.period_id").eq(periodId))
@@ -1029,6 +1051,7 @@ class TaskExecutionService(
         executor: String? = null,
         status: String? = null,
         overdue: Boolean? = null,
+        taskType: String? = null,
         limit: Int = 50,
         offset: Int = 0,
     ): Future<JsonObject> {
@@ -1042,12 +1065,20 @@ class TaskExecutionService(
             val plannedField = DSL.field("e.planned_time", OffsetDateTime::class.java)
             conditions.add(plannedField.ge(dayStart))
             conditions.add(plannedField.lt(dayEnd))
-            // 今日工作台只展示活动服务期的执行；已收束周期的历史记录仍可由时间线/统计查询
-            conditions.add(DSL.field("p.status").eq("ACTIVE"))
+            // 今日工作台只展示活动服务期的执行；已收束周期的历史记录仍可由时间线/统计查询。
+            // 全院性康复活动（period_id 为空）同样参与今日看板。
+            conditions.add(
+                taskParticipationCondition(
+                    taskPeriodId = DSL.field("t.period_id", String::class.java),
+                    taskType = DSL.field("t.task_type", String::class.java),
+                    periodStatus = DSL.field("p.status", String::class.java),
+                ),
+            )
 
             periodId?.let { conditions.add(DSL.field("t.period_id").eq(it)) }
             executor?.let { conditions.add(DSL.field("e.executor").eq(it)) }
             status?.let { conditions.add(DSL.field("e.status").eq(it)) }
+            taskType?.let { conditions.add(DSL.field("t.task_type").eq(it)) }
 
             // 逾期筛选条件：仅未完成且计划时间已过
             if (overdue == true) {
@@ -1059,9 +1090,16 @@ class TaskExecutionService(
             val overdueTotalConditions = mutableListOf<org.jooq.Condition>()
             overdueTotalConditions.add(plannedField.ge(dayStart))
             overdueTotalConditions.add(plannedField.lt(dayEnd))
-            overdueTotalConditions.add(DSL.field("p.status").eq("ACTIVE"))
+            overdueTotalConditions.add(
+                taskParticipationCondition(
+                    taskPeriodId = DSL.field("t.period_id", String::class.java),
+                    taskType = DSL.field("t.task_type", String::class.java),
+                    periodStatus = DSL.field("p.status", String::class.java),
+                ),
+            )
             periodId?.let { overdueTotalConditions.add(DSL.field("t.period_id").eq(it)) }
             executor?.let { overdueTotalConditions.add(DSL.field("e.executor").eq(it)) }
+            taskType?.let { overdueTotalConditions.add(DSL.field("t.task_type").eq(it)) }
             overdueTotalConditions.add(DSL.field("e.status").`in`("PENDING", "IN_PROGRESS"))
             overdueTotalConditions.add(plannedField.lt(now))
 
@@ -1179,6 +1217,7 @@ class TaskExecutionService(
         dateTo: LocalDate,
         periodId: String? = null,
         executor: String? = null,
+        taskType: String? = null,
         limit: Int = 50,
         offset: Int = 0,
     ): Future<JsonObject> {
@@ -1205,6 +1244,7 @@ class TaskExecutionService(
         baseConditions.add(ePlannedTime.lt(rangeEnd))
         periodId?.let { baseConditions.add(tPeriodId.eq(it)) }
         executor?.let { baseConditions.add(eExecutor.eq(it)) }
+        taskType?.let { baseConditions.add(DSL.field("t.task_type").eq(it)) }
 
         // 全局汇总查询
         val globalQuery =

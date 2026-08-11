@@ -659,6 +659,27 @@ export default function OrdersPage() {
       className: "min-w-[80px]",
       render: (row) => (row.is_major ? <Badge variant="success">主要</Badge> : <span className="text-fg-dimmed">-</span>),
     },
+    {
+      key: "actions",
+      header: "操作",
+      className: "min-w-[120px]",
+      render: (row) => {
+        const patientId = selectedAdmission?.patient_id ?? "";
+        const params = new URLSearchParams();
+        if (patientId) params.set("patient", patientId);
+        if (row.diagnosis_text.trim()) params.set("disease", row.diagnosis_text.trim());
+        if (row.icd_code?.trim()) params.set("icd", row.icd_code.trim());
+        return (
+          <a
+            href={`/dashboard/chronic?${params.toString()}`}
+            className="text-xs text-accent hover:underline"
+            title="一键带入诊断登记为慢病档案（自动生成慢病随访计划）"
+          >
+            登记为慢病
+          </a>
+        );
+      },
+    },
   ];
 
   return (

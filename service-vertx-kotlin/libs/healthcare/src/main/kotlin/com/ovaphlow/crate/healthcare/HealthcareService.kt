@@ -2,6 +2,7 @@ package com.ovaphlow.crate.healthcare
 
 import com.ovaphlow.crate.common.Ulid
 import com.ovaphlow.crate.database.DatabaseConfig
+import com.ovaphlow.crate.database.gen.healthcare.tables.ChronicDiseaseRegistrations.CHRONIC_DISEASE_REGISTRATIONS
 import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalRecords
 import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalRecords.MEDICAL_RECORDS
 import com.ovaphlow.crate.database.gen.healthcare.tables.Diagnoses.DIAGNOSES
@@ -317,6 +318,10 @@ class HealthcareService(
 
     fun getOrder(id: String): Future<JsonObject> = medicalOrderService.getOrder(id)
 
+    /** 医嘱给药明细列表（只读，含批次/药品来源摘要） */
+    fun getOrderAdministrations(id: String): Future<JsonObject> =
+        medicalOrderService.listOrderAdministrations(id)
+
     fun updateOrderStatus(id: String, body: JsonObject): Future<JsonObject> =
         medicalOrderService.updateOrderStatus(id, body)
 
@@ -368,16 +373,27 @@ class HealthcareService(
                 }
                 val id = Ulid.generate()
                 val now = OffsetDateTime.now()
-                val insert = ctx.insertInto(PROGRESS_NOTES)
-                    .set(PROGRESS_NOTES.ID, id)
-                    .set(PROGRESS_NOTES.ENCOUNTER_ID, encounterId)
-                    .set(PROGRESS_NOTES.NOTE_TYPE, input.noteType)
-                    .set(PROGRESS_NOTES.CONTENT, input.content)
-                    .set(PROGRESS_NOTES.PHYSICIAN, input.physician)
-                    .set(PROGRESS_NOTES.RECORD_TIME, input.recordTime)
-                    .set(PROGRESS_NOTES.CREATED_AT, now)
-                execute(connection, insert).map {
-                    progressNoteResponse(id, encounterId, input, now)
+                // 慢病病程：校验档案存在且属于该老人（不同老人/不同档案严格隔离）
+                val chronicCheck: Future<Void> = if (input.noteType == "CHRONIC") {
+                    ensureChronicRegistrationBelongs(connection, input.chronicDiseaseId!!, encounter.getString("patient_id"))
+                } else {
+                    Future.succeededFuture()
+                }
+                chronicCheck.compose {
+                    var insert = ctx.insertInto(PROGRESS_NOTES)
+                        .set(PROGRESS_NOTES.ID, id)
+                        .set(PROGRESS_NOTES.ENCOUNTER_ID, encounterId)
+                        .set(PROGRESS_NOTES.NOTE_TYPE, input.noteType)
+                        .set(PROGRESS_NOTES.CONTENT, input.content)
+                        .set(PROGRESS_NOTES.PHYSICIAN, input.physician)
+                        .set(PROGRESS_NOTES.RECORD_TIME, input.recordTime)
+                        .set(PROGRESS_NOTES.CREATED_AT, now)
+                    input.metadata?.let { metadata ->
+                        insert = insert.set(PROGRESS_NOTES.METADATA, JSONB.valueOf(metadata.encode()))
+                    }
+                    execute(connection, insert).map {
+                        progressNoteResponse(id, encounterId, input, now)
+                    }
                 }
             }
         }
@@ -1725,13 +1741,15 @@ class HealthcareService(
         val content: String,
         val physician: String,
         val recordTime: OffsetDateTime,
+        val metadata: JsonObject?,
+        val chronicDiseaseId: String?,
     )
 
     private fun validateProgressNoteInput(body: JsonObject): ProgressNoteCreateInput {
-        rejectUnknownKeys(body, setOf("note_type", "content", "physician", "record_time"), "request")
+        rejectUnknownKeys(body, setOf("note_type", "content", "physician", "record_time", "metadata"), "request")
         val noteType = requiredText(body, "note_type")
-        if (noteType != "DAILY") {
-            throw IllegalArgumentException("invalid note_type, must be DAILY")
+        if (noteType !in setOf("DAILY", "CHRONIC")) {
+            throw IllegalArgumentException("invalid note_type, must be one of: [DAILY, CHRONIC]")
         }
         val content = requiredText(body, "content")
         if (content.length > 2000) {
@@ -1743,7 +1761,35 @@ class HealthcareService(
         }
         val recordTime = body.getString("record_time")?.let { offsetDateTime(it, "record_time") }
             ?: OffsetDateTime.now()
-        return ProgressNoteCreateInput(noteType, content, physician, recordTime)
+        val metadata = jsonObject(body, "metadata")
+        val chronicDiseaseId = if (noteType == "CHRONIC") {
+            val value = metadata?.getString("chronic_disease_id")?.trim()?.takeIf(String::isNotBlank)
+                ?: throw IllegalArgumentException("metadata.chronic_disease_id is required for CHRONIC notes")
+            if (value.length > 32) throw IllegalArgumentException("chronic_disease_id must not exceed 32 characters")
+            value
+        } else {
+            null
+        }
+        return ProgressNoteCreateInput(noteType, content, physician, recordTime, metadata, chronicDiseaseId)
+    }
+
+    /** 慢病病程校验：档案存在且属于该 encounter 的老人（跨档案/跨老人一律拒绝） */
+    private fun ensureChronicRegistrationBelongs(client: SqlClient, chronicDiseaseId: String, patientId: String?): Future<Void> {
+        val query = ctx.selectOne()
+            .from(CHRONIC_DISEASE_REGISTRATIONS)
+            .where(
+                CHRONIC_DISEASE_REGISTRATIONS.ID.eq(chronicDiseaseId)
+                    .and(CHRONIC_DISEASE_REGISTRATIONS.PATIENT_ID.eq(patientId)),
+            )
+        return execute(client, query).compose { rows ->
+            if (rows.size() == 0) {
+                Future.failedFuture(
+                    HealthcareNotFoundException("chronic disease registration not found for this patient"),
+                )
+            } else {
+                Future.succeededFuture()
+            }
+        }
     }
 
     private fun progressNoteJson(row: Row): JsonObject =
@@ -1754,6 +1800,7 @@ class HealthcareService(
             .put("content", row.getString("content"))
             .put("physician", row.getString("physician"))
             .put("record_time", row.getOffsetDateTime("record_time")?.toString())
+            .put("metadata", row.getValue("metadata"))
             .put("created_at", row.getOffsetDateTime("created_at")?.toString())
 
     private fun progressNoteResponse(
@@ -1769,6 +1816,7 @@ class HealthcareService(
             .put("content", input.content)
             .put("physician", input.physician)
             .put("record_time", input.recordTime.toString())
+            .put("metadata", input.metadata)
             .put("created_at", now.toString())
 
     private data class DiagnosisCreateInput(

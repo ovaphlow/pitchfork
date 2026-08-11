@@ -13,6 +13,7 @@ import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalOrders;
 import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalRecords;
 import com.ovaphlow.crate.database.gen.healthcare.tables.Patients;
 import com.ovaphlow.crate.database.gen.healthcare.tables.ProgressNotes;
+import com.ovaphlow.crate.database.gen.healthcare.tables.VitalSignRecords;
 
 import java.util.Arrays;
 import java.util.List;
@@ -81,6 +82,11 @@ public class Healthcare extends SchemaImpl {
     public final ProgressNotes PROGRESS_NOTES = ProgressNotes.PROGRESS_NOTES;
 
     /**
+     * 生命体征记录：入住长者日常健康监测（养老方向）
+     */
+    public final VitalSignRecords VITAL_SIGN_RECORDS = VitalSignRecords.VITAL_SIGN_RECORDS;
+
+    /**
      * No further instances allowed
      */
     private Healthcare() {
@@ -104,7 +110,8 @@ public class Healthcare extends SchemaImpl {
             MedicalOrders.MEDICAL_ORDERS,
             MedicalRecords.MEDICAL_RECORDS,
             Patients.PATIENTS,
-            ProgressNotes.PROGRESS_NOTES
+            ProgressNotes.PROGRESS_NOTES,
+            VitalSignRecords.VITAL_SIGN_RECORDS
         );
     }
 }

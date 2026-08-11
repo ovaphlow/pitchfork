@@ -13,6 +13,7 @@ import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalOrders;
 import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalRecords;
 import com.ovaphlow.crate.database.gen.healthcare.tables.Patients;
 import com.ovaphlow.crate.database.gen.healthcare.tables.ProgressNotes;
+import com.ovaphlow.crate.database.gen.healthcare.tables.VitalSignRecords;
 import com.ovaphlow.crate.database.gen.healthcare.tables.records.ChronicDiseaseRegistrationsRecord;
 import com.ovaphlow.crate.database.gen.healthcare.tables.records.DiagnosesRecord;
 import com.ovaphlow.crate.database.gen.healthcare.tables.records.EncountersRecord;
@@ -22,6 +23,7 @@ import com.ovaphlow.crate.database.gen.healthcare.tables.records.MedicalOrdersRe
 import com.ovaphlow.crate.database.gen.healthcare.tables.records.MedicalRecordsRecord;
 import com.ovaphlow.crate.database.gen.healthcare.tables.records.PatientsRecord;
 import com.ovaphlow.crate.database.gen.healthcare.tables.records.ProgressNotesRecord;
+import com.ovaphlow.crate.database.gen.healthcare.tables.records.VitalSignRecordsRecord;
 
 import org.jooq.ForeignKey;
 import org.jooq.TableField;
@@ -52,6 +54,7 @@ public class Keys {
     public static final UniqueKey<PatientsRecord> PATIENTS_ID_CARD_NO_KEY = Internal.createUniqueKey(Patients.PATIENTS, DSL.name("patients_id_card_no_key"), new TableField[] { Patients.PATIENTS.ID_CARD_NO }, true);
     public static final UniqueKey<PatientsRecord> PATIENTS_PKEY = Internal.createUniqueKey(Patients.PATIENTS, DSL.name("patients_pkey"), new TableField[] { Patients.PATIENTS.ID }, true);
     public static final UniqueKey<ProgressNotesRecord> PROGRESS_NOTES_PKEY = Internal.createUniqueKey(ProgressNotes.PROGRESS_NOTES, DSL.name("progress_notes_pkey"), new TableField[] { ProgressNotes.PROGRESS_NOTES.ID }, true);
+    public static final UniqueKey<VitalSignRecordsRecord> VITAL_SIGN_RECORDS_PKEY = Internal.createUniqueKey(VitalSignRecords.VITAL_SIGN_RECORDS, DSL.name("vital_sign_records_pkey"), new TableField[] { VitalSignRecords.VITAL_SIGN_RECORDS.ID }, true);
 
     // -------------------------------------------------------------------------
     // FOREIGN KEY definitions
@@ -69,4 +72,6 @@ public class Keys {
     public static final ForeignKey<MedicalOrdersRecord, EncountersRecord> MEDICAL_ORDERS__MEDICAL_ORDERS_ENCOUNTER_ID_FKEY = Internal.createForeignKey(MedicalOrders.MEDICAL_ORDERS, DSL.name("medical_orders_encounter_id_fkey"), new TableField[] { MedicalOrders.MEDICAL_ORDERS.ENCOUNTER_ID }, Keys.ENCOUNTERS_PKEY, new TableField[] { Encounters.ENCOUNTERS.ID }, true);
     public static final ForeignKey<MedicalRecordsRecord, EncountersRecord> MEDICAL_RECORDS__MEDICAL_RECORDS_ENCOUNTER_ID_FKEY = Internal.createForeignKey(MedicalRecords.MEDICAL_RECORDS, DSL.name("medical_records_encounter_id_fkey"), new TableField[] { MedicalRecords.MEDICAL_RECORDS.ENCOUNTER_ID }, Keys.ENCOUNTERS_PKEY, new TableField[] { Encounters.ENCOUNTERS.ID }, true);
     public static final ForeignKey<ProgressNotesRecord, EncountersRecord> PROGRESS_NOTES__PROGRESS_NOTES_ENCOUNTER_ID_FKEY = Internal.createForeignKey(ProgressNotes.PROGRESS_NOTES, DSL.name("progress_notes_encounter_id_fkey"), new TableField[] { ProgressNotes.PROGRESS_NOTES.ENCOUNTER_ID }, Keys.ENCOUNTERS_PKEY, new TableField[] { Encounters.ENCOUNTERS.ID }, true);
+    public static final ForeignKey<VitalSignRecordsRecord, EncountersRecord> VITAL_SIGN_RECORDS__VITAL_SIGN_RECORDS_ENCOUNTER_ID_FKEY = Internal.createForeignKey(VitalSignRecords.VITAL_SIGN_RECORDS, DSL.name("vital_sign_records_encounter_id_fkey"), new TableField[] { VitalSignRecords.VITAL_SIGN_RECORDS.ENCOUNTER_ID }, Keys.ENCOUNTERS_PKEY, new TableField[] { Encounters.ENCOUNTERS.ID }, true);
+    public static final ForeignKey<VitalSignRecordsRecord, PatientsRecord> VITAL_SIGN_RECORDS__VITAL_SIGN_RECORDS_PATIENT_ID_FKEY = Internal.createForeignKey(VitalSignRecords.VITAL_SIGN_RECORDS, DSL.name("vital_sign_records_patient_id_fkey"), new TableField[] { VitalSignRecords.VITAL_SIGN_RECORDS.PATIENT_ID }, Keys.PATIENTS_PKEY, new TableField[] { Patients.PATIENTS.ID }, true);
 }

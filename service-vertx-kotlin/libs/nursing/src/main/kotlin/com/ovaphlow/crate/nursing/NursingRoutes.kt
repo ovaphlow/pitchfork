@@ -1,5 +1,6 @@
 package com.ovaphlow.crate.nursing
 
+import io.vertx.core.Handler
 import io.vertx.core.Vertx
 import io.vertx.core.json.JsonObject
 import io.vertx.ext.web.Router
@@ -13,7 +14,15 @@ object NursingRoutes {
 
     private val log = LoggerFactory.getLogger(NursingRoutes::class.java)
 
-    fun create(vertx: Vertx, pool: Pool): Router {
+    /**
+     * @param administrationAuthHandler 记录给药的认证中间件（由 App 编排层注入，
+     *   与 Healthcare 写路由同一 IDP 会话校验，写入 ctx userId 作为给药人）。
+     */
+    fun create(
+        vertx: Vertx,
+        pool: Pool,
+        administrationAuthHandler: Handler<RoutingContext>? = null,
+    ): Router {
         val router = Router.router(vertx)
         val mPool = pool
 
@@ -51,7 +60,7 @@ object NursingRoutes {
         router.route("/assessments/*").subRouter(AssessmentRoutes.create(vertx, mPool))
         router.route("/plans/*").subRouter(PlanRoutes.create(vertx, mPool))
         router.route("/tasks/*").subRouter(TaskRoutes.create(vertx, mPool))
-        router.route("/executions/*").subRouter(TaskExecutionRoutes.create(vertx, mPool))
+        router.route("/executions/*").subRouter(TaskExecutionRoutes.create(vertx, mPool, administrationAuthHandler))
         router.route("/visit-schedules/*").subRouter(VisitScheduleRoutes.create(vertx, mPool))
 
         return router

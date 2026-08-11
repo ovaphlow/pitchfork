@@ -13,6 +13,7 @@ import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalOrders;
 import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalRecords;
 import com.ovaphlow.crate.database.gen.healthcare.tables.Patients;
 import com.ovaphlow.crate.database.gen.healthcare.tables.ProgressNotes;
+import com.ovaphlow.crate.database.gen.healthcare.tables.VitalSignRecords;
 
 
 /**
@@ -65,4 +66,9 @@ public class Tables {
      * 病程/日常照护/成长记录通用表
      */
     public static final ProgressNotes PROGRESS_NOTES = ProgressNotes.PROGRESS_NOTES;
+
+    /**
+     * 生命体征记录：入住长者日常健康监测（养老方向）
+     */
+    public static final VitalSignRecords VITAL_SIGN_RECORDS = VitalSignRecords.VITAL_SIGN_RECORDS;
 }

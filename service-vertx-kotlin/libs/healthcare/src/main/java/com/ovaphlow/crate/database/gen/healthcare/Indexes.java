@@ -13,6 +13,7 @@ import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalOrders;
 import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalRecords;
 import com.ovaphlow.crate.database.gen.healthcare.tables.Patients;
 import com.ovaphlow.crate.database.gen.healthcare.tables.ProgressNotes;
+import com.ovaphlow.crate.database.gen.healthcare.tables.VitalSignRecords;
 
 import org.jooq.Index;
 import org.jooq.OrderField;
@@ -58,6 +59,10 @@ public class Indexes {
     public static final Index IDX_PROGRESS_TYPE = Internal.createIndex(DSL.name("idx_progress_type"), ProgressNotes.PROGRESS_NOTES, new OrderField[] { ProgressNotes.PROGRESS_NOTES.NOTE_TYPE }, false);
     public static final Index IDX_RECORDS_ENCOUNTER = Internal.createIndex(DSL.name("idx_records_encounter"), MedicalRecords.MEDICAL_RECORDS, new OrderField[] { MedicalRecords.MEDICAL_RECORDS.ENCOUNTER_ID }, false);
     public static final Index IDX_RECORDS_TYPE = Internal.createIndex(DSL.name("idx_records_type"), MedicalRecords.MEDICAL_RECORDS, new OrderField[] { MedicalRecords.MEDICAL_RECORDS.RECORD_TYPE }, false);
+    public static final Index IDX_VITAL_SIGNS_ABNORMAL_STATUS = Internal.createIndex(DSL.name("idx_vital_signs_abnormal_status"), VitalSignRecords.VITAL_SIGN_RECORDS, new OrderField[] { VitalSignRecords.VITAL_SIGN_RECORDS.ABNORMAL, VitalSignRecords.VITAL_SIGN_RECORDS.REVIEW_STATUS, VitalSignRecords.VITAL_SIGN_RECORDS.MEASURED_AT.desc() }, false);
+    public static final Index IDX_VITAL_SIGNS_ENCOUNTER = Internal.createIndex(DSL.name("idx_vital_signs_encounter"), VitalSignRecords.VITAL_SIGN_RECORDS, new OrderField[] { VitalSignRecords.VITAL_SIGN_RECORDS.ENCOUNTER_ID }, false);
+    public static final Index IDX_VITAL_SIGNS_PATIENT_MEASURED = Internal.createIndex(DSL.name("idx_vital_signs_patient_measured"), VitalSignRecords.VITAL_SIGN_RECORDS, new OrderField[] { VitalSignRecords.VITAL_SIGN_RECORDS.PATIENT_ID, VitalSignRecords.VITAL_SIGN_RECORDS.MEASURED_AT.desc() }, false);
+    public static final Index IDX_VITAL_SIGNS_PATIENT_TYPE_MEASURED = Internal.createIndex(DSL.name("idx_vital_signs_patient_type_measured"), VitalSignRecords.VITAL_SIGN_RECORDS, new OrderField[] { VitalSignRecords.VITAL_SIGN_RECORDS.PATIENT_ID, VitalSignRecords.VITAL_SIGN_RECORDS.TYPE, VitalSignRecords.VITAL_SIGN_RECORDS.MEASURED_AT }, false);
     public static final Index UQ_CHRONIC_DISEASE_ACTIVE = Internal.createIndex(DSL.name("uq_chronic_disease_active"), ChronicDiseaseRegistrations.CHRONIC_DISEASE_REGISTRATIONS, new OrderField[] { ChronicDiseaseRegistrations.CHRONIC_DISEASE_REGISTRATIONS.PATIENT_ID, ChronicDiseaseRegistrations.CHRONIC_DISEASE_REGISTRATIONS.DISEASE_NAME }, true);
     public static final Index UQ_ENCOUNTERS_ACTIVE_ELDERLY_CARE = Internal.createIndex(DSL.name("uq_encounters_active_elderly_care"), Encounters.ENCOUNTERS, new OrderField[] { Encounters.ENCOUNTERS.PATIENT_ID }, true);
 }

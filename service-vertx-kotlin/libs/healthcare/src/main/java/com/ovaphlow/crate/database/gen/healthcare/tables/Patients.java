@@ -10,6 +10,7 @@ import com.ovaphlow.crate.database.gen.healthcare.Keys;
 import com.ovaphlow.crate.database.gen.healthcare.tables.Encounters.EncountersPath;
 import com.ovaphlow.crate.database.gen.healthcare.tables.FollowupPlans.FollowupPlansPath;
 import com.ovaphlow.crate.database.gen.healthcare.tables.FollowupRecords.FollowupRecordsPath;
+import com.ovaphlow.crate.database.gen.healthcare.tables.VitalSignRecords.VitalSignRecordsPath;
 import com.ovaphlow.crate.database.gen.healthcare.tables.records.PatientsRecord;
 
 import java.time.LocalDate;
@@ -260,6 +261,18 @@ public class Patients extends TableImpl<PatientsRecord> {
         return _followupRecords;
     }
 
+    private transient VitalSignRecordsPath _vitalSignRecords;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>healthcare.vital_sign_records</code> table
+     */
+    public VitalSignRecordsPath vitalSignRecords() {
+        if (_vitalSignRecords == null)
+            _vitalSignRecords = new VitalSignRecordsPath(this, null, Keys.VITAL_SIGN_RECORDS__VITAL_SIGN_RECORDS_PATIENT_ID_FKEY.getInverseKey());
+
+        return _vitalSignRecords;
+    }
 
     @Override
     public Patients as(String alias) {

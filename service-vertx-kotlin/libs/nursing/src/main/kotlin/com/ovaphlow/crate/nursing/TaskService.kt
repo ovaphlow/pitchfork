@@ -41,7 +41,7 @@ class TaskService(
     private val cUpdatedAt = DSL.field("updated_at", OffsetDateTime::class.java)
 
     companion object {
-        private val VALID_TASK_TYPES = setOf("NURSING", "REHABILITATION", "LIVING_CARE", "HEALTH_EDUCATION", "OTHER")
+        internal val VALID_TASK_TYPES = setOf("NURSING", "REHABILITATION", "LIVING_CARE", "HEALTH_EDUCATION", "OTHER")
         private val ORDER_TASK_TYPES = setOf("MEDICATION", "TREATMENT")
         private val ORDER_TERMINAL_STATUSES = setOf("CANCELLED", "COMPLETED")
         private val VALID_STATUS_TRANSITIONS = mapOf(

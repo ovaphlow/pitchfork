@@ -1,7 +1,9 @@
 package com.ovaphlow.crate.nursing
 
+import io.vertx.core.Handler
 import io.vertx.core.Vertx
 import io.vertx.ext.web.Router
+import io.vertx.ext.web.RoutingContext
 import io.vertx.ext.web.handler.BodyHandler
 import io.vertx.sqlclient.Pool
 import java.math.BigDecimal
@@ -20,9 +22,18 @@ object TaskExecutionRoutes {
     fun isOverdueStatusAllowed(overdue: Boolean?, status: String?): Boolean =
         overdue != true || status !in TERMINAL_STATUSES
 
-    fun create(vertx: Vertx, pool: Pool): Router {
+    /**
+     * @param administrationAuthHandler 记录给药的认证中间件（由 App 编排层注入，
+     *   写入 ctx userId 作为给药人）；未注入时业务处理器保持 401 兜底。
+     */
+    fun create(
+        vertx: Vertx,
+        pool: Pool,
+        administrationAuthHandler: Handler<RoutingContext>? = null,
+    ): Router {
         val router = Router.router(vertx)
         val service = TaskExecutionService(pool)
+        val administrationService = MedicationAdministrationService(pool)
 
         router.route().handler(BodyHandler.create())
 
@@ -56,6 +67,7 @@ object TaskExecutionRoutes {
                 executor = params.getParam("executor"),
                 status = status,
                 overdue = overdue,
+                taskType = params.getParam("task_type"),
                 limit = params.getParam("limit")?.toIntOrNull() ?: 50,
                 offset = params.getParam("offset")?.toIntOrNull() ?: 0
             ).onSuccess { ctx.json(it) }
@@ -91,6 +103,7 @@ object TaskExecutionRoutes {
                 executor = params.getParam("executor"),
                 status = status,
                 overdue = overdue,
+                taskType = params.getParam("task_type"),
                 limit = params.getParam("limit")?.toIntOrNull() ?: 50,
                 offset = params.getParam("offset")?.toIntOrNull() ?: 0
             ).onSuccess { ctx.json(it) }
@@ -157,6 +170,7 @@ object TaskExecutionRoutes {
                 dateTo = dateTo,
                 periodId = params.getParam("period_id"),
                 executor = params.getParam("executor"),
+                taskType = params.getParam("task_type"),
                 limit = limit,
                 offset = offset
             ).onSuccess { ctx.json(it) }
@@ -214,6 +228,64 @@ object TaskExecutionRoutes {
                 offset = params.getParam("offset")?.toIntOrNull() ?: 0
             ).onSuccess { ctx.json(it) }
                 .onFailure { NursingRoutes.respondError(ctx, it) }
+        }
+
+        // ——— MAR 给药记录查询：静态路径必须先于泛型 /:id ———
+        router.get("/administrations").handler { ctx ->
+            val params = ctx.request()
+            val dateStr = params.getParam("date")
+            val date = try {
+                if (dateStr != null) LocalDate.parse(dateStr) else null
+            } catch (_: Exception) {
+                NursingRoutes.respond(ctx, 400, "invalid date format, expected YYYY-MM-DD")
+                return@handler
+            }
+            val limit = params.getParam("limit")?.toIntOrNull() ?: 50
+            val offset = params.getParam("offset")?.toIntOrNull() ?: 0
+            administrationService.listAdministrations(
+                encounterId = params.getParam("encounter_id"),
+                medicalOrderId = params.getParam("medical_order_id"),
+                date = date,
+                result = params.getParam("result"),
+                limit = limit,
+                offset = offset,
+            ).onSuccess { ctx.json(it) }
+                .onFailure { respondAdministrationFailure(ctx, it) }
+        }
+
+        // ——— 记录给药（写操作：认证中间件注入给药人，401 兑底） ———
+        if (administrationAuthHandler != null) {
+            router.post("/:id/administration").handler(administrationAuthHandler)
+        }
+        router.post("/:id/administration").handler { ctx ->
+            val id = ctx.pathParam("id") ?: return@handler NursingRoutes.respond(ctx, 400, "id required")
+            val userId = ctx.get<String>("userId")
+            if (userId.isNullOrBlank()) {
+                NursingRoutes.respond(ctx, 401, "authentication required")
+                return@handler
+            }
+            administrationService.recordAdministration(id, userId, NursingRoutes.body(ctx))
+                .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                .onFailure { respondAdministrationFailure(ctx, it) }
+        }
+
+        // ——— 给药来源选择器（只读）：已发药且未给完的发药明细 ———
+        router.get("/:id/administration/sources").handler { ctx ->
+            val id = ctx.pathParam("id") ?: return@handler NursingRoutes.respond(ctx, 400, "id required")
+            administrationService.listAdministrationSources(id)
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondAdministrationFailure(ctx, it) }
+        }
+
+        // ——— 单条给药记录（含来源发药明细摘要） ———
+        router.get("/:id/administration").handler { ctx ->
+            val id = ctx.pathParam("id") ?: return@handler NursingRoutes.respond(ctx, 400, "id required")
+            administrationService.getAdministrationByExecution(id)
+                .onSuccess { ctx.json(it) }
+                .onFailure {
+                    if (it is NotFoundException) NursingRoutes.respond(ctx, 404, it.message)
+                    else respondAdministrationFailure(ctx, it)
+                }
         }
 
         // ——— 获取单条 ———
@@ -326,5 +398,15 @@ object TaskExecutionRoutes {
         }
 
         return router
+    }
+
+    /** 给药记录路由错误映射：400 入参 / 404 资源 / 409 状态与对账冲突 / 500 其余 */
+    private fun respondAdministrationFailure(ctx: io.vertx.ext.web.RoutingContext, error: Throwable?) {
+        when (error) {
+            is IllegalArgumentException -> NursingRoutes.respond(ctx, 400, error.message)
+            is NotFoundException -> NursingRoutes.respond(ctx, 404, error.message)
+            is ConflictException -> NursingRoutes.respond(ctx, 409, error.message)
+            else -> NursingRoutes.respondError(ctx, error)
+        }
     }
 }

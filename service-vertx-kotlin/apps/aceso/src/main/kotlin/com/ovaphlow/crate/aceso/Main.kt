@@ -146,9 +146,16 @@ fun main() {
             idpSessionAuthHandler(vertx, idpBaseUrl),
             idpSessionAuthHandler(vertx, idpBaseUrl),
             idpSessionAuthHandler(vertx, idpBaseUrl),
+            idpSessionAuthHandler(vertx, idpBaseUrl),
         ),
     )
-    apiRouter.route("/nursing/v1/*").subRouter(NursingRoutes.create(vertx, pool))
+    apiRouter.route("/nursing/v1/*").subRouter(
+        NursingRoutes.create(
+            vertx,
+            pool,
+            idpSessionAuthHandler(vertx, idpBaseUrl),
+        ),
+    )
     apiRouter.route("/pharmacy/v1/*").subRouter(
         PharmacyRoutes.create(
             vertx,

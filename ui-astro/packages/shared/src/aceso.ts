@@ -2785,3 +2785,362 @@ export function listPatientFollowups(patientId: string): Promise<FollowupPatient
   return request<FollowupPatientTimeline>(`/healthcare/v1/patients/${encodeURIComponent(patientId)}/followups`);
 }
 
+// ─── 生命体征 (Vital Signs · healthcare) ─────────────────────────────────
+// 养老方向：入住长者日常健康监测。体征类型为英文枚举，前端展示映射中文；
+// 血压按收缩/舒张两条独立记录建模（一次录入提交两条）；abnormal 由服务端
+// 按内置参考范围计算（WEIGHT 不判异常）；删除为软删除（数据可追溯）。
+
+export type VitalSignType =
+  | "TEMPERATURE"
+  | "PULSE"
+  | "RESPIRATION"
+  | "SYSTOLIC_BP"
+  | "DIASTOLIC_BP"
+  | "SPO2"
+  | "BLOOD_GLUCOSE"
+  | "WEIGHT";
+
+export interface VitalSignRecord {
+  id: string;
+  patient_id: string;
+  patient_name: string | null;
+  encounter_id: string | null;
+  encounter_no: string | null;
+  type: VitalSignType;
+  value: number;
+  unit: string;
+  measured_at: string;
+  recorded_by: string;
+  /** 超参考范围标记，服务端计算（客户端不可提交） */
+  abnormal: boolean;
+  note: string | null;
+  metadata: Record<string, unknown> | null;
+  /** 异常处理状态：待复核/已确认/已误报/已转诊（服务端管控） */
+  review_status: VitalSignReviewStatus;
+  /** 复核结论：确认异常/误报，未复核为 null */
+  review_result: VitalSignReviewResult | null;
+  /** 复核备注 */
+  review_note: string | null;
+  /** 复核人（认证主体） */
+  reviewed_by: string | null;
+  /** 复核时间 */
+  reviewed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type VitalSignReviewStatus = "待复核" | "已确认" | "已误报" | "已转诊";
+export type VitalSignReviewResult = "确认异常" | "误报";
+
+export interface VitalSignInput {
+  patient_id: string;
+  encounter_id?: string | null;
+  type: VitalSignType;
+  value: number;
+  unit?: string;
+  measured_at?: string;
+  note?: string;
+  metadata?: Record<string, unknown>;
+}
+
+/** 修正：value 必填；unit/measured_at 省略保留原值；note/metadata 传 null 清空 */
+export interface VitalSignUpdateInput {
+  value: number;
+  unit?: string;
+  measured_at?: string;
+  note?: string | null;
+  metadata?: Record<string, unknown> | null;
+}
+
+export interface VitalSignList {
+  records: VitalSignRecord[];
+  meta: { total: number };
+}
+
+export interface VitalSignSnapshot {
+  records: VitalSignRecord[];
+}
+
+export interface VitalSignTrend {
+  records: VitalSignRecord[];
+}
+
+/** 按老人查询体征记录（时间倒序，可分页，按类型/时间范围过滤） */
+export function listVitalSigns(params: {
+  patient_id: string;
+  type?: string;
+  date_from?: string;
+  date_to?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<VitalSignList> {
+  const query = new URLSearchParams();
+  query.set("patient_id", params.patient_id);
+  if (params.type?.trim()) query.set("type", params.type.trim());
+  if (params.date_from?.trim()) query.set("date_from", params.date_from.trim());
+  if (params.date_to?.trim()) query.set("date_to", params.date_to.trim());
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  return request<VitalSignList>(`/healthcare/v1/vital-signs?${query.toString()}`);
+}
+
+/** 批量创建体征记录：请求体为数组（血压一次提交收缩/舒张两条），返回创建结果 */
+export function createVitalSigns(inputs: VitalSignInput[]): Promise<VitalSignSnapshot> {
+  return request<VitalSignSnapshot>("/healthcare/v1/vital-signs", {
+    method: "POST",
+    body: JSON.stringify(inputs),
+  });
+}
+
+export function getVitalSign(id: string): Promise<VitalSignRecord> {
+  return request<VitalSignRecord>(`/healthcare/v1/vital-signs/${encodeURIComponent(id)}`);
+}
+
+/** 修正体征记录（改值/时间/备注），abnormal 由服务端重算 */
+export function updateVitalSign(id: string, input: VitalSignUpdateInput): Promise<VitalSignRecord> {
+  return request<VitalSignRecord>(`/healthcare/v1/vital-signs/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+/** 软删除体征记录（置 deleted_at，可追溯），返回 {id, deleted_at} */
+export function deleteVitalSign(id: string): Promise<{ id: string; deleted_at: string }> {
+  return request<{ id: string; deleted_at: string }>(`/healthcare/v1/vital-signs/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+/** 最新体征快照：每种类型最近一条（首页/详情卡片用） */
+export function getVitalSignSnapshot(patientId: string): Promise<VitalSignSnapshot> {
+  return request<VitalSignSnapshot>(
+    `/healthcare/v1/patients/${encodeURIComponent(patientId)}/vital-signs/snapshot`,
+  );
+}
+
+/** 趋势序列：指定老人、指定体征类型在一段时间内的测量点（时间升序，供绘图） */
+export function getVitalSignTrend(
+  patientId: string,
+  type: VitalSignType,
+  params: { date_from?: string; date_to?: string } = {},
+): Promise<VitalSignTrend> {
+  const query = new URLSearchParams();
+  query.set("type", type);
+  if (params.date_from?.trim()) query.set("date_from", params.date_from.trim());
+  if (params.date_to?.trim()) query.set("date_to", params.date_to.trim());
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<VitalSignTrend>(
+    `/healthcare/v1/patients/${encodeURIComponent(patientId)}/vital-signs/trend${suffix}`,
+  );
+}
+
+// ─── 体征异常告警闭环（复核 / 转诊）──────────────────────────────────────
+// 状态机：待复核 ─复核→ 已确认 ─转诊→ 已转诊；待复核 ─复核→ 已误报（终态）。
+// 复核可重复执行（覆盖式更新）；转诊在事务内创建随访计划（慢病随访/门诊），
+// 计划 metadata 关联体征记录；修正记录导致 abnormal 翻转时状态自动重置。
+
+export interface VitalSignAbnormalList {
+  records: VitalSignRecord[];
+  meta: { total: number };
+}
+
+export interface VitalSignAbnormalSummary {
+  /** 待复核异常数 */
+  pending_total: number;
+  /** 今日新增异常数（按测量时间，业务时区当天） */
+  today_total: number;
+  /** 已转诊异常数 */
+  referred_total: number;
+  /** 各体征类型异常分布 */
+  by_type: { type: VitalSignType; count: number }[];
+  /** 各处理状态分布 */
+  by_status: { status: VitalSignReviewStatus; count: number }[];
+}
+
+export interface VitalSignReviewInput {
+  /** 复核结论：确认异常 / 误报 */
+  result: VitalSignReviewResult;
+  /** 复核备注（≤500 字） */
+  note?: string;
+}
+
+export interface VitalSignReferInput {
+  /** 计划随访日，缺省当天；不得早于入住开始日 */
+  planned_date?: string;
+  remark?: string;
+}
+
+export interface VitalSignReferResult {
+  record: VitalSignRecord;
+  followup_plan: FollowupPlan;
+}
+
+/** 跨老人异常列表：仅 abnormal=true 的记录（patient_id 可选过滤），按测量时间倒序 */
+export function listAbnormalVitalSigns(params: {
+  patient_id?: string;
+  type?: VitalSignType;
+  review_status?: VitalSignReviewStatus;
+  date_from?: string;
+  date_to?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<VitalSignAbnormalList> {
+  const query = new URLSearchParams();
+  if (params.patient_id?.trim()) query.set("patient_id", params.patient_id.trim());
+  if (params.type) query.set("type", params.type);
+  if (params.review_status) query.set("review_status", params.review_status);
+  if (params.date_from?.trim()) query.set("date_from", params.date_from.trim());
+  if (params.date_to?.trim()) query.set("date_to", params.date_to.trim());
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<VitalSignAbnormalList>(`/healthcare/v1/vital-signs/abnormal${suffix}`);
+}
+
+/** 异常看板统计摘要：待复核/今日新增/已转诊 + 类型与状态分布 */
+export function getAbnormalVitalSignSummary(): Promise<VitalSignAbnormalSummary> {
+  return request<VitalSignAbnormalSummary>("/healthcare/v1/vital-signs/abnormal/summary");
+}
+
+/** 复核异常记录：待复核 → 已确认 | 已误报；复核人与时间由服务端留痕 */
+export function reviewVitalSign(id: string, input: VitalSignReviewInput): Promise<VitalSignRecord> {
+  return request<VitalSignRecord>(`/healthcare/v1/vital-signs/${encodeURIComponent(id)}/review`, {
+    method: "POST",
+    body: JSON.stringify({
+      result: input.result,
+      ...(input.note?.trim() ? { note: input.note.trim() } : {}),
+    }),
+  });
+}
+
+/** 转诊：已确认 → 已转诊，事务内创建随访计划（慢病随访/门诊），计划 metadata 关联体征记录 */
+export function referVitalSign(id: string, input: VitalSignReferInput = {}): Promise<VitalSignReferResult> {
+  const body: Record<string, string> = {};
+  if (input.planned_date?.trim()) body.planned_date = input.planned_date.trim();
+  if (input.remark?.trim()) body.remark = input.remark.trim();
+  return request<VitalSignReferResult>(`/healthcare/v1/vital-signs/${encodeURIComponent(id)}/refer`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+// ─── 慢病档案管理 (Chronic Disease · healthcare) ───────────────────────────
+// 养老方向：患者级、跨入住周期的长期慢病档案。
+// 登记/随访完成自动生成「慢病随访」计划（metadata.chronic_disease_id 关联）。
+// 业务枚举（中文值）：控制状态 良好/一般/较差/未控制；
+// 随访频率 每月/每两月/每季度/每半年/每年；档案状态 管理中/已缓解/已停管。
+
+export type ChronicControlStatus = "良好" | "一般" | "较差" | "未控制";
+export type ChronicFollowupFrequency = "每月" | "每两月" | "每季度" | "每半年" | "每年";
+export type ChronicRegistrationStatus = "管理中" | "已缓解" | "已停管";
+
+export interface ChronicDiseaseRegistration {
+  id: string;
+  patient_id: string;
+  patient_name: string | null;
+  encounter_id: string;
+  encounter_no: string | null;
+  disease_name: string;
+  icd_code: string | null;
+  confirmed_date: string;
+  control_status: ChronicControlStatus;
+  followup_frequency: ChronicFollowupFrequency;
+  physician: string | null;
+  remark: string | null;
+  status: ChronicRegistrationStatus;
+  metadata: Record<string, unknown> | null;
+  /** 下次随访日：待随访计划最早日期（无则 null） */
+  next_followup_date: string | null;
+  /** 待随访计划已逾期（查询计算） */
+  is_overdue: boolean;
+  recent_followup_date: string | null;
+  recent_followup_result: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChronicDiseaseRegistrationList {
+  records: ChronicDiseaseRegistration[];
+  meta: { total: number };
+}
+
+/** 档案时间线：慢病病程记录 + 慢病随访计划/记录，各按时间倒序 */
+export interface ChronicDiseaseTimeline {
+  chronic_disease_id: string;
+  progress_notes: ChronicProgressNote[];
+  followup_plans: FollowupPlan[];
+  followup_records: FollowupRecord[];
+}
+
+/** 慢病病程记录（progress_notes，note_type=CHRONIC） */
+export interface ChronicProgressNote {
+  id: string;
+  encounter_id: string;
+  note_type: string;
+  content: string;
+  physician: string | null;
+  record_time: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface ChronicDiseaseRegistrationInput {
+  patient_id: string;
+  encounter_id: string;
+  disease_name: string;
+  icd_code?: string;
+  confirmed_date: string;
+  control_status?: ChronicControlStatus;
+  followup_frequency?: ChronicFollowupFrequency;
+  physician?: string;
+  remark?: string;
+  /** 可携带 diagnosis_id（一键带入当次入住诊断）与 followup_frequency 覆盖 */
+  metadata?: Record<string, unknown>;
+}
+
+export interface ChronicDiseaseStatusInput {
+  status: ChronicRegistrationStatus;
+}
+
+export function listChronicDiseases(params: {
+  patient_id?: string;
+  disease_name?: string;
+  control_status?: ChronicControlStatus;
+  status?: ChronicRegistrationStatus;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<ChronicDiseaseRegistrationList> {
+  const query = new URLSearchParams();
+  if (params.patient_id?.trim()) query.set("patient_id", params.patient_id.trim());
+  if (params.disease_name?.trim()) query.set("disease_name", params.disease_name.trim());
+  if (params.control_status) query.set("control_status", params.control_status);
+  if (params.status) query.set("status", params.status);
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<ChronicDiseaseRegistrationList>(`/healthcare/v1/chronic-diseases${suffix}`);
+}
+
+export function getChronicDisease(id: string): Promise<ChronicDiseaseRegistration> {
+  return request<ChronicDiseaseRegistration>(`/healthcare/v1/chronic-diseases/${encodeURIComponent(id)}`);
+}
+
+export function getChronicDiseaseTimeline(id: string): Promise<ChronicDiseaseTimeline> {
+  return request<ChronicDiseaseTimeline>(`/healthcare/v1/chronic-diseases/${encodeURIComponent(id)}/timeline`);
+}
+
+/** 登记慢病档案；成功即自动生成首轮「慢病随访」计划（同事务） */
+export function createChronicDisease(input: ChronicDiseaseRegistrationInput): Promise<ChronicDiseaseRegistration> {
+  return request<ChronicDiseaseRegistration>("/healthcare/v1/chronic-diseases", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+/** 档案状态流转：管理中 ↔ 已缓解/已停管；停管后停止自动生成新计划 */
+export function updateChronicDiseaseStatus(id: string, input: ChronicDiseaseStatusInput): Promise<ChronicDiseaseRegistration> {
+  return request<ChronicDiseaseRegistration>(`/healthcare/v1/chronic-diseases/${encodeURIComponent(id)}/status`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}

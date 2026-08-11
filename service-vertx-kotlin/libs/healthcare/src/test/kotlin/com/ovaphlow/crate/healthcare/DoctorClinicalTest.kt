@@ -39,6 +39,7 @@ class DoctorClinicalTest {
         val notes: RowSet<Row> = dcRowSet(),
         val diagnoses: RowSet<Row> = dcRowSet(),
         val orders: RowSet<Row> = dcRowSet(),
+        val registrations: RowSet<Row> = dcRowSet(),
     ) {
         val queries = mutableListOf<String>()
         val tuples = mutableListOf<Pair<String, List<Any?>>>()
@@ -69,6 +70,7 @@ class DoctorClinicalTest {
                     sql.contains("count(*)") && sql.contains("from healthcare.diagnoses") -> dcRows(dcMockRow(mapOf("total" to 1L)))
                     sql.contains("count(*)") && sql.contains("from healthcare.medical_orders") -> dcRows(dcMockRow(mapOf("total" to 1L)))
                     sql.contains("from healthcare.patients") -> dcRowSet()
+                    sql.contains("from healthcare.chronic_disease_registrations") -> registrations
                     sql.contains("from healthcare.encounters") -> encounters
                     sql.contains("from healthcare.progress_notes") -> notes
                     sql.contains("from healthcare.diagnoses") -> diagnoses
@@ -146,6 +148,23 @@ class DoctorClinicalTest {
             "physician" to "张医生",
             "record_time" to OffsetDateTime.parse("2026-08-05T09:30:00+08:00"),
             "created_at" to OffsetDateTime.parse("2026-08-05T09:30:00+08:00"),
+        )
+        base.putAll(overrides)
+        return base
+    }
+
+    private fun chronicRegistrationRow(overrides: Map<String, Any?> = emptyMap()): MutableMap<String, Any?> {
+        val base = mutableMapOf<String, Any?>(
+            "id" to "chd-1",
+            "patient_id" to "pat-1",
+            "encounter_id" to "enc-1",
+            "disease_name" to "高血压",
+            "confirmed_date" to LocalDate.of(2024, 5, 10),
+            "control_status" to "良好",
+            "followup_frequency" to "每月",
+            "physician" to "赵医生",
+            "status" to "管理中",
+            "created_at" to OffsetDateTime.parse("2026-08-01T09:00:00+08:00"),
         )
         base.putAll(overrides)
         return base
@@ -293,7 +312,11 @@ class DoctorClinicalTest {
 
         // encounter_id 不能被请求体覆盖：未知键一律拒绝
         expectInvalid(validNoteBody(mapOf("encounter_id" to "enc-2")), "unsupported keys")
-        expectInvalid(validNoteBody(mapOf("metadata" to JsonObject())), "unsupported keys")
+        expectInvalid(validNoteBody(mapOf("status" to "x")), "unsupported keys")
+        // 慢病病程（CHRONIC）必须携带 metadata.chronic_disease_id；DAILY 允许 metadata
+        expectInvalid(validNoteBody(mapOf("note_type" to "CHRONIC", "metadata" to JsonObject())), "chronic_disease_id is required")
+        expectInvalid(validNoteBody(mapOf("note_type" to "CHRONIC", "metadata" to JsonObject().put("chronic_disease_id", " "))), "chronic_disease_id is required")
+        expectInvalid(validNoteBody(mapOf("note_type" to "CHRONIC", "metadata" to JsonObject().put("chronic_disease_id", "a".repeat(33)))), "32")
 
         assertTrue(stub.queries.isEmpty(), "校验失败不得触发任何 SQL")
         assertEquals(0, stub.transactionCalls)
@@ -320,6 +343,64 @@ class DoctorClinicalTest {
         val cause4 = causeOf(HealthcareService(deceased.pool).createProgressNote("enc-1", validNoteBody()))
         assertInstanceOf(ConflictException::class.java, cause4)
         assertTrue(cause4.message?.contains("encounter is not active") == true, "got: ${cause4.message}")
+    }
+
+    @Test
+    fun `CHRONIC病程校验通过时创建成功并写入档案关联`() {
+        val stub = DatabaseStub(registrations = dcRows(chronicRegistrationRow()))
+        val future = HealthcareService(stub.pool).createProgressNote(
+            "enc-1",
+            validNoteBody(
+                mapOf(
+                    "note_type" to "CHRONIC",
+                    "metadata" to JsonObject().put("chronic_disease_id", "chd-1"),
+                ),
+            ),
+        )
+        val result = future.toCompletionStage().toCompletableFuture().get()
+
+        assertEquals("CHRONIC", result.getString("note_type"))
+        assertEquals("chd-1", result.getJsonObject("metadata").getString("chronic_disease_id"))
+
+        // 归属校验必须同时约束档案 id 与 encounter 的老人
+        val checkSql = stub.queries.first { it.contains("from healthcare.chronic_disease_registrations") }
+        assertTrue(checkSql.contains("id = $1") && checkSql.contains("patient_id = $2"), "归属校验必须约束档案id与老人: $checkSql")
+        val checkParams = stub.tuples.first { it.first.contains("from healthcare.chronic_disease_registrations") }.second
+        assertEquals(listOf("chd-1", "pat-1"), checkParams, "校验参数必须为档案id与encounter老人")
+
+        val insertSql = stub.queries.first { it.contains("insert into healthcare.progress_notes") }
+        assertTrue(insertSql.contains("metadata"), "insert 必须写入 metadata: $insertSql")
+    }
+
+    @Test
+    fun `CHRONIC病程档案不存在或属于其他老人时拒绝且无副作用`() {
+        // 档案不存在：registrations 为空行集 → 拒绝
+        val missing = DatabaseStub()
+        val cause1 = causeOf(
+            HealthcareService(missing.pool).createProgressNote(
+                "enc-1",
+                validNoteBody(mapOf("note_type" to "CHRONIC", "metadata" to JsonObject().put("chronic_disease_id", "chd-999"))),
+            ),
+        )
+        assertInstanceOf(HealthcareNotFoundException::class.java, cause1)
+        assertTrue(cause1.message?.contains("chronic disease registration not found for this patient") == true, "got: ${cause1.message}")
+        assertFalse(missing.queries.any { it.contains("insert into healthcare.progress_notes") }, "拒绝时不得写入病程")
+
+        // 跨老人：encounter 属于 pat-2，档案属于 pat-1 → 校验按 encounter 老人绑定参数，真实库中查无此行 → 拒绝
+        val crossPatient = DatabaseStub(
+            encounters = dcRows(encounterRow(mapOf("patient_id" to "pat-2"))),
+        )
+        val cause2 = causeOf(
+            HealthcareService(crossPatient.pool).createProgressNote(
+                "enc-1",
+                validNoteBody(mapOf("note_type" to "CHRONIC", "metadata" to JsonObject().put("chronic_disease_id", "chd-1"))),
+            ),
+        )
+        assertInstanceOf(HealthcareNotFoundException::class.java, cause2)
+        assertTrue(cause2.message?.contains("chronic disease registration not found for this patient") == true, "got: ${cause2.message}")
+        val checkParams = crossPatient.tuples.first { it.first.contains("from healthcare.chronic_disease_registrations") }.second
+        assertEquals(listOf("chd-1", "pat-2"), checkParams, "归属校验必须使用encounter的老人而非档案的老人")
+        assertFalse(crossPatient.queries.any { it.contains("insert into healthcare.progress_notes") }, "拒绝时不得写入病程")
     }
 
     @Test
