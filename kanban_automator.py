@@ -8,15 +8,15 @@
 Todo 列不处理（手动控制），从「需求分解」开始：
   需求分解 -> 「需求分解 agent」分析需求、形成文档
           ├─ 不分解：-> 开发
-          └─ 分解：输出 JSON 计划列表 → 脚本创建 N 张子任务卡（落「计划」列，带「子任务」标签）
-             → 父卡打「已分解」标签并移入「计划」列，等待全部子卡 Done 后自动 Done
+          └─ 分解：输出 JSON 计划列表 → 脚本创建 N 张子任务卡（落「计划评审」列，带「子任务」标签）
+             → 父卡打「已分解」标签并移入「计划评审」列，等待全部子卡 Done 后自动 Done
              拆分规则：按层切片（后端卡/前端卡），先后端后前端，前端卡声明依赖的后端卡；契约先行，
              单卡控制在 agent 一轮可完成粒度（详见「需求分解」阶段 prompt）
   计划 -> 「评审 agent」评估/修订计划卡（通过或修订后都）-> 开发
   开发 -> 「开发 agent」编码实现             -> 测试
   测试 -> 「测试 agent」验证                 -> Done（子任务卡 Done 时自动 close issue）
 
-「评审」列为预留状态（测试结束后的专门评审阶段），当前与 Todo 一样不自动处理。
+「终审」列为预留状态（测试结束后的专门评审阶段），当前与 Todo 一样不自动处理。
 
 每列并发限制：同一次运行中，每个 status 列最多起一个 agent。
 防重复触发（任务执行状态，Issue 卡以标签代替锁文件）：
@@ -34,8 +34,8 @@ Todo 列不处理（手动控制），从「需求分解」开始：
 父卡/子卡规则：
   - 防重复分解：「已分解」标签为主闸，subIssues 查询兜底（有子卡但缺标签时自动补打）；
     建卡由脚本完成（解析需求分解 agent 的 JSON），agent 不直接调 gh 建卡。
-  - 子任务卡（带「子任务」标签）永不分解；测试失败只回退「开发」或「计划」
-    （输出「需求分解」会被强制改为「计划」，避免触发父卡重新分解）。
+  - 子任务卡（带「子任务」标签）永不分解；测试失败只回退「开发」或「计划评审」
+    （输出「需求分解」会被强制改为「计划评审」，避免触发父卡重新分解）。
   - 父卡聚合：每轮扫描更新「📊 子卡进度」评论（原地 PATCH 不刷屏）；全部子卡 Done 后
     父卡移 Done + 汇总评论 + close 父 issue + 摘「已分解」标签；父卡本身永不启动 agent。
 
@@ -95,17 +95,17 @@ STATUS_FIELD_ID = "PVTSSF_lAHOAAOE884AYQefzgPghq8"
 OPTION_IDS = {
     "Todo": "f75ad846",
     "需求分解": "6ff7dcda",
-    "计划": "9a427661",
+    "计划评审": "9a427661",
     "开发": "47fc9ee4",
     "测试": "ceaca6cd",
-    "评审": "6aa4326a",
+    "终审": "6aa4326a",
     "Done": "98236657",
 }
 OPTION_MISSING = set()  # resolve_option_ids() 填充：Status 字段缺失的选项名
 
 TRANSITIONS = {
-    "需求分解": "开发",   # 需求分解 agent 输出分解时，实际目标改为「计划」（父卡）
-    "计划": "开发",   # 评审 agent 评估/修订计划卡
+    "需求分解": "开发",   # 需求分解 agent 输出分解时，实际目标改为「计划评审」（父卡）
+    "计划评审": "开发",   # 评审 agent 评估/修订计划卡
     "开发": "测试",
     "测试": "Done",
 }
@@ -170,7 +170,7 @@ STAGE_PROMPTS = {
               "每条验收标准必须可通过构建/单元测试/路由测试/前端构建验证；最多 10 条；\n" \
               "不需要分解就不要输出 JSON 代码块。注意：如果看板卡片是子任务（Issue 带「子任务」标签），" \
               "只输出规格说明，不要输出 JSON 代码块。",
-    "计划": "你是评审 agent（计划评估）。请评估看板上的计划卡片（可能是父需求分解出的子任务，也可能是独立计划）。\n" \
+    "计划评审": "你是评审 agent（计划评审）。请评估看板上的计划卡片（可能是父需求分解出的子任务，也可能是独立计划）。\n" \
               "卡片描述与评论中包含计划内容（背景、目标、验收标准）。\n\n" \
               "评估要点：\n" \
               "1. 完整性：计划是否覆盖卡片要求的全部内容；子任务卡粒度应为**逻辑最小单位**\n" \
@@ -197,7 +197,7 @@ STAGE_PROMPTS = {
               "- 验收标准本身有问题（口径不清、需求缺失或矛盾、需要需求/计划角色决策，" \
               "例如评论中提出的计划决策点）→ `回退目标：需求分解`。\n" \
               "失败时必须且只能输出其中一行（放在 ❌ 标记之后）；通过时不要输出。\n\n" \
-              "如果这是子任务卡片（Issue 带「子任务」标签），回退目标只能输出「开发」或「计划」——" \
+              "如果这是子任务卡片（Issue 带「子任务」标签），回退目标只能输出「开发」或「计划评审」——" \
               "验收口径问题输出 `回退目标：计划`（由评审 agent 修订计划），不要输出「需求分解」。",
 }
 
@@ -727,7 +727,7 @@ def log_step(title, target_status):
 
 def resolve_option_ids():
     """按名称解析 Status 字段选项 ID（field-list），失败用硬编码兜底。
-    返回缺失的选项名集合（如项目设置里还没加「计划」）。
+    返回缺失的选项名集合（如项目设置里还没加「计划评审」）。
     结果缓存 OPTION_CACHE_TTL 秒：field-list 每次实测约消耗 102 GraphQL 点数，
     选项 ID 极少变动，无需每轮扫描/每个 agent 运行都查；缓存里缺选项时强制刷新
     （选项可能刚被人工添加，保证添加后尽快生效）。"""
@@ -755,7 +755,7 @@ def resolve_option_ids():
                     ids[opt["name"]] = opt["id"]
     except (subprocess.CalledProcessError, json.JSONDecodeError, KeyError, TypeError):
         pass
-    for name in ("Todo", "需求分解", "计划", "开发", "测试", "评审", "Done"):
+    for name in ("Todo", "需求分解", "计划评审", "开发", "测试", "终审", "Done"):
         if name not in ids:
             missing.add(name)
     OPTION_IDS = ids
@@ -816,10 +816,10 @@ def split_spec_and_json(text):
 
 def create_plan_children(parent_number, plans):
     """把需求分解 agent 的 JSON 计划列表落成子任务卡：
-    gh issue create --parent 关联 → 加入看板 → 置「计划」列 → 打「子任务」标签。
+    gh issue create --parent 关联 → 加入看板 → 置「计划评审」列 → 打「子任务」标签。
     返回 [(issue_number, title)]；全部失败返回 []。"""
-    if "计划" in OPTION_MISSING:
-        print(f"{ts()} [plan] Status 字段缺少「计划」选项，无法创建子卡（请在项目设置添加）", flush=True)
+    if "计划评审" in OPTION_MISSING:
+        print(f"{ts()} [plan] Status 字段缺少「计划评审」选项，无法创建子卡（请在项目设置添加）", flush=True)
         return []
     # 子任务标签必须先存在，否则后续 add_label 全部失败（gh 对不存在的标签报错），
     # 导致子卡缺失「子任务」标签、测试失败回退限制失效
@@ -839,7 +839,7 @@ def create_plan_children(parent_number, plans):
                  "--url", url, "--format", "json", "--jq", ".id"],
                 cwd=REPO_DIR, text=True).strip().strip('"')
             gh_edit(id=item_id, field_id=STATUS_FIELD_ID,
-                    single_select_option_id=OPTION_IDS["计划"])
+                    single_select_option_id=OPTION_IDS["计划评审"])
             add_label(number, label=CHILD_LABEL)
             created.append((number, title))
             print(f"{ts()} [plan] 已创建子卡 #{number} {p['title']!r}", flush=True)
@@ -1051,7 +1051,7 @@ def run_agent_mode(card_id, original_title, current, target, issue_number=None, 
     mark_in_progress(card_id, original_title, issue_number)
 
     # 需求分解/计划/测试阶段捕获输出
-    capture = current in ("需求分解", "计划", "测试")
+    capture = current in ("需求分解", "计划评审", "测试")
     ok, output, timed_out = run_agent(prompt, capture_output=capture)
 
     # 检查测试是否失败（通过输出中的标志）
@@ -1082,7 +1082,7 @@ def run_agent_mode(card_id, original_title, current, target, issue_number=None, 
                     add_comment(issue_number, f"## 📋 已分解为 {len(children)} 个子任务\n\n{listing}")
                     update_progress_comment(
                         issue_number, f"📊 子卡进度：0/{len(children)} 完成\n\n{PROGRESS_MARKER}")
-                    target_status = "计划"  # 父卡移入计划列等待子卡收尾
+                    target_status = "计划评审"  # 父卡移入计划评审列等待子卡收尾
                     log_step(original_title, f"计划(分解为{len(children)}个子任务)")
                     print(f"{ts()} [agent] 已分解: {original_title!r} -> {len(children)} 张子卡")
                 else:
@@ -1099,7 +1099,7 @@ def run_agent_mode(card_id, original_title, current, target, issue_number=None, 
                         print(f"{ts()} [agent] 写入卡片描述失败: {e}")
 
         # 计划阶段（评审 agent）：把评审结论写回卡片（通过/修订记录）
-        if current == "计划" and output:
+        if current == "计划评审" and output:
             verdict = "通过" if "需要修订" not in output[:200] else "修订"
             record = f"## 评审记录（{verdict}）\n\n{output.strip()}"
             if issue_number:
@@ -1138,8 +1138,8 @@ def run_agent_mode(card_id, original_title, current, target, issue_number=None, 
         fail_target = parse_fallback_target(output or "")
         if is_child and fail_target == "需求分解":
             # 子卡不回需求分解（防止触发父卡重新分解），改由评审 agent 修订计划
-            fail_target = "计划"
-            print(f"{ts()} [agent] 子卡回退目标「需求分解」已强制改为「计划」")
+            fail_target = "计划评审"
+            print(f"{ts()} [agent] 子卡回退目标「需求分解」已强制改为「计划评审」")
         fail_body = f"## 测试失败报告（第 {fail_count} 次）\n\n**失败时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n**失败原因**:\n\n{failure_reason}"
 
         # 失败报告：Issue 卡写评论（body 无法用 item-edit 更新），DraftIssue 卡追加到描述
@@ -1169,7 +1169,7 @@ def run_agent_mode(card_id, original_title, current, target, issue_number=None, 
                          f"或直接在 GitHub 上移除该卡全部「❌ 测试失败」标签，\n"
                          f"    或给卡片添加标签「需要重新计划」（退回需求分解重新计划）或「需要改动」（退回开发实现），\n"
                          f"    下一轮扫描会自动按标签路由处理；\n"
-                         f"3. 也可手动把卡片移到「计划」列（评审 agent 修订计划）或「开发」/「需求分解」列继续。")
+                         f"3. 也可手动把卡片移到「计划评审」列（评审 agent 修订计划）或「开发」/「需求分解」列继续。")
             if issue_number:
                 add_comment(issue_number, halt_body)
             else:
@@ -1225,7 +1225,7 @@ def launch_agent(card_id, original_title, current, target, issue_number, content
         stdin=subprocess.DEVNULL,
     )
     suffix = f"（{reason}）" if reason else ""
-    stage = {"需求分解": "需求分解 agent", "计划": "评审 agent", "开发": "开发 agent",
+    stage = {"需求分解": "需求分解 agent", "计划评审": "评审 agent", "开发": "开发 agent",
              "测试": "测试 agent"}.get(current, current)
     print(f"{ts()} 已启动后台 {stage}{suffix}: {original_title!r} ({current} -> {target})", flush=True)
 
@@ -1313,10 +1313,10 @@ def run_scan_mode():
             launched += 1
             continue
 
-        if current in (None, "Todo", "评审"):
-            note = "预留" if current == "评审" else "手动控制"
+        if current in (None, "Todo", "终审"):
+            note = "预留" if current == "终审" else "手动控制"
             print(f"{ts()} 跳过({note}): {title!r} 状态 {current!r}"
-                  + ("" if current == "评审" else "，请手动移到「需求分解」"), flush=True)
+                  + ("" if current == "终审" else "，请手动移到「需求分解」"), flush=True)
             continue
         if current == "Done":
             print(f"{ts()} 跳过(已完成): {title!r}", flush=True)
