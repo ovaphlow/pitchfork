@@ -5,13 +5,13 @@
 支持 --loop 自循环模式：每 10 分钟（可 --interval 调整）从扫描看板重新开始。
 后台 agent：pi 完成文件改动 → 自己调 gh 更新看板状态。
 
-Todo 列不处理（手动控制），从「需求」开始：
-  需求 -> 「需求 agent」分析需求、形成文档
+Todo 列不处理（手动控制），从「需求分解」开始：
+  需求分解 -> 「需求分解 agent」分析需求、形成文档
           ├─ 不分解：-> 开发
           └─ 分解：输出 JSON 计划列表 → 脚本创建 N 张子任务卡（落「计划」列，带「子任务」标签）
              → 父卡打「已分解」标签并移入「计划」列，等待全部子卡 Done 后自动 Done
              拆分规则：按层切片（后端卡/前端卡），先后端后前端，前端卡声明依赖的后端卡；契约先行，
-             单卡控制在 agent 一轮可完成粒度（详见「需求」阶段 prompt）
+             单卡控制在 agent 一轮可完成粒度（详见「需求分解」阶段 prompt）
   计划 -> 「评审 agent」评估/修订计划卡（通过或修订后都）-> 开发
   开发 -> 「开发 agent」编码实现             -> 测试
   测试 -> 「测试 agent」验证                 -> Done（子任务卡 Done 时自动 close issue）
@@ -26,21 +26,21 @@ Todo 列不处理（手动控制），从「需求」开始：
   才视为残留并清除。agent 崩溃后残留标签最迟约 1 小时后由扫描清除并重新启动流程。
   DraftIssue 卡无标签能力，仍回退锁文件（/tmp/kanban_automator.lock）。
 
-防死循环：测试失败由测试 agent 决定回退「需求」或「开发」（验收口径/需求问题退需求，
+防死循环：测试失败由测试 agent 决定回退「需求分解」或「开发」（验收口径/需求问题退需求分解，
 实现缺陷退开发），最多 MAX_TEST_FAILURES 次；超过后停止自动流转
 （卡片留在测试列并加评论说明）。Issue 卡失败次数以「❌ 测试失败 N」标签记录
 （代替失败状态文件，卡片上直接可见）；人工修复后运行 `--reset <card_id>`（摘除失败标签）
 恢复，或直接在 GitHub 上移除失败标签。
 父卡/子卡规则：
   - 防重复分解：「已分解」标签为主闸，subIssues 查询兜底（有子卡但缺标签时自动补打）；
-    建卡由脚本完成（解析需求 agent 的 JSON），agent 不直接调 gh 建卡。
+    建卡由脚本完成（解析需求分解 agent 的 JSON），agent 不直接调 gh 建卡。
   - 子任务卡（带「子任务」标签）永不分解；测试失败只回退「开发」或「计划」
-    （输出「需求」会被强制改为「计划」，避免触发父卡重新分解）。
+    （输出「需求分解」会被强制改为「计划」，避免触发父卡重新分解）。
   - 父卡聚合：每轮扫描更新「📊 子卡进度」评论（原地 PATCH 不刷屏）；全部子卡 Done 后
     父卡移 Done + 汇总评论 + close 父 issue + 摘「已分解」标签；父卡本身永不启动 agent。
 
 标签路由：给 Issue 卡加「需要重新计划」/「需要改动」标签，扫描时先把卡片移入
-「需求」/「开发」列（与处理阶段一致），再按对应阶段启动 agent，并自动清除 halt 停止状态
+「需求分解」/「开发」列（与处理阶段一致），再按对应阶段启动 agent，并自动清除 halt 停止状态
 （父卡忽略并摘除路由标签）。
 测试失败判定以输出开头的 ❌ 标记为准，避免 "0 failures"/"无需 ❌ 标记" 等通过措辞误判。
 """
@@ -94,7 +94,7 @@ LABEL_STALE_AFTER = AGENT_TIMEOUT + 120 + STALE_GRACE
 STATUS_FIELD_ID = "PVTSSF_lAHOAAOE884AYQefzgPghq8"
 OPTION_IDS = {
     "Todo": "f75ad846",
-    "需求": "6ff7dcda",
+    "需求分解": "6ff7dcda",
     "计划": "9a427661",
     "开发": "47fc9ee4",
     "测试": "ceaca6cd",
@@ -104,7 +104,7 @@ OPTION_IDS = {
 OPTION_MISSING = set()  # resolve_option_ids() 填充：Status 字段缺失的选项名
 
 TRANSITIONS = {
-    "需求": "开发",   # 需求 agent 输出分解时，实际目标改为「计划」（父卡）
+    "需求分解": "开发",   # 需求分解 agent 输出分解时，实际目标改为「计划」（父卡）
     "计划": "开发",   # 评审 agent 评估/修订计划卡
     "开发": "测试",
     "测试": "Done",
@@ -113,13 +113,13 @@ TRANSITIONS = {
 # 需求分解为子任务
 MAX_PLANS = 50                      # 单个需求最多分解的子任务数（宽松兜底：每列并发 1，
                                # 卡数只影响排队时长不影响正确性；对齐 subIssues 查询上限留余量）
-CHILD_LABEL = "子任务"              # 子任务卡标记（需求 agent 建卡时打上）
+CHILD_LABEL = "子任务"              # 子任务卡标记（需求分解 agent 建卡时打上）
 DECOMPOSED_LABEL = "已分解"         # 父卡标记：已分解，等待子卡收尾（防重复分解主闸）
 DECOMPOSED_LABEL_COLOR = "0E8A16"
 PROGRESS_MARKER = "<!-- kanban-progress -->"  # 父卡进度评论标记（原地 PATCH 用）
 
 # 标签路由：给 Issue 卡加标签即可改变自动流转方向（优先级高于列状态与 halt 停止）：
-#   「需要重新计划」→ 卡片先移到「需求」列，再由需求 agent 重新分析/修订计划（目标：开发）
+#   「需要重新计划」→ 卡片先移到「需求分解」列，再由需求分解 agent 重新分析/修订计划（目标：开发）
 #   「需要改动」    → 卡片先移到「开发」列，再由开发 agent 实现改动（目标：测试）
 ROUTE_LABELS = {
     "需要重新计划": "开发",
@@ -128,7 +128,7 @@ ROUTE_LABELS = {
 
 # 列 → 路由标签映射：卡片离开某列前摘除对应标签，防止残留标签再次触发路由
 COLUMN_ROUTE_LABELS = {
-    "需求": "需要重新计划",
+    "需求分解": "需要重新计划",
     "开发": "需要改动",
 }
 
@@ -145,7 +145,7 @@ FAIL_LABEL_COLOR = "B60205"
 FAIL_LABELS = [f"❌ 测试失败 {i}" for i in range(1, MAX_TEST_FAILURES + 1)]
 
 STAGE_PROMPTS = {
-    "需求": "你是需求分析 agent。请分析看板卡片的需求，形成清晰的需求规格说明。" \
+    "需求分解": "你是需求分解 agent。请分析看板卡片的需求，形成清晰的需求规格说明。" \
               "直接输出分析结果（包含背景、目标、验收标准等），不要写入文件。\n\n" \
               "验收标准只写**可以通过程序构建、单元测试/路由测试验证**的内容；" \
               "**不要包含任何 e2e 测试、数据库集成测试、浏览器验收类条目**（如「需在真实环境验证」「集成/E2E 验收」）——" \
@@ -195,10 +195,10 @@ STAGE_PROMPTS = {
               "同时输出一行**回退目标**（由你自行判断卡片应退回哪一列）：\n" \
               "- 代码/构建/单元测试层面的实现缺陷 → `回退目标：开发`；\n" \
               "- 验收标准本身有问题（口径不清、需求缺失或矛盾、需要需求/计划角色决策，" \
-              "例如评论中提出的计划决策点）→ `回退目标：需求`。\n" \
+              "例如评论中提出的计划决策点）→ `回退目标：需求分解`。\n" \
               "失败时必须且只能输出其中一行（放在 ❌ 标记之后）；通过时不要输出。\n\n" \
               "如果这是子任务卡片（Issue 带「子任务」标签），回退目标只能输出「开发」或「计划」——" \
-              "验收口径问题输出 `回退目标：计划`（由评审 agent 修订计划），不要输出「需求」。",
+              "验收口径问题输出 `回退目标：计划`（由评审 agent 修订计划），不要输出「需求分解」。",
 }
 
 
@@ -277,7 +277,7 @@ def get_issue_labels(issue_number):
 
 def remove_column_route_label(issue_number, column):
     """卡片离开某列前，摘除该列对应的路由标签（防止残留标签再次触发路由）。
-    例：需求列对应「需要重新计划」，开发列对应「需要改动」；测试列无对应标签。"""
+    例：需求分解列对应「需要重新计划」，开发列对应「需要改动」；测试列无对应标签。"""
     if not issue_number:
         return
     label = COLUMN_ROUTE_LABELS.get(column)
@@ -755,7 +755,7 @@ def resolve_option_ids():
                     ids[opt["name"]] = opt["id"]
     except (subprocess.CalledProcessError, json.JSONDecodeError, KeyError, TypeError):
         pass
-    for name in ("Todo", "需求", "计划", "开发", "测试", "评审", "Done"):
+    for name in ("Todo", "需求分解", "计划", "开发", "测试", "评审", "Done"):
         if name not in ids:
             missing.add(name)
     OPTION_IDS = ids
@@ -776,7 +776,7 @@ def resolve_option_ids():
 # ---------- 需求分解 / 子任务 ----------
 
 def parse_plan_json(text):
-    """从需求 agent 输出中解析计划列表（```json 围栏或纯 JSON）。
+    """从需求分解 agent 输出中解析计划列表（```json 围栏或纯 JSON）。
     格式不符/超限/缺字段时返回 None（调用方降级为单卡流程）。"""
     m = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
     candidate = m.group(1) if m else text.strip()
@@ -788,7 +788,7 @@ def parse_plan_json(text):
         return None
     if not isinstance(plans, list) or not plans or len(plans) > MAX_PLANS:
         if isinstance(plans, list) and len(plans) > MAX_PLANS:
-            print(f"{ts()} [plan] 需求 agent 输出 {len(plans)} 条计划超过上限 {MAX_PLANS}，"
+            print(f"{ts()} [plan] 需求分解 agent 输出 {len(plans)} 条计划超过上限 {MAX_PLANS}，"
                   f"本次不分解（降级单卡流程）", flush=True)
         return None
     out = []
@@ -815,7 +815,7 @@ def split_spec_and_json(text):
 
 
 def create_plan_children(parent_number, plans):
-    """把需求 agent 的 JSON 计划列表落成子任务卡：
+    """把需求分解 agent 的 JSON 计划列表落成子任务卡：
     gh issue create --parent 关联 → 加入看板 → 置「计划」列 → 打「子任务」标签。
     返回 [(issue_number, title)]；全部失败返回 []。"""
     if "计划" in OPTION_MISSING:
@@ -991,11 +991,11 @@ def is_test_failure(output):
 
 
 def parse_fallback_target(output):
-    """解析测试 agent 声明的回退目标。格式：`回退目标：需求` 或 `回退目标：开发`。
+    """解析测试 agent 声明的回退目标。格式：`回退目标：需求分解` 或 `回退目标：开发`。
     未声明或格式不符时默认回退开发。"""
     if not output:
         return TEST_FAIL_TARGET
-    m = re.search(r"回退目标\s*[:：]\s*(需求|开发)", output)
+    m = re.search(r"回退目标\s*[:：]\s*(需求分解|需求|开发)", output)
     return m.group(1) if m else TEST_FAIL_TARGET
 
 
@@ -1035,7 +1035,7 @@ def run_agent_mode(card_id, original_title, current, target, issue_number=None, 
             pass
 
     prompt = STAGE_PROMPTS[current]
-    if current == "需求" and is_child:
+    if current == "需求分解" and is_child:
         prompt += "\n\n注意：这是子任务卡片，只输出规格说明，不要输出 JSON 分解块。"
     prompt += f"\n\n看板标题：{original_title}"
     if card_body:
@@ -1050,8 +1050,8 @@ def run_agent_mode(card_id, original_title, current, target, issue_number=None, 
     print(f"{ts()} [agent] 开始: {original_title!r} ({current} -> {target})")
     mark_in_progress(card_id, original_title, issue_number)
 
-    # 需求/计划/测试阶段捕获输出
-    capture = current in ("需求", "计划", "测试")
+    # 需求分解/计划/测试阶段捕获输出
+    capture = current in ("需求分解", "计划", "测试")
     ok, output, timed_out = run_agent(prompt, capture_output=capture)
 
     # 检查测试是否失败（通过输出中的标志）
@@ -1065,8 +1065,8 @@ def run_agent_mode(card_id, original_title, current, target, issue_number=None, 
     if ok and not test_failed:
         target_status = target
 
-        # 需求阶段：写规格说明；若输出 JSON 计划列表且非子任务 → 分解为子任务卡
-        if current == "需求" and output:
+        # 需求分解阶段：写规格说明；若输出 JSON 计划列表且非子任务 → 分解为子任务卡
+        if current == "需求分解" and output:
             plan_output = output.strip()
             spec_text = split_spec_and_json(plan_output)
             plans = None if is_child else parse_plan_json(plan_output)
@@ -1116,7 +1116,7 @@ def run_agent_mode(card_id, original_title, current, target, issue_number=None, 
         # 标签语义 = 当前列里正在被处理的那张卡；锁文件条目最后再清（防误重启）
         if issue_number:
             remove_label(issue_number)
-        # 移走前摘除当前列对应的路由标签（如需求列的「需要重新计划」），防止残留标签再次触发路由
+        # 移走前摘除当前列对应的路由标签（如需求分解列的「需要重新计划」），防止残留标签再次触发路由
         remove_column_route_label(issue_number, current)
 
         gh_edit(id=card_id, field_id=STATUS_FIELD_ID,
@@ -1133,13 +1133,13 @@ def run_agent_mode(card_id, original_title, current, target, issue_number=None, 
         log_step(original_title, target_status)
         print(f"{ts()} [agent] 完成: {original_title!r} -> {target_status}")
     elif test_failed:
-        # 测试失败：记录失败次数；由测试 agent 声明回退目标（需求/开发），未超限则回退，超限则停止自动流转
+        # 测试失败：记录失败次数；由测试 agent 声明回退目标（需求分解/开发），未超限则回退，超限则停止自动流转
         fail_count, halted = record_test_failure(card_id, original_title, issue_number)
         fail_target = parse_fallback_target(output or "")
-        if is_child and fail_target == "需求":
-            # 子卡不回需求（防止触发父卡重新分解），改由评审 agent 修订计划
+        if is_child and fail_target == "需求分解":
+            # 子卡不回需求分解（防止触发父卡重新分解），改由评审 agent 修订计划
             fail_target = "计划"
-            print(f"{ts()} [agent] 子卡回退目标「需求」已强制改为「计划」")
+            print(f"{ts()} [agent] 子卡回退目标「需求分解」已强制改为「计划」")
         fail_body = f"## 测试失败报告（第 {fail_count} 次）\n\n**失败时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n**失败原因**:\n\n{failure_reason}"
 
         # 失败报告：Issue 卡写评论（body 无法用 item-edit 更新），DraftIssue 卡追加到描述
@@ -1167,9 +1167,9 @@ def run_agent_mode(card_id, original_title, current, target, issue_number=None, 
                          f"2. 恢复自动流转：运行 `python3 kanban_automator.py --reset {card_id}`"
                          f"（会摘除本卡全部「❌ 测试失败」标签），"
                          f"或直接在 GitHub 上移除该卡全部「❌ 测试失败」标签，\n"
-                         f"    或给卡片添加标签「需要重新计划」（退回需求重新计划）或「需要改动」（退回开发实现），\n"
+                         f"    或给卡片添加标签「需要重新计划」（退回需求分解重新计划）或「需要改动」（退回开发实现），\n"
                          f"    下一轮扫描会自动按标签路由处理；\n"
-                         f"3. 也可手动把卡片移到「计划」列（评审 agent 修订计划）或「开发」/「需求」列继续。")
+                         f"3. 也可手动把卡片移到「计划」列（评审 agent 修订计划）或「开发」/「需求分解」列继续。")
             if issue_number:
                 add_comment(issue_number, halt_body)
             else:
@@ -1225,7 +1225,7 @@ def launch_agent(card_id, original_title, current, target, issue_number, content
         stdin=subprocess.DEVNULL,
     )
     suffix = f"（{reason}）" if reason else ""
-    stage = {"需求": "需求 agent", "计划": "评审 agent", "开发": "开发 agent",
+    stage = {"需求分解": "需求分解 agent", "计划": "评审 agent", "开发": "开发 agent",
              "测试": "测试 agent"}.get(current, current)
     print(f"{ts()} 已启动后台 {stage}{suffix}: {original_title!r} ({current} -> {target})", flush=True)
 
@@ -1233,7 +1233,7 @@ def launch_agent(card_id, original_title, current, target, issue_number, content
 def run_scan_mode():
     """扫描看板，为每张待处理卡起后台 agent，秒级返回。"""
     items = get_items()
-    # 子任务执行顺序保证：按 issue number 升序处理。子卡由需求 agent 的 JSON 顺序创建
+    # 子任务执行顺序保证：按 issue number 升序处理。子卡由需求分解 agent 的 JSON 顺序创建
     # （先全部后端卡、后全部前端卡），后端卡号小前端卡号大；升序即先后端后前端，
     # 各列（计划/开发/测试）每轮并发 1，队列顺序 = 执行顺序。DraftIssue 无编号排最后。
     items.sort(key=lambda c: (c.get("content", {}).get("number") is None,
@@ -1272,7 +1272,7 @@ def run_scan_mode():
             if aggregate_parent(card, issue_number, labels, items_by_number):
                 continue
 
-        # 标签路由：需要重新计划 -> 需求 agent（目标开发）；需要改动 -> 开发 agent（目标测试）
+        # 标签路由：需要重新计划 -> 需求分解 agent（目标开发）；需要改动 -> 开发 agent（目标测试）
         route_label = None
         route_target = None
         for label, target in ROUTE_LABELS.items():
@@ -1280,8 +1280,8 @@ def run_scan_mode():
                 route_label, route_target = label, target
                 break
         if route_target:
-            # 虚拟列 = 该目标对应的处理列（需求->开发 由需求 agent 处理；开发->测试 由开发 agent 处理）
-            virtual = "需求" if route_target == "开发" else "开发"
+            # 虚拟列 = 该目标对应的处理列（需求分解->开发 由需求分解 agent 处理；开发->测试 由开发 agent 处理）
+            virtual = "需求分解" if route_target == "开发" else "开发"
 
             # 处理中标记检查：Issue 卡看「⏳ 处理中」标签，DraftIssue 卡看锁文件
             in_progress, fatal = in_progress_state(card_id, issue_number, labels)
@@ -1300,7 +1300,7 @@ def run_scan_mode():
             remove_label(issue_number, label=route_label)
             clear_fail_state(card_id, issue_number)
 
-            # 先把卡片移到对应处理列（需要重新计划 -> 需求；需要改动 -> 开发），
+            # 先把卡片移到对应处理列（需要重新计划 -> 需求分解；需要改动 -> 开发），
             # 看板状态与实际处理阶段保持一致；随后同轮直接启动 agent
             try:
                 gh_edit(id=card_id, field_id=STATUS_FIELD_ID,
@@ -1316,7 +1316,7 @@ def run_scan_mode():
         if current in (None, "Todo", "评审"):
             note = "预留" if current == "评审" else "手动控制"
             print(f"{ts()} 跳过({note}): {title!r} 状态 {current!r}"
-                  + ("" if current == "评审" else "，请手动移到「需求」"), flush=True)
+                  + ("" if current == "评审" else "，请手动移到「需求分解」"), flush=True)
             continue
         if current == "Done":
             print(f"{ts()} 跳过(已完成): {title!r}", flush=True)
@@ -1391,6 +1391,12 @@ def run_loop_mode(interval=600):
 
 
 def main():
+    # stdout 可能是文件（LOG_OUTPUT 重定向）：强制行缓冲，保证 print 实时落盘；
+    # 否则 agent 崩溃时缓冲中的日志全部丢失，无法定位
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
     # --reset 模式：清除卡片失败状态，恢复自动流转
     if "--reset" in sys.argv:
         idx = sys.argv.index("--reset") + 1
