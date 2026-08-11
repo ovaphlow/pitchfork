@@ -230,7 +230,8 @@ def add_label(issue_number, label=IN_PROGRESS_LABEL):
             cwd=REPO_DIR, check=True, capture_output=True,
         )
     except subprocess.CalledProcessError as e:
-        print(f"{ts()} [label] 添加标签失败: {e}")
+        print(f"{ts()} [label] 添加标签失败: "
+              f"{(e.stderr or b'').decode(errors='replace').strip() or e}", flush=True)
 
 
 def remove_label(issue_number, label=IN_PROGRESS_LABEL):
@@ -240,8 +241,9 @@ def remove_label(issue_number, label=IN_PROGRESS_LABEL):
             ["gh", "issue", "edit", str(issue_number), "--remove-label", label],
             cwd=REPO_DIR, check=True, capture_output=True,
         )
-    except subprocess.CalledProcessError:
-        pass
+    except subprocess.CalledProcessError as e:
+        print(f"{ts()} [label] 移除标签失败: "
+              f"{(e.stderr or b'').decode(errors='replace').strip() or e}", flush=True)
 
 
 def ensure_label(name, color=FAIL_LABEL_COLOR, description="看板自动流转状态标签"):
@@ -810,6 +812,9 @@ def create_plan_children(parent_number, plans):
     if "计划" in OPTION_MISSING:
         print(f"{ts()} [plan] Status 字段缺少「计划」选项，无法创建子卡（请在项目设置添加）", flush=True)
         return []
+    # 子任务标签必须先存在，否则后续 add_label 全部失败（gh 对不存在的标签报错），
+    # 导致子卡缺失「子任务」标签、测试失败回退限制失效
+    ensure_label(CHILD_LABEL, color="0E8A16", description="看板子任务卡标记（由需求分解生成）")
     created = []
     for p in plans:
         title = f"[#{parent_number}] {p['title']}"
