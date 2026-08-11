@@ -1217,6 +1217,11 @@ def launch_agent(card_id, original_title, current, target, issue_number, content
 def run_scan_mode():
     """扫描看板，为每张待处理卡起后台 agent，秒级返回。"""
     items = get_items()
+    # 子任务执行顺序保证：按 issue number 升序处理。子卡由需求 agent 的 JSON 顺序创建
+    # （先全部后端卡、后全部前端卡），后端卡号小前端卡号大；升序即先后端后前端，
+    # 各列（计划/开发/测试）每轮并发 1，队列顺序 = 执行顺序。DraftIssue 无编号排最后。
+    items.sort(key=lambda c: (c.get("content", {}).get("number") is None,
+                              c.get("content", {}).get("number") or 0))
     busy_columns = set()
     launched = 0
     resolve_option_ids()
