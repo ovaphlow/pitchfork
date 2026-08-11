@@ -1170,7 +1170,7 @@ def launch_agent(card_id, original_title, current, target, issue_number, content
         stdin=subprocess.DEVNULL,
     )
     suffix = f"（{reason}）" if reason else ""
-    print(f"{ts()} 已启动后台 agent{suffix}: {original_title!r} -> {target}")
+    print(f"{ts()} 已启动后台 agent{suffix}: {original_title!r} -> {target}", flush=True)
 
 
 def run_scan_mode():
@@ -1206,7 +1206,7 @@ def run_scan_mode():
             route = next((l for l in ROUTE_LABELS if l in labels), None)
             if route:
                 remove_label(issue_number, label=route)
-                print(f"{ts()} 父卡忽略路由标签: {title!r}")
+                print(f"{ts()} 父卡忽略路由标签: {title!r}", flush=True)
             if aggregate_parent(card, issue_number, labels, items_by_number):
                 continue
 
@@ -1226,11 +1226,11 @@ def run_scan_mode():
             if fatal:
                 return
             if in_progress:
-                print(f"{ts()} 跳过(处理中): {title!r}")
+                print(f"{ts()} 跳过(处理中): {title!r}", flush=True)
                 busy_columns.add(virtual)
                 continue
             if virtual in busy_columns:
-                print(f"{ts()} 跳过(列忙): {title!r} 列 {virtual!r} 已有工作在进行")
+                print(f"{ts()} 跳过(列忙): {title!r} 列 {virtual!r} 已有工作在进行", flush=True)
                 continue
             busy_columns.add(virtual)
 
@@ -1245,7 +1245,7 @@ def run_scan_mode():
                         single_select_option_id=OPTION_IDS[virtual])
                 log_step(original_title, f"{virtual}(标签路由:{route_label})")
             except subprocess.CalledProcessError as e:
-                print(f"{ts()} [label] 移列失败: {e}")
+                print(f"{ts()} [label] 移列失败: {e}", flush=True)
             launch_agent(card_id, original_title, virtual, route_target, issue_number, content_id,
                          reason=f"标签路由:{route_label}")
             launched += 1
@@ -1254,10 +1254,10 @@ def run_scan_mode():
         if current in (None, "Todo", "评审"):
             note = "预留" if current == "评审" else "手动控制"
             print(f"{ts()} 跳过({note}): {title!r} 状态 {current!r}"
-                  + ("" if current == "评审" else "，请手动移到「需求」"))
+                  + ("" if current == "评审" else "，请手动移到「需求」"), flush=True)
             continue
         if current == "Done":
-            print(f"{ts()} 跳过(已完成): {title!r}")
+            print(f"{ts()} 跳过(已完成): {title!r}", flush=True)
             continue
 
         # 处理中标记检查：Issue 卡看「⏳ 处理中」标签，DraftIssue 卡看锁文件
@@ -1265,18 +1265,18 @@ def run_scan_mode():
         if fatal:
             return
         if in_progress:
-            print(f"{ts()} 跳过(处理中): {title!r}")
+            print(f"{ts()} 跳过(处理中): {title!r}", flush=True)
             busy_columns.add(current)
             continue
 
         # 已因测试失败超限停止流转的卡：不再自动处理，直到人工 --reset 或加路由标签
         if is_halted(card_id, issue_number, labels):
             print(f"{ts()} 跳过(已停止流转): {title!r} 测试失败达 {MAX_TEST_FAILURES} 次，"
-                  f"请人工介入后运行 --reset {card_id} 或加路由标签")
+                  f"请人工介入后运行 --reset {card_id} 或加路由标签", flush=True)
             continue
 
         if current in busy_columns:
-            print(f"{ts()} 跳过(列忙): {title!r} 列 {current!r} 已有工作在进行")
+            print(f"{ts()} 跳过(列忙): {title!r} 列 {current!r} 已有工作在进行", flush=True)
             continue
         busy_columns.add(current)
 
@@ -1286,7 +1286,7 @@ def run_scan_mode():
         launch_agent(card_id, original_title, current, target, issue_number, content_id)
         launched += 1
 
-    print(f"{ts()} 完成，共启动 {launched} 个后台 agent")
+    print(f"{ts()} 完成，共启动 {launched} 个后台 agent", flush=True)
 
 
 # ---------- 入口 ----------
