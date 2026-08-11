@@ -273,12 +273,13 @@ def repo_name():
 
 def get_label_added_at(issue_number, label):
     """查询标签最近一次被添加到该 Issue 的时间（GraphQL LabeledEvent，时间线按时间升序）。
-    失败返回 None。"""
+    取最后一个匹配事件（= 最近一次 add；remove-then-add 会追加新事件，取首个会拿到
+    历史旧事件导致误判过期）。失败返回 None。"""
     owner, _, repo = repo_name().partition("/")
     query = """query($owner:String!,$repo:String!,$number:Int!){
       repository(owner:$owner,name:$repo){
         issue(number:$number){
-          timelineItems(itemTypes:[LABELED_EVENT], first:20){
+          timelineItems(itemTypes:[LABELED_EVENT], first:100){
             nodes{... on LabeledEvent{createdAt label{name}}}
           }
         }
@@ -290,10 +291,12 @@ def get_label_added_at(issue_number, label):
              "-F", f"owner={owner}", "-F", f"repo={repo}",
              "-F", f"number={issue_number}"],
             cwd=REPO_DIR))
-        nodes = out["data"]["repository"]["issue"]["timelineItems"]["nodes"]
-        for n in nodes:
+        added = None
+        for n in out["data"]["repository"]["issue"]["timelineItems"]["nodes"]:
             if n.get("label", {}).get("name") == label:
-                return datetime.fromisoformat(n["createdAt"].replace("Z", "+00:00"))
+                added = datetime.fromisoformat(n["createdAt"].replace("Z", "+00:00"))
+        if added is not None:
+            return added
     except (subprocess.CalledProcessError, json.JSONDecodeError,
             KeyError, TypeError, ValueError):
         pass
