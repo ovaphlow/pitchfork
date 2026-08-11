@@ -17,7 +17,7 @@ cross product boundaries.
 |---|---|
 | Platform | `permissions`, `logging`, `database`, `common` |
 | Trainova | `knowledge`, `skills`, `trainings`, `exams`, `onsite`, `analytics` |
-| Aceso | `inventories`, `pharmacy`, `nursing` |
+| Aceso | `inventories`, `pharmacy`, `nursing`, `dining` |
 | Incubating | `healthcare` |
 
 An app owns route mounting, runtime configuration and its declared libraries.

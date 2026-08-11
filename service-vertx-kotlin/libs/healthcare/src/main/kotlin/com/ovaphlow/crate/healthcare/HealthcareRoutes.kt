@@ -4,6 +4,7 @@ import com.ovaphlow.crate.nursing.ConflictException
 import com.ovaphlow.crate.nursing.NotFoundException
 import io.vertx.core.Handler
 import io.vertx.core.Vertx
+import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
 import io.vertx.ext.web.Router
 import io.vertx.ext.web.RoutingContext
@@ -25,12 +26,14 @@ object HealthcareRoutes {
         followupAuthHandler: Handler<RoutingContext>? = null,
         vitalSignAuthHandler: Handler<RoutingContext>? = null,
         chronicDiseaseAuthHandler: Handler<RoutingContext>? = null,
+        checkupAuthHandler: Handler<RoutingContext>? = null,
     ): Router {
         val router = Router.router(vertx)
         val service = HealthcareService(pool)
         val chronicDiseaseService = ChronicDiseaseService(pool)
         val followupService = FollowupService(pool, chronicDiseaseService = chronicDiseaseService)
         val vitalSignService = VitalSignService(pool)
+        val checkupService = CheckupService(pool)
 
         router.route().handler(BodyHandler.create())
 
@@ -594,6 +597,126 @@ object HealthcareRoutes {
                 .onFailure { respondFailure(ctx, it) }
         }
 
+        // ========================================================================
+        //  体检管理 (Health Checkup) — 医疗/养老/儿保共用
+        //  批次（年度唯一）+ 参检名单快照 + 结果录入；异常项转体征/转随访。
+        //  写路由的认证中间件由 App 编排层注入；未注入时业务处理器保持 401 兜底。
+        // ========================================================================
+        if (checkupAuthHandler != null) {
+            router.post("/health-checkups").handler(checkupAuthHandler)
+            router.patch("/health-checkups/:id/status").handler(checkupAuthHandler)
+            router.post("/health-checkups/:id/members").handler(checkupAuthHandler)
+            router.post("/health-checkups/:id/results").handler(checkupAuthHandler)
+            router.patch("/health-checkup-results/:id").handler(checkupAuthHandler)
+            router.post("/health-checkup-results/:id/to-vital-sign").handler(checkupAuthHandler)
+            router.post("/health-checkup-results/:id/to-followup").handler(checkupAuthHandler)
+        }
+        router.post("/health-checkups").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            checkupService.createCheckup(body(ctx), userId)
+                .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                .onFailure { respondCheckupCreateFailure(ctx, it) }
+        }
+        router.get("/health-checkups").handler { ctx ->
+            checkupService.listCheckups(
+                status = ctx.request().getParam("status"),
+                limit = limit(ctx),
+                offset = offset(ctx),
+            ).onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.get("/health-checkups/:id").handler { ctx ->
+            checkupService.getCheckup(requiredId(ctx))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.patch("/health-checkups/:id/status").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            checkupService.updateCheckupStatus(requiredId(ctx), body(ctx))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 批次只读统计（应检/已检/完成率/异常汇总）
+        router.get("/health-checkups/:id/stats").handler { ctx ->
+            checkupService.getCheckupStats(requiredId(ctx))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 名单补录（幂等跳过已存在成员）
+        router.post("/health-checkups/:id/members").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            checkupService.addMembers(requiredId(ctx), body(ctx), userId)
+                .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.get("/health-checkups/:id/members").handler { ctx ->
+            checkupService.listMembers(
+                id = requiredId(ctx),
+                checked = ctx.request().getParam("checked"),
+                limit = limit(ctx),
+                offset = offset(ctx),
+            ).onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 结果录入：单条对象或数组批量
+        router.post("/health-checkups/:id/results").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            val raw = ctx.body().buffer()?.toString()?.trim() ?: ""
+            val parsed: Any? = try {
+                JsonObject(raw)
+            } catch (_: RuntimeException) {
+                try {
+                    JsonArray(raw)
+                } catch (_: RuntimeException) {
+                    null
+                }
+            }
+            if (parsed == null) {
+                respond(ctx, 400, "body must be a JSON object or an array of results")
+                return@handler
+            }
+            checkupService.createResults(requiredId(ctx), parsed, userId)
+                .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.get("/health-checkups/:id/results").handler { ctx ->
+            checkupService.listResults(
+                checkupId = requiredId(ctx),
+                abnormal = ctx.request().getParam("abnormal"),
+                patientId = ctx.request().getParam("patient_id"),
+                itemCategory = ctx.request().getParam("item_category"),
+                limit = limit(ctx),
+                offset = offset(ctx),
+            ).onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        router.get("/health-checkup-results/:id").handler { ctx ->
+            checkupService.getResult(requiredId(ctx))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 修正结果（重算异常标记；不级联已生成的体征/随访）
+        router.patch("/health-checkup-results/:id").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            checkupService.updateResult(requiredId(ctx), body(ctx))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 异常转体征（幂等，重复 409）
+        router.post("/health-checkup-results/:id/to-vital-sign").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            checkupService.toVitalSign(requiredId(ctx), userId)
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 异常转随访（幂等，重复 409；体 {followup_type, planned_date?, planned_way?, remark?}）
+        router.post("/health-checkup-results/:id/to-followup").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            checkupService.toFollowup(requiredId(ctx), body(ctx), userId)
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+
         return router
     }
 
@@ -641,6 +764,15 @@ object HealthcareRoutes {
             respond(ctx, 409, "encounter_no already exists")
         } else if (error is DuplicateNursingRecordException) {
             respond(ctx, 409, error.message ?: "nursing record already exists for task execution")
+        } else {
+            respondFailure(ctx, error)
+        }
+    }
+
+    private fun respondCheckupCreateFailure(ctx: RoutingContext, error: Throwable) {
+        val message = error.message?.lowercase() ?: ""
+        if (message.contains("uq_health_checkups_year")) {
+            respond(ctx, 409, "health checkup for this year already exists")
         } else {
             respondFailure(ctx, error)
         }

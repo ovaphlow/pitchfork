@@ -50,7 +50,8 @@ public class ChronicDiseaseRegistrations extends TableImpl<ChronicDiseaseRegistr
     private static final long serialVersionUID = 1L;
 
     /**
-     * The reference instance of <code>healthcare.chronic_disease_registrations</code>
+     * The reference instance of
+     * <code>healthcare.chronic_disease_registrations</code>
      */
     public static final ChronicDiseaseRegistrations CHRONIC_DISEASE_REGISTRATIONS = new ChronicDiseaseRegistrations();
 
@@ -68,52 +69,56 @@ public class ChronicDiseaseRegistrations extends TableImpl<ChronicDiseaseRegistr
     public final TableField<ChronicDiseaseRegistrationsRecord, String> ID = createField(DSL.name("id"), SQLDataType.VARCHAR(32).nullable(false), this, "");
 
     /**
-     * The column <code>healthcare.chronic_disease_registrations.patient_id</code>.
+     * The column
+     * <code>healthcare.chronic_disease_registrations.patient_id</code>.
      * 患者（老人），跨入住长期锚定
      */
     public final TableField<ChronicDiseaseRegistrationsRecord, String> PATIENT_ID = createField(DSL.name("patient_id"), SQLDataType.VARCHAR(32).nullable(false), this, "患者（老人），跨入住长期锚定");
 
     /**
-     * The column <code>healthcare.chronic_disease_registrations.encounter_id</code>.
+     * The column
+     * <code>healthcare.chronic_disease_registrations.encounter_id</code>.
      * 登记时的活动入住锚点，仅用于归属校验
      */
     public final TableField<ChronicDiseaseRegistrationsRecord, String> ENCOUNTER_ID = createField(DSL.name("encounter_id"), SQLDataType.VARCHAR(32).nullable(false), this, "登记时的活动入住锚点，仅用于归属校验");
 
     /**
-     * The column <code>healthcare.chronic_disease_registrations.disease_name</code>.
-     * 中文病种，如 高血压
+     * The column
+     * <code>healthcare.chronic_disease_registrations.disease_name</code>.
      */
-    public final TableField<ChronicDiseaseRegistrationsRecord, String> DISEASE_NAME = createField(DSL.name("disease_name"), SQLDataType.VARCHAR.nullable(false), this, "中文病种，如 高血压");
+    public final TableField<ChronicDiseaseRegistrationsRecord, String> DISEASE_NAME = createField(DSL.name("disease_name"), SQLDataType.VARCHAR.nullable(false), this, "");
 
     /**
-     * The column <code>healthcare.chronic_disease_registrations.icd_code</code>.
-     * ICD 编码（可选）
+     * The column
+     * <code>healthcare.chronic_disease_registrations.icd_code</code>.
      */
-    public final TableField<ChronicDiseaseRegistrationsRecord, String> ICD_CODE = createField(DSL.name("icd_code"), SQLDataType.VARCHAR, this, "ICD 编码（可选）");
+    public final TableField<ChronicDiseaseRegistrationsRecord, String> ICD_CODE = createField(DSL.name("icd_code"), SQLDataType.VARCHAR, this, "");
 
     /**
-     * The column <code>healthcare.chronic_disease_registrations.confirmed_date</code>.
-     * 确诊日期
+     * The column
+     * <code>healthcare.chronic_disease_registrations.confirmed_date</code>.
      */
-    public final TableField<ChronicDiseaseRegistrationsRecord, LocalDate> CONFIRMED_DATE = createField(DSL.name("confirmed_date"), SQLDataType.LOCALDATE.nullable(false), this, "确诊日期");
+    public final TableField<ChronicDiseaseRegistrationsRecord, LocalDate> CONFIRMED_DATE = createField(DSL.name("confirmed_date"), SQLDataType.LOCALDATE.nullable(false), this, "");
 
     /**
-     * The column <code>healthcare.chronic_disease_registrations.control_status</code>.
+     * The column
+     * <code>healthcare.chronic_disease_registrations.control_status</code>.
      * 控制状态，中文枚举：良好/一般/较差/未控制
      */
     public final TableField<ChronicDiseaseRegistrationsRecord, String> CONTROL_STATUS = createField(DSL.name("control_status"), SQLDataType.VARCHAR.nullable(false).defaultValue(DSL.field(DSL.raw("'良好'::character varying"), SQLDataType.VARCHAR)), this, "控制状态，中文枚举：良好/一般/较差/未控制");
 
     /**
-     * The column <code>healthcare.chronic_disease_registrations.followup_frequency</code>.
+     * The column
+     * <code>healthcare.chronic_disease_registrations.followup_frequency</code>.
      * 随访频率，中文枚举：每月/每两月/每季度/每半年/每年
      */
     public final TableField<ChronicDiseaseRegistrationsRecord, String> FOLLOWUP_FREQUENCY = createField(DSL.name("followup_frequency"), SQLDataType.VARCHAR.nullable(false), this, "随访频率，中文枚举：每月/每两月/每季度/每半年/每年");
 
     /**
-     * The column <code>healthcare.chronic_disease_registrations.physician</code>.
-     * 责任医生
+     * The column
+     * <code>healthcare.chronic_disease_registrations.physician</code>.
      */
-    public final TableField<ChronicDiseaseRegistrationsRecord, String> PHYSICIAN = createField(DSL.name("physician"), SQLDataType.VARCHAR, this, "责任医生");
+    public final TableField<ChronicDiseaseRegistrationsRecord, String> PHYSICIAN = createField(DSL.name("physician"), SQLDataType.VARCHAR, this, "");
 
     /**
      * The column <code>healthcare.chronic_disease_registrations.remark</code>.
@@ -127,18 +132,21 @@ public class ChronicDiseaseRegistrations extends TableImpl<ChronicDiseaseRegistr
     public final TableField<ChronicDiseaseRegistrationsRecord, String> STATUS = createField(DSL.name("status"), SQLDataType.VARCHAR.nullable(false).defaultValue(DSL.field(DSL.raw("'管理中'::character varying"), SQLDataType.VARCHAR)), this, "档案状态，中文枚举：管理中/已缓解/已停管（软停管）");
 
     /**
-     * The column <code>healthcare.chronic_disease_registrations.metadata</code>.
-     * 扩展元数据；可含 diagnosis_id 关联来源诊断、followup_frequency 覆盖默认频率
+     * The column
+     * <code>healthcare.chronic_disease_registrations.metadata</code>. 扩展元数据；可含
+     * diagnosis_id 关联来源诊断、followup_frequency 覆盖默认频率
      */
     public final TableField<ChronicDiseaseRegistrationsRecord, JSONB> METADATA = createField(DSL.name("metadata"), SQLDataType.JSONB, this, "扩展元数据；可含 diagnosis_id 关联来源诊断、followup_frequency 覆盖默认频率");
 
     /**
-     * The column <code>healthcare.chronic_disease_registrations.created_at</code>.
+     * The column
+     * <code>healthcare.chronic_disease_registrations.created_at</code>.
      */
     public final TableField<ChronicDiseaseRegistrationsRecord, OffsetDateTime> CREATED_AT = createField(DSL.name("created_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6).defaultValue(DSL.field(DSL.raw("now()"), SQLDataType.TIMESTAMPWITHTIMEZONE)), this, "");
 
     /**
-     * The column <code>healthcare.chronic_disease_registrations.updated_at</code>.
+     * The column
+     * <code>healthcare.chronic_disease_registrations.updated_at</code>.
      */
     public final TableField<ChronicDiseaseRegistrationsRecord, OffsetDateTime> UPDATED_AT = createField(DSL.name("updated_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6).defaultValue(DSL.field(DSL.raw("now()"), SQLDataType.TIMESTAMPWITHTIMEZONE)), this, "");
 
@@ -151,21 +159,24 @@ public class ChronicDiseaseRegistrations extends TableImpl<ChronicDiseaseRegistr
     }
 
     /**
-     * Create an aliased <code>healthcare.chronic_disease_registrations</code> table reference
+     * Create an aliased <code>healthcare.chronic_disease_registrations</code>
+     * table reference
      */
     public ChronicDiseaseRegistrations(String alias) {
         this(DSL.name(alias), CHRONIC_DISEASE_REGISTRATIONS);
     }
 
     /**
-     * Create an aliased <code>healthcare.chronic_disease_registrations</code> table reference
+     * Create an aliased <code>healthcare.chronic_disease_registrations</code>
+     * table reference
      */
     public ChronicDiseaseRegistrations(Name alias) {
         this(alias, CHRONIC_DISEASE_REGISTRATIONS);
     }
 
     /**
-     * Create a <code>healthcare.chronic_disease_registrations</code> table reference
+     * Create a <code>healthcare.chronic_disease_registrations</code> table
+     * reference
      */
     public ChronicDiseaseRegistrations() {
         this(DSL.name("chronic_disease_registrations"), null);

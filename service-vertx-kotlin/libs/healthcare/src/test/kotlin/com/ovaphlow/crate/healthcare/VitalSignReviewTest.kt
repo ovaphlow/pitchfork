@@ -169,7 +169,8 @@ class VitalSignReviewTest {
             "encounter_id" to "enc-1",
             "encounter_no" to "A20260801001",
             "followup_type" to "慢病随访",
-            "planned_date" to LocalDate.parse("2026-08-10"),
+            // 相对今天：避免计划日早于当天被查询计算为已逾期（日期漂移）
+            "planned_date" to LocalDate.now(),
             "planned_way" to "门诊",
             "assignee" to "user-1",
             "status" to "待随访",

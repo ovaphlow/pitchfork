@@ -53,8 +53,8 @@ class VitalSignService(
             "DIASTOLIC_BP", "SPO2", "BLOOD_GLUCOSE", "WEIGHT",
         )
 
-        /** 各类型标准单位；客户端省略 unit 时按类型默认 */
-        private val defaultUnits = mapOf(
+        /** 各类型标准单位；客户端省略 unit 时按类型默认（体检转体征复用） */
+        internal val defaultUnits = mapOf(
             "TEMPERATURE" to "℃",
             "PULSE" to "次/分",
             "RESPIRATION" to "次/分",
@@ -65,8 +65,8 @@ class VitalSignService(
             "WEIGHT" to "kg",
         )
 
-        /** 内置参考范围（含边界）：value < min 或 value > max 记为异常；WEIGHT 不判异常 */
-        private val referenceRanges = mapOf(
+        /** 内置参考范围（含边界）：value < min 或 value > max 记为异常；WEIGHT 不判异常（体检转体征复用） */
+        internal val referenceRanges = mapOf(
             "TEMPERATURE" to (36.0 to 37.3),
             "PULSE" to (60.0 to 100.0),
             "RESPIRATION" to (12.0 to 20.0),

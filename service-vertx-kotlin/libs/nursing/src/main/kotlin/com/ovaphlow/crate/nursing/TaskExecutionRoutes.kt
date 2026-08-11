@@ -23,13 +23,14 @@ object TaskExecutionRoutes {
         overdue != true || status !in TERMINAL_STATUSES
 
     /**
-     * @param administrationAuthHandler 记录给药的认证中间件（由 App 编排层注入，
-     *   写入 ctx userId 作为给药人）；未注入时业务处理器保持 401 兜底。
+     * @param authHandler 认证中间件（由 App 编排层注入，Aceso 为 IDP 会话校验，
+     *   写入 ctx userId 作为操作人）：同时保护记录给药与打卡状态更新两条写路由；
+     *   未注入时业务处理器保持原有行为（不强制登录，也不记录执行人）。
      */
     fun create(
         vertx: Vertx,
         pool: Pool,
-        administrationAuthHandler: Handler<RoutingContext>? = null,
+        authHandler: Handler<RoutingContext>? = null,
     ): Router {
         val router = Router.router(vertx)
         val service = TaskExecutionService(pool)
@@ -254,8 +255,8 @@ object TaskExecutionRoutes {
         }
 
         // ——— 记录给药（写操作：认证中间件注入给药人，401 兑底） ———
-        if (administrationAuthHandler != null) {
-            router.post("/:id/administration").handler(administrationAuthHandler)
+        if (authHandler != null) {
+            router.post("/:id/administration").handler(authHandler)
         }
         router.post("/:id/administration").handler { ctx ->
             val id = ctx.pathParam("id") ?: return@handler NursingRoutes.respond(ctx, 400, "id required")
@@ -322,7 +323,12 @@ object TaskExecutionRoutes {
                 }
         }
 
-        // ——— 状态更新（支持备注） ———
+        // ——— 状态更新（支持备注，记录执行人） ———
+        // 打卡（开始/完成/跳过/取消）为写操作：认证中间件注入登录 subject（ctx userId），
+        // 随状态流转落库 executor；未注入认证时保持原有行为（不强制登录）。
+        if (authHandler != null) {
+            router.patch("/:id/status").handler(authHandler)
+        }
         router.patch("/:id/status").handler { ctx ->
             val id = ctx.pathParam("id") ?: return@handler NursingRoutes.respond(ctx, 400, "id required")
             val b = NursingRoutes.body(ctx)
@@ -332,6 +338,13 @@ object TaskExecutionRoutes {
             val note = b.getString("note")
             val consumptionsJson = b.getJsonArray("consumptions")
 
+            // 登录 subject（Aceso IDP 会话处理器写入 ctx userId，兼容历史 subject_id 键）
+            val authenticatedSubject = resolveAuthenticatedSubject(ctx)
+            if (authHandler != null && authenticatedSubject.isNullOrBlank()) {
+                NursingRoutes.respond(ctx, 401, "authentication required")
+                return@handler
+            }
+
             // 如果有耗材清单且状态为 COMPLETED，走带耗材流程
             if (consumptionsJson != null && consumptionsJson.size() > 0) {
                 if (status != "COMPLETED") {
@@ -339,7 +352,6 @@ object TaskExecutionRoutes {
                     return@handler
                 }
 
-                val authenticatedSubject = ctx.get("subject_id") as? String ?: ""
                 val consumptions = mutableListOf<TaskExecutionService.ConsumptionInput>()
                 for (i in 0 until consumptionsJson.size()) {
                     val item = consumptionsJson.getJsonObject(i)
@@ -372,7 +384,7 @@ object TaskExecutionRoutes {
                     ))
                 }
 
-                service.completeExecutionWithConsumptions(id, note, consumptions, authenticatedSubject)
+                service.completeExecutionWithConsumptions(id, note, consumptions, authenticatedSubject.orEmpty())
                     .onSuccess { ctx.json(it) }
                     .onFailure {
                         when (it) {
@@ -385,7 +397,7 @@ object TaskExecutionRoutes {
                         }
                     }
             } else {
-                service.updateStatus(id, status, note)
+                service.updateStatus(id, status, note, executor = authenticatedSubject)
                     .onSuccess { ctx.json(it) }
                     .onFailure {
                         when (it) {
@@ -399,6 +411,10 @@ object TaskExecutionRoutes {
 
         return router
     }
+
+    /** 解析认证会话中的操作人 subject：Aceso IDP 会话处理器写入 ctx userId，兼容历史 subject_id 键 */
+    private fun resolveAuthenticatedSubject(ctx: io.vertx.ext.web.RoutingContext): String? =
+        (ctx.get<String>("userId") ?: ctx.get<String>("subject_id"))?.takeIf { it.isNotBlank() }
 
     /** 给药记录路由错误映射：400 入参 / 404 资源 / 409 状态与对账冲突 / 500 其余 */
     private fun respondAdministrationFailure(ctx: io.vertx.ext.web.RoutingContext, error: Throwable?) {

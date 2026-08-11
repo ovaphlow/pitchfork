@@ -15,6 +15,7 @@ include(
     "libs:analytics",
     "libs:healthcare",
     "libs:nursing",
+    "libs:dining",
     "apps:aceso",
     "apps:trainova",
 )

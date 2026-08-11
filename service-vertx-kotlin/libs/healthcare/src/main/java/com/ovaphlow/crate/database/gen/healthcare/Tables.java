@@ -9,6 +9,9 @@ import com.ovaphlow.crate.database.gen.healthcare.tables.Diagnoses;
 import com.ovaphlow.crate.database.gen.healthcare.tables.Encounters;
 import com.ovaphlow.crate.database.gen.healthcare.tables.FollowupPlans;
 import com.ovaphlow.crate.database.gen.healthcare.tables.FollowupRecords;
+import com.ovaphlow.crate.database.gen.healthcare.tables.HealthCheckupMembers;
+import com.ovaphlow.crate.database.gen.healthcare.tables.HealthCheckupResults;
+import com.ovaphlow.crate.database.gen.healthcare.tables.HealthCheckups;
 import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalOrders;
 import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalRecords;
 import com.ovaphlow.crate.database.gen.healthcare.tables.Patients;
@@ -46,6 +49,21 @@ public class Tables {
      * 随访记录：一次实际随访的事实（只增不改，可审计）
      */
     public static final FollowupRecords FOLLOWUP_RECORDS = FollowupRecords.FOLLOWUP_RECORDS;
+
+    /**
+     * 体检参检名单快照：批次内人员与活动周期锚点
+     */
+    public static final HealthCheckupMembers HEALTH_CHECKUP_MEMBERS = HealthCheckupMembers.HEALTH_CHECKUP_MEMBERS;
+
+    /**
+     * 体检结果：数值项自动判异常，文本项人工标记，可转体征/转随访
+     */
+    public static final HealthCheckupResults HEALTH_CHECKUP_RESULTS = HealthCheckupResults.HEALTH_CHECKUP_RESULTS;
+
+    /**
+     * 体检批次：机构年度体检常规（医疗/养老/儿保共用）
+     */
+    public static final HealthCheckups HEALTH_CHECKUPS = HealthCheckups.HEALTH_CHECKUPS;
 
     /**
      * 医嘱主表，公共流程字段在此，具体业务细节在 order_details JSONB

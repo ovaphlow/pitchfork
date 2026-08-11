@@ -37,7 +37,8 @@ public class ChronicDiseaseRegistrationsRecord extends UpdatableRecordImpl<Chron
     }
 
     /**
-     * Setter for <code>healthcare.chronic_disease_registrations.patient_id</code>.
+     * Setter for
+     * <code>healthcare.chronic_disease_registrations.patient_id</code>.
      * 患者（老人），跨入住长期锚定
      */
     public void setPatientId(String value) {
@@ -45,7 +46,8 @@ public class ChronicDiseaseRegistrationsRecord extends UpdatableRecordImpl<Chron
     }
 
     /**
-     * Getter for <code>healthcare.chronic_disease_registrations.patient_id</code>.
+     * Getter for
+     * <code>healthcare.chronic_disease_registrations.patient_id</code>.
      * 患者（老人），跨入住长期锚定
      */
     public String getPatientId() {
@@ -53,7 +55,8 @@ public class ChronicDiseaseRegistrationsRecord extends UpdatableRecordImpl<Chron
     }
 
     /**
-     * Setter for <code>healthcare.chronic_disease_registrations.encounter_id</code>.
+     * Setter for
+     * <code>healthcare.chronic_disease_registrations.encounter_id</code>.
      * 登记时的活动入住锚点，仅用于归属校验
      */
     public void setEncounterId(String value) {
@@ -61,7 +64,8 @@ public class ChronicDiseaseRegistrationsRecord extends UpdatableRecordImpl<Chron
     }
 
     /**
-     * Getter for <code>healthcare.chronic_disease_registrations.encounter_id</code>.
+     * Getter for
+     * <code>healthcare.chronic_disease_registrations.encounter_id</code>.
      * 登记时的活动入住锚点，仅用于归属校验
      */
     public String getEncounterId() {
@@ -69,55 +73,56 @@ public class ChronicDiseaseRegistrationsRecord extends UpdatableRecordImpl<Chron
     }
 
     /**
-     * Setter for <code>healthcare.chronic_disease_registrations.disease_name</code>.
-     * 中文病种，如 高血压
+     * Setter for
+     * <code>healthcare.chronic_disease_registrations.disease_name</code>.
      */
     public void setDiseaseName(String value) {
         set(3, value);
     }
 
     /**
-     * Getter for <code>healthcare.chronic_disease_registrations.disease_name</code>.
-     * 中文病种，如 高血压
+     * Getter for
+     * <code>healthcare.chronic_disease_registrations.disease_name</code>.
      */
     public String getDiseaseName() {
         return (String) get(3);
     }
 
     /**
-     * Setter for <code>healthcare.chronic_disease_registrations.icd_code</code>.
-     * ICD 编码（可选）
+     * Setter for
+     * <code>healthcare.chronic_disease_registrations.icd_code</code>.
      */
     public void setIcdCode(String value) {
         set(4, value);
     }
 
     /**
-     * Getter for <code>healthcare.chronic_disease_registrations.icd_code</code>.
-     * ICD 编码（可选）
+     * Getter for
+     * <code>healthcare.chronic_disease_registrations.icd_code</code>.
      */
     public String getIcdCode() {
         return (String) get(4);
     }
 
     /**
-     * Setter for <code>healthcare.chronic_disease_registrations.confirmed_date</code>.
-     * 确诊日期
+     * Setter for
+     * <code>healthcare.chronic_disease_registrations.confirmed_date</code>.
      */
     public void setConfirmedDate(LocalDate value) {
         set(5, value);
     }
 
     /**
-     * Getter for <code>healthcare.chronic_disease_registrations.confirmed_date</code>.
-     * 确诊日期
+     * Getter for
+     * <code>healthcare.chronic_disease_registrations.confirmed_date</code>.
      */
     public LocalDate getConfirmedDate() {
         return (LocalDate) get(5);
     }
 
     /**
-     * Setter for <code>healthcare.chronic_disease_registrations.control_status</code>.
+     * Setter for
+     * <code>healthcare.chronic_disease_registrations.control_status</code>.
      * 控制状态，中文枚举：良好/一般/较差/未控制
      */
     public void setControlStatus(String value) {
@@ -125,7 +130,8 @@ public class ChronicDiseaseRegistrationsRecord extends UpdatableRecordImpl<Chron
     }
 
     /**
-     * Getter for <code>healthcare.chronic_disease_registrations.control_status</code>.
+     * Getter for
+     * <code>healthcare.chronic_disease_registrations.control_status</code>.
      * 控制状态，中文枚举：良好/一般/较差/未控制
      */
     public String getControlStatus() {
@@ -133,7 +139,8 @@ public class ChronicDiseaseRegistrationsRecord extends UpdatableRecordImpl<Chron
     }
 
     /**
-     * Setter for <code>healthcare.chronic_disease_registrations.followup_frequency</code>.
+     * Setter for
+     * <code>healthcare.chronic_disease_registrations.followup_frequency</code>.
      * 随访频率，中文枚举：每月/每两月/每季度/每半年/每年
      */
     public void setFollowupFrequency(String value) {
@@ -141,7 +148,8 @@ public class ChronicDiseaseRegistrationsRecord extends UpdatableRecordImpl<Chron
     }
 
     /**
-     * Getter for <code>healthcare.chronic_disease_registrations.followup_frequency</code>.
+     * Getter for
+     * <code>healthcare.chronic_disease_registrations.followup_frequency</code>.
      * 随访频率，中文枚举：每月/每两月/每季度/每半年/每年
      */
     public String getFollowupFrequency() {
@@ -149,16 +157,16 @@ public class ChronicDiseaseRegistrationsRecord extends UpdatableRecordImpl<Chron
     }
 
     /**
-     * Setter for <code>healthcare.chronic_disease_registrations.physician</code>.
-     * 责任医生
+     * Setter for
+     * <code>healthcare.chronic_disease_registrations.physician</code>.
      */
     public void setPhysician(String value) {
         set(8, value);
     }
 
     /**
-     * Getter for <code>healthcare.chronic_disease_registrations.physician</code>.
-     * 责任医生
+     * Getter for
+     * <code>healthcare.chronic_disease_registrations.physician</code>.
      */
     public String getPhysician() {
         return (String) get(8);
@@ -195,44 +203,50 @@ public class ChronicDiseaseRegistrationsRecord extends UpdatableRecordImpl<Chron
     }
 
     /**
-     * Setter for <code>healthcare.chronic_disease_registrations.metadata</code>.
-     * 扩展元数据；可含 diagnosis_id 关联来源诊断、followup_frequency 覆盖默认频率
+     * Setter for
+     * <code>healthcare.chronic_disease_registrations.metadata</code>. 扩展元数据；可含
+     * diagnosis_id 关联来源诊断、followup_frequency 覆盖默认频率
      */
     public void setMetadata(JSONB value) {
         set(11, value);
     }
 
     /**
-     * Getter for <code>healthcare.chronic_disease_registrations.metadata</code>.
-     * 扩展元数据；可含 diagnosis_id 关联来源诊断、followup_frequency 覆盖默认频率
+     * Getter for
+     * <code>healthcare.chronic_disease_registrations.metadata</code>. 扩展元数据；可含
+     * diagnosis_id 关联来源诊断、followup_frequency 覆盖默认频率
      */
     public JSONB getMetadata() {
         return (JSONB) get(11);
     }
 
     /**
-     * Setter for <code>healthcare.chronic_disease_registrations.created_at</code>.
+     * Setter for
+     * <code>healthcare.chronic_disease_registrations.created_at</code>.
      */
     public void setCreatedAt(OffsetDateTime value) {
         set(12, value);
     }
 
     /**
-     * Getter for <code>healthcare.chronic_disease_registrations.created_at</code>.
+     * Getter for
+     * <code>healthcare.chronic_disease_registrations.created_at</code>.
      */
     public OffsetDateTime getCreatedAt() {
         return (OffsetDateTime) get(12);
     }
 
     /**
-     * Setter for <code>healthcare.chronic_disease_registrations.updated_at</code>.
+     * Setter for
+     * <code>healthcare.chronic_disease_registrations.updated_at</code>.
      */
     public void setUpdatedAt(OffsetDateTime value) {
         set(13, value);
     }
 
     /**
-     * Getter for <code>healthcare.chronic_disease_registrations.updated_at</code>.
+     * Getter for
+     * <code>healthcare.chronic_disease_registrations.updated_at</code>.
      */
     public OffsetDateTime getUpdatedAt() {
         return (OffsetDateTime) get(13);

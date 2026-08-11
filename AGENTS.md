@@ -38,7 +38,7 @@
 ## Flyway 与模块边界
 
 - 领域表及迁移归属其 lib：`libs/<module>/src/main/resources/db/migration/`。只有依赖该 lib 的 app 才会获得对应迁移。
-- 迁移版本号按号段隔离：`V200+` inventories、`V300+` pharmacy、`V400+` nursing、`V500+` healthcare、`V600+` Trainova 预留；`apps/trainova` 的 `V5–V7` 是基线，不可移动或复制。
+- 迁移版本号按号段隔离：`V200+` inventories、`V300+` pharmacy、`V400+` nursing、`V500+` healthcare、`V600–V699` Aceso dining（膳食营养）；`apps/trainova` 的 `V5–V7` 是基线，不可移动或复制。
 - 不用全局 Flyway `outOfOrder` 解决顺序问题；先核对现有历史和归属。新增 lib 按最大号段递增 100。
 - 跨产品或跨领域改动必须保持最小范围，不把无关迁移、表、权限或后台任务并入小功能计划。
 

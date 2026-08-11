@@ -1,6 +1,7 @@
 package com.ovaphlow.crate.aceso
 
 import com.ovaphlow.crate.database.DatabaseConfig
+import com.ovaphlow.crate.dining.DiningRoutes
 import com.ovaphlow.crate.healthcare.HealthcareRoutes
 import com.ovaphlow.crate.healthcare.HealthcareService
 import com.ovaphlow.crate.healthcare.HealthcareNotFoundException
@@ -147,10 +148,18 @@ fun main() {
             idpSessionAuthHandler(vertx, idpBaseUrl),
             idpSessionAuthHandler(vertx, idpBaseUrl),
             idpSessionAuthHandler(vertx, idpBaseUrl),
+            idpSessionAuthHandler(vertx, idpBaseUrl),
         ),
     )
     apiRouter.route("/nursing/v1/*").subRouter(
         NursingRoutes.create(
+            vertx,
+            pool,
+            idpSessionAuthHandler(vertx, idpBaseUrl),
+        ),
+    )
+    apiRouter.route("/dining/v1/*").subRouter(
+        DiningRoutes.create(
             vertx,
             pool,
             idpSessionAuthHandler(vertx, idpBaseUrl),

@@ -7,9 +7,11 @@ package com.ovaphlow.crate.database.gen.healthcare.tables;
 import com.ovaphlow.crate.database.gen.healthcare.Healthcare;
 import com.ovaphlow.crate.database.gen.healthcare.Indexes;
 import com.ovaphlow.crate.database.gen.healthcare.Keys;
+import com.ovaphlow.crate.database.gen.healthcare.tables.ChronicDiseaseRegistrations.ChronicDiseaseRegistrationsPath;
 import com.ovaphlow.crate.database.gen.healthcare.tables.Diagnoses.DiagnosesPath;
 import com.ovaphlow.crate.database.gen.healthcare.tables.FollowupPlans.FollowupPlansPath;
 import com.ovaphlow.crate.database.gen.healthcare.tables.FollowupRecords.FollowupRecordsPath;
+import com.ovaphlow.crate.database.gen.healthcare.tables.HealthCheckupMembers.HealthCheckupMembersPath;
 import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalOrders.MedicalOrdersPath;
 import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalRecords.MedicalRecordsPath;
 import com.ovaphlow.crate.database.gen.healthcare.tables.Patients.PatientsPath;
@@ -252,6 +254,19 @@ public class Encounters extends TableImpl<EncountersRecord> {
         return _patients;
     }
 
+    private transient ChronicDiseaseRegistrationsPath _chronicDiseaseRegistrations;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>healthcare.chronic_disease_registrations</code> table
+     */
+    public ChronicDiseaseRegistrationsPath chronicDiseaseRegistrations() {
+        if (_chronicDiseaseRegistrations == null)
+            _chronicDiseaseRegistrations = new ChronicDiseaseRegistrationsPath(this, null, Keys.CHRONIC_DISEASE_REGISTRATIONS__CHRONIC_DISEASE_REGISTRATIONS_ENCOUNTER_ID_FKEY.getInverseKey());
+
+        return _chronicDiseaseRegistrations;
+    }
+
     private transient DiagnosesPath _diagnoses;
 
     /**
@@ -289,6 +304,19 @@ public class Encounters extends TableImpl<EncountersRecord> {
             _followupRecords = new FollowupRecordsPath(this, null, Keys.FOLLOWUP_RECORDS__FOLLOWUP_RECORDS_ENCOUNTER_ID_FKEY.getInverseKey());
 
         return _followupRecords;
+    }
+
+    private transient HealthCheckupMembersPath _healthCheckupMembers;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>healthcare.health_checkup_members</code> table
+     */
+    public HealthCheckupMembersPath healthCheckupMembers() {
+        if (_healthCheckupMembers == null)
+            _healthCheckupMembers = new HealthCheckupMembersPath(this, null, Keys.HEALTH_CHECKUP_MEMBERS__HEALTH_CHECKUP_MEMBERS_ENCOUNTER_ID_FKEY.getInverseKey());
+
+        return _healthCheckupMembers;
     }
 
     private transient MedicalOrdersPath _medicalOrders;

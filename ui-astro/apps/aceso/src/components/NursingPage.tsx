@@ -16,6 +16,7 @@ import {
   enrollElderlyAdmissionCarePeriod,
   getCarePlanRevision,
   getCurrentSession,
+  getMedicationAdministration,
   getNursingIncident,
   getNursingPlan,
   getNursingRecord,
@@ -23,6 +24,7 @@ import {
   listActiveElderlyAdmissions,
   listCarePlanRevisions,
   listIdentitySubjects,
+  listMedicationAdministrationSources,
   listNursingAssessments,
   listNursingIncidents,
   listNursingPlans,
@@ -43,6 +45,7 @@ import {
   listInventoryStocks,
   listWarehouseOptions,
   listNursingExecutionConsumptions,
+  recordMedicationAdministration,
   type CarePlanRevisionDetail,
   type CarePlanRevisionListItem,
   type Encounter,
@@ -60,6 +63,9 @@ import {
   type Patient,
   type InventoryStockAvailability,
   type MedicalOrder,
+  type MedicationAdministration,
+  type MedicationAdministrationInput,
+  type MedicationAdministrationSource,
   type NursingConsumptionInput,
   type NursingExecutionConsumption,
   type ShiftHandover,
@@ -209,6 +215,23 @@ const frequencyOptions: [string, string][] = [
   ["PRN", "按需"],
   ["STAT", "立即/临时"],
 ];
+
+/** 给药结果选项（与后端白名单一致，存中文值）：已服/部分服消耗发药数量，其余不消耗 */
+const ADMIN_RESULT_OPTIONS: Array<[string, string]> = [
+  ["已服", "已服"],
+  ["部分服", "部分服"],
+  ["拒服", "拒服"],
+  ["漏服", "漏服"],
+  ["暂缓", "暂缓"],
+];
+
+function isConsumingResult(result: string): boolean {
+  return result === "已服" || result === "部分服";
+}
+
+function isReasonRequiredResult(result: string): boolean {
+  return result === "部分服" || result === "拒服" || result === "漏服" || result === "暂缓";
+}
 
 function taskStatusLabel(value: string): string {
   return { ACTIVE: "执行中", COMPLETED: "已完成", CANCELLED: "已取消" }[value] ?? value;
@@ -403,6 +426,21 @@ export default function NursingPage() {
   const [consumeWarehouses, setConsumeWarehouses] = useState<WarehouseOption[]>([]);
   const [consumeStocks, setConsumeStocks] = useState<InventoryStockAvailability[]>([]);
   const [consumeItems, setConsumeItems] = useState<ConsumptionDraft[]>([]);
+  // ——— 给药记录（MAR）：MEDICATION 任务完成/跳过升级为记录给药 ———
+  const [adminTarget, setAdminTarget] = useState<NursingTodayExecution | null>(null);
+  const [adminResult, setAdminResult] = useState("已服");
+  const [adminSourceId, setAdminSourceId] = useState("");
+  const [adminQuantity, setAdminQuantity] = useState("");
+  const [adminReason, setAdminReason] = useState("");
+  const [adminSources, setAdminSources] = useState<MedicationAdministrationSource[]>([]);
+  const [adminSourcesLoading, setAdminSourcesLoading] = useState(false);
+  const [adminSaving, setAdminSaving] = useState(false);
+  const [adminError, setAdminError] = useState("");
+  // ——— 给药记录查看 ———
+  const [adminViewOpen, setAdminViewOpen] = useState(false);
+  const [adminViewLoading, setAdminViewLoading] = useState(false);
+  const [adminViewError, setAdminViewError] = useState("");
+  const [adminViewRecord, setAdminViewRecord] = useState<MedicationAdministration | null>(null);
 
   const subjectMap = useMemo(() => {
     const map = new Map<string, string>();
@@ -1003,6 +1041,101 @@ export default function NursingPage() {
     }
   }
 
+  // ========================================================================
+  //  给药记录（MAR）：MEDICATION 任务的完成/跳过升级为记录给药
+  // ========================================================================
+
+  /** 打开记录给药弹窗：重置表单并加载该医嘱已发药且未给完的来源（静默失败，未发药时列表为空） */
+  async function openAdminModal(execution: NursingTodayExecution) {
+    setAdminTarget(execution);
+    setAdminResult("已服");
+    setAdminSourceId("");
+    setAdminQuantity("");
+    setAdminReason("");
+    setAdminSources([]);
+    setAdminError("");
+    setAdminSourcesLoading(true);
+    try {
+      const response = await listMedicationAdministrationSources(execution.id);
+      setAdminSources(response.records);
+    } catch {
+      setAdminSources([]);
+    } finally {
+      setAdminSourcesLoading(false);
+    }
+  }
+
+  function closeAdminModal() {
+    if (adminSaving) return;
+    setAdminTarget(null);
+    setAdminError("");
+  }
+
+  async function handleRecordAdministration() {
+    if (!adminTarget) return;
+    const consuming = isConsumingResult(adminResult);
+    // 客户端预校验（服务端仍做权威校验：未发药/超发药均拒绝）
+    if (consuming) {
+      if (!adminSourceId) {
+        setAdminError("请选择发药来源（未发药不可记录已服/部分服）");
+        return;
+      }
+      const quantity = adminQuantity.trim();
+      if (!quantity || !/^\d+(\.\d+)?$/.test(quantity) || Number(quantity) <= 0) {
+        setAdminError("实际给药数量必须为正数");
+        return;
+      }
+      const source = adminSources.find((item) => item.id === adminSourceId);
+      if (source && Number(quantity) > Number(source.remaining_quantity)) {
+        setAdminError(`给药数量不能超过该来源剩余数量 ${source.remaining_quantity} ${source.unit ?? ""}`);
+        return;
+      }
+    }
+    if (isReasonRequiredResult(adminResult) && !adminReason.trim()) {
+      setAdminError("请填写原因");
+      return;
+    }
+
+    setAdminSaving(true);
+    setAdminError("");
+    try {
+      const input: MedicationAdministrationInput = consuming
+        ? {
+            result: adminResult,
+            dispense_item_id: adminSourceId,
+            administered_quantity: adminQuantity.trim(),
+            ...(adminReason.trim() ? { reason: adminReason.trim() } : {}),
+          }
+        : { result: adminResult, reason: adminReason.trim() };
+      await recordMedicationAdministration(adminTarget.id, input);
+      setAdminTarget(null);
+      // 仅刷新当前数据，不重置筛选/页签
+      await loadTodayExecutions();
+      setStatReloadKey((k) => k + 1);
+    } catch (error) {
+      // 失败保留输入，仅展示错误
+      setAdminError(errorMessage(error, "记录给药失败"));
+    } finally {
+      setAdminSaving(false);
+    }
+  }
+
+  /** 查看已完成/已跳过的 MEDICATION 执行的给药记录；无记录时弹窗内提示 */
+  async function openAdminView(execution: NursingTodayExecution) {
+    setAdminViewOpen(true);
+    setAdminViewLoading(true);
+    setAdminViewError("");
+    setAdminViewRecord(null);
+    try {
+      const record = await getMedicationAdministration(execution.id);
+      setAdminViewRecord(record);
+    } catch (error) {
+      setAdminViewError(errorMessage(error, "暂无给药记录"));
+    } finally {
+      setAdminViewLoading(false);
+    }
+  }
+
   async function loadConsumeWarehouses() {
     try {
       const warehouses = await listWarehouseOptions();
@@ -1081,7 +1214,7 @@ export default function NursingPage() {
       });
     }
     return columns;
-  }, [subjectMap, mounted, todayExecutions, actionSaving]);
+  }, [subjectMap, mounted, todayExecutions, actionSaving, adminSaving]);
 
   function executionStatusBadge(status: string) {
     const variant = status === "PENDING" ? "warning" as const
@@ -1093,25 +1226,38 @@ export default function NursingPage() {
   }
 
   function renderTodayActions(record: NursingTodayExecution) {
-    const isBusy = actionSaving;
+    const isBusy = actionSaving || adminSaving;
     const btnClass = "px-2 py-0.5 text-xs rounded";
+    // MEDICATION 任务：完成/跳过升级为记录给药（含拒服/漏服/暂缓），取消仍为通用操作
+    const isMedication = record.task_type === "MEDICATION";
     switch (record.status) {
       case "PENDING":
         return (
           <div className="flex gap-1">
             <button className={btnClass + " bg-accent/10 text-accent hover:bg-accent/20"} disabled={isBusy} onClick={() => handleStartExecution(record)}>开始</button>
-            <button className={btnClass + " bg-amber-100 text-amber-700 hover:bg-amber-200"} disabled={isBusy} onClick={() => openActionModal(record, "skip")}>跳过</button>
+            {isMedication ? (
+              <button className={btnClass + " bg-green-100 text-green-700 hover:bg-green-200"} disabled={isBusy} onClick={() => void openAdminModal(record)}>记录给药</button>
+            ) : (
+              <button className={btnClass + " bg-amber-100 text-amber-700 hover:bg-amber-200"} disabled={isBusy} onClick={() => openActionModal(record, "skip")}>跳过</button>
+            )}
             <button className={btnClass + " bg-red-100 text-red-600 hover:bg-red-200"} disabled={isBusy} onClick={() => openActionModal(record, "cancel")}>取消</button>
           </div>
         );
       case "IN_PROGRESS":
         return (
           <div className="flex gap-1">
-            <button className={btnClass + " bg-green-100 text-green-700 hover:bg-green-200"} disabled={isBusy} onClick={() => openActionModal(record, "complete")}>完成</button>
+            <button className={btnClass + " bg-green-100 text-green-700 hover:bg-green-200"} disabled={isBusy} onClick={() => { if (isMedication) void openAdminModal(record); else openActionModal(record, "complete"); }}>
+              {isMedication ? "记录给药" : "完成"}
+            </button>
             <button className={btnClass + " bg-red-100 text-red-600 hover:bg-red-200"} disabled={isBusy} onClick={() => openActionModal(record, "cancel")}>取消</button>
           </div>
         );
       default:
+        if (isMedication) {
+          return (
+            <button className={btnClass + " bg-accent/10 text-accent hover:bg-accent/20"} disabled={isBusy} onClick={() => void openAdminView(record)}>查看给药</button>
+          );
+        }
         return <span className="text-xs text-fg-dimmed">—</span>;
     }
   }
@@ -2033,6 +2179,165 @@ export default function NursingPage() {
           </div>
           {actionError && <p className="text-sm text-danger">{actionError}</p>}
         </form>
+      </Modal>
+
+      {/* ——— 记录给药弹窗（MEDICATION） ——— */}
+      <Modal open={adminTarget !== null} onClose={closeAdminModal} title="记录给药" width="36rem">
+        <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void handleRecordAdministration(); }}>
+          <div className="rounded-md bg-surface-alt px-3 py-2 text-sm text-fg-muted">
+            {adminTarget?.task_description ?? "-"}
+            {adminTarget?.patient_name && <span className="ml-2 text-fg-dimmed">— {adminTarget.patient_name}</span>}
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm font-medium text-fg-muted">给药结果 <span className="text-danger">*</span></label>
+            <div className="flex flex-wrap gap-2">
+              {ADMIN_RESULT_OPTIONS.map(([value, label]) => (
+                <label
+                  key={value}
+                  className={`cursor-pointer rounded-md border px-3 py-1.5 text-sm transition-colors ${
+                    adminResult === value
+                      ? "border-accent bg-accent/10 text-accent"
+                      : "border-border bg-surface text-fg-muted hover:border-accent/50"
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="admin-result"
+                    value={value}
+                    className="sr-only"
+                    checked={adminResult === value}
+                    onChange={() => { setAdminResult(value); setAdminError(""); }}
+                  />
+                  {label}
+                </label>
+              ))}
+            </div>
+            <p className="text-xs text-fg-dimmed">已服/部分服消耗发药数量；拒服/漏服/暂缓不消耗数量、无需来源。</p>
+          </div>
+
+          {isConsumingResult(adminResult) && (
+            <>
+              <div className="flex flex-col gap-1.5">
+                <label className="text-sm font-medium text-fg-muted" htmlFor="admin-source">发药来源 <span className="text-danger">*</span></label>
+                <select
+                  id="admin-source"
+                  className={selectClass}
+                  value={adminSourceId}
+                  onChange={(event) => { setAdminSourceId(event.target.value); setAdminError(""); }}
+                  disabled={adminSourcesLoading}
+                >
+                  <option value="">
+                    {adminSourcesLoading
+                      ? "加载发药来源…"
+                      : adminSources.length === 0
+                        ? "暂无已发药且未给完的来源"
+                        : "选择发药明细"}
+                  </option>
+                  {adminSources.map((source) => (
+                    <option key={source.id} value={source.id}>
+                      {source.material_name ?? source.material_id}
+                      {source.batch_no ? ` · ${source.batch_no}` : ""}
+                      {` · ${source.warehouse ?? "-"} · 已发 ${source.dispensed_quantity} / 剩余 ${source.remaining_quantity} ${source.unit ?? ""}`}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-xs text-fg-dimmed">仅显示该医嘱已发药（DISPENSED）且未给完的发药明细；未发药时不可记录已服/部分服。</p>
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <label className="text-sm font-medium text-fg-muted" htmlFor="admin-quantity">实际给药数量 <span className="text-danger">*</span></label>
+                <div className="flex items-center gap-2">
+                  <input
+                    id="admin-quantity"
+                    type="text"
+                    inputMode="decimal"
+                    className="h-10 w-40 rounded-md border border-border bg-surface px-3 text-sm text-fg placeholder:text-fg-dimmed focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                    value={adminQuantity}
+                    onChange={(event) => { setAdminQuantity(event.target.value); setAdminError(""); }}
+                    placeholder="如 1 或 0.5"
+                  />
+                  <span className="text-sm text-fg-muted">
+                    {adminSources.find((item) => item.id === adminSourceId)?.unit ?? ""}
+                  </span>
+                </div>
+              </div>
+            </>
+          )}
+
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm font-medium text-fg-muted" htmlFor="admin-reason">
+              原因{isReasonRequiredResult(adminResult) ? " " : "（可选）"}
+              {isReasonRequiredResult(adminResult) && <span className="text-danger">*</span>}
+            </label>
+            <textarea
+              id="admin-reason"
+              rows={3}
+              className={textareaClass}
+              value={adminReason}
+              onChange={(event) => { setAdminReason(event.target.value); setAdminError(""); }}
+              placeholder={
+                isConsumingResult(adminResult)
+                  ? adminResult === "部分服" ? "例如：长者服用部分后不适，剩余退回" : "记录给药情况（可选）"
+                  : adminResult === "拒服" ? "例如：长者拒绝服用" : adminResult === "漏服" ? "例如：错过计划时间，补记" : "例如：长者外出暂缓，稍后补服"
+              }
+            />
+          </div>
+
+          <p className="text-xs text-fg-dimmed">
+            {isConsumingResult(adminResult)
+              ? "记录后执行将联动为已完成并写入执行时间；给药数量计入该发药来源累计，累计不得超过已发数量。"
+              : "记录后执行将联动为已跳过并写入执行时间；不消耗发药数量，不触发退药。"}
+          </p>
+
+          <div className="flex justify-end gap-3">
+            <Button type="button" variant="ghost" onClick={closeAdminModal} disabled={adminSaving}>取消</Button>
+            <Button type="submit" loading={adminSaving}>确认记录</Button>
+          </div>
+          {adminError && <p className="text-sm text-danger">{adminError}</p>}
+        </form>
+      </Modal>
+
+      {/* ——— 给药记录查看弹窗 ——— */}
+      <Modal open={adminViewOpen} onClose={() => setAdminViewOpen(false)} title="给药记录">
+        {adminViewLoading ? (
+          <div className="py-4 text-center text-sm text-fg-muted">加载中...</div>
+        ) : adminViewError ? (
+          <div className="space-y-4">
+            <div className="rounded-md border border-border bg-surface-alt px-3 py-2 text-sm text-fg-muted">{adminViewError}</div>
+            <div className="flex justify-end">
+              <Button type="button" variant="ghost" onClick={() => setAdminViewOpen(false)}>关闭</Button>
+            </div>
+          </div>
+        ) : adminViewRecord ? (
+          <div className="space-y-3 text-sm">
+            <div className="rounded-md bg-surface-alt px-3 py-2 text-sm text-fg-muted">
+              {adminViewRecord.task_description ?? "-"}
+              {adminViewRecord.patient_name && <span className="ml-2 text-fg-dimmed">— {adminViewRecord.patient_name}</span>}
+            </div>
+            <div className="grid gap-x-6 gap-y-1.5 sm:grid-cols-2">
+              <p>
+                <span className="text-fg-dimmed">给药结果：</span>
+                <Badge variant={isConsumingResult(adminViewRecord.result) ? "success" as const : "default" as const}>{adminViewRecord.result}</Badge>
+              </p>
+              <p><span className="text-fg-dimmed">实际数量：</span>{adminViewRecord.administered_quantity != null ? `${adminViewRecord.administered_quantity} ${adminViewRecord.unit ?? ""}` : "—"}</p>
+              <p><span className="text-fg-dimmed">给药时间：</span>{formatDateTime(adminViewRecord.administered_at)}</p>
+              <p><span className="text-fg-dimmed">给药人：</span>{subjectMap.get(adminViewRecord.administered_by ?? "") ?? adminViewRecord.administered_by ?? "-"}</p>
+              {adminViewRecord.material_name != null && (
+                <p><span className="text-fg-dimmed">药品：</span>{adminViewRecord.material_name}</p>
+              )}
+              <p><span className="text-fg-dimmed">批次：</span>{adminViewRecord.batch_no ?? "—"}</p>
+              <p><span className="text-fg-dimmed">仓库：</span>{adminViewRecord.warehouse ?? "—"}</p>
+              {adminViewRecord.dispense_no != null && (
+                <p><span className="text-fg-dimmed">发药单：</span>{adminViewRecord.dispense_no}</p>
+              )}
+              <p className="sm:col-span-2"><span className="text-fg-dimmed">计划时间：</span>{formatDateTime(adminViewRecord.planned_time)}</p>
+              <p className="sm:col-span-2"><span className="text-fg-dimmed">原因：</span>{adminViewRecord.reason ?? "—"}</p>
+            </div>
+            <div className="flex justify-end">
+              <Button type="button" variant="ghost" onClick={() => setAdminViewOpen(false)}>关闭</Button>
+            </div>
+          </div>
+        ) : null}
       </Modal>
 
       {/* ——— 耗材详情弹窗 ——— */}

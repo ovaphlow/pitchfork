@@ -15,13 +15,13 @@ object NursingRoutes {
     private val log = LoggerFactory.getLogger(NursingRoutes::class.java)
 
     /**
-     * @param administrationAuthHandler 记录给药的认证中间件（由 App 编排层注入，
-     *   与 Healthcare 写路由同一 IDP 会话校验，写入 ctx userId 作为给药人）。
+     * @param authHandler 认证中间件（由 App 编排层注入，Aceso 为 IDP 会话校验，
+     *   写入 ctx userId 作为操作人）：保护护理执行的两条写路由——记录给药与打卡状态更新。
      */
     fun create(
         vertx: Vertx,
         pool: Pool,
-        administrationAuthHandler: Handler<RoutingContext>? = null,
+        authHandler: Handler<RoutingContext>? = null,
     ): Router {
         val router = Router.router(vertx)
         val mPool = pool
@@ -60,7 +60,7 @@ object NursingRoutes {
         router.route("/assessments/*").subRouter(AssessmentRoutes.create(vertx, mPool))
         router.route("/plans/*").subRouter(PlanRoutes.create(vertx, mPool))
         router.route("/tasks/*").subRouter(TaskRoutes.create(vertx, mPool))
-        router.route("/executions/*").subRouter(TaskExecutionRoutes.create(vertx, mPool, administrationAuthHandler))
+        router.route("/executions/*").subRouter(TaskExecutionRoutes.create(vertx, mPool, authHandler))
         router.route("/visit-schedules/*").subRouter(VisitScheduleRoutes.create(vertx, mPool))
 
         return router

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<configuration>
+    <jdbc>
+        <driver>org.postgresql.Driver</driver>
+        <url>jdbc:postgresql://localhost:5432/aceso</url>
+        <user>ovaphlow</user>
+        <password>__PITCHFORK_DB_PASSWORD__</password>
+    </jdbc>
+    <generator>
+        <database>
+            <name>org.jooq.meta.postgres.PostgresDatabase</name>
+            <schemata>
+                <schema>
+                    <inputSchema>dining</inputSchema>
+                </schema>
+            </schemata>
+            <includes>dining_diet_profiles|dining_dishes|dining_weekly_menus|dining_weekly_menu_items|dining_rosters|dining_roster_items|dining_meal_executions</includes>
+        </database>
+        <target>
+            <packageName>com.ovaphlow.crate.database.gen.dining</packageName>
+            <directory>src/main/java</directory>
+        </target>
+    </generator>
+</configuration>

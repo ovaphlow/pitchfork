@@ -8,12 +8,15 @@ import {
   listDiagnoses,
   listElderlyAdmissions,
   listMedicalOrders,
+  listOrderAdministrations,
   listPatients,
   listProgressNotes,
   updateMedicalOrderStatus,
   type Diagnosis,
   type Encounter,
   type MedicalOrder,
+  type MedicalOrderAdministration,
+  type MedicalOrderAdministrationSummary,
   type MedicalOrderExecutionSummary,
   type MedicalOrderInput,
   type ProgressNote,
@@ -148,6 +151,22 @@ const EXECUTION_SUMMARY_ITEMS: Array<[keyof MedicalOrderExecutionSummary, string
   ["CANCELLED", "已取消"],
 ];
 
+/** 给药汇总项：已给/拒服/漏服/暂缓次数与数量，未发药时 dispensed/remaining 为 null */
+const ADMINISTRATION_SUMMARY_ITEMS: Array<[keyof MedicalOrderAdministrationSummary, string]> = [
+  ["administered_count", "已给次数"],
+  ["administered_quantity", "已给数量"],
+  ["partial_count", "部分服"],
+  ["refused_count", "拒服"],
+  ["missed_count", "漏服"],
+  ["deferred_count", "暂缓"],
+  ["dispensed_quantity", "已发数量"],
+  ["remaining_quantity", "剩余数量"],
+];
+
+function isConsumingResult(result: string): boolean {
+  return result === "已服" || result === "部分服";
+}
+
 const ORDER_DETAIL_LABELS: Record<string, string> = {
   drug_name: "药名",
   dose: "剂量",
@@ -241,6 +260,10 @@ export default function OrdersPage() {
   const [saving, setSaving] = useState(false);
 
   const [detailTarget, setDetailTarget] = useState<MedicalOrder | null>(null);
+  // ——— 给药汇总与明细（医嘱侧只读） ———
+  const [adminRecords, setAdminRecords] = useState<MedicalOrderAdministration[]>([]);
+  const [adminRecordsLoading, setAdminRecordsLoading] = useState(false);
+  const [adminRecordsError, setAdminRecordsError] = useState("");
   const [detail, setDetail] = useState<MedicalOrder | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState("");
@@ -523,10 +546,24 @@ export default function OrdersPage() {
     setDetailError("");
     setStatusError("");
     setStatusAction("");
+    setAdminRecords([]);
+    setAdminRecordsError("");
+    setAdminRecordsLoading(order.order_type === "MEDICATION");
     setDetailLoading(true);
     try {
       const data = await getMedicalOrder(order.id);
       setDetail(data);
+      // 给药明细只读加载（仅用药医嘱），失败不阻塞详情展示
+      if (order.order_type === "MEDICATION") {
+        try {
+          const response = await listOrderAdministrations(order.id);
+          setAdminRecords(response.records);
+        } catch (error) {
+          setAdminRecordsError(errorMessage(error, "无法加载给药明细"));
+        } finally {
+          setAdminRecordsLoading(false);
+        }
+      }
     } catch (error) {
       setDetailError(errorMessage(error, "无法读取医嘱详情"));
     } finally {
@@ -541,6 +578,9 @@ export default function OrdersPage() {
     setDetailError("");
     setStatusError("");
     setStatusAction("");
+    setAdminRecords([]);
+    setAdminRecordsError("");
+    setAdminRecordsLoading(false);
   }
 
   async function handleStatusUpdate(orderId: string, status: string) {
@@ -1310,6 +1350,60 @@ export default function OrdersPage() {
                 <p className="text-sm text-fg-dimmed">暂无执行汇总</p>
               )}
             </section>
+
+            {detail.order_type === "MEDICATION" && (
+              <section>
+                <h4 className="mb-2 text-sm font-semibold text-fg-emphasis">给药汇总</h4>
+                {detail.administration_summary ? (
+                  <div className="flex flex-wrap gap-2">
+                    {ADMINISTRATION_SUMMARY_ITEMS.map(([key, label]) => {
+                      const value = detail.administration_summary?.[key];
+                      return (
+                        <span key={key} className="inline-flex items-center gap-1 rounded-full bg-surface-alt px-3 py-1 text-sm text-fg-muted">
+                          <span className="font-semibold text-fg">{value == null ? "—" : String(value)}</span>
+                          {label}
+                        </span>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="text-sm text-fg-dimmed">暂无给药汇总</p>
+                )}
+              </section>
+            )}
+
+            {detail.order_type === "MEDICATION" && (
+              <section>
+                <h4 className="mb-2 text-sm font-semibold text-fg-emphasis">给药明细</h4>
+                {adminRecordsLoading ? (
+                  <p className="text-sm text-fg-dimmed">正在读取给药明细…</p>
+                ) : adminRecordsError ? (
+                  <p className="text-sm text-danger">{adminRecordsError}</p>
+                ) : adminRecords.length === 0 ? (
+                  <p className="text-sm text-fg-dimmed">暂无给药记录</p>
+                ) : (
+                  <div className="space-y-2">
+                    {adminRecords.map((record) => (
+                      <div key={record.id} className="rounded-md border border-border bg-surface-alt px-3 py-2 text-sm">
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                          <Badge variant={isConsumingResult(record.result) ? "success" as const : "default" as const}>{record.result}</Badge>
+                          <span className="font-medium text-fg">{record.administered_quantity != null ? `${record.administered_quantity} ${record.unit ?? ""}` : "—"}</span>
+                          <span className="text-fg-muted">{formatDateTime(record.administered_at)}</span>
+                          <span className="text-fg-muted">{record.administered_by ?? "-"}</span>
+                        </div>
+                        <div className="mt-1 text-xs text-fg-muted">
+                          {record.task_description ?? "-"}
+                          {record.material_name ? ` · ${record.material_name}` : ""}
+                          {record.batch_no ? ` · 批次 ${record.batch_no}` : ""}
+                          {record.dispense_no ? ` · ${record.dispense_no}` : ""}
+                        </div>
+                        {record.reason && <div className="mt-1 text-xs text-fg-dimmed">原因：{record.reason}</div>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </section>
+            )}
 
             {detail.status === "ACTIVE" && (
               <div className="border-t border-border pt-4">

@@ -336,11 +336,14 @@ class TaskExecutionRehabilitationIntegrationTest {
         assertEquals(1, execs.size)
         val execId = execs[0].getString("id")
 
-        // 前端打卡路径：开始 → 完成（PATCH /task-executions/:id/status，无耗材分支）
-        val started = await(executionService.updateStatus(execId, "IN_PROGRESS"))
+        // 前端打卡路径：开始 → 完成（PATCH /task-executions/:id/status，无耗材分支）。
+        // 路由从认证会话（登录 subject_id）解析执行人并随状态更新落库；
+        // 此处直接模拟登录用户传入 executor。
+        val executor = "rh-登录执行人"
+        val started = await(executionService.updateStatus(execId, "IN_PROGRESS", executor = executor))
         assertEquals("IN_PROGRESS", started.getString("status"))
 
-        val completed = await(executionService.updateStatus(execId, "COMPLETED", "rh-完成备注"))
+        val completed = await(executionService.updateStatus(execId, "COMPLETED", "rh-完成备注", executor = executor))
         assertEquals("COMPLETED", completed.getString("status"))
         assertNotNull(completed.getString("actual_time"), "打卡完成后实际时间应落库")
 
@@ -349,9 +352,7 @@ class TaskExecutionRehabilitationIntegrationTest {
         assertEquals("COMPLETED", rows[0].getString("status"))
         assertNotNull(rows[0].getString("actual_time"), "actual_time 应落库")
         assertEquals("rh-完成备注", rows[0].getString("note"), "完成备注应落库")
-        // 验收标准 2：执行人正确落库（登录 subject_id）。当前 PATCH 无耗材分支不写 executor，
-        // 该断言用于暴露差距——需求 F6 要求记录执行人。
-        assertNotNull(rows[0].getString("executor"), "执行人（登录 subject_id）应落库")
+        assertEquals(executor, rows[0].getString("executor"), "执行人（登录 subject_id）应落库")
 
         ctx.completeNow()
     }

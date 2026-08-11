@@ -9,6 +9,9 @@ import com.ovaphlow.crate.database.gen.healthcare.tables.Diagnoses;
 import com.ovaphlow.crate.database.gen.healthcare.tables.Encounters;
 import com.ovaphlow.crate.database.gen.healthcare.tables.FollowupPlans;
 import com.ovaphlow.crate.database.gen.healthcare.tables.FollowupRecords;
+import com.ovaphlow.crate.database.gen.healthcare.tables.HealthCheckupMembers;
+import com.ovaphlow.crate.database.gen.healthcare.tables.HealthCheckupResults;
+import com.ovaphlow.crate.database.gen.healthcare.tables.HealthCheckups;
 import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalOrders;
 import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalRecords;
 import com.ovaphlow.crate.database.gen.healthcare.tables.Patients;
@@ -46,6 +49,10 @@ public class Indexes {
     public static final Index IDX_FOLLOWUP_RECORDS_DATE = Internal.createIndex(DSL.name("idx_followup_records_date"), FollowupRecords.FOLLOWUP_RECORDS, new OrderField[] { FollowupRecords.FOLLOWUP_RECORDS.FOLLOWUP_DATE.desc() }, false);
     public static final Index IDX_FOLLOWUP_RECORDS_PATIENT = Internal.createIndex(DSL.name("idx_followup_records_patient"), FollowupRecords.FOLLOWUP_RECORDS, new OrderField[] { FollowupRecords.FOLLOWUP_RECORDS.PATIENT_ID }, false);
     public static final Index IDX_FOLLOWUP_RECORDS_PLAN = Internal.createIndex(DSL.name("idx_followup_records_plan"), FollowupRecords.FOLLOWUP_RECORDS, new OrderField[] { FollowupRecords.FOLLOWUP_RECORDS.PLAN_ID }, false);
+    public static final Index IDX_HEALTH_CHECKUP_MEMBERS_CHECKUP = Internal.createIndex(DSL.name("idx_health_checkup_members_checkup"), HealthCheckupMembers.HEALTH_CHECKUP_MEMBERS, new OrderField[] { HealthCheckupMembers.HEALTH_CHECKUP_MEMBERS.CHECKUP_ID, HealthCheckupMembers.HEALTH_CHECKUP_MEMBERS.CHECKED }, false);
+    public static final Index IDX_HEALTH_CHECKUP_RESULTS_ABNORMAL = Internal.createIndex(DSL.name("idx_health_checkup_results_abnormal"), HealthCheckupResults.HEALTH_CHECKUP_RESULTS, new OrderField[] { HealthCheckupResults.HEALTH_CHECKUP_RESULTS.CHECKUP_ID, HealthCheckupResults.HEALTH_CHECKUP_RESULTS.ABNORMAL }, false);
+    public static final Index IDX_HEALTH_CHECKUP_RESULTS_CHECKUP = Internal.createIndex(DSL.name("idx_health_checkup_results_checkup"), HealthCheckupResults.HEALTH_CHECKUP_RESULTS, new OrderField[] { HealthCheckupResults.HEALTH_CHECKUP_RESULTS.CHECKUP_ID }, false);
+    public static final Index IDX_HEALTH_CHECKUP_RESULTS_PATIENT = Internal.createIndex(DSL.name("idx_health_checkup_results_patient"), HealthCheckupResults.HEALTH_CHECKUP_RESULTS, new OrderField[] { HealthCheckupResults.HEALTH_CHECKUP_RESULTS.PATIENT_ID }, false);
     public static final Index IDX_MEDICAL_RECORDS_NURSING_QUERY = Internal.createIndex(DSL.name("idx_medical_records_nursing_query"), MedicalRecords.MEDICAL_RECORDS, new OrderField[] { MedicalRecords.MEDICAL_RECORDS.RECORD_TYPE, MedicalRecords.MEDICAL_RECORDS.ENCOUNTER_ID, MedicalRecords.MEDICAL_RECORDS.RECORD_DATE.desc() }, false);
     public static final Index IDX_ORDERS_ENCOUNTER = Internal.createIndex(DSL.name("idx_orders_encounter"), MedicalOrders.MEDICAL_ORDERS, new OrderField[] { MedicalOrders.MEDICAL_ORDERS.ENCOUNTER_ID }, false);
     public static final Index IDX_ORDERS_NURSE_CHECKED_MEDICATION = Internal.createIndex(DSL.name("idx_orders_nurse_checked_medication"), MedicalOrders.MEDICAL_ORDERS, new OrderField[] { MedicalOrders.MEDICAL_ORDERS.ENCOUNTER_ID, MedicalOrders.MEDICAL_ORDERS.CREATED_AT }, false);
@@ -65,4 +72,6 @@ public class Indexes {
     public static final Index IDX_VITAL_SIGNS_PATIENT_TYPE_MEASURED = Internal.createIndex(DSL.name("idx_vital_signs_patient_type_measured"), VitalSignRecords.VITAL_SIGN_RECORDS, new OrderField[] { VitalSignRecords.VITAL_SIGN_RECORDS.PATIENT_ID, VitalSignRecords.VITAL_SIGN_RECORDS.TYPE, VitalSignRecords.VITAL_SIGN_RECORDS.MEASURED_AT }, false);
     public static final Index UQ_CHRONIC_DISEASE_ACTIVE = Internal.createIndex(DSL.name("uq_chronic_disease_active"), ChronicDiseaseRegistrations.CHRONIC_DISEASE_REGISTRATIONS, new OrderField[] { ChronicDiseaseRegistrations.CHRONIC_DISEASE_REGISTRATIONS.PATIENT_ID, ChronicDiseaseRegistrations.CHRONIC_DISEASE_REGISTRATIONS.DISEASE_NAME }, true);
     public static final Index UQ_ENCOUNTERS_ACTIVE_ELDERLY_CARE = Internal.createIndex(DSL.name("uq_encounters_active_elderly_care"), Encounters.ENCOUNTERS, new OrderField[] { Encounters.ENCOUNTERS.PATIENT_ID }, true);
+    public static final Index UQ_HEALTH_CHECKUP_MEMBERS = Internal.createIndex(DSL.name("uq_health_checkup_members"), HealthCheckupMembers.HEALTH_CHECKUP_MEMBERS, new OrderField[] { HealthCheckupMembers.HEALTH_CHECKUP_MEMBERS.CHECKUP_ID, HealthCheckupMembers.HEALTH_CHECKUP_MEMBERS.PATIENT_ID }, true);
+    public static final Index UQ_HEALTH_CHECKUPS_YEAR = Internal.createIndex(DSL.name("uq_health_checkups_year"), HealthCheckups.HEALTH_CHECKUPS, new OrderField[] { HealthCheckups.HEALTH_CHECKUPS.CHECKUP_YEAR }, true);
 }

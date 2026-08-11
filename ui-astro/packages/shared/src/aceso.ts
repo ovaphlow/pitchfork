@@ -1466,6 +1466,101 @@ export function listNursingExecutionConsumptions(id: string): Promise<NursingPag
 }
 
 // ========================================================================
+//  Nursing API — Medication Administrations (医嘱给药记录 MAR)
+// ========================================================================
+
+/** 给药记录（每执行实例至多一条，与执行 1:1） */
+export interface MedicationAdministration {
+  id: string;
+  task_execution_id: string;
+  medical_order_id: string;
+  /** 已服 / 部分服 / 拒服 / 漏服 / 暂缓（项目惯例存中文值） */
+  result: string;
+  /** 实际给药数量（基础单位，十进制文本） */
+  administered_quantity: string | null;
+  unit: string | null;
+  dispense_item_id: string | null;
+  dispense_no: string | null;
+  material_id: string | null;
+  material_name: string | null;
+  lot_id: string | null;
+  batch_no: string | null;
+  warehouse: string | null;
+  /** 给药人（认证 userId，服务端写入） */
+  administered_by: string | null;
+  /** 给药时间（服务端当前时间） */
+  administered_at: string | null;
+  reason: string | null;
+  planned_time: string | null;
+  task_description: string | null;
+  patient_name: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+/**
+ * 给药输入：服务端受控字段（给药人/时间/医嘱归属）不接受提交；
+ * 已服/部分服必填 dispense_item_id + administered_quantity（十进制文本）；
+ * 拒服/漏服/暂缓必填 reason，且不得带来源与数量。
+ */
+export interface MedicationAdministrationInput {
+  result: string;
+  dispense_item_id?: string;
+  administered_quantity?: string;
+  reason?: string;
+}
+
+/** 给药来源选择器行：该医嘱已 DISPENSED 且剩余数量 > 0 的发药明细 */
+export interface MedicationAdministrationSource {
+  id: string;
+  dispense_id: string | null;
+  dispense_no: string | null;
+  dispensed_at: string | null;
+  material_id: string | null;
+  material_name: string | null;
+  lot_id: string | null;
+  batch_no: string | null;
+  warehouse: string | null;
+  unit: string | null;
+  dispensed_quantity: string;
+  administered_quantity: string;
+  remaining_quantity: string;
+}
+
+/** 记录给药：成功联动执行为 COMPLETED/SKIPPED 并写 actual_time；给药人与时间由服务端写入 */
+export function recordMedicationAdministration(
+  executionId: string,
+  input: MedicationAdministrationInput,
+): Promise<MedicationAdministration> {
+  return request<MedicationAdministration>(`/nursing/v1/executions/${encodeURIComponent(executionId)}/administration`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+/** 单条给药记录（含来源发药明细摘要）；不存在返回 404 */
+export function getMedicationAdministration(executionId: string): Promise<MedicationAdministration> {
+  return request<MedicationAdministration>(`/nursing/v1/executions/${encodeURIComponent(executionId)}/administration`);
+}
+
+/** 给药来源选择器：已发药（DISPENSED）且未给完的发药明细，只读 */
+export function listMedicationAdministrationSources(executionId: string): Promise<NursingPage<MedicationAdministrationSource>> {
+  return request<NursingPage<MedicationAdministrationSource>>(`/nursing/v1/executions/${encodeURIComponent(executionId)}/administration/sources`);
+}
+
+/** MAR 查询：按老人（encounter_id）/医嘱/给药日期/结果过滤给药明细 */
+export function listMedicationAdministrations(params: {
+  encounter_id?: string;
+  medical_order_id?: string;
+  date?: string;
+  result?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<NursingPage<MedicationAdministration>> {
+  return request<NursingPage<MedicationAdministration>>(`/nursing/v1/executions/administrations${nursingQuery(params)}`);
+}
+
+// ========================================================================
 //  Inventory API — Stocks (库存)
 // ========================================================================
 
@@ -1766,6 +1861,49 @@ export interface MedicalOrderExecutionSummary {
   CANCELLED: number;
 }
 
+/** 医嘱给药汇总（医嘱侧只读）：已给次数/数量、拒服/漏服/暂缓次数、已发/剩余数量 */
+export interface MedicalOrderAdministrationSummary {
+  /** 已给次数（已服 + 部分服） */
+  administered_count: number;
+  /** 已给数量（已服 + 部分服实际数量之和，十进制文本） */
+  administered_quantity: string;
+  partial_count: number;
+  refused_count: number;
+  missed_count: number;
+  deferred_count: number;
+  /** 已发数量（DISPENSED 发药明细之和）；未发药为 null */
+  dispensed_quantity: string | null;
+  /** 剩余数量 = 已发 - 已给；未发药为 null */
+  remaining_quantity: string | null;
+}
+
+/** 给药明细行（医嘱侧只读，按 task 关联） */
+export interface MedicalOrderAdministration {
+  id: string;
+  task_execution_id: string;
+  result: string;
+  administered_quantity: string | null;
+  unit: string | null;
+  dispense_item_id: string | null;
+  lot_id: string | null;
+  warehouse: string | null;
+  administered_by: string | null;
+  administered_at: string | null;
+  reason: string | null;
+  created_at: string | null;
+  planned_time: string | null;
+  task_description: string | null;
+  material_id: string | null;
+  material_name: string | null;
+  batch_no: string | null;
+  dispense_no: string | null;
+}
+
+export interface MedicalOrderAdministrationList {
+  records: MedicalOrderAdministration[];
+  meta: { total: number };
+}
+
 export interface MedicalOrder {
   id: string;
   encounter_id: string;
@@ -1788,6 +1926,8 @@ export interface MedicalOrder {
   nurse_checked_at: string | null;
   task_id: string | null;
   execution_summary?: MedicalOrderExecutionSummary;
+  /** 给药汇总（医嘱侧只读）：无给药记录时为零值，未发药时 dispensed/remaining 为 null */
+  administration_summary?: MedicalOrderAdministrationSummary;
   created_at: string;
   updated_at: string;
 }
@@ -1876,6 +2016,11 @@ export function listPendingNurseCheckOrders(params: {
   if (params.offset != null) query.set("offset", String(params.offset));
   const qs = query.toString();
   return request<NurseCheckPendingOrderList>(`/healthcare/v1/orders/pending-nurse-check${qs ? `?${qs}` : ""}`);
+}
+
+/** 医嘱给药明细（只读）：按 task 关联，与执行汇总/给药汇总同源一致 */
+export function listOrderAdministrations(orderId: string): Promise<MedicalOrderAdministrationList> {
+  return request<MedicalOrderAdministrationList>(`/healthcare/v1/orders/${encodeURIComponent(orderId)}/administrations`);
 }
 
 export function markEncounterDeath(encounterId: string, input: DeathInput): Promise<Encounter> {
@@ -3143,4 +3288,769 @@ export function updateChronicDiseaseStatus(id: string, input: ChronicDiseaseStat
     method: "PATCH",
     body: JSON.stringify(input),
   });
+}
+
+// ========================================================================
+//  Healthcare API — Health Checkup (体检管理)
+//  机构年度体检常规（医疗/养老/儿保共用）：
+//  批次（年度唯一）+ 参检名单快照 + 结果录入；异常项一键转体征/转随访。
+// ========================================================================
+
+export type HealthCheckupStatus = "草稿" | "进行中" | "已完成";
+
+/** 体检批次 */
+export interface HealthCheckup {
+  id: string;
+  checkup_year: number;
+  name: string;
+  status: HealthCheckupStatus;
+  start_date: string | null;
+  end_date: string | null;
+  /** 创建人（认证主体，服务端写入） */
+  operator: string;
+  metadata: Record<string, unknown> | null;
+  member_total: number;
+  checked_total: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface HealthCheckupList {
+  records: HealthCheckup[];
+  meta: { total: number };
+}
+
+/** 批次只读统计：应检/已检/完成率/异常汇总 */
+export interface HealthCheckupStats {
+  member_total: number;
+  checked_total: number;
+  /** 已检/应检 百分比（整数） */
+  completion_rate: number;
+  abnormal_total: number;
+  vital_sign_total: number;
+  followup_total: number;
+}
+
+export interface HealthCheckupInput {
+  /** 业务年（2000–2100），同一年度仅允许一个批次（重复 409） */
+  checkup_year: number;
+  name: string;
+  start_date?: string;
+  end_date?: string;
+  /** 创建时是否快照本机构在册人员，默认 true */
+  snapshot?: boolean;
+  metadata?: Record<string, unknown>;
+}
+
+/** 状态流转：草稿 → 进行中 → 已完成（单向，非法跳转 400） */
+export interface HealthCheckupStatusInput {
+  status: HealthCheckupStatus;
+}
+
+/** 参检名单快照成员 */
+export interface HealthCheckupMember {
+  id: string;
+  checkup_id: string;
+  patient_id: string;
+  patient_name: string | null;
+  /** 活动 ELDERLY_CARE/OUTPATIENT 周期锚点，可空 */
+  encounter_id: string | null;
+  encounter_no: string | null;
+  checked: boolean;
+  checked_at: string | null;
+  operator: string;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+  /** 补录时已存在成员（唯一索引幂等跳过）为 true */
+  skipped?: boolean;
+}
+
+export interface HealthCheckupMemberList {
+  records: HealthCheckupMember[];
+  meta: { total: number };
+}
+
+export interface HealthCheckupMemberInput {
+  patient_ids: string[];
+}
+
+export type HealthCheckupItemCategory = "数值" | "文本";
+
+/** 体检结果：数值项自动判异常，文本项人工标记 */
+export interface HealthCheckupResult {
+  id: string;
+  checkup_id: string;
+  member_id: string;
+  patient_id: string;
+  patient_name: string | null;
+  /** 项目名（中文），如 收缩压/空腹血糖/心电图 */
+  item_name: string;
+  item_category: HealthCheckupItemCategory;
+  value: number | null;
+  unit: string | null;
+  text_value: string | null;
+  ref_min: number | null;
+  ref_max: number | null;
+  /** 异常标记：数值项服务端按参考范围计算（含边界），文本项录入人标记 */
+  abnormal: boolean;
+  exam_date: string;
+  operator: string;
+  /** 非空表示已转体征（幂等，重复 409） */
+  vital_sign_id: string | null;
+  /** 非空表示已转随访（幂等，重复 409） */
+  followup_plan_id: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface HealthCheckupResultList {
+  records: HealthCheckupResult[];
+  meta: { total: number };
+}
+
+export interface HealthCheckupResultInput {
+  /** 必须属于批次参检名单 */
+  patient_id: string;
+  item_name: string;
+  item_category: HealthCheckupItemCategory;
+  /** 数值项必填；abnormal 由服务端计算，客户端不可提交 */
+  value?: number;
+  /** 数值项单位；命中内置映射时省略按类型默认，否则必填 */
+  unit?: string;
+  /** 文本项必填（心电图/胸透结论等） */
+  text_value?: string;
+  ref_min?: number;
+  ref_max?: number;
+  /** 文本项必填（人工标记异常）；数值项由服务端计算 */
+  abnormal?: boolean;
+  /** 体检日期，默认当天 */
+  exam_date?: string;
+  /** 可含 thresholds 覆盖参考范围 {"thresholds":{"SYSTOLIC_BP":{"min":..,"max":..}}} */
+  metadata?: Record<string, unknown>;
+}
+
+/** 修正：数值项服务端重算 abnormal；文本项可改 text_value/abnormal */
+export interface HealthCheckupResultPatchInput {
+  value?: number;
+  unit?: string;
+  text_value?: string;
+  abnormal?: boolean;
+  ref_min?: number;
+  ref_max?: number;
+  exam_date?: string;
+  metadata?: Record<string, unknown> | null;
+}
+
+/** 异常转体征生成的 vital_sign_records（快照，不随结果修正级联） */
+export interface CheckupVitalSignConversion {
+  id: string;
+  patient_id: string;
+  patient_name: string | null;
+  encounter_id: string | null;
+  encounter_no: string | null;
+  type: VitalSignType;
+  value: number;
+  unit: string;
+  measured_at: string;
+  recorded_by: string;
+  abnormal: boolean;
+  note: string | null;
+  metadata: Record<string, unknown> | null;
+  review_status: VitalSignReviewStatus;
+  review_result: VitalSignReviewResult | null;
+  review_note: string | null;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** 异常转随访生成的 followup_plans（锚定活动 encounter） */
+export interface CheckupFollowupConversion {
+  id: string;
+  patient_id: string;
+  patient_name: string | null;
+  encounter_id: string;
+  encounter_no: string | null;
+  followup_type: string;
+  planned_date: string;
+  planned_way: string;
+  /** 责任人（认证主体，服务端写入） */
+  assignee: string;
+  status: "待随访";
+  completed_at: string | null;
+  cancel_reason: string | null;
+  remark: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ToFollowupInput {
+  /** 慢病随访 / 常规电话随访 */
+  followup_type: string;
+  /** 默认体检日 + 7 天 */
+  planned_date?: string;
+  /** 电话 / 上门 / 门诊，默认电话 */
+  planned_way?: string;
+  remark?: string;
+}
+
+/** 批次列表（分页 + 状态筛选） */
+export function listHealthCheckups(params: {
+  status?: HealthCheckupStatus;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<HealthCheckupList> {
+  const query = new URLSearchParams();
+  if (params.status) query.set("status", params.status);
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<HealthCheckupList>(`/healthcare/v1/health-checkups${suffix}`);
+}
+
+export function getHealthCheckup(id: string): Promise<HealthCheckup> {
+  return request<HealthCheckup>(`/healthcare/v1/health-checkups/${encodeURIComponent(id)}`);
+}
+
+/** 创建批次：同一年度重复 409；snapshot=true 时同事务快照在册人员 */
+export function createHealthCheckup(input: HealthCheckupInput): Promise<HealthCheckup> {
+  return request<HealthCheckup>("/healthcare/v1/health-checkups", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+/** 批次状态流转：草稿 → 进行中 → 已完成（单向） */
+export function updateHealthCheckupStatus(
+  id: string,
+  input: HealthCheckupStatusInput,
+): Promise<HealthCheckup> {
+  return request<HealthCheckup>(`/healthcare/v1/health-checkups/${encodeURIComponent(id)}/status`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+/** 批次只读统计 */
+export function getHealthCheckupStats(id: string): Promise<HealthCheckupStats> {
+  return request<HealthCheckupStats>(`/healthcare/v1/health-checkups/${encodeURIComponent(id)}/stats`);
+}
+
+/** 名单补录（幂等跳过已存在成员；已完成批次 400） */
+export function addHealthCheckupMembers(
+  id: string,
+  input: HealthCheckupMemberInput,
+): Promise<HealthCheckupMemberList> {
+  return request<HealthCheckupMemberList>(`/healthcare/v1/health-checkups/${encodeURIComponent(id)}/members`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function listHealthCheckupMembers(
+  id: string,
+  params: { checked?: boolean; limit?: number; offset?: number } = {},
+): Promise<HealthCheckupMemberList> {
+  const query = new URLSearchParams();
+  if (params.checked !== undefined) query.set("checked", String(params.checked));
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<HealthCheckupMemberList>(`/healthcare/v1/health-checkups/${encodeURIComponent(id)}/members${suffix}`);
+}
+
+/** 结果录入：单条对象或数组批量；成功联动成员已检标记 */
+export function createHealthCheckupResults(
+  id: string,
+  inputs: HealthCheckupResultInput | HealthCheckupResultInput[],
+): Promise<HealthCheckupResultList> {
+  return request<HealthCheckupResultList>(`/healthcare/v1/health-checkups/${encodeURIComponent(id)}/results`, {
+    method: "POST",
+    body: JSON.stringify(inputs),
+  });
+}
+
+/** 结果列表：按异常/人员/类别筛选 */
+export function listHealthCheckupResults(
+  id: string,
+  params: {
+    abnormal?: boolean;
+    patient_id?: string;
+    item_category?: HealthCheckupItemCategory;
+    limit?: number;
+    offset?: number;
+  } = {},
+): Promise<HealthCheckupResultList> {
+  const query = new URLSearchParams();
+  if (params.abnormal !== undefined) query.set("abnormal", String(params.abnormal));
+  if (params.patient_id?.trim()) query.set("patient_id", params.patient_id.trim());
+  if (params.item_category) query.set("item_category", params.item_category);
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<HealthCheckupResultList>(`/healthcare/v1/health-checkups/${encodeURIComponent(id)}/results${suffix}`);
+}
+
+export function getHealthCheckupResult(id: string): Promise<HealthCheckupResult> {
+  return request<HealthCheckupResult>(`/healthcare/v1/health-checkup-results/${encodeURIComponent(id)}`);
+}
+
+/** 修正结果：数值项重算 abnormal；不级联已生成的体征/随访（快照） */
+export function updateHealthCheckupResult(
+  id: string,
+  input: HealthCheckupResultPatchInput,
+): Promise<HealthCheckupResult> {
+  return request<HealthCheckupResult>(`/healthcare/v1/health-checkup-results/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+/** 异常转体征：仅 abnormal 数值项且命中内置映射；同项重复 409 */
+export function convertCheckupResultToVitalSign(
+  id: string,
+): Promise<{ vital_sign: CheckupVitalSignConversion; result: HealthCheckupResult }> {
+  return request<{ vital_sign: CheckupVitalSignConversion; result: HealthCheckupResult }>(
+    `/healthcare/v1/health-checkup-results/${encodeURIComponent(id)}/to-vital-sign`,
+    { method: "POST" },
+  );
+}
+
+/** 异常转随访：锚定活动 encounter；同项重复 409；无活动锚点 409 */
+export function convertCheckupResultToFollowup(
+  id: string,
+  input: ToFollowupInput,
+): Promise<{ followup_plan: CheckupFollowupConversion; result: HealthCheckupResult }> {
+  return request<{ followup_plan: CheckupFollowupConversion; result: HealthCheckupResult }>(
+    `/healthcare/v1/health-checkup-results/${encodeURIComponent(id)}/to-followup`,
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+// ─── 膳食营养 (dining) ─────────────────────────────────────────────
+// 长者餐食管理：饮食档案 → 菜品库 → 周菜谱 → 配餐名单 → 就餐登记 → 统计。
+// 业务枚举一律中文值：餐食类型（普食/软食/碎食/流食/糖尿病餐）、
+// 餐次（早餐/午餐/晚餐/加餐）、就餐状态（正常/部分/未就餐/拒食）等。
+
+export interface DietProfile {
+  id: string;
+  patient_id: string;
+  patient_name: string | null;
+  encounter_id: string;
+  meal_type: string;
+  allergies: string[];
+  portion_preference: string | null;
+  remark: string | null;
+  status: string;
+  /** 关联入住状态：ACTIVE=在院 */
+  encounter_status: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DietProfileInput {
+  patient_id: string;
+  encounter_id: string;
+  meal_type: string;
+  allergies?: string[];
+  portion_preference?: string;
+  remark?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface DietProfileList {
+  records: DietProfile[];
+  meta: { total: number };
+}
+
+export interface Dish {
+  id: string;
+  name: string;
+  category: string;
+  meal_times: string[];
+  diet_tags: string[];
+  status: string;
+  remark: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DishInput {
+  name: string;
+  category: string;
+  meal_times?: string[];
+  diet_tags?: string[];
+  remark?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface DishList {
+  records: Dish[];
+  meta: { total: number };
+}
+
+export interface WeeklyMenuItem {
+  id: string;
+  menu_id: string;
+  day_of_week: number;
+  meal_time: string;
+  dish_id: string;
+  dish_name: string;
+  sort_order: number;
+}
+
+export interface WeeklyMenu {
+  id: string;
+  week_start: string;
+  name: string | null;
+  status: string;
+  remark: string | null;
+  items?: WeeklyMenuItem[];
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WeeklyMenuInput {
+  week_start: string;
+  name?: string;
+  remark?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface WeeklyMenuList {
+  records: WeeklyMenu[];
+  meta: { total: number };
+}
+
+export interface MealExecution {
+  id: string;
+  roster_item_id: string;
+  status: string;
+  remark: string | null;
+  recorded_by: string;
+  recorded_at: string;
+  /** 联查字段（list 接口） */
+  menu_date?: string;
+  meal_time?: string;
+  patient_id?: string;
+  patient_name?: string;
+  meal_type?: string;
+  allergies?: string[];
+  adjust_type?: string | null;
+}
+
+export interface RosterItem {
+  id: string;
+  roster_id: string;
+  patient_id: string;
+  encounter_id: string | null;
+  patient_name: string;
+  meal_type: string;
+  allergies: string[];
+  source: "自动" | "手工";
+  adjust_type: string | null;
+  remark: string | null;
+  sort_order: number;
+  execution: MealExecution | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Roster {
+  id: string;
+  menu_date: string;
+  meal_time: string;
+  generated_by: string | null;
+  generated_at: string | null;
+  remark: string | null;
+  items?: RosterItem[];
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RosterList {
+  records: Roster[];
+  meta: { total: number };
+}
+
+export interface RosterGenerateResult {
+  roster: Roster;
+  created: number;
+  updated: number;
+  skipped: number;
+  total: number;
+}
+
+export interface MealStatistics {
+  date_from: string;
+  date_to: string;
+  summary: {
+    expected_total: number;
+    recorded_total: number;
+    eaten_total: number;
+    normal_total: number;
+    partial_total: number;
+    not_eaten_total: number;
+    refused_total: number;
+    not_expected_total: number;
+    unrecorded_total: number;
+    dining_rate: number | null;
+  };
+  by_status: Record<string, number>;
+  by_meal: Array<{ meal_time: string; expected_total: number; recorded_total: number; eaten_total: number; dining_rate: number | null }>;
+  by_date: Array<{ menu_date: string; expected_total: number; recorded_total: number; eaten_total: number; dining_rate: number | null }>;
+}
+
+export interface MealExecutionList {
+  records: MealExecution[];
+  meta: { total: number };
+}
+
+// ─── 长者饮食档案 ──────────────────────────────────────────────────
+
+export function listDietProfiles(params: {
+  patient_id?: string;
+  encounter_id?: string;
+  status?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<DietProfileList> {
+  const query = new URLSearchParams();
+  if (params.patient_id?.trim()) query.set("patient_id", params.patient_id.trim());
+  if (params.encounter_id?.trim()) query.set("encounter_id", params.encounter_id.trim());
+  if (params.status?.trim()) query.set("status", params.status.trim());
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<DietProfileList>(`/dining/v1/diet-profiles${suffix}`);
+}
+
+export function getDietProfile(id: string): Promise<DietProfile> {
+  return request<DietProfile>(`/dining/v1/diet-profiles/${encodeURIComponent(id)}`);
+}
+
+export function createDietProfile(input: DietProfileInput): Promise<DietProfile> {
+  return request<DietProfile>("/dining/v1/diet-profiles", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateDietProfile(id: string, input: Partial<DietProfileInput>): Promise<DietProfile> {
+  return request<DietProfile>(`/dining/v1/diet-profiles/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateDietProfileStatus(id: string, status: "启用" | "停用"): Promise<DietProfile> {
+  return request<DietProfile>(`/dining/v1/diet-profiles/${encodeURIComponent(id)}/status`, {
+    method: "PATCH",
+    body: JSON.stringify({ status }),
+  });
+}
+
+export function deleteDietProfile(id: string): Promise<void> {
+  return request<void>(`/dining/v1/diet-profiles/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+// ─── 菜品库 ────────────────────────────────────────────────────────
+
+export function listDishes(params: {
+  category?: string;
+  status?: string;
+  keyword?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<DishList> {
+  const query = new URLSearchParams();
+  if (params.category?.trim()) query.set("category", params.category.trim());
+  if (params.status?.trim()) query.set("status", params.status.trim());
+  if (params.keyword?.trim()) query.set("keyword", params.keyword.trim());
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<DishList>(`/dining/v1/dishes${suffix}`);
+}
+
+export function createDish(input: DishInput): Promise<Dish> {
+  return request<Dish>("/dining/v1/dishes", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateDish(id: string, input: Partial<DishInput>): Promise<Dish> {
+  return request<Dish>(`/dining/v1/dishes/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateDishStatus(id: string, status: "启用" | "停用"): Promise<Dish> {
+  return request<Dish>(`/dining/v1/dishes/${encodeURIComponent(id)}/status`, {
+    method: "PATCH",
+    body: JSON.stringify({ status }),
+  });
+}
+
+// ─── 周菜谱 ────────────────────────────────────────────────────────
+
+export function listWeeklyMenus(params: {
+  week_start?: string;
+  status?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<WeeklyMenuList> {
+  const query = new URLSearchParams();
+  if (params.week_start?.trim()) query.set("week_start", params.week_start.trim());
+  if (params.status?.trim()) query.set("status", params.status.trim());
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<WeeklyMenuList>(`/dining/v1/weekly-menus${suffix}`);
+}
+
+export function getWeeklyMenu(id: string): Promise<WeeklyMenu> {
+  return request<WeeklyMenu>(`/dining/v1/weekly-menus/${encodeURIComponent(id)}`);
+}
+
+/** 取某日期所在周当前启用的菜谱（含明细）；无启用菜谱时 404 */
+export function getWeeklyMenuByDate(date: string): Promise<WeeklyMenu> {
+  return request<WeeklyMenu>(`/dining/v1/weekly-menus/by-date?date=${encodeURIComponent(date)}`);
+}
+
+export function createWeeklyMenu(input: WeeklyMenuInput): Promise<WeeklyMenu> {
+  return request<WeeklyMenu>("/dining/v1/weekly-menus", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateWeeklyMenu(id: string, input: Partial<WeeklyMenuInput>): Promise<WeeklyMenu> {
+  return request<WeeklyMenu>(`/dining/v1/weekly-menus/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateWeeklyMenuStatus(id: string, status: "启用" | "停用"): Promise<WeeklyMenu> {
+  return request<WeeklyMenu>(`/dining/v1/weekly-menus/${encodeURIComponent(id)}/status`, {
+    method: "PATCH",
+    body: JSON.stringify({ status }),
+  });
+}
+
+export function replaceWeeklyMenuItems(
+  id: string,
+  items: Array<{ day_of_week: number; meal_time: string; dish_id: string; sort_order?: number }>,
+): Promise<WeeklyMenu> {
+  return request<WeeklyMenu>(`/dining/v1/weekly-menus/${encodeURIComponent(id)}/items`, {
+    method: "POST",
+    body: JSON.stringify({ items }),
+  });
+}
+
+/** 整周模板复制到目标周；目标周已有启用菜谱时 409 */
+export function copyWeeklyMenu(id: string, weekStart: string): Promise<WeeklyMenu> {
+  return request<WeeklyMenu>(`/dining/v1/weekly-menus/${encodeURIComponent(id)}/copy`, {
+    method: "POST",
+    body: JSON.stringify({ week_start: weekStart }),
+  });
+}
+
+// ─── 配餐名单 ──────────────────────────────────────────────────────
+
+export function generateRoster(input: { date: string; meal_time: string; remark?: string }): Promise<RosterGenerateResult> {
+  return request<RosterGenerateResult>("/dining/v1/rosters/generate", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function listRosters(params: {
+  date?: string;
+  meal_time?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<RosterList> {
+  const query = new URLSearchParams();
+  if (params.date?.trim()) query.set("date", params.date.trim());
+  if (params.meal_time?.trim()) query.set("meal_time", params.meal_time.trim());
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<RosterList>(`/dining/v1/rosters${suffix}`);
+}
+
+export function getRoster(id: string): Promise<Roster> {
+  return request<Roster>(`/dining/v1/rosters/${encodeURIComponent(id)}`);
+}
+
+/** 手工调整：外出/请假（标记本餐不就餐）/临时加餐（新增） */
+export function addRosterItem(
+  rosterId: string,
+  input: { patient_id: string; adjust_type: "外出" | "请假" | "临时加餐"; remark?: string },
+): Promise<RosterItem> {
+  return request<RosterItem>(`/dining/v1/rosters/${encodeURIComponent(rosterId)}/items`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function removeRosterItem(rosterId: string, itemId: string): Promise<void> {
+  return request<void>(`/dining/v1/rosters/${encodeURIComponent(rosterId)}/items/${encodeURIComponent(itemId)}`, {
+    method: "DELETE",
+  });
+}
+
+// ─── 就餐执行登记 ──────────────────────────────────────────────────
+
+/** 登记（幂等）：同一名单条目重复登记为更新，登记人与时间随之刷新 */
+export function registerMealExecution(input: { roster_item_id: string; status: string; remark?: string }): Promise<MealExecution> {
+  return request<MealExecution>("/dining/v1/executions", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function listMealExecutions(params: {
+  date?: string;
+  meal_time?: string;
+  status?: string;
+  patient_id?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<MealExecutionList> {
+  const query = new URLSearchParams();
+  if (params.date?.trim()) query.set("date", params.date.trim());
+  if (params.meal_time?.trim()) query.set("meal_time", params.meal_time.trim());
+  if (params.status?.trim()) query.set("status", params.status.trim());
+  if (params.patient_id?.trim()) query.set("patient_id", params.patient_id.trim());
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<MealExecutionList>(`/dining/v1/executions${suffix}`);
+}
+
+// ─── 就餐统计 ──────────────────────────────────────────────────────
+
+export function getMealStatistics(params: {
+  date_from: string;
+  date_to: string;
+  meal_time?: string;
+}): Promise<MealStatistics> {
+  const query = new URLSearchParams();
+  query.set("date_from", params.date_from);
+  query.set("date_to", params.date_to);
+  if (params.meal_time?.trim()) query.set("meal_time", params.meal_time.trim());
+  return request<MealStatistics>(`/dining/v1/statistics/meals?${query.toString()}`);
 }

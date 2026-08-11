@@ -2,7 +2,7 @@
 """看板状态流转（后台模式）：cron 秒级返回，pi agent 在后台运行。
 
 主脚本：扫看板 → 对每张待处理卡起后台 agent → 立即退出。
-支持 --loop 自循环模式：每 5 分钟（可 --interval 调整）从扫描看板重新开始。
+支持 --loop 自循环模式：每 10 分钟（可 --interval 调整）从扫描看板重新开始。
 后台 agent：pi 完成文件改动 → 自己调 gh 更新看板状态。
 
 Todo 列不处理（手动控制），从「需求」开始：
@@ -52,6 +52,11 @@ import fcntl
 import signal
 from datetime import datetime, timezone
 
+# gh 子进程输出解析依赖纯 JSON：剥离强制彩色输出的环境变量（agent 内核常带
+# CLICOLOR_FORCE/GH_FORCE_TTY，会让 gh 对管道输出 ANSI 色码导致 json.loads 失败）
+for _v in ("CLICOLOR_FORCE", "GH_FORCE_TTY"):
+    os.environ.pop(_v, None)
+
 PROJECT_NUMBER = "8"
 OWNER = "@me"
 PROJECT_ID = "PVT_kwHOAAOE884AYQef"
@@ -63,6 +68,9 @@ LOG_OUTPUT = "/tmp/kanban_automator.log"
 # DraftIssue 卡无标签能力，处理中/失败状态仍回退这两个文件；Issue 卡全部走标签
 LOCK_FILE = "/tmp/kanban_automator.lock"
 FAIL_STATE_FILE = "/tmp/kanban_automator_fails.json"
+# resolve_option_ids() 的 field-list 结果缓存（每次实测约 102 GraphQL 点数，选项 ID 极少变动）
+OPTION_CACHE_FILE = "/tmp/kanban_option_ids.json"
+OPTION_CACHE_TTL = 3600  # 1 小时；缓存显示缺选项时强制刷新（人工添加后尽快生效）
 
 IN_PROGRESS_LABEL = "⏳ 处理中"
 STALE_GRACE = 60
@@ -699,9 +707,23 @@ def log_step(title, target_status):
 # ---------- 状态选项解析 ----------
 
 def resolve_option_ids():
-    """启动时按名称解析 Status 字段选项 ID（field-list），失败用硬编码兜底。
-    返回缺失的选项名集合（如项目设置里还没加「计划」）。"""
+    """按名称解析 Status 字段选项 ID（field-list），失败用硬编码兜底。
+    返回缺失的选项名集合（如项目设置里还没加「计划」）。
+    结果缓存 OPTION_CACHE_TTL 秒：field-list 每次实测约消耗 102 GraphQL 点数，
+    选项 ID 极少变动，无需每轮扫描/每个 agent 运行都查；缓存里缺选项时强制刷新
+    （选项可能刚被人工添加，保证添加后尽快生效）。"""
     global OPTION_IDS, OPTION_MISSING
+    try:
+        with open(OPTION_CACHE_FILE, encoding="utf-8") as f:
+            cache = json.load(f)
+        if (time.time() - cache["resolved_at"] < OPTION_CACHE_TTL
+                and not cache.get("missing")):
+            OPTION_IDS = cache["option_ids"]
+            OPTION_MISSING = set()
+            return OPTION_MISSING
+    except (FileNotFoundError, json.JSONDecodeError, KeyError, TypeError):
+        pass
+
     ids = dict(OPTION_IDS)
     missing = set()
     try:
@@ -719,6 +741,14 @@ def resolve_option_ids():
             missing.add(name)
     OPTION_IDS = ids
     OPTION_MISSING = missing
+    # 原子写缓存
+    cache = {"resolved_at": time.time(), "option_ids": ids, "missing": sorted(missing)}
+    tmp = f"{OPTION_CACHE_FILE}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cache, f, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, OPTION_CACHE_FILE)
     if missing:
         print(f"{ts()} [field] Status 字段缺少选项: {sorted(missing)}（请在项目设置添加）", flush=True)
     return missing
@@ -1291,7 +1321,7 @@ def run_scan_mode():
 
 # ---------- 入口 ----------
 
-def run_loop_mode(interval=300):
+def run_loop_mode(interval=600):
     """自循环模式：每 interval 秒从扫描看板重新开始一轮。
     每轮独立获取 cron flock（与 cron 实例互斥，重叠时跳过本轮）；
     启动的后台 agent 均独立进程组，循环退出不影响它们。"""
@@ -1343,7 +1373,7 @@ def main():
 
     # --loop 模式：自循环扫描（--interval 秒，默认 300）
     if "--loop" in sys.argv:
-        interval = 300
+        interval = 600
         if "--interval" in sys.argv:
             i = sys.argv.index("--interval")
             interval = int(sys.argv[i + 1])

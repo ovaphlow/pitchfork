@@ -7,6 +7,7 @@ dependencies {
     implementation(project(":libs:inventories"))
     implementation(project(":libs:pharmacy"))
     implementation(project(":libs:nursing"))
+    implementation(project(":libs:dining"))
     implementation(project(":libs:logging"))
     implementation(project(":libs:database"))
     implementation(project(":libs:common"))

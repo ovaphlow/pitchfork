@@ -319,10 +319,17 @@ class TaskExecutionService(
             }
     }
 
+    /**
+     * 更新执行状态（打卡路径）。
+     *
+     * @param executor 执行人（登录 subject_id），由路由从认证会话解析传入；
+     *   非空时随状态流转落库（开始/完成/跳过/取消均记录操作人）。
+     */
     fun updateStatus(
         id: String,
         newStatus: String,
         note: String? = null,
+        executor: String? = null,
     ): Future<JsonObject> {
         if (newStatus.isBlank()) {
             return Future.failedFuture(IllegalArgumentException("status is required"))
@@ -350,6 +357,11 @@ class TaskExecutionService(
             // 支持保存备注/跳过/取消原因
             if (!note.isNullOrBlank()) {
                 q = q.set(cNote, note.trim())
+            }
+
+            // 执行人（登录 subject_id）：无耗材打卡路径此前不落库，F6 验收要求记录
+            if (!executor.isNullOrBlank()) {
+                q = q.set(cExecutor, executor.trim())
             }
 
             val updateQuery = q.where(cId.eq(id))
@@ -409,9 +421,9 @@ class TaskExecutionService(
         consumptions: List<ConsumptionInput>,
         authenticatedSubject: String,
     ): Future<JsonObject> {
-        // 无耗材时走原有的 updateStatus 路径
+        // 无耗材时走原有的 updateStatus 路径（同样记录执行人）
         if (consumptions.isEmpty()) {
-            return updateStatus(id, "COMPLETED", note)
+            return updateStatus(id, "COMPLETED", note, executor = authenticatedSubject)
         }
         if (consumptions.map { it.stockId }.distinct().size != consumptions.size) {
             return Future.failedFuture(IllegalArgumentException("duplicate stock_id"))
