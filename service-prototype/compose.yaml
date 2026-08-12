@@ -1,0 +1,21 @@
+# Podman Compose — PostgreSQL 17 for service-prototype
+# Uses PITCHFORK_DB_PASSWORD from the shell or a local .env file
+# Usage: podman compose up -d   or   docker compose up -d
+
+services:
+  pitchfork-prototype-db:
+    image: postgres:17
+    container_name: pitchfork-prototype-db
+    restart: unless-stopped
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: ovaphlow
+      POSTGRES_PASSWORD: "${PITCHFORK_DB_PASSWORD:?PITCHFORK_DB_PASSWORD must be set}"
+    volumes:
+      - ./.data/pg:/var/lib/postgresql:Z
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ovaphlow -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5

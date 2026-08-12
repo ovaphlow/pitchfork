@@ -12,8 +12,13 @@ import (
 	"time"
 
 	"github.com/ovaphlow/pitchfork/service-prototype/internal/config"
+	"github.com/ovaphlow/pitchfork/service-prototype/internal/database"
 	"github.com/ovaphlow/pitchfork/service-prototype/internal/httpapi"
 )
+
+// databaseBootstrapTimeout bounds the startup connection attempt so an
+// unreachable database delays startup only briefly.
+const databaseBootstrapTimeout = 5 * time.Second
 
 func main() {
 	runContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -33,6 +38,13 @@ func run(ctx context.Context, lookup func(string) string, stdout, stderr io.Writ
 
 	logger := slog.New(slog.NewTextHandler(stdout, nil))
 	logger.Info("starting prototyped", "port", configuration.Port)
+
+	connector := database.New(configuration.DatabaseURL)
+	// An unavailable database must never prevent startup: the failure is
+	// logged and the service keeps serving without a database. A later
+	// Connect call (or restart) retries the migrations.
+	bootstrapDatabase(ctx, logger, connector)
+	defer connector.Close()
 
 	server := &http.Server{
 		Addr:              configuration.Address(),
@@ -60,4 +72,17 @@ func run(ctx context.Context, lookup func(string) string, stdout, stderr io.Writ
 		}
 	}
 	return 0
+}
+
+// bootstrapDatabase attempts to connect and run the embedded migrations
+// within a bounded window. Connection and migration failures are logged and
+// swallowed: the service starts and keeps serving even without a database.
+func bootstrapDatabase(ctx context.Context, logger *slog.Logger, connector *database.Connector) {
+	connectContext, cancel := context.WithTimeout(ctx, databaseBootstrapTimeout)
+	defer cancel()
+	if err := connector.Connect(connectContext); err != nil {
+		logger.Warn("database unavailable; continuing without database", "error", err)
+		return
+	}
+	logger.Info("database ready")
 }
