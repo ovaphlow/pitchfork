@@ -64,7 +64,7 @@ func TestLoadFromLookupRequiresPasswordWithoutDatabaseURL(t *testing.T) {
 
 func TestLoadFromLookupDatabaseURLWins(t *testing.T) {
 	configuration, err := LoadFromLookup(valuesLookup(map[string]string{
-		"DATABASE_URL":          "postgres://custom:secret@db.example:5544/custom",
+		"DATABASE_URL":         "postgres://custom:secret@db.example:5544/custom",
 		"PITCHFORK_DB_PASSWORD": "", // 离散变量完全不参与
 		"PITCHFORK_DB_HOST":     "ignored.example",
 	}))
@@ -128,7 +128,7 @@ func TestLoadWithDotEnvLookupEnvOverridesFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	configuration, err := LoadWithDotEnvLookup(valuesLookup(map[string]string{
-		"PORT":                  "9002",
+		"PORT":                 "9002",
 		"PITCHFORK_DB_PASSWORD": "env-pw",
 	}), path)
 	if err != nil {
@@ -151,5 +151,38 @@ func TestLoadWithDotEnvMissingFileIsNotError(t *testing.T) {
 	}
 	if configuration.Port != defaultPort {
 		t.Fatalf("Port = %d, want default %d", configuration.Port, defaultPort)
+	}
+}
+
+// ─── #29 CORS 允许列表配置 ───────────────────────────────────────────────
+
+func TestLoadFromLookupParsesCORSAllowedOrigins(t *testing.T) {
+	configuration, err := LoadFromLookup(valuesLookup(map[string]string{
+		"CORS_ALLOWED_ORIGINS": "https://a.example, https://b.example ,",
+		"PITCHFORK_DB_PASSWORD": "pw",
+	}))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	want := []string{"https://a.example", "https://b.example"}
+	if len(configuration.CORSAllowedOrigins) != len(want) {
+		t.Fatalf("CORSAllowedOrigins = %#v, want %#v", configuration.CORSAllowedOrigins, want)
+	}
+	for i := range want {
+		if configuration.CORSAllowedOrigins[i] != want[i] {
+			t.Fatalf("CORSAllowedOrigins = %#v, want %#v", configuration.CORSAllowedOrigins, want)
+		}
+	}
+}
+
+func TestLoadFromLookupCORSAllowedOriginsDefaultEmpty(t *testing.T) {
+	configuration, err := LoadFromLookup(valuesLookup(map[string]string{
+		"PITCHFORK_DB_PASSWORD": "pw",
+	}))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if configuration.CORSAllowedOrigins == nil || len(configuration.CORSAllowedOrigins) != 0 {
+		t.Fatalf("CORSAllowedOrigins = %#v, want empty slice", configuration.CORSAllowedOrigins)
 	}
 }

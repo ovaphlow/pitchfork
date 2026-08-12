@@ -48,7 +48,7 @@ func run(ctx context.Context, lookup func(string) string, stdout, stderr io.Writ
 
 	server := &http.Server{
 		Addr:              configuration.Address(),
-		Handler:           httpapi.NewMux(),
+		Handler:           httpapi.NewMux(configuration.CORSAllowedOrigins),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

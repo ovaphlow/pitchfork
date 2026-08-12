@@ -28,6 +28,9 @@ type Config struct {
 	// DATABASE_URL when provided, otherwise it is assembled from the
 	// discrete PITCHFORK_DB_* variables.
 	DatabaseURL string
+	// CORSAllowedOrigins is the comma-separated CORS allow list from
+	// CORS_ALLOWED_ORIGINS. Empty when the variable is unset.
+	CORSAllowedOrigins []string
 }
 
 // Address returns the listen address for the HTTP server.
@@ -52,7 +55,28 @@ func LoadFromLookup(lookup func(string) string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	return Config{Port: port, DatabaseURL: databaseURL}, nil
+	return Config{
+		Port:               port,
+		DatabaseURL:        databaseURL,
+		CORSAllowedOrigins: splitCSV(lookup("CORS_ALLOWED_ORIGINS")),
+	}, nil
+}
+
+// splitCSV splits a comma-separated list, trimming whitespace and dropping
+// empty entries. An empty input yields an empty (non-nil) slice.
+func splitCSV(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return []string{}
+	}
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 // LoadWithDotEnv loads configuration from the process environment merged
