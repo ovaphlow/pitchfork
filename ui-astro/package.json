@@ -6,6 +6,7 @@
     "dev:admin": "pnpm --filter @pitchfork/admin dev",
     "dev:worker": "pnpm --filter @pitchfork/worker dev",
     "dev:aceso": "pnpm --filter @pitchfork/aceso dev",
+    "dev:merit": "pnpm --filter @pitchfork/merit dev",
     "build": "pnpm -r build",
     "preview": "pnpm --filter @pitchfork/auth preview",
     "preview:aceso": "pnpm --filter @pitchfork/aceso preview",

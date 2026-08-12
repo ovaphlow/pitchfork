@@ -4,6 +4,7 @@
 package com.ovaphlow.crate.database.gen.nursing;
 
 
+import com.ovaphlow.crate.database.gen.nursing.tables.MedicationAdministrations;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingAssessments;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingCarePlanRevisions;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingIncidentActions;
@@ -16,6 +17,7 @@ import com.ovaphlow.crate.database.gen.nursing.tables.NursingShiftHandovers;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingTaskExecutions;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingTasks;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingVisitSchedules;
+import com.ovaphlow.crate.database.gen.nursing.tables.records.MedicationAdministrationsRecord;
 import com.ovaphlow.crate.database.gen.nursing.tables.records.NursingAssessmentsRecord;
 import com.ovaphlow.crate.database.gen.nursing.tables.records.NursingCarePlanRevisionsRecord;
 import com.ovaphlow.crate.database.gen.nursing.tables.records.NursingIncidentActionsRecord;
@@ -47,6 +49,8 @@ public class Keys {
     // UNIQUE and PRIMARY KEY definitions
     // -------------------------------------------------------------------------
 
+    public static final UniqueKey<MedicationAdministrationsRecord> MEDICATION_ADMINISTRATIONS_PKEY = Internal.createUniqueKey(MedicationAdministrations.MEDICATION_ADMINISTRATIONS, DSL.name("medication_administrations_pkey"), new TableField[] { MedicationAdministrations.MEDICATION_ADMINISTRATIONS.ID }, true);
+    public static final UniqueKey<MedicationAdministrationsRecord> MEDICATION_ADMINISTRATIONS_TASK_EXECUTION_ID_KEY = Internal.createUniqueKey(MedicationAdministrations.MEDICATION_ADMINISTRATIONS, DSL.name("medication_administrations_task_execution_id_key"), new TableField[] { MedicationAdministrations.MEDICATION_ADMINISTRATIONS.TASK_EXECUTION_ID }, true);
     public static final UniqueKey<NursingAssessmentsRecord> NURSING_ASSESSMENTS_PKEY = Internal.createUniqueKey(NursingAssessments.NURSING_ASSESSMENTS, DSL.name("nursing_assessments_pkey"), new TableField[] { NursingAssessments.NURSING_ASSESSMENTS.ID }, true);
     public static final UniqueKey<NursingCarePlanRevisionsRecord> NURSING_CARE_PLAN_REVISIONS_NEW_PLAN_ID_KEY = Internal.createUniqueKey(NursingCarePlanRevisions.NURSING_CARE_PLAN_REVISIONS, DSL.name("nursing_care_plan_revisions_new_plan_id_key"), new TableField[] { NursingCarePlanRevisions.NURSING_CARE_PLAN_REVISIONS.NEW_PLAN_ID }, true);
     public static final UniqueKey<NursingCarePlanRevisionsRecord> NURSING_CARE_PLAN_REVISIONS_PKEY = Internal.createUniqueKey(NursingCarePlanRevisions.NURSING_CARE_PLAN_REVISIONS, DSL.name("nursing_care_plan_revisions_pkey"), new TableField[] { NursingCarePlanRevisions.NURSING_CARE_PLAN_REVISIONS.ID }, true);
@@ -67,6 +71,7 @@ public class Keys {
     // FOREIGN KEY definitions
     // -------------------------------------------------------------------------
 
+    public static final ForeignKey<MedicationAdministrationsRecord, NursingTaskExecutionsRecord> MEDICATION_ADMINISTRATIONS__MEDICATION_ADMINISTRATIONS_TASK_EXECUTION_ID_FKEY = Internal.createForeignKey(MedicationAdministrations.MEDICATION_ADMINISTRATIONS, DSL.name("medication_administrations_task_execution_id_fkey"), new TableField[] { MedicationAdministrations.MEDICATION_ADMINISTRATIONS.TASK_EXECUTION_ID }, Keys.NURSING_TASK_EXECUTIONS_PKEY, new TableField[] { NursingTaskExecutions.NURSING_TASK_EXECUTIONS.ID }, true);
     public static final ForeignKey<NursingAssessmentsRecord, NursingServicePeriodsRecord> NURSING_ASSESSMENTS__NURSING_ASSESSMENTS_PERIOD_ID_FKEY = Internal.createForeignKey(NursingAssessments.NURSING_ASSESSMENTS, DSL.name("nursing_assessments_period_id_fkey"), new TableField[] { NursingAssessments.NURSING_ASSESSMENTS.PERIOD_ID }, Keys.NURSING_SERVICE_PERIODS_PKEY, new TableField[] { NursingServicePeriods.NURSING_SERVICE_PERIODS.ID }, true);
     public static final ForeignKey<NursingCarePlanRevisionsRecord, NursingAssessmentsRecord> NURSING_CARE_PLAN_REVISIONS__NURSING_CARE_PLAN_REVISIONS_ASSESSMENT_ID_FKEY = Internal.createForeignKey(NursingCarePlanRevisions.NURSING_CARE_PLAN_REVISIONS, DSL.name("nursing_care_plan_revisions_assessment_id_fkey"), new TableField[] { NursingCarePlanRevisions.NURSING_CARE_PLAN_REVISIONS.ASSESSMENT_ID }, Keys.NURSING_ASSESSMENTS_PKEY, new TableField[] { NursingAssessments.NURSING_ASSESSMENTS.ID }, true);
     public static final ForeignKey<NursingCarePlanRevisionsRecord, NursingPlansRecord> NURSING_CARE_PLAN_REVISIONS__NURSING_CARE_PLAN_REVISIONS_NEW_PLAN_ID_FKEY = Internal.createForeignKey(NursingCarePlanRevisions.NURSING_CARE_PLAN_REVISIONS, DSL.name("nursing_care_plan_revisions_new_plan_id_fkey"), new TableField[] { NursingCarePlanRevisions.NURSING_CARE_PLAN_REVISIONS.NEW_PLAN_ID }, Keys.NURSING_PLANS_PKEY, new TableField[] { NursingPlans.NURSING_PLANS.ID }, true);

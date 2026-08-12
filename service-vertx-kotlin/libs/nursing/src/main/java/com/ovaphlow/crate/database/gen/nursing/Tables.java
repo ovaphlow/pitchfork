@@ -4,6 +4,7 @@
 package com.ovaphlow.crate.database.gen.nursing;
 
 
+import com.ovaphlow.crate.database.gen.nursing.tables.MedicationAdministrations;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingAssessments;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingCarePlanRevisions;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingIncidentActions;
@@ -23,6 +24,11 @@ import com.ovaphlow.crate.database.gen.nursing.tables.NursingVisitSchedules;
  */
 @SuppressWarnings({ "all", "unchecked", "rawtypes", "this-escape" })
 public class Tables {
+
+    /**
+     * 护士给药记录（MAR）：每执行实例至多一条，与药房发药明细联动对账（累计给药 ≤ 实发数量）
+     */
+    public static final MedicationAdministrations MEDICATION_ADMINISTRATIONS = MedicationAdministrations.MEDICATION_ADMINISTRATIONS;
 
     /**
      * The table <code>nursing.nursing_assessments</code>.

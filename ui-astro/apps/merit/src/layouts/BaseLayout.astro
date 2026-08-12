@@ -1,0 +1,29 @@
+---
+import "../styles/global.css";
+
+interface Props {
+	title: string;
+}
+
+const { title } = Astro.props;
+---
+
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{title} — Merit</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <script>
+      // htmx.org 模块顶层引用浏览器全局 location，SSR(Node) 下求值会崩溃，
+      // 因此仅在浏览器环境动态 import；仍由 Astro 从 npm 包自动打包，非 CDN 外链。
+      if (typeof window !== "undefined") {
+        await import("htmx.org");
+      }
+    </script>
+  </head>
+  <body class="min-h-screen bg-bg text-fg antialiased">
+    <slot />
+  </body>
+</html>

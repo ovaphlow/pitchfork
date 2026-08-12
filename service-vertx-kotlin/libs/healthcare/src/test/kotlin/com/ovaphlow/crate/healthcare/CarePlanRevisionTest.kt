@@ -1,6 +1,7 @@
 package com.ovaphlow.crate.healthcare
 
 import com.ovaphlow.crate.nursing.ConflictException
+import com.ovaphlow.crate.nursing.NotFoundException
 import io.mockk.every
 import io.mockk.mockk
 import io.vertx.core.Future
@@ -25,6 +26,7 @@ import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.extension.ExtendWith
+import java.math.BigDecimal
 import java.time.LocalDate
 import java.time.OffsetDateTime
 import java.util.function.Function as JavaFunction
@@ -47,7 +49,10 @@ class CarePlanRevisionTest {
     private class DatabaseStub(
         var encounters: RowSet<Row> = rowSet(),
         var periods: RowSet<Row> = rowSet(),
+        var assessments: RowSet<Row> = rowSet(),
         var plans: RowSet<Row> = rowSet(),
+        /** plan_id = pln-2 时返回的新计划行（用于详情组装区分新旧计划） */
+        var newPlanRows: RowSet<Row> = rowSet(),
         var planItems: RowSet<Row> = rowSet(),
         var tasks: RowSet<Row> = rowSet(),
         var inProgressChecks: RowSet<Row> = rowSet(),
@@ -89,6 +94,7 @@ class CarePlanRevisionTest {
                     sql.contains("from nursing.nursing_care_plan_revisions") -> "revisions"
                     sql.contains("from healthcare.encounters") -> "encounters"
                     sql.contains("from nursing.nursing_service_periods") -> "periods"
+                    sql.contains("from nursing.nursing_assessments") -> "assessments"
                     sql.contains("from nursing.nursing_plan_items") -> "plan_items"
                     sql.contains("from nursing.nursing_tasks") -> "tasks"
                     sql.contains("from nursing.nursing_plans") -> "plans"
@@ -106,9 +112,13 @@ class CarePlanRevisionTest {
                     "revisions" -> revisionRows
                     "encounters" -> encounters
                     "periods" -> periods
+                    "assessments" -> assessments
                     "plan_items" -> planItems
                     "tasks" -> tasks
-                    "plans" -> plans
+                    "plans" -> {
+                        val tuple = tupleValues(firstArg())
+                        if (newPlanRows != null && tuple.isNotEmpty() && tuple[0] == "pln-2") newPlanRows else plans
+                    }
                     else -> rowSet()
                 }
                 Future.succeededFuture(result)
@@ -235,6 +245,49 @@ class CarePlanRevisionTest {
     private fun countRow(total: Long): MutableMap<String, Any?> =
         mutableMapOf("total" to total)
 
+    private fun assessmentRow(overrides: Map<String, Any?> = emptyMap()): MutableMap<String, Any?> {
+        val base = mutableMapOf<String, Any?>(
+            "id" to "asm-1",
+            "encounter_id" to "enc-1",
+            "period_id" to "per-1",
+            "assess_type" to "BARTHEL",
+            "assess_date" to LocalDate.of(2026, 8, 5),
+            "assessor" to "护理员",
+            "total_score" to BigDecimal.valueOf(65.0),
+            "result_level" to "中度依赖",
+            "detail" to JsonObject().put("note", "近期步行能力下降"),
+            "remark" to "复评说明",
+            "metadata" to null,
+            "created_at" to OffsetDateTime.parse("2026-08-05T10:00:00+08:00"),
+        )
+        base.putAll(overrides)
+        return base
+    }
+
+    /** 列表 join 后的行：修订字段 + 评估摘要 + 新旧计划摘要（prev 为左连别名） */
+    private fun revisionRow(overrides: Map<String, Any?> = emptyMap()): MutableMap<String, Any?> {
+        val base = mutableMapOf<String, Any?>(
+            "id" to "rev-1",
+            "period_id" to "per-1",
+            "encounter_id" to "enc-1",
+            "revision_no" to 1,
+            "assessment_id" to "asm-1",
+            "assess_type" to "BARTHEL",
+            "assess_date" to LocalDate.of(2026, 8, 5),
+            "assessor" to "护理员",
+            "result_level" to "中度依赖",
+            "previous_plan_id" to "pln-1",
+            "prev_plan_name" to "第一阶段照护计划",
+            "prev_plan_status" to "DISCONTINUED",
+            "new_plan_id" to "pln-2",
+            "new_plan_name" to "第二阶段照护计划",
+            "new_plan_status" to "ACTIVE",
+            "created_at" to OffsetDateTime.parse("2026-08-05T10:00:00+08:00"),
+        )
+        base.putAll(overrides)
+        return base
+    }
+
     private fun validRevisionBody(overrides: Map<String, Any?> = emptyMap()): JsonObject {
         val body = JsonObject()
             .put("assessment", JsonObject()
@@ -345,6 +398,23 @@ class CarePlanRevisionTest {
                 ),
             ),
             "unsupported keys in plan items",
+        )
+        // 服务端推导键全部拒绝：status/encounter_id/plan_id/revision_no 落在 plan 层白名单外
+        for (injectedKey in listOf("status", "encounter_id", "plan_id", "revision_no")) {
+            expectInvalid(
+                validRevisionBody(
+                    mapOf(
+                        "plan" to validRevisionBody().getJsonObject("plan").copy()
+                            .put(injectedKey, "injected"),
+                    ),
+                ),
+                "unsupported keys in plan",
+            )
+        }
+        // 顶层任意未知键同样拒绝
+        expectInvalid(
+            validRevisionBody().put("random_unknown", 1),
+            "unsupported keys in request",
         )
         // 缺 assessment / plan
         expectInvalid(JsonObject().put("plan", JsonObject()), "assessment is required")
@@ -746,6 +816,92 @@ class CarePlanRevisionTest {
         }.onComplete { ar ->
             if (ar.succeeded()) testContext.completeNow() else testContext.failNow(ar.cause())
         }
+    }
+
+    // ——— 6. 只读列表 / 详情 ———
+
+    @Test
+    fun `列表按修订号倒序组装记录且读取无写副作用`() {
+        val stub = DatabaseStub(
+            revisionRows = rows(revisionRow()),
+            assessments = rows(assessmentRow()),
+            plans = rows(planRow()),
+            countRows = rows(countRow(1L)),
+        )
+        val service = HealthcareService(stub.pool)
+        val list = service.listCarePlanRevisions("enc-1")
+            .toCompletionStage().toCompletableFuture().get()
+
+        assertEquals(1L, list.getJsonObject("meta").getLong("total"))
+        assertEquals(1, list.getJsonArray("records").size())
+        val record = list.getJsonArray("records").getJsonObject(0)
+        assertEquals("rev-1", record.getString("id"))
+        assertEquals(1, record.getInteger("revision_no"))
+        assertEquals("BARTHEL", record.getJsonObject("assessment").getString("assess_type"))
+        assertEquals("2026-08-05", record.getJsonObject("assessment").getString("assess_date"))
+        assertEquals("DISCONTINUED", record.getJsonObject("previous_plan").getString("status"))
+        assertEquals("pln-2", record.getJsonObject("new_plan").getString("id"))
+        assertEquals("ACTIVE", record.getJsonObject("new_plan").getString("status"))
+
+        // 数据查询按修订号倒序
+        val dataSql = stub.poolQueries.filter { it.contains("order by") }.last()
+        assertTrue(dataSql.contains("revision_no desc"), "got: $dataSql")
+        // 读取路径无任何写 SQL，且不经过事务连接
+        assertTrue(stub.poolQueries.none { it.startsWith("insert") || it.startsWith("update") }, "读取不得发出写 SQL")
+        assertTrue(stub.connQueries.isEmpty(), "读取不得使用事务连接")
+    }
+
+    @Test
+    fun `详情读取校验 period 归属且不匹配时返回409`() {
+        val stubMismatch = DatabaseStub(
+            revisionRows = rows(revisionRow()),
+            periods = rows(periodRow(mapOf("encounter_id" to "enc-9"))),
+        )
+        val service = HealthcareService(stubMismatch.pool)
+        val cause = causeOf(service.getCarePlanRevision("rev-1"))
+        assertInstanceOf(ConflictException::class.java, cause)
+        assertTrue(cause.message?.contains("does not belong to the bound encounter") == true, "got: ${cause.message}")
+
+        // 修订不存在返回 404
+        val stubMissing = DatabaseStub()
+        val serviceMissing = HealthcareService(stubMissing.pool)
+        val causeMissing = causeOf(serviceMissing.getCarePlanRevision("rev-9"))
+        assertInstanceOf(NotFoundException::class.java, causeMissing)
+        assertEquals("care plan revision not found: rev-9", causeMissing.message)
+    }
+
+    @Test
+    fun `详情读取组装评估新旧计划措施与任务`() {
+        val stub = DatabaseStub(
+            revisionRows = rows(revisionRow()),
+            periods = rows(periodRow()),
+            assessments = rows(assessmentRow()),
+            plans = rows(planRow(mapOf("status" to "DISCONTINUED"))),
+            newPlanRows = rows(planRow(mapOf("id" to "pln-2", "plan_name" to "第二阶段照护计划", "status" to "ACTIVE"))),
+            planItems = rows(planItemRow()),
+            tasks = rows(taskRow()),
+        )
+        val service = HealthcareService(stub.pool)
+        val detail = service.getCarePlanRevision("rev-1")
+            .toCompletionStage().toCompletableFuture().get()
+
+        assertEquals("rev-1", detail.getString("id"))
+        assertEquals("per-1", detail.getString("period_id"))
+        assertEquals(1, detail.getInteger("revision_no"))
+        assertEquals("BARTHEL", detail.getJsonObject("assessment").getString("assess_type"))
+        assertEquals(65.0, detail.getJsonObject("assessment").getDouble("total_score"))
+        assertEquals("第一阶段照护计划", detail.getJsonObject("previous_plan").getString("plan_name"))
+        assertEquals("DISCONTINUED", detail.getJsonObject("previous_plan").getString("status"))
+        assertEquals("pln-2", detail.getJsonObject("plan").getString("id"))
+        assertEquals("第二阶段照护计划", detail.getJsonObject("plan").getString("plan_name"))
+        assertEquals("ACTIVE", detail.getJsonObject("plan").getString("status"))
+        assertEquals(1, detail.getJsonObject("plan").getJsonArray("items").size())
+        assertEquals("每日协助晨间洗漱", detail.getJsonObject("plan").getJsonArray("items").getJsonObject(0).getString("action"))
+        assertEquals(1, detail.getJsonArray("tasks").size())
+        assertEquals("tsk-1", detail.getJsonArray("tasks").getJsonObject(0).getString("id"))
+
+        // 读取路径无写副作用
+        assertTrue(stub.poolQueries.none { it.startsWith("insert") || it.startsWith("update") }, "读取不得发出写 SQL")
     }
 
     private fun <T> withServer(

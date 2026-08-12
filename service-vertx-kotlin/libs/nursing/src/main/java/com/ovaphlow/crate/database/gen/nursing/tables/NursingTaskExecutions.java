@@ -7,6 +7,7 @@ package com.ovaphlow.crate.database.gen.nursing.tables;
 import com.ovaphlow.crate.database.gen.nursing.Indexes;
 import com.ovaphlow.crate.database.gen.nursing.Keys;
 import com.ovaphlow.crate.database.gen.nursing.Nursing;
+import com.ovaphlow.crate.database.gen.nursing.tables.MedicationAdministrations.MedicationAdministrationsPath;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingTasks.NursingTasksPath;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingVisitSchedules.NursingVisitSchedulesPath;
 import com.ovaphlow.crate.database.gen.nursing.tables.records.NursingTaskExecutionsRecord;
@@ -215,6 +216,19 @@ public class NursingTaskExecutions extends TableImpl<NursingTaskExecutionsRecord
             _nursingTasks = new NursingTasksPath(this, Keys.NURSING_TASK_EXECUTIONS__NURSING_TASK_EXECUTIONS_TASK_ID_FKEY, null);
 
         return _nursingTasks;
+    }
+
+    private transient MedicationAdministrationsPath _medicationAdministrations;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>nursing.medication_administrations</code> table
+     */
+    public MedicationAdministrationsPath medicationAdministrations() {
+        if (_medicationAdministrations == null)
+            _medicationAdministrations = new MedicationAdministrationsPath(this, null, Keys.MEDICATION_ADMINISTRATIONS__MEDICATION_ADMINISTRATIONS_TASK_EXECUTION_ID_FKEY.getInverseKey());
+
+        return _medicationAdministrations;
     }
 
     private transient NursingVisitSchedulesPath _nursingVisitSchedules;

@@ -510,6 +510,23 @@ class HealthcareIncidentHandoverRoutesTest {
     }
 
     @Test
+    fun `跨入住关闭返回404且不产生新事实`(vertx: Vertx, ctx: VertxTestContext) {
+        // inc-1 属于 enc-2；以 enc-1 作用域关闭必须按双重归属过滤返回 404 且不写入关闭事实
+        stub.incidents = rows(incidentRow(mapOf("encounter_id" to "enc-2")))
+        request(
+            vertx, HttpMethod.POST, "$BASE_AUTH/encounters/enc-1/nursing-incidents/inc-1/close",
+            JsonObject().put("close_note", "跨入住关闭"),
+        ).onSuccess { (status, body) ->
+                ctx.verify {
+                    assertEquals(404, status)
+                    assertTrue(body.getString("error").contains("nursing incident not found"))
+                    assertTrue(stub.connTuples.none { it.first.startsWith("insert into nursing.nursing_incident_actions") })
+                    ctx.completeNow()
+                }
+            }.onFailure { ctx.failNow(it) }
+    }
+
+    @Test
     fun `事件列表按encounter隔离并返回records和total`(vertx: Vertx, ctx: VertxTestContext) {
         stub.encounters = rows(encounterRow())
         stub.incidents = rows(incidentRow())
@@ -539,6 +556,37 @@ class HealthcareIncidentHandoverRoutesTest {
                 ctx.verify {
                     assertEquals(400, status)
                     assertTrue(body.getString("error").contains("Idempotency-Key"))
+                    ctx.completeNow()
+                }
+            }.onFailure { ctx.failNow(it) }
+    }
+
+    @Test
+    fun `创建交班缺失encounter_id返回400`(vertx: Vertx, ctx: VertxTestContext) {
+        request(
+            vertx, HttpMethod.POST, "$BASE_AUTH/nursing-shift-handovers",
+            JsonObject().put("business_date", "2026-08-09").put("shift", "早班"),
+            headers = mapOf("Idempotency-Key" to "idem-1"),
+        ).onSuccess { (status, body) ->
+                ctx.verify {
+                    assertEquals(400, status)
+                    assertTrue(body.getString("error").contains("encounter_id is required"))
+                    ctx.completeNow()
+                }
+            }.onFailure { ctx.failNow(it) }
+    }
+
+    @Test
+    fun `创建交班伪造encounter_id返回404`(vertx: Vertx, ctx: VertxTestContext) {
+        // 锚定入住不存在：按契约错误顺序返回 404（对象不存在优先于后续资格校验）
+        request(
+            vertx, HttpMethod.POST, "$BASE_AUTH/nursing-shift-handovers",
+            JsonObject().put("encounter_id", "enc-fake").put("business_date", "2026-08-09").put("shift", "早班"),
+            headers = mapOf("Idempotency-Key" to "idem-1"),
+        ).onSuccess { (status, body) ->
+                ctx.verify {
+                    assertEquals(404, status)
+                    assertTrue(body.getString("error").contains("encounter not found"))
                     ctx.completeNow()
                 }
             }.onFailure { ctx.failNow(it) }

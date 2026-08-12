@@ -4,6 +4,7 @@
 package com.ovaphlow.crate.database.gen.nursing;
 
 
+import com.ovaphlow.crate.database.gen.nursing.tables.MedicationAdministrations;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingAssessments;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingCarePlanRevisions;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingIncidentActions;
@@ -45,6 +46,9 @@ public class Indexes {
     public static final Index IDX_INCIDENT_ENCOUNTER_OCCURRED = Internal.createIndex(DSL.name("idx_incident_encounter_occurred"), NursingIncidents.NURSING_INCIDENTS, new OrderField[] { NursingIncidents.NURSING_INCIDENTS.ENCOUNTER_ID, NursingIncidents.NURSING_INCIDENTS.OCCURRED_AT.desc() }, false);
     public static final Index IDX_INCIDENT_PERIOD_OCCURRED = Internal.createIndex(DSL.name("idx_incident_period_occurred"), NursingIncidents.NURSING_INCIDENTS, new OrderField[] { NursingIncidents.NURSING_INCIDENTS.PERIOD_ID, NursingIncidents.NURSING_INCIDENTS.OCCURRED_AT.desc() }, false);
     public static final Index IDX_INCIDENT_PERIOD_STATUS_OPEN = Internal.createIndex(DSL.name("idx_incident_period_status_open"), NursingIncidents.NURSING_INCIDENTS, new OrderField[] { NursingIncidents.NURSING_INCIDENTS.PERIOD_ID, NursingIncidents.NURSING_INCIDENTS.STATUS }, false);
+    public static final Index IDX_MA_ADMINISTERED_AT = Internal.createIndex(DSL.name("idx_ma_administered_at"), MedicationAdministrations.MEDICATION_ADMINISTRATIONS, new OrderField[] { MedicationAdministrations.MEDICATION_ADMINISTRATIONS.ADMINISTERED_AT }, false);
+    public static final Index IDX_MA_DISPENSE_ITEM = Internal.createIndex(DSL.name("idx_ma_dispense_item"), MedicationAdministrations.MEDICATION_ADMINISTRATIONS, new OrderField[] { MedicationAdministrations.MEDICATION_ADMINISTRATIONS.DISPENSE_ITEM_ID }, false);
+    public static final Index IDX_MA_MEDICAL_ORDER = Internal.createIndex(DSL.name("idx_ma_medical_order"), MedicationAdministrations.MEDICATION_ADMINISTRATIONS, new OrderField[] { MedicationAdministrations.MEDICATION_ADMINISTRATIONS.MEDICAL_ORDER_ID }, false);
     public static final Index IDX_PERIOD_ENCOUNTER_STATUS = Internal.createIndex(DSL.name("idx_period_encounter_status"), NursingServicePeriods.NURSING_SERVICE_PERIODS, new OrderField[] { NursingServicePeriods.NURSING_SERVICE_PERIODS.ENCOUNTER_ID, NursingServicePeriods.NURSING_SERVICE_PERIODS.STATUS }, false);
     public static final Index IDX_PLAN_PERIOD = Internal.createIndex(DSL.name("idx_plan_period"), NursingPlans.NURSING_PLANS, new OrderField[] { NursingPlans.NURSING_PLANS.PERIOD_ID }, false);
     public static final Index IDX_SHIFT_HANDOVER_ITEM_ENCOUNTER = Internal.createIndex(DSL.name("idx_shift_handover_item_encounter"), NursingShiftHandoverItems.NURSING_SHIFT_HANDOVER_ITEMS, new OrderField[] { NursingShiftHandoverItems.NURSING_SHIFT_HANDOVER_ITEMS.ENCOUNTER_ID, NursingShiftHandoverItems.NURSING_SHIFT_HANDOVER_ITEMS.HANDOVER_ID }, false);

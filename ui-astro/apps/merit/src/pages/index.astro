@@ -1,0 +1,29 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+import Counter from "../components/Counter.svelte";
+import { apiUrl } from "../lib/api";
+---
+
+<BaseLayout title="首页">
+  <main class="mx-auto flex min-h-screen w-full max-w-3xl flex-col justify-center gap-8 px-6 py-16">
+    <header class="text-center">
+      <h1 class="text-4xl font-bold tracking-tight text-fg-emphasis">Merit</h1>
+      <p class="mt-3 text-lg text-fg-muted">
+        htmx + Svelte + Astro CSR 站点骨架（Tailwind 样式）
+      </p>
+    </header>
+
+    <section class="flex justify-center">
+      <Counter client:load />
+    </section>
+
+    <section
+      hx-get={apiUrl("health/status")}
+      hx-trigger="load delay:1s"
+      hx-swap="innerHTML"
+      class="rounded-xl border border-border bg-surface p-6 text-center text-sm text-fg-dimmed"
+    >
+      正在通过 htmx 探测后端接口 {apiUrl("health/status")}…
+    </section>
+  </main>
+</BaseLayout>

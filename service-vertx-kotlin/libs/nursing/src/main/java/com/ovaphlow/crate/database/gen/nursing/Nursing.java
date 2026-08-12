@@ -4,6 +4,7 @@
 package com.ovaphlow.crate.database.gen.nursing;
 
 
+import com.ovaphlow.crate.database.gen.nursing.tables.MedicationAdministrations;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingAssessments;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingCarePlanRevisions;
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingIncidentActions;
@@ -37,6 +38,11 @@ public class Nursing extends SchemaImpl {
      * The reference instance of <code>nursing</code>
      */
     public static final Nursing NURSING = new Nursing();
+
+    /**
+     * 护士给药记录（MAR）：每执行实例至多一条，与药房发药明细联动对账（累计给药 ≤ 实发数量）
+     */
+    public final MedicationAdministrations MEDICATION_ADMINISTRATIONS = MedicationAdministrations.MEDICATION_ADMINISTRATIONS;
 
     /**
      * The table <code>nursing.nursing_assessments</code>.
@@ -114,6 +120,7 @@ public class Nursing extends SchemaImpl {
     @Override
     public final List<Table<?>> getTables() {
         return Arrays.asList(
+            MedicationAdministrations.MEDICATION_ADMINISTRATIONS,
             NursingAssessments.NURSING_ASSESSMENTS,
             NursingCarePlanRevisions.NURSING_CARE_PLAN_REVISIONS,
             NursingIncidentActions.NURSING_INCIDENT_ACTIONS,

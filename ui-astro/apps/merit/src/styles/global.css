@@ -1,0 +1,22 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: oklch(14% 0.008 250);
+  --color-surface: oklch(17% 0.008 250);
+  --color-surface-alt: oklch(19% 0.01 250);
+  --color-border: oklch(25% 0.01 250);
+  --color-fg: oklch(85% 0.008 250);
+  --color-fg-emphasis: oklch(95% 0.005 250);
+  --color-fg-muted: oklch(65% 0.015 250);
+  --color-fg-dimmed: oklch(50% 0.015 250);
+
+  --color-accent: oklch(62% 0.16 235);
+  --color-accent-subtle: oklch(62% 0.16 235 / 0.12);
+
+  --font-body: "Inter", "Noto Sans SC", system-ui, -apple-system, sans-serif;
+}
+
+html,
+body {
+  font-family: var(--font-body);
+}

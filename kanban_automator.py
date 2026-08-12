@@ -12,7 +12,8 @@ Todo 列不处理（手动控制），从「需求分解」开始：
              → 父卡打「已分解」标签并移入「计划评审」列，等待全部子卡 Done 后自动 Done
              拆分规则：按层切片（后端卡/前端卡），先后端后前端，前端卡声明依赖的后端卡；契约先行，
              单卡控制在 agent 一轮可完成粒度（详见「需求分解」阶段 prompt）
-  计划评审 -> 「评审 agent」评估/修订计划卡（通过或修订后都）-> 开发
+  计划评审 -> 「评审 agent」评估计划卡：通过 -> 开发；需要修订 -> 输出修订意见/修订后完整计划，
+             卡片留在「计划评审」列，下一轮重新评审，通过后才进开发
   开发 -> 「开发 agent」编码实现             -> 测试
   测试 -> 「测试 agent」验证                 -> 终审
   终审 -> 「终审 agent」独立最终验收（评审角色）-> Done（子任务卡 Done 时自动 close issue）
@@ -184,9 +185,11 @@ STAGE_PROMPTS = {
               "**不要包含任何 e2e 测试、数据库集成测试、浏览器验收类条目**（本流程不做这些验证）；\n" \
               "4. 一致性：如果评论中有测试失败报告，必须解决其中提出的问题（修订验收口径或补充缺失内容）。\n\n" \
               "输出要求（直接输出，不要写入文件）：\n" \
-              "- 计划没有问题：输出「✅ 评审通过」并简述结论即可；\n" \
+              "- 计划没有问题：输出「✅ 评审通过」并简述结论即可，卡片随后进入开发；\n" \
               "- 计划需要修改：输出修订后的完整计划（背景、目标、验收标准），开头包含「❌ 需要修订」。\n" \
-              "两条路径都表示评审完成，卡片随后进入开发。",
+              "「❌ 需要修订」时卡片**留在「计划评审」列**重新评审，不会进入开发。\n" \
+              "因此如果评论中已有上一轮「评审记录（修订）」，请以其中**最新修订后计划**为评估对象：\n" \
+              "修订意见已解决的直接输出「✅ 评审通过」；仍有问题的继续输出修订后完整计划（开头「❌ 需要修订」）。",
     "开发": "你是开发 agent。卡片描述或 Issue 评论中包含完整的需求规格说明（背景、目标、验收标准）。" \
               "请仔细阅读描述与评论，根据验收标准实现编码，不要询问用户。",
     "测试": "你是测试 agent。卡片描述中包含验收标准。" \
@@ -1117,9 +1120,17 @@ def run_agent_mode(card_id, original_title, current, target, issue_number=None, 
                         print(f"{ts()} [agent] 写入卡片描述失败: {e}")
 
         # 计划阶段（评审 agent）与终审（最终验收）：把结论写回卡片
+        plan_review_revised = False
         if current in ("计划评审", "终审") and output:
             if current == "计划评审":
-                verdict = "通过" if "需要修订" not in output[:200] else "修订"
+                # 判定标记扫描整段输出：评审 agent 可能先写长段结论再输出「❌ 需要修订」
+                #（只查前 200 字符会把晚出现的修订标记漏判为通过，见 #28）
+                verdict = "修订" if "❌ 需要修订" in output else "通过"
+                if verdict == "修订":
+                    # 需要修订：卡片留在「计划评审」列，下一轮以评论中最新修订计划重新评审，
+                    # 只有「✅ 评审通过」才进入开发（不直接把修订过的计划当成品放行）
+                    target_status = "计划评审"
+                    plan_review_revised = True
             else:
                 verdict = "返工" if is_test_failure(output) else "通过"
             record = f"## 评审记录（{verdict}）\n\n{output.strip()}"
@@ -1151,8 +1162,12 @@ def run_agent_mode(card_id, original_title, current, target, issue_number=None, 
                 print(f"{ts()} [agent] 已关闭子任务 issue #{issue_number}")
             except subprocess.CalledProcessError as e:
                 print(f"{ts()} [agent] 关闭子任务 issue 失败: {e}")
-        log_step(original_title, target_status)
-        print(f"{ts()} [agent] 完成: {original_title!r} -> {target_status}")
+        if plan_review_revised:
+            log_step(original_title, "计划评审(需要修订,重新评审)")
+            print(f"{ts()} [agent] 完成: {original_title!r} -> 计划评审（需要修订，重新评审）")
+        else:
+            log_step(original_title, target_status)
+            print(f"{ts()} [agent] 完成: {original_title!r} -> {target_status}")
     elif test_failed:
         # 测试失败：记录失败次数；由测试 agent 声明回退目标（需求分解/开发），未超限则回退，超限则停止自动流转
         fail_count, halted = record_test_failure(card_id, original_title, issue_number)
