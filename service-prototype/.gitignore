@@ -1,5 +1,5 @@
 bin/
 .env
 logs/
-prototyped
-prototyped.exe
+/prototyped
+/prototyped.exe
