@@ -261,6 +261,22 @@ public class EncountersRecord extends UpdatableRecordImpl<EncountersRecord> {
         return (String) get(16);
     }
 
+    /**
+     * Setter for <code>healthcare.encounters.settled_at</code>. 结算冻结标记：非空 = 该
+     * encounter 全部账单已冻结，新增账单/手工加项/缴费一律 409
+     */
+    public void setSettledAt(OffsetDateTime value) {
+        set(17, value);
+    }
+
+    /**
+     * Getter for <code>healthcare.encounters.settled_at</code>. 结算冻结标记：非空 = 该
+     * encounter 全部账单已冻结，新增账单/手工加项/缴费一律 409
+     */
+    public OffsetDateTime getSettledAt() {
+        return (OffsetDateTime) get(17);
+    }
+
     // -------------------------------------------------------------------------
     // Primary key information
     // -------------------------------------------------------------------------
@@ -284,7 +300,7 @@ public class EncountersRecord extends UpdatableRecordImpl<EncountersRecord> {
     /**
      * Create a detached, initialised EncountersRecord
      */
-    public EncountersRecord(String id, String patientId, String encounterType, String department, String ward, OffsetDateTime admitDate, OffsetDateTime dischargeDate, String admittingDiagnosis, String dischargeDiagnosis, String attendingPhysician, String status, JSONB metadata, OffsetDateTime createdAt, OffsetDateTime updatedAt, String encounterNo, OffsetDateTime deathDate, String deathCause) {
+    public EncountersRecord(String id, String patientId, String encounterType, String department, String ward, OffsetDateTime admitDate, OffsetDateTime dischargeDate, String admittingDiagnosis, String dischargeDiagnosis, String attendingPhysician, String status, JSONB metadata, OffsetDateTime createdAt, OffsetDateTime updatedAt, String encounterNo, OffsetDateTime deathDate, String deathCause, OffsetDateTime settledAt) {
         super(Encounters.ENCOUNTERS);
 
         setId(id);
@@ -304,6 +320,7 @@ public class EncountersRecord extends UpdatableRecordImpl<EncountersRecord> {
         setEncounterNo(encounterNo);
         setDeathDate(deathDate);
         setDeathCause(deathCause);
+        setSettledAt(settledAt);
         resetChangedOnNotNull();
     }
 }

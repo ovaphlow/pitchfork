@@ -27,6 +27,10 @@ object HealthcareRoutes {
         vitalSignAuthHandler: Handler<RoutingContext>? = null,
         chronicDiseaseAuthHandler: Handler<RoutingContext>? = null,
         checkupAuthHandler: Handler<RoutingContext>? = null,
+        depositAuthHandler: Handler<RoutingContext>? = null,
+        feeItemAuthHandler: Handler<RoutingContext>? = null,
+        billAuthHandler: Handler<RoutingContext>? = null,
+        paymentAuthHandler: Handler<RoutingContext>? = null,
     ): Router {
         val router = Router.router(vertx)
         val service = HealthcareService(pool)
@@ -34,6 +38,10 @@ object HealthcareRoutes {
         val followupService = FollowupService(pool, chronicDiseaseService = chronicDiseaseService)
         val vitalSignService = VitalSignService(pool)
         val checkupService = CheckupService(pool)
+        val depositService = DepositService(pool)
+        val feeItemService = FeeItemService(pool)
+        val billService = BillService(pool)
+        val paymentService = PaymentService(pool)
 
         router.route().handler(BodyHandler.create())
 
@@ -717,6 +725,196 @@ object HealthcareRoutes {
                 .onFailure { respondFailure(ctx, it) }
         }
 
+        // ========================================================================
+        //  押金登记与退押 (Deposit) — 养老费用管理独立子任务
+        //  挂 encounter（不强制关联费用项目字典，结算收束不自动冲抵押金）。
+        //  写路由的认证中间件由 App 编排层注入；未注入时业务处理器保持 401 兜底。
+        //  退押为独立操作：不校验 encounter 收束状态，离院/去世后仍可退押。
+        // ========================================================================
+        if (depositAuthHandler != null) {
+            router.post("/encounters/:id/deposits").handler(depositAuthHandler)
+            router.post("/encounters/:id/deposits/refunds").handler(depositAuthHandler)
+        }
+        // 登记押金：体 {amount, remark?, metadata?}；operator 取认证主体
+        router.post("/encounters/:id/deposits").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            depositService.createDeposit(requiredId(ctx), body(ctx), userId)
+                .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 退押：累计退押不得超过当前余额；离院/去世后仍可退押
+        router.post("/encounters/:id/deposits/refunds").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            depositService.createRefund(requiredId(ctx), body(ctx), userId)
+                .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 台账：{records, meta:{total, balance}}；空台账 records: [] 且 total: 0
+        router.get("/encounters/:id/deposits").handler { ctx ->
+            depositService.listDeposits(
+                encounterId = requiredId(ctx),
+                limit = limit(ctx),
+                offset = offset(ctx),
+            ).onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+
+        // ========================================================================
+        //  费用项目字典 (Fee Items) — 养老收费基础数据，为账单自动计费提供单价来源
+        //  写路由的认证中间件由 App 编排层注入；未注入时业务处理器保持 401 兜底。
+        //  状态流转（启用/停用）通过 PATCH /:id/status 独立进行；
+        //  账单明细为快照，字典改价/停用不影响已生成账单。
+        // ========================================================================
+        if (feeItemAuthHandler != null) {
+            router.post("/fee-items").handler(feeItemAuthHandler)
+            router.put("/fee-items/:id").handler(feeItemAuthHandler)
+            router.delete("/fee-items/:id").handler(feeItemAuthHandler)
+            router.patch("/fee-items/:id/status").handler(feeItemAuthHandler)
+        }
+        // 创建：体 {category, name, unit_price, remark?, metadata?}；状态默认 启用
+        router.post("/fee-items").handler { ctx ->
+            userId(ctx) ?: return@handler
+            feeItemService.createItem(body(ctx))
+                .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 列表：{records, meta:{total}}；支持 category/status 过滤；空列表 records: [] 且 total: 0
+        router.get("/fee-items").handler { ctx ->
+            feeItemService.listItems(
+                category = ctx.request().getParam("category"),
+                status = ctx.request().getParam("status"),
+                limit = limit(ctx),
+                offset = offset(ctx),
+            ).onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 详情
+        router.get("/fee-items/:id").handler { ctx ->
+            feeItemService.getItem(requiredId(ctx))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 更新：全量替换字典字段；状态只能走 PATCH /:id/status
+        router.put("/fee-items/:id").handler { ctx ->
+            userId(ctx) ?: return@handler
+            feeItemService.updateItem(requiredId(ctx), body(ctx))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 删除
+        router.delete("/fee-items/:id").handler { ctx ->
+            userId(ctx) ?: return@handler
+            feeItemService.deleteItem(requiredId(ctx))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 状态流转：体 {status: 启用|停用}；非法状态值 400
+        router.patch("/fee-items/:id/status").handler { ctx ->
+            userId(ctx) ?: return@handler
+            feeItemService.updateItemStatus(requiredId(ctx), body(ctx))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+
+        // ========================================================================
+        //  账单生成与手工加项 (Bills) — 按月自动计费（床位/护理/伙食）+ 手工加项
+        //  写路由的认证中间件由 App 编排层注入；未注入时业务处理器保持 401 兜底。
+        //  同 encounter 同账期唯一，重复生成 409；停用字典项不可用于新账单/加项 400；
+        //  结算收束冻结（encounters.settled_at 非空）后生成/加项/补结算 409。
+        // ========================================================================
+        if (billAuthHandler != null) {
+            router.post("/encounters/:id/bills").handler(billAuthHandler)
+            router.post("/bills/:id/items").handler(billAuthHandler)
+            router.post("/encounters/:id/billing-settlement").handler(billAuthHandler)
+        }
+        // 生成账单：体 {month: "YYYY-MM"}；自动计费床位/护理/伙食并落明细快照；状态初始 待缴费
+        router.post("/encounters/:id/bills").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            billService.generate(requiredId(ctx), body(ctx), userId)
+                .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 手工加项：体 {item_id, unit_price?, quantity?, remark?}；unit_price 可覆盖字典单价
+        router.post("/bills/:id/items").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            billService.addItem(requiredId(ctx), body(ctx), userId)
+                .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 补结算（无请求体）：已离院/去世未结算 → 生成区间最终账单并冻结；
+        // 已全部结算 409；未离院/去世 409；未认证 401。
+        router.post("/encounters/:id/billing-settlement").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            service.settleEncounterBilling(requiredId(ctx))
+                .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 账单详情（含明细快照）
+        router.get("/bills/:id").handler { ctx ->
+            billService.getBill(requiredId(ctx))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 账单列表：{records, meta:{total}}；账期倒序分页
+        router.get("/encounters/:id/bills").handler { ctx ->
+            billService.listBills(
+                encounterId = requiredId(ctx),
+                limit = limit(ctx),
+                offset = offset(ctx),
+            ).onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+
+        // ========================================================================
+        //  缴费与欠费 (Payments) — 收费闭环收款环节
+        //  多次部分缴费累加，余额递减；超缴 400 不写入；余额归零账单流转 已结清。
+        //  欠费列表与汇总注册在 /payments/arrears、/payments/summary 独立路径，
+        //  避免与账单卡的 /bills/:id 通配路由冲突；缴费流水按账单挂载。
+        //  写路由与只读端点的认证中间件均由 App 编排层注入；
+        //  未注入时业务处理器保持 401 兜底。
+        // ========================================================================
+        if (paymentAuthHandler != null) {
+            router.post("/bills/:id/payments").handler(paymentAuthHandler)
+            router.get("/bills/:id/payments").handler(paymentAuthHandler)
+            router.get("/payments/arrears").handler(paymentAuthHandler)
+            router.get("/payments/summary").handler(paymentAuthHandler)
+        }
+        // 缴费：体 {amount, method, remark?, metadata?}；operator 取认证主体；
+        // 超缴 400 不写入；余额归零后账单状态 待缴费 → 已结清；
+        // 结算收束冻结（encounters.settled_at 非空）后缴费 409。
+        router.post("/bills/:id/payments").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            paymentService.createPayment(requiredId(ctx), body(ctx), userId)
+                .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 缴费流水（按账单）：{records, meta:{total}}；空流水 records: [] 且 total: 0
+        router.get("/bills/:id/payments").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            paymentService.listPayments(
+                billId = requiredId(ctx),
+                limit = limit(ctx),
+                offset = offset(ctx),
+            ).onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 欠费列表：{records, meta:{total}}；空列表 records: [] 且 total: 0
+        router.get("/payments/arrears").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            paymentService.listArrears(
+                limit = limit(ctx),
+                offset = offset(ctx),
+            ).onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 汇总：{due_amount, paid_amount, arrears_amount}；无数据时三项均为 0
+        router.get("/payments/summary").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            paymentService.summary()
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+
         return router
     }
 
@@ -751,6 +949,7 @@ object HealthcareRoutes {
             is HealthcareNotFoundException -> respond(ctx, 404, error.message)
             is NotFoundException -> respond(ctx, 404, error.message)
             is ConflictException -> respond(ctx, 409, error.message)
+            is DuplicateBillException -> respond(ctx, 409, error.message)
             else -> {
                 log.error("healthcare route error", error)
                 respond(ctx, 500, "internal error")

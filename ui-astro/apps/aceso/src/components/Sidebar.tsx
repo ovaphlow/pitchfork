@@ -57,7 +57,8 @@ const items: Item[] = [
   },
   {
     type: "group", label: "财务收费", children: [
-      { label: "门诊收费",   path: "/dashboard/billing",       icon: "💰", domains: ["医疗"] },
+      { label: "养老收费",   path: "/dashboard/billing",       icon: "💰", domains: ["养老"] },
+      { label: "押金管理",   path: "/dashboard/deposits",      icon: "🏦", domains: ["养老"] },
     ],
   },
   {

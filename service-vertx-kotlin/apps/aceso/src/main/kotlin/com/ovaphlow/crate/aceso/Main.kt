@@ -149,6 +149,10 @@ fun main() {
             idpSessionAuthHandler(vertx, idpBaseUrl),
             idpSessionAuthHandler(vertx, idpBaseUrl),
             idpSessionAuthHandler(vertx, idpBaseUrl),
+            idpSessionAuthHandler(vertx, idpBaseUrl),
+            idpSessionAuthHandler(vertx, idpBaseUrl),
+            idpSessionAuthHandler(vertx, idpBaseUrl),
+            idpSessionAuthHandler(vertx, idpBaseUrl),
         ),
     )
     apiRouter.route("/nursing/v1/*").subRouter(

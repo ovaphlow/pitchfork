@@ -14,7 +14,7 @@
                     <inputSchema>healthcare</inputSchema>
                 </schema>
             </schemata>
-            <includes>patients|encounters|diagnoses|medical_orders|progress_notes|medical_records|followup_plans|followup_records|vital_sign_records|chronic_disease_registrations|health_checkups|health_checkup_members|health_checkup_results</includes>
+            <includes>patients|encounters|diagnoses|medical_orders|progress_notes|medical_records|followup_plans|followup_records|vital_sign_records|chronic_disease_registrations|health_checkups|health_checkup_members|health_checkup_results|deposit_records|fee_items|bills|bill_items|payments</includes>
         </database>
         <target>
             <packageName>com.ovaphlow.crate.database.gen.healthcare</packageName>

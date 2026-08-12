@@ -148,6 +148,8 @@ export interface Encounter {
   discharge_diagnosis: string | null;
   attending_physician: string | null;
   status: string;
+  /** 结算收束冻结标记（养老收费）；未收束为 null */
+  settled_at: string | null;
   metadata: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
@@ -4053,4 +4055,336 @@ export function getMealStatistics(params: {
   query.set("date_to", params.date_to);
   if (params.meal_time?.trim()) query.set("meal_time", params.meal_time.trim());
   return request<MealStatistics>(`/dining/v1/statistics/meals?${query.toString()}`);
+}
+
+// ========================================================================
+//  Healthcare API — Deposit (押金登记与退押)
+//  养老费用管理独立子任务：入住押金登记、退押与台账，挂 encounter
+//  （不强制关联费用项目字典；结算收束不自动冲抵押金）。
+//  退押为独立操作：不校验 encounter 收束状态，离院/去世后仍可退押。
+// ========================================================================
+
+export type DepositType = "登记" | "退押";
+
+/** 押金台账记录（登记/退押为同表两类记录） */
+export interface DepositRecord {
+  id: string;
+  encounter_id: string;
+  type: DepositType;
+  /** 发生金额（元），登记与退押均为正数；余额 = Σ登记 − Σ退押 */
+  amount: number;
+  /** 操作人（认证主体，服务端写入） */
+  operator: string;
+  remark: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DepositLedger {
+  records: DepositRecord[];
+  meta: { total: number; balance: number };
+}
+
+export interface DepositInput {
+  /** 正数且至多两位小数（元），NUMERIC(12,2) 上限 */
+  amount: number;
+  remark?: string;
+  metadata?: Record<string, unknown>;
+}
+
+/** 登记押金：encounter 必须存在（404）；缺必填/金额 ≤ 0 → 400 */
+export function createDeposit(encounterId: string, input: DepositInput): Promise<DepositRecord> {
+  return request<DepositRecord>(`/healthcare/v1/encounters/${encodeURIComponent(encounterId)}/deposits`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+/** 退押：累计退押不得超过当前余额（400）；离院/去世后仍可退押 */
+export function createDepositRefund(encounterId: string, input: DepositInput): Promise<DepositRecord> {
+  return request<DepositRecord>(`/healthcare/v1/encounters/${encodeURIComponent(encounterId)}/deposits/refunds`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+/** 按 encounter 查询押金台账（登记+退押倒序分页）；meta.balance 为当前余额 */
+export function listDeposits(
+  encounterId: string,
+  params: { limit?: number; offset?: number } = {},
+): Promise<DepositLedger> {
+  const query = new URLSearchParams();
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<DepositLedger>(`/healthcare/v1/encounters/${encodeURIComponent(encounterId)}/deposits${suffix}`);
+}
+
+// ========================================================================
+//  Healthcare API — 养老收费 (Fee Items / Bills / Payments / Settlement)
+//  费用字典、账单（按月自动计费 + 手工加项）、缴费与欠费、结算收束入口，
+//  路径 /healthcare/v1/*，沿用 request 封装（token 注入、JSON、401、{records,meta}）。
+//  押金（deposits）为独立子任务：本组不引用押金接口，押金展示只在押金管理页。
+// ========================================================================
+
+// ─── 费用项目字典 (Fee Items) ────────────────────────────────────────
+
+export type FeeItemCategory = "床位费" | "护理费" | "伙食费" | "个性化服务费" | "押金" | "其他";
+export type FeeItemStatus = "启用" | "停用";
+
+/** 费用项目字典条目；unit_price 为 NUMERIC(12,2) 数值（元） */
+export interface FeeItem {
+  id: string;
+  category: FeeItemCategory;
+  name: string;
+  unit_price: number;
+  status: FeeItemStatus;
+  remark: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FeeItemList {
+  records: FeeItem[];
+  meta: { total: number };
+}
+
+export interface FeeItemInput {
+  category: FeeItemCategory;
+  name: string;
+  unit_price: number;
+  remark?: string;
+  metadata?: Record<string, unknown>;
+}
+
+/** 费用字典列表：category/status 过滤，created_at 倒序分页 */
+export function listFeeItems(params: {
+  category?: FeeItemCategory;
+  status?: FeeItemStatus;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<FeeItemList> {
+  const query = new URLSearchParams();
+  if (params.category) query.set("category", params.category);
+  if (params.status) query.set("status", params.status);
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<FeeItemList>(`/healthcare/v1/fee-items${suffix}`);
+}
+
+export function getFeeItem(id: string): Promise<FeeItem> {
+  return request<FeeItem>(`/healthcare/v1/fee-items/${encodeURIComponent(id)}`);
+}
+
+/** 创建费用项目：分类/名称/单价必填；状态默认 启用 */
+export function createFeeItem(input: FeeItemInput): Promise<FeeItem> {
+  return request<FeeItem>("/healthcare/v1/fee-items", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+/** 全量更新字典字段（分类/名称/单价/备注/扩展）；状态只能走 updateFeeItemStatus */
+export function updateFeeItem(id: string, input: FeeItemInput): Promise<FeeItem> {
+  return request<FeeItem>(`/healthcare/v1/fee-items/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+/** 删除字典条目 */
+export function deleteFeeItem(id: string): Promise<{ id: string }> {
+  return request<{ id: string }>(`/healthcare/v1/fee-items/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+/** 启用/停用流转：非法状态值 400 */
+export function updateFeeItemStatus(id: string, status: FeeItemStatus): Promise<FeeItem> {
+  return request<FeeItem>(`/healthcare/v1/fee-items/${encodeURIComponent(id)}/status`, {
+    method: "PATCH",
+    body: JSON.stringify({ status }),
+  });
+}
+
+// ─── 账单 (Bills) ────────────────────────────────────────────────────
+
+export type BillStatus = "待缴费" | "已结清" | "已结算";
+export type BillItemSource = "自动" | "手工";
+
+/** 账单明细（字典快照：编码/名称/单价在生成时定格，字典改价不影响已生成账单） */
+export interface BillItem {
+  id: string;
+  bill_id: string;
+  source: BillItemSource;
+  /** 来源字典项 ID（自动计费与手工加项均为字典项 ID） */
+  item_code: string;
+  item_name: string;
+  unit_price: number;
+  quantity: number;
+  amount: number;
+  remark: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Bill {
+  id: string;
+  encounter_id: string;
+  period_start: string;
+  period_end: string;
+  status: BillStatus;
+  /** 已结清/已结算时间；列表接口不返回该字段 */
+  settled_at?: string | null;
+  total_amount: number;
+  /** 仅详情接口返回（列表接口为空数组） */
+  items?: BillItem[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BillList {
+  records: Bill[];
+  meta: { total: number };
+}
+
+export interface BillItemInput {
+  /** 费用字典项 ID（须启用，停用项 400） */
+  item_id: string;
+  /** 覆盖字典单价（可选，正数且至多两位小数） */
+  unit_price?: number;
+  /** 数量（正数，默认 1） */
+  quantity?: number;
+  remark?: string;
+}
+
+/** 生成账单：按月自动计费（床位/护理/伙食），账期裁剪到在院区间；同 encounter 同账期唯一（409） */
+export function generateBill(encounterId: string, month: string): Promise<Bill> {
+  return request<Bill>(`/healthcare/v1/encounters/${encodeURIComponent(encounterId)}/bills`, {
+    method: "POST",
+    body: JSON.stringify({ month }),
+  });
+}
+
+/** 手工加项：unit_price 缺省取字典单价；加项后重算账单合计 */
+export function addBillItem(billId: string, input: BillItemInput): Promise<Bill> {
+  return request<Bill>(`/healthcare/v1/bills/${encodeURIComponent(billId)}/items`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+/** 账单详情（含明细快照） */
+export function getBill(billId: string): Promise<Bill> {
+  return request<Bill>(`/healthcare/v1/bills/${encodeURIComponent(billId)}`);
+}
+
+/** 按 encounter 查询账单列表（账期倒序分页，不含明细） */
+export function listBills(
+  encounterId: string,
+  params: { limit?: number; offset?: number } = {},
+): Promise<BillList> {
+  const query = new URLSearchParams();
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<BillList>(`/healthcare/v1/encounters/${encodeURIComponent(encounterId)}/bills${suffix}`);
+}
+
+/** 结算收束：已离院/去世未结算的养老入住 → 生成区间最终账单并冻结全部账单；返回收束后的 encounter */
+export function settleEncounterBilling(encounterId: string): Promise<Encounter> {
+  return request<Encounter>(`/healthcare/v1/encounters/${encodeURIComponent(encounterId)}/billing-settlement`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+// ─── 缴费与欠费 (Payments / Arrears / Summary) ───────────────────────
+
+export type PaymentMethod = "现金" | "转账" | "银行卡" | "微信" | "支付宝";
+
+/** 缴费流水记录；operator 由服务端写入认证主体 */
+export interface Payment {
+  id: string;
+  bill_id: string;
+  amount: number;
+  method: PaymentMethod;
+  operator: string;
+  remark: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PaymentList {
+  records: Payment[];
+  meta: { total: number };
+}
+
+export interface PaymentInput {
+  amount: number;
+  method: PaymentMethod;
+  remark?: string;
+  metadata?: Record<string, unknown>;
+}
+
+/** 缴费：多次部分缴费累加，余额递减；单笔不得使累计缴费超过账单合计（超缴 400）；余额归零账单转 已结清 */
+export function createPayment(billId: string, input: PaymentInput): Promise<Payment> {
+  return request<Payment>(`/healthcare/v1/bills/${encodeURIComponent(billId)}/payments`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+/** 按账单查询缴费流水（倒序分页） */
+export function listPayments(
+  billId: string,
+  params: { limit?: number; offset?: number } = {},
+): Promise<PaymentList> {
+  const query = new URLSearchParams();
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<PaymentList>(`/healthcare/v1/bills/${encodeURIComponent(billId)}/payments${suffix}`);
+}
+
+/** 欠费账单（状态 待缴费 且 余额 > 0），账期倒序分页；id 为账单 ID */
+export interface Arrear {
+  id: string;
+  encounter_id: string;
+  period_start: string;
+  period_end: string;
+  status: BillStatus;
+  total_amount: number;
+  paid_amount: number;
+  balance: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ArrearsList {
+  records: Arrear[];
+  meta: { total: number };
+}
+
+export function listArrears(params: { limit?: number; offset?: number } = {}): Promise<ArrearsList> {
+  const query = new URLSearchParams();
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<ArrearsList>(`/healthcare/v1/payments/arrears${suffix}`);
+}
+
+/** 收费汇总：应缴 = Σ账单合计、已缴 = Σ缴费金额、欠费 = Σ待缴费账单余额；无数据时三项均为 0 */
+export interface PaymentSummary {
+  due_amount: number;
+  paid_amount: number;
+  arrears_amount: number;
+}
+
+export function getPaymentSummary(): Promise<PaymentSummary> {
+  return request<PaymentSummary>("/healthcare/v1/payments/summary");
 }

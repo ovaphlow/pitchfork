@@ -53,6 +53,7 @@ class HealthcareService(
         pool,
         ensureCareUnitActive = { client, careUnit -> ensureCareUnitActiveForHandover(client, careUnit) },
     )
+    private val billService = BillService(pool)
     companion object {
         private val patientStatuses = setOf("ACTIVE", "INACTIVE", "DECEASED")
         private val encounterStatuses = setOf("ACTIVE", "DISCHARGED", "TRANSFERRED")
@@ -95,6 +96,7 @@ class HealthcareService(
                 .put("discharge_diagnosis", row.getString("discharge_diagnosis"))
                 .put("attending_physician", row.getString("attending_physician"))
                 .put("status", row.getString("status"))
+                .put("settled_at", row.getOffsetDateTime("settled_at")?.toString())
                 .put("metadata", row.getValue("metadata"))
                 .put("created_at", row.getOffsetDateTime("created_at")?.toString())
                 .put("updated_at", row.getOffsetDateTime("updated_at")?.toString())
@@ -231,13 +233,30 @@ class HealthcareService(
                     }
 
                 closePeriodFuture.compose {
-                    val query = ctx.update(ENCOUNTERS)
-                        .set(ENCOUNTERS.DISCHARGE_DATE, dischargeDate)
-                        .set(ENCOUNTERS.DISCHARGE_DIAGNOSIS, body.getString("discharge_diagnosis"))
-                        .set(ENCOUNTERS.STATUS, "DISCHARGED")
-                        .set(ENCOUNTERS.UPDATED_AT, now)
-                        .where(ENCOUNTERS.ID.eq(id))
-                    execute(connection, query).compose { getEncounter(connection, id) }
+                    // 结算收束：养老入住同事务生成区间最终账单并冻结全部账单（同一连接）
+                    val settlementFuture: Future<Void> =
+                        if (encounter.getString("encounter_type") == "ELDERLY_CARE") {
+                            billService
+                                .settleEncounter(
+                                    connection,
+                                    id,
+                                    now,
+                                    requireTerminalStatus = false,
+                                    endDate = businessDate(dischargeDate),
+                                )
+                                .map<Void> { null }
+                        } else {
+                            Future.succeededFuture()
+                        }
+                    settlementFuture.compose {
+                        val query = ctx.update(ENCOUNTERS)
+                            .set(ENCOUNTERS.DISCHARGE_DATE, dischargeDate)
+                            .set(ENCOUNTERS.DISCHARGE_DIAGNOSIS, body.getString("discharge_diagnosis"))
+                            .set(ENCOUNTERS.STATUS, "DISCHARGED")
+                            .set(ENCOUNTERS.UPDATED_AT, now)
+                            .where(ENCOUNTERS.ID.eq(id))
+                        execute(connection, query).compose { getEncounter(connection, id) }
+                    }
                 }
             }
         }
@@ -280,6 +299,18 @@ class HealthcareService(
                         servicePeriodService.closeElderlyCarePeriod(connection, id, businessDate(deathDate), now)
                     }
                     .compose {
+                        // 结算收束：同事务生成区间最终账单并冻结全部账单（同一连接）
+                        billService
+                            .settleEncounter(
+                                connection,
+                                id,
+                                now,
+                                requireTerminalStatus = false,
+                                endDate = businessDate(deathDate),
+                            )
+                            .map<Void> { null }
+                    }
+                    .compose {
                         var query = ctx.update(ENCOUNTERS)
                             .set(ENCOUNTERS.DEATH_DATE, deathDate)
                             .set(ENCOUNTERS.STATUS, "DECEASED")
@@ -303,6 +334,15 @@ class HealthcareService(
 
     private fun businessDate(value: OffsetDateTime): LocalDate =
         value.atZoneSameInstant(businessZone).toLocalDate()
+
+    /**
+     * 补结算：已离院/去世但未结算的养老入住 → 生成区间最终账单并冻结全部账单。
+     * 已全部结算 409；未离院/去世 409；非养老入住 400。
+     */
+    fun settleEncounterBilling(id: String): Future<JsonObject> =
+        pool.withTransaction { connection ->
+            billService.settleEncounter(connection, id, OffsetDateTime.now(), requireTerminalStatus = true)
+        }
 
     // ——— 医嘱读取/创建/状态机委托（实现位于 MedicalOrderService） ———
     fun createOrder(encounterId: String, body: JsonObject): Future<JsonObject> =

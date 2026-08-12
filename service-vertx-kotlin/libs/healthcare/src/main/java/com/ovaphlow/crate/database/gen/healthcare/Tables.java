@@ -4,9 +4,13 @@
 package com.ovaphlow.crate.database.gen.healthcare;
 
 
+import com.ovaphlow.crate.database.gen.healthcare.tables.BillItems;
+import com.ovaphlow.crate.database.gen.healthcare.tables.Bills;
 import com.ovaphlow.crate.database.gen.healthcare.tables.ChronicDiseaseRegistrations;
+import com.ovaphlow.crate.database.gen.healthcare.tables.DepositRecords;
 import com.ovaphlow.crate.database.gen.healthcare.tables.Diagnoses;
 import com.ovaphlow.crate.database.gen.healthcare.tables.Encounters;
+import com.ovaphlow.crate.database.gen.healthcare.tables.FeeItems;
 import com.ovaphlow.crate.database.gen.healthcare.tables.FollowupPlans;
 import com.ovaphlow.crate.database.gen.healthcare.tables.FollowupRecords;
 import com.ovaphlow.crate.database.gen.healthcare.tables.HealthCheckupMembers;
@@ -15,6 +19,7 @@ import com.ovaphlow.crate.database.gen.healthcare.tables.HealthCheckups;
 import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalOrders;
 import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalRecords;
 import com.ovaphlow.crate.database.gen.healthcare.tables.Patients;
+import com.ovaphlow.crate.database.gen.healthcare.tables.Payments;
 import com.ovaphlow.crate.database.gen.healthcare.tables.ProgressNotes;
 import com.ovaphlow.crate.database.gen.healthcare.tables.VitalSignRecords;
 
@@ -26,9 +31,24 @@ import com.ovaphlow.crate.database.gen.healthcare.tables.VitalSignRecords;
 public class Tables {
 
     /**
+     * 账单明细：费用项目快照（编码/名称/单价），字典改价/停用不影响已生成账单
+     */
+    public static final BillItems BILL_ITEMS = BillItems.BILL_ITEMS;
+
+    /**
+     * 账单：按月自动计费 + 手工加项，同 encounter 同账期唯一
+     */
+    public static final Bills BILLS = Bills.BILLS;
+
+    /**
      * 慢病登记档案：患者级、跨入住周期的长期管理档案（养老方向）
      */
     public static final ChronicDiseaseRegistrations CHRONIC_DISEASE_REGISTRATIONS = ChronicDiseaseRegistrations.CHRONIC_DISEASE_REGISTRATIONS;
+
+    /**
+     * 押金台账：入住押金登记与退押记录（养老费用管理）
+     */
+    public static final DepositRecords DEPOSIT_RECORDS = DepositRecords.DEPOSIT_RECORDS;
 
     /**
      * 诊断/评估记录，涵盖疾病、发育筛查、功能评估等
@@ -39,6 +59,11 @@ public class Tables {
      * 就诊/住院/入住周期表，一个 encounter 对应一次持续的服务接触
      */
     public static final Encounters ENCOUNTERS = Encounters.ENCOUNTERS;
+
+    /**
+     * 费用项目字典：养老收费基础数据（为账单自动计费提供单价来源）
+     */
+    public static final FeeItems FEE_ITEMS = FeeItems.FEE_ITEMS;
 
     /**
      * 随访计划：预先安排的随访任务（养老/福利院）
@@ -79,6 +104,11 @@ public class Tables {
      * 服务对象主表 (患者/老人/儿童)
      */
     public static final Patients PATIENTS = Patients.PATIENTS;
+
+    /**
+     * 缴费记录：收费闭环收款环节，多次部分缴费累加，余额递减
+     */
+    public static final Payments PAYMENTS = Payments.PAYMENTS;
 
     /**
      * 病程/日常照护/成长记录通用表

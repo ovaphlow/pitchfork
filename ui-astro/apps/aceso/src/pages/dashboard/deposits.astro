@@ -1,0 +1,8 @@
+---
+import DashboardLayout from "../../layouts/DashboardLayout.astro";
+import DepositsPage from "../../components/DepositsPage.tsx";
+---
+
+<DashboardLayout title="押金管理">
+  <DepositsPage client:only="react" />
+</DashboardLayout>

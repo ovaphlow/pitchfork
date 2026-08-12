@@ -7,7 +7,9 @@ package com.ovaphlow.crate.database.gen.healthcare.tables;
 import com.ovaphlow.crate.database.gen.healthcare.Healthcare;
 import com.ovaphlow.crate.database.gen.healthcare.Indexes;
 import com.ovaphlow.crate.database.gen.healthcare.Keys;
+import com.ovaphlow.crate.database.gen.healthcare.tables.Bills.BillsPath;
 import com.ovaphlow.crate.database.gen.healthcare.tables.ChronicDiseaseRegistrations.ChronicDiseaseRegistrationsPath;
+import com.ovaphlow.crate.database.gen.healthcare.tables.DepositRecords.DepositRecordsPath;
 import com.ovaphlow.crate.database.gen.healthcare.tables.Diagnoses.DiagnosesPath;
 import com.ovaphlow.crate.database.gen.healthcare.tables.FollowupPlans.FollowupPlansPath;
 import com.ovaphlow.crate.database.gen.healthcare.tables.FollowupRecords.FollowupRecordsPath;
@@ -155,6 +157,12 @@ public class Encounters extends TableImpl<EncountersRecord> {
      */
     public final TableField<EncountersRecord, String> DEATH_CAUSE = createField(DSL.name("death_cause"), SQLDataType.CLOB, this, "");
 
+    /**
+     * The column <code>healthcare.encounters.settled_at</code>. 结算冻结标记：非空 = 该
+     * encounter 全部账单已冻结，新增账单/手工加项/缴费一律 409
+     */
+    public final TableField<EncountersRecord, OffsetDateTime> SETTLED_AT = createField(DSL.name("settled_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6), this, "结算冻结标记：非空 = 该 encounter 全部账单已冻结，新增账单/手工加项/缴费一律 409");
+
     private Encounters(Name alias, Table<EncountersRecord> aliased) {
         this(alias, aliased, (Field<?>[]) null, null);
     }
@@ -254,6 +262,19 @@ public class Encounters extends TableImpl<EncountersRecord> {
         return _patients;
     }
 
+    private transient BillsPath _bills;
+
+    /**
+     * Get the implicit to-many join path to the <code>healthcare.bills</code>
+     * table
+     */
+    public BillsPath bills() {
+        if (_bills == null)
+            _bills = new BillsPath(this, null, Keys.BILLS__BILLS_ENCOUNTER_ID_FKEY.getInverseKey());
+
+        return _bills;
+    }
+
     private transient ChronicDiseaseRegistrationsPath _chronicDiseaseRegistrations;
 
     /**
@@ -265,6 +286,19 @@ public class Encounters extends TableImpl<EncountersRecord> {
             _chronicDiseaseRegistrations = new ChronicDiseaseRegistrationsPath(this, null, Keys.CHRONIC_DISEASE_REGISTRATIONS__CHRONIC_DISEASE_REGISTRATIONS_ENCOUNTER_ID_FKEY.getInverseKey());
 
         return _chronicDiseaseRegistrations;
+    }
+
+    private transient DepositRecordsPath _depositRecords;
+
+    /**
+     * Get the implicit to-many join path to the
+     * <code>healthcare.deposit_records</code> table
+     */
+    public DepositRecordsPath depositRecords() {
+        if (_depositRecords == null)
+            _depositRecords = new DepositRecordsPath(this, null, Keys.DEPOSIT_RECORDS__DEPOSIT_RECORDS_ENCOUNTER_ID_FKEY.getInverseKey());
+
+        return _depositRecords;
     }
 
     private transient DiagnosesPath _diagnoses;

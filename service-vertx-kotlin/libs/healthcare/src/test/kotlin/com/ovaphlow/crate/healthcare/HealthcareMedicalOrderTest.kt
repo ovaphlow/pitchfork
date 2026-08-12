@@ -790,7 +790,8 @@ class HealthcareMedicalOrderTest {
         val orderUpdate = stub.queries.first { it.contains("update healthcare.medical_orders") }
         val taskUpdate = stub.queries.first { it.contains("update nursing.nursing_tasks") }
         val periodUpdate = stub.queries.first { it.contains("update nursing.nursing_service_periods") }
-        val encounterUpdate = stub.queries.first { it.contains("update healthcare.encounters") }
+        // 结算收束先写 encounters.settled_at（冻结标记），终态更新须按 discharge_date 定位
+        val encounterUpdate = stub.queries.first { it.contains("update healthcare.encounters") && it.contains("discharge_date") }
         assertTrue(orderUpdate.contains("set status = $"), "活动医嘱必须更新 status: $orderUpdate")
         assertTrue(
             stub.tuples.first { it.first.contains("update healthcare.medical_orders") }.second.contains("DISCONTINUED"),
@@ -963,7 +964,8 @@ class HealthcareMedicalOrderTest {
         val orderUpdate = stub.queries.first { it.contains("update healthcare.medical_orders") }
         val taskUpdate = stub.queries.first { it.contains("update nursing.nursing_tasks") }
         val periodUpdate = stub.queries.first { it.contains("update nursing.nursing_service_periods") }
-        val encounterUpdate = stub.queries.first { it.contains("update healthcare.encounters") }
+        // 结算收束先写 encounters.settled_at（冻结标记），终态更新须按 death_date 定位
+        val encounterUpdate = stub.queries.first { it.contains("update healthcare.encounters") && it.contains("death_date") }
         val patientUpdate = stub.queries.first { it.contains("update healthcare.patients") }
         assertTrue(
             stub.queries.indexOf(orderUpdate) < stub.queries.indexOf(taskUpdate) &&
@@ -975,7 +977,7 @@ class HealthcareMedicalOrderTest {
         assertTrue(encounterUpdate.contains("death_date"), "encounter 更新必须写 death_date: $encounterUpdate")
         assertTrue(encounterUpdate.contains("death_cause"), "提供死亡原因时必须写 death_cause: $encounterUpdate")
         assertFalse(encounterUpdate.contains("discharge_date"), "encounter 更新不得含 discharge_date: $encounterUpdate")
-        val encounterTuple = stub.tuples.first { it.first.contains("update healthcare.encounters") }.second
+        val encounterTuple = stub.tuples.first { it.first.contains("update healthcare.encounters") && it.first.contains("death_date") }.second
         assertTrue(encounterTuple.contains(deathDate))
         assertTrue(encounterTuple.contains("心力衰竭"))
         assertTrue(
@@ -1006,7 +1008,7 @@ class HealthcareMedicalOrderTest {
             )
             .toCompletionStage().toCompletableFuture().get()
 
-        val encounterUpdate = stub.queries.first { it.contains("update healthcare.encounters") }
+        val encounterUpdate = stub.queries.first { it.contains("update healthcare.encounters") && it.contains("death_date") }
         assertFalse(encounterUpdate.contains("death_cause"), "空白死亡原因不得绑定 death_cause: $encounterUpdate")
         assertTrue(stub.queries.none { it.contains("insert into nursing.nursing_task_executions") })
         assertTrue(stub.queries.none { it.contains("stock_operation") })
