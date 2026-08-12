@@ -1,15 +1,18 @@
 GO ?= go
+NODE ?= node
+PNPM ?= pnpm
 
 .PHONY: assets build run test vet
 
 assets:
-	@echo "service-prototype has no web assets yet; placeholder target."
+	$(PNPM) install --frozen-lockfile
+	$(NODE) web/scripts/build-assets.mjs
 
 build: assets
 	mkdir -p bin
 	$(GO) build -o bin/prototyped ./cmd/prototyped
 
-run:
+run: assets
 	$(GO) run ./cmd/prototyped
 
 test:

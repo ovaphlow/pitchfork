@@ -1,0 +1,10 @@
+{{define "title"}}prototyped demo{{end}}
+{{define "content"}}
+<main>
+  <h1>Prototype Demo</h1>
+  <p id="greeting">{{.Greeting}}</p>
+  <button hx-get="/crate-api/prototype/v1/demo-fragment" hx-target="#greeting" hx-swap="innerHTML">
+    加载片段
+  </button>
+</main>
+{{end}}

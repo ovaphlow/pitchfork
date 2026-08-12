@@ -1,0 +1,11 @@
+{
+  "name": "prototyped-web-assets",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "build:assets": "node ./web/scripts/build-assets.mjs"
+  },
+  "devDependencies": {
+    "htmx.org": "^2.0.0"
+  }
+}

@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+
+	"github.com/ovaphlow/pitchfork/service-prototype/web"
 )
 
 // prototypePrefix is the unified API prefix. It follows the repository
@@ -29,10 +31,47 @@ type healthResponse struct {
 func NewMux(allowedOrigins []string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(prototypePrefix+"/{resource}", handleResource)
+	mux.HandleFunc("GET /demo", handleDemoPage)
+	mux.HandleFunc("GET /static/{file}", handleStaticAsset)
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusNotFound, "not found")
 	})
 	return corsMiddleware(mux, allowedOrigins)
+}
+
+// handleDemoPage renders the server-rendered demo page.
+func handleDemoPage(w http.ResponseWriter, r *http.Request) {
+	greeting := "你好，prototyped"
+	if r.URL.Query().Get("name") != "" {
+		greeting = "你好，" + r.URL.Query().Get("name")
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := web.RenderDemo(w, greeting); err != nil {
+		writeError(w, http.StatusInternalServerError, "render page failed")
+	}
+}
+
+// handleStaticAsset serves the embedded static files (e.g. htmx.min.js).
+func handleStaticAsset(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("file")
+	if name == "" {
+		writeError(w, http.StatusNotFound, "asset not found")
+		return
+	}
+	data, err := web.StaticFiles.ReadFile("static/" + name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "asset not found")
+		return
+	}
+	contentType := "application/octet-stream"
+	if strings.HasSuffix(name, ".js") {
+		contentType = "text/javascript"
+	} else if strings.HasSuffix(name, ".css") {
+		contentType = "text/css"
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
 }
 
 // handleResource serves resources under the unified prefix. GET healthz
@@ -44,11 +83,17 @@ func handleResource(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if r.PathValue("resource") == "healthz" {
+	switch r.PathValue("resource") {
+	case "healthz":
 		writeJSON(w, http.StatusOK, healthResponse{Status: "ok"})
-		return
+	case "demo-fragment":
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := web.RenderDemoFragment(w, "这是来自 htmx 片段的问候"); err != nil {
+			writeError(w, http.StatusInternalServerError, "render fragment failed")
+		}
+	default:
+		writeError(w, http.StatusNotFound, "resource not found")
 	}
-	writeError(w, http.StatusNotFound, "resource not found")
 }
 
 // corsMiddleware wraps the mux with CORS handling. Requests carrying an

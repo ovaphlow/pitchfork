@@ -168,3 +168,60 @@ func TestCORSNoAllowedOriginsRejectsAll(t *testing.T) {
 		t.Fatalf("status = %d, want 200 (CORS must not block the request)", recorder.Code)
 	}
 }
+
+// ─── #30 服务端渲染页面 / htmx 片段 / 静态资产 ─────────────────────────
+
+// GET /demo 返回 200 且 Content-Type 为 text/html，内容为渲染后的页面。
+func TestDemoPageServesHTML(t *testing.T) {
+	recorder := get(NewMux(nil), "/demo", nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", recorder.Code)
+	}
+	if contentType := recorder.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "text/html") {
+		t.Fatalf("Content-Type = %q, want text/html", contentType)
+	}
+	if !strings.Contains(recorder.Body.String(), "Prototype Demo") {
+		t.Fatalf("page body does not contain the demo heading")
+	}
+}
+
+// GET /crate-api/prototype/v1/demo-fragment 返回 200、text/html，响应体为 HTML 片段。
+func TestDemoFragmentServesHTMLFragment(t *testing.T) {
+	recorder := get(NewMux(nil), "/crate-api/prototype/v1/demo-fragment", nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", recorder.Code)
+	}
+	if contentType := recorder.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "text/html") {
+		t.Fatalf("Content-Type = %q, want text/html", contentType)
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, "htmx") || !strings.HasPrefix(strings.TrimSpace(body), "<p") {
+		t.Fatalf("body %q is not an HTML fragment", body)
+	}
+}
+
+// 经 go:embed 提供的静态资产（htmx.min.js）GET 返回 200 且非空。
+func TestStaticAssetServedViaEmbed(t *testing.T) {
+	recorder := get(NewMux(nil), "/static/htmx.min.js", nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", recorder.Code)
+	}
+	if contentType := recorder.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "text/javascript") {
+		t.Fatalf("Content-Type = %q, want text/javascript", contentType)
+	}
+	if recorder.Body.Len() == 0 {
+		t.Fatal("htmx.min.js body is empty")
+	}
+}
+
+// 缺失资产返回 404 JSON。
+func TestStaticAssetMissingReturnsJSON404(t *testing.T) {
+	recorder := get(NewMux(nil), "/static/does-not-exist.js", nil)
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", recorder.Code)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil || payload["error"] == "" {
+		t.Fatalf("body %q is not a JSON error", recorder.Body.String())
+	}
+}
