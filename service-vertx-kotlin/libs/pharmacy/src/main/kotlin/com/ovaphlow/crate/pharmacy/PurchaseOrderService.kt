@@ -9,6 +9,7 @@ import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyPurchaseReceipts
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
+import io.vertx.pgclient.PgException
 import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.RowSet
@@ -131,6 +132,33 @@ class PurchaseOrderService(
                         doCreate(conn, body, key, userId, fingerprint)
                     }
                 }
+        }.recover { error: Throwable ->
+            // 并发同键创建：唯一索引冲突（23505）不能以 500 泄漏。回读幂等键
+            // 比对指纹后返回原订单或 409，而不是把 SQL 唯一冲突暴露给调用方。
+            if (error is PgException && error.sqlState == "23505") {
+                findOrderByIdempotencyKey(pool, key)
+                    .compose { existing: Row? ->
+                        if (existing == null) {
+                            Future.failedFuture(
+                                ConflictException("idempotency key raced during concurrent create"),
+                            )
+                        } else {
+                            val storedFingerprint = existing.getValue(1)?.toString()
+                            if (storedFingerprint != fingerprint) {
+                                Future.failedFuture(
+                                    ConflictException("idempotency key already used with a different request"),
+                                )
+                            } else {
+                                loadOrderDetail(pool, existing.getValue(0)?.toString() ?: "")
+                                    .map { detail: JsonObject ->
+                                        CreateResult(id = detail.getString("id") ?: "", replayed = true, order = detail)
+                                    }
+                            }
+                        }
+                    }
+            } else {
+                Future.failedFuture(error)
+            }
         }
     }
 
@@ -376,6 +404,36 @@ class PurchaseOrderService(
                         doReceive(conn, id, body, key, userId, fingerprint)
                     }
                 }
+        }.recover { error: Throwable ->
+            // 并发同键收货：唯一索引冲突（23505）不能以 500 泄漏。回读幂等键
+            // 比对指纹后返回原收货凭证或 409，而不是把 SQL 唯一冲突暴露给调用方。
+            if (error is PgException && error.sqlState == "23505") {
+                findReceiptByIdempotencyKey(pool, key)
+                    .compose { existing: Row? ->
+                        if (existing == null) {
+                            Future.failedFuture(
+                                ConflictException("idempotency key raced during concurrent receive"),
+                            )
+                        } else {
+                            val storedFingerprint = existing.getValue(1)?.toString()
+                            if (storedFingerprint != fingerprint) {
+                                Future.failedFuture(
+                                    ConflictException("idempotency key already used with a different request"),
+                                )
+                            } else {
+                                loadReceiptDetail(pool, existing.getValue(0)?.toString() ?: "")
+                                    .compose { payload: JsonObject ->
+                                        loadOrderDetail(pool, id).map { order: JsonObject ->
+                                            payload.put("order", order)
+                                            ReceiveResult(replayed = true, payload = payload)
+                                        }
+                                    }
+                            }
+                        }
+                    }
+            } else {
+                Future.failedFuture(error)
+            }
         }
     }
 

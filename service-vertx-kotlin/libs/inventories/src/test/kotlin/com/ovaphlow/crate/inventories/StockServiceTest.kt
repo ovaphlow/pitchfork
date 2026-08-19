@@ -418,4 +418,71 @@ class StockServiceTest {
         future.onFailure { failures.add(it) }
         return failures.single()
     }
+
+    // ========================================================================
+    //  confirmPurchaseReceipt 输入校验（事务开启前即失败）
+    // ========================================================================
+
+    private fun purchaseReceiptItem(
+        materialId: String = "mat-1",
+        quantity: BigDecimal = BigDecimal.ONE,
+        unitCost: BigDecimal = BigDecimal.TEN,
+    ) = StockService.PurchaseReceiptItem(
+        receiptItemId = "rec-item-1",
+        materialId = materialId,
+        batchNo = null,
+        productionDate = null,
+        expiryDate = null,
+        manufacturer = null,
+        quantity = quantity,
+        unitCost = unitCost,
+    )
+
+    private fun purchaseReceiptCommand(
+        items: List<StockService.PurchaseReceiptItem> = listOf(purchaseReceiptItem()),
+    ) = StockService.PurchaseReceiptCommand(
+        warehouse = "药房西药库",
+        supplierName = "华康医药配送",
+        purchaseOrderId = "po-1",
+        purchaseOrderNo = "PH-PO-1",
+        purchaseReceiptId = "rec-1",
+        receiptNo = "PH-REC-1",
+        receivedBy = "pharm-user",
+        items = items,
+    )
+
+    @Test
+    fun `confirmPurchaseReceipt rejects blank warehouse`() {
+        val cmd = purchaseReceiptCommand().copy(warehouse = "")
+        val error = failureOf(service.confirmPurchaseReceipt(mockk(), cmd))
+        assertTrue(error.message?.contains("warehouse") == true)
+    }
+
+    @Test
+    fun `confirmPurchaseReceipt rejects blank supplier`() {
+        val cmd = purchaseReceiptCommand().copy(supplierName = "")
+        val error = failureOf(service.confirmPurchaseReceipt(mockk(), cmd))
+        assertTrue(error.message?.contains("supplier_name") == true)
+    }
+
+    @Test
+    fun `confirmPurchaseReceipt rejects empty items`() {
+        val cmd = purchaseReceiptCommand(items = emptyList())
+        val error = failureOf(service.confirmPurchaseReceipt(mockk(), cmd))
+        assertTrue(error.message?.contains("item") == true)
+    }
+
+    @Test
+    fun `confirmPurchaseReceipt rejects non positive quantity`() {
+        val cmd = purchaseReceiptCommand(items = listOf(purchaseReceiptItem(quantity = BigDecimal.ZERO)))
+        val error = failureOf(service.confirmPurchaseReceipt(mockk(), cmd))
+        assertTrue(error.message?.contains("quantity") == true)
+    }
+
+    @Test
+    fun `confirmPurchaseReceipt rejects negative unit cost`() {
+        val cmd = purchaseReceiptCommand(items = listOf(purchaseReceiptItem(unitCost = BigDecimal.valueOf(-1))))
+        val error = failureOf(service.confirmPurchaseReceipt(mockk(), cmd))
+        assertTrue(error.message?.contains("unit_cost") == true)
+    }
 }
