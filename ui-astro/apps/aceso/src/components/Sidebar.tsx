@@ -31,7 +31,6 @@ const items: Item[] = [
   {
     type: "group", label: "居民管理", domainLabels: { 养老: "长者管理", 儿保: "儿童管理" }, children: [
       { label: "居民档案", domainLabels: { 养老: "长者档案", 儿保: "儿童健康档案" }, path: "/dashboard/elders", icon: "👤", domains: ["医疗", "养老", "儿保"] },
-      { label: "挂号登记",   path: "/dashboard/registration", icon: "📋", domains: ["医疗", "儿保"] },
       { label: "入院管理", domainLabels: { 养老: "入住管理" }, path: "/dashboard/admission", icon: "🏠", domains: ["医疗", "养老"] },
       { label: "随访管理", domainLabels: { 儿保: "儿童保健随访" }, path: "/dashboard/followup", icon: "📞", domains: ["医疗", "养老", "儿保"] },
     ],
