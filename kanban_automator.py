@@ -2,7 +2,7 @@
 """看板状态流转（后台模式）：cron 秒级返回，pi agent 在后台运行。
 
 主脚本：扫看板 → 对每张待处理卡起后台 agent → 立即退出。
-支持 --loop 自循环模式：每 10 分钟（可 --interval 调整）从扫描看板重新开始。
+支持 --loop 自循环模式：每 12 分钟（可 --interval 调整）从扫描看板重新开始。
 后台 agent：pi 完成文件改动 → 自己调 gh 更新看板状态。
 
 Todo 列不处理（手动控制），从「需求分解」开始：
@@ -12,6 +12,8 @@ Todo 列不处理（手动控制），从「需求分解」开始：
              → 父卡打「已分解」标签并移入「计划评审」列，等待全部子卡 Done 后自动 Done
              拆分规则：按层切片（后端卡/前端卡），先后端后前端，前端卡声明依赖的后端卡；契约先行，
              单卡控制在 agent 一轮可完成粒度（详见「需求分解」阶段 prompt）
+             需求分解与计划评审共用《验收标准统一规范》（ACCEPTANCE_STANDARD）：分解时按规范一次写全验收标准，
+             评审时按同一规范逐维度核对、修订必须一次补齐全部缺口，避免标准不一致导致反复修订
   计划评审 -> 「评审 agent」评估计划卡：通过 -> 开发；需要修订 -> 输出修订意见/修订后完整计划，
              卡片留在「计划评审」列，下一轮重新评审，通过后才进开发
   开发 -> 「开发 agent」编码实现             -> 测试
@@ -21,7 +23,8 @@ Todo 列不处理（手动控制），从「需求分解」开始：
 「终审」列为最终验收阶段：终审 agent（评审角色）只读审查开发 diff、测试证据与残余风险，
 通过才移 Done；发现问题回退开发/需求分解（子任务回退开发/计划评审），复用 ❌ 测试失败计数防死循环。
 
-每列并发限制：同一次运行中，每个 status 列最多起一个 agent。
+每列并发限制：同一次运行中，每个 status 列最多起 COLUMN_CONCURRENCY 个 agent
+（默认 1；「计划评审」评审 agent 只读不碰工作区，默认放宽到 2，可调）。
 防重复触发（任务执行状态，Issue 卡以标签代替锁文件）：
   Issue 卡以「⏳ 处理中」标签为任务执行状态。开始处理时**先摘除再添加**该标签，
   使 GitHub 时间线（LabeledEvent）记录本次运行的开始时间；扫描时标签存在即视为处理中，
@@ -41,6 +44,9 @@ Todo 列不处理（手动控制），从「需求分解」开始：
     （输出「需求分解」会被强制改为「计划评审」，避免触发父卡重新分解）。
   - 父卡聚合：每轮扫描更新「📊 子卡进度」评论（原地 PATCH 不刷屏）；全部子卡 Done 后
     父卡移 Done + 汇总评论 + close 父 issue + 摘「已分解」标签；父卡本身永不启动 agent。
+  - 兄弟子卡依赖门控：子卡 body 用「依赖「<被依赖子卡完整标题>」」声明代码依赖（多张并列多个「」），
+    被依赖子卡未 Done 前，依赖卡在开发/测试/终审阶段不启动 agent（计划评审只读，不受门控），
+    避免并发 agent 在同一仓库工作区互相覆盖（#28/#29 被 #27 清出工作区的同类事故）。
 
 标签路由：给 Issue 卡加「需要重新计划」/「需要改动」标签，扫描时先把卡片移入
 「需求分解」/「开发」列（与处理阶段一致），再按对应阶段启动 agent，并自动清除 halt 停止状态
@@ -114,8 +120,23 @@ TRANSITIONS = {
     "终审": "Done",   # 终审 agent（评审角色）最终验收后 Done
 }
 
+# 每列并发上限（同一次运行中，该列最多同时启动的 agent 数；未列出的列默认 1）：
+# 「计划评审」的评审 agent 只读（不写工作区、不受依赖门控），可安全并行，放宽到 2，
+# 避免多张子卡在计划评审列排队串行；其余列（需求分解/开发/测试/终审）共用仓库工作区，
+# 并发会互相覆盖未提交改动（#28/#29 同类事故），保持 1。
+COLUMN_CONCURRENCY = {
+    "计划评审": 2,
+}
+COLUMN_CONCURRENCY_DEFAULT = 1
+
+
+def column_busy(busy_counts, column):
+    """该列本轮已占用（处理中卡片 1 槽 + 新启动 agent 各 1 槽）的并发槽位是否已达上限。"""
+    limit = COLUMN_CONCURRENCY.get(column, COLUMN_CONCURRENCY_DEFAULT)
+    return busy_counts.get(column, 0) >= limit
+
 # 需求分解为子任务
-MAX_PLANS = 50                      # 单个需求最多分解的子任务数（宽松兜底：每列并发 1，
+MAX_PLANS = 50                      # 单个需求最多分解的子任务数（宽松兜底：每列并发有限，
                                # 卡数只影响排队时长不影响正确性；对齐 subIssues 查询上限留余量）
 CHILD_LABEL = "子任务"              # 子任务卡标记（需求分解 agent 建卡时打上）
 DECOMPOSED_LABEL = "已分解"         # 父卡标记：已分解，等待子卡收尾（防重复分解主闸）
@@ -148,6 +169,24 @@ MAX_TEST_FAILURES = 2
 FAIL_LABEL_COLOR = "B60205"
 FAIL_LABELS = [f"❌ 测试失败 {i}" for i in range(1, MAX_TEST_FAILURES + 1)]
 
+# 验收标准统一规范：需求分解 agent 按此写验收标准、计划评审 agent 按此逐维度核对/修订计划。
+# 两份 prompt 共用同一标准，避免「计划文档与评审标准不一致」导致反复修订。
+ACCEPTANCE_STANDARD = (
+    "《验收标准统一规范》（需求分解与计划评审共用；按卡片实际范围取舍）：\n"
+    "1. 成功路径：每个端点至少一条成功用例并钉死状态码与响应体（POST 创建 201+完整对象含服务端生成的 26 位 ULID id、"
+    "GET 200+对象、PUT 200+更新后对象、DELETE 204）；\n"
+    "2. 写操作生效性：PUT 后 GET 反映更新、DELETE 后 GET 404；\n"
+    "3. 失败路径：缺必填 400、非法枚举/越界 400（POST 与 PUT 两个入口、列表筛选参数一致覆盖）、"
+    "不存在 ID 404（GET/PUT/DELETE 每个方法都覆盖），错误响应体统一 { \"error\": ... }；\n"
+    "4. 字段闭环：迁移表中每个列都有 API 行为（透传/回显/默认值/自动设置），"
+    "metadata/created_by/created_at/updated_at 等扩展字段必须写明处理口径；\n"
+    "5. 列表：空列表返回 {records:[], meta:{total:0}}、筛选生效、limit/offset 分页生效、排序口径（如有）写明；\n"
+    "6. 跨切面：ID 格式断言（26 位 Crockford Base32 ULID）、CORS 预检覆盖写方法（接口将被浏览器消费时）、"
+    "既有测试不得回归；\n"
+    "7. 约束：后端卡全程不访问数据库（内存注入）；不含任何 e2e、数据库集成、浏览器验收条目；"
+    "前端卡验收 = 构建+类型检查+页面调用 @pitchfork/shared 客户端方法（编译期绑定）。\n"
+)
+
 STAGE_PROMPTS = {
     "需求分解": "你是需求分解 agent。请分析看板卡片的需求，形成清晰的需求规格说明。" \
               "直接输出分析结果（包含背景、目标、验收标准等），不要写入文件。\n\n" \
@@ -170,8 +209,13 @@ STAGE_PROMPTS = {
               "   前端开发与验收不要求后端已运行）；\n" \
               "3. 每张卡控制在单个 agent 一轮可完成并自测的粒度（约 1 小时工作量）：宁可多拆一张卡，\n" \
               "   也不要让一张卡包含两个可独立验收的功能点；\n" \
-              "4. 除前后端契约依赖外，子任务之间不得有代码依赖；有代码依赖就合并为一条。\n" \
+              "4. 子任务之间存在代码依赖时，依赖卡 body 顶部必须显式声明\n" \
+              "   「依赖「<被依赖子卡完整标题>」」（多张被依赖卡并列多个「」），自动机据此门控：\n" \
+              "   被依赖子卡未 Done 前，依赖卡不会进入开发；无代码依赖的子任务不得互相引用标题。\n" \
               "每条验收标准必须可通过构建/单元测试/路由测试/前端构建验证；最多 10 条；\n" \
+              "验收标准按下面的《验收标准统一规范》**一次写全**——该规范也是计划评审 agent 的核对标准，\n" \
+              "写全一次，避免评审反复要求修订：\n" \
+              + ACCEPTANCE_STANDARD + \
               "不需要分解就不要输出 JSON 代码块。注意：如果看板卡片是子任务（Issue 带「子任务」标签），" \
               "只输出规格说明，不要输出 JSON 代码块。",
     "计划评审": "你是评审 agent（计划评审）。请评估看板上的计划卡片（可能是父需求分解出的子任务，也可能是独立计划）。\n" \
@@ -181,15 +225,17 @@ STAGE_PROMPTS = {
               "   （一张卡 = 一个可独立验收的功能点：一个业务对象的后端闭环，或一个前端交付物）；\n" \
               "   一张卡含多个业务对象/多个页面属于大卡，修订时拆小；\n" \
               "2. 可实现性：是否能在现有代码库中实现；\n" \
-              "3. 可验证性：每条验收标准必须可以通过程序构建、单元测试/路由测试验证，" \
-              "**不要包含任何 e2e 测试、数据库集成测试、浏览器验收类条目**（本流程不做这些验证）；\n" \
+              "3. 可验证性：按下面的《验收标准统一规范》**逐维度核对**（与需求分解共用同一标准），\n" \
+              "   一次列全所有缺口，修订计划必须完整覆盖全部维度，不要把可验证性缺口留到下一轮：\n" \
+              + ACCEPTANCE_STANDARD + \
               "4. 一致性：如果评论中有测试失败报告，必须解决其中提出的问题（修订验收口径或补充缺失内容）。\n\n" \
               "输出要求（直接输出，不要写入文件）：\n" \
               "- 计划没有问题：输出「✅ 评审通过」并简述结论即可，卡片随后进入开发；\n" \
               "- 计划需要修改：输出修订后的完整计划（背景、目标、验收标准），开头包含「❌ 需要修订」。\n" \
               "「❌ 需要修订」时卡片**留在「计划评审」列**重新评审，不会进入开发。\n" \
               "因此如果评论中已有上一轮「评审记录（修订）」，请以其中**最新修订后计划**为评估对象：\n" \
-              "修订意见已解决的直接输出「✅ 评审通过」；仍有问题的继续输出修订后完整计划（开头「❌ 需要修订」）。",
+              "修订意见已解决的直接输出「✅ 评审通过」；仍有问题的继续输出修订后完整计划（开头「❌ 需要修订」），\n" \
+              "修订必须按《验收标准统一规范》逐维度补齐全部缺口（本轮一次性列全并覆盖），不得留到下一轮。",
     "开发": "你是开发 agent。卡片描述或 Issue 评论中包含完整的需求规格说明（背景、目标、验收标准）。" \
               "请仔细阅读描述与评论，根据验收标准实现编码，不要询问用户。\n\n" \
               "**工作区规则（多张卡共用同一仓库工作区，必须遵守）**：\n" \
@@ -565,8 +611,10 @@ def record_test_failure(card_id, title, issue_number=None):
 
 
 def clear_fail_state(card_id, issue_number=None):
-    """成功流转（任何正向移动）后清零失败计数。
+    """清零失败计数（仅在最终成功 Done、人工 --reset 或路由标签介入时调用）。
     Issue 卡：摘除全部「❌ 测试失败 N」标签；DraftIssue 卡：清失败状态文件条目。"""
+    # 注意：测试/终审失败计数跨开发轮次累积（MAX_TEST_FAILURES 防死循环），
+    # 不能在每个正向流转（如 开发→测试）时清零，见 #34。
     if issue_number:
         for label in FAIL_LABELS:
             remove_label(issue_number, label=label)
@@ -1007,18 +1055,36 @@ def _has_fail_marker(text):
     return False
 
 
+# 引用/代码片段（反引号代码或双引号字符串）里可能含失败关键词——通过报告常引用
+# API 错误体 `{"error": "import failed", ...}` 或测试名，若直接做子串匹配会把
+# "failed" 等词误判为失败信号（#34 死循环根因：题库卡验收标准要求 import 失败体，
+# 每份通过报告前 2000 字符内都引用 "import failed"，被判失败后无限 测试↔开发 往返）。
+QUOTED_SPAN_RE = re.compile(r"`[^`]*`|\"[^\"]*\"")
+
+
+def _strip_quoted(text):
+    """剔除反引号代码片段与双引号字符串（保留其余文本做关键词判定）。"""
+    return QUOTED_SPAN_RE.sub("", text)
+
+
 def is_test_failure(output):
     """判断测试 agent 输出是否为失败。
-    依据：测试 prompt 要求失败时在输出开头包含 ❌；
-    必须排除 "0 failures"/"未发现失败"/"无需 ❌ 标记" 等通过措辞（旧实现因 "fail" 子串误判导致死循环）。"""
+    依据：测试 prompt 要求失败时在输出开头包含 ❌（主信号）；
+    兜底关键词检查前先剔除引用/代码片段，并排除 "0 failures"/"import failed"/
+    "未发现失败"/"无需 ❌ 标记" 等通过措辞（旧实现因 "fail" 子串误判导致死循环）。"""
     if not output:
         return False
     head = output[:2000]
     if _has_fail_marker(head):
         return True
-    low = head.lower()
+    low = _strip_quoted(head).lower()
+    # 状态/满足度枚举（「通过/未通过」「满足、不满足」等徽章渲染说明）不是失败信号，
+    # 先剔除再判关键词（否则「未通过」子串会把通过报告误判为失败，见 #42）
+    low = re.sub(r"通过(?:[/、|]|或)未通过", "通过", low)
+    low = re.sub(r"满足(?:[/、|]|或)不满足", "满足", low)
     # 剔除常见通过措辞
-    for noise in ("0 failures", "0 failed", "0 tests failed", "not fail",
+    for noise in ("0 failures", "0 failed", "0 tests failed", "not fail", "never fail",
+                  "import failed",
                   "未发现失败", "无失败", "没有失败", "零失败",
                   "未发现不满足", "无不满足", "没有不满足", "零不满足",
                   "0 测试失败", "无测试失败", "没有测试失败", "测试失败率"):
@@ -1169,7 +1235,12 @@ def run_agent_mode(card_id, original_title, current, target, issue_number=None, 
 
         gh_edit(id=card_id, field_id=STATUS_FIELD_ID,
                 single_select_option_id=OPTION_IDS[target_status])
-        clear_fail_state(card_id, issue_number)  # 正向流转成功，清零失败计数
+        # 失败计数只在最终成功（Done）或人工重置（--reset / 路由标签）时清零：
+        # 原实现每次正向流转（含 开发→测试）都清零，导致「❌ 测试失败 N」标签计数
+        # 永不累积，MAX_TEST_FAILURES 防死循环永不触发，卡片可在 测试↔开发
+        # （及终审↔开发）间无限往返（#34）。测试/终审失败计数必须跨开发轮次累积。
+        if target_status == "Done":
+            clear_fail_state(card_id, issue_number)
         if target_status == "Done" and is_child:
             # 子任务完成 → close 子 issue
             try:
@@ -1258,6 +1329,60 @@ def run_agent_mode(card_id, original_title, current, target, issue_number=None, 
     unmark_in_progress(card_id, issue_number)
 
 
+# ---------- 兄弟子卡依赖门控 ----------
+
+def normalize_card_title(title):
+    """归一化子卡标题：去 [#N] 前缀与尾部（...）后缀，便于与卡体「依赖「标题」」引用比对。"""
+    t = (title or "").strip()
+    t = re.sub(r"^\[#\d+\]\s*", "", t)
+    t = re.sub(r"（[^）]*）$", "", t)
+    return t.strip()
+
+
+def extract_dep_titles(body):
+    """从卡体提取「...」引用的标题（去重保序）。"""
+    if not body:
+        return []
+    out = []
+    for m in re.finditer(r"「([^」]+)」", body):
+        t = m.group(1).strip()
+        if t and t not in out:
+            out.append(t)
+    return out
+
+
+def unmet_sibling_deps(card, items):
+    """返回未完成的兄弟子任务依赖标题列表（依赖卡 body 声明「依赖「<标题>」」）。
+
+    只把标题带 [#N] 前缀的子任务 Issue 卡当作依赖目标（避免父卡标题被误判成死等）；
+    引用的标题不是兄弟子卡、或对应子卡已 Done 时不阻塞。"""
+    body = (card.get("content") or {}).get("body") or ""
+    refs = extract_dep_titles(body)
+    if not refs:
+        return []
+    by_norm = {}
+    for c in items:
+        content = c.get("content") or {}
+        if content.get("type") != "Issue":
+            continue
+        t = content.get("title") or ""
+        if not re.match(r"^\[#\d+\]\s*", t):
+            continue  # 只认兄弟子任务卡（含 [#N] 前缀）
+        by_norm[normalize_card_title(t)] = (t, c.get("status"))
+    my_title = card.get("title") or ""
+    unmet = []
+    for ref in refs:
+        hit = by_norm.get(normalize_card_title(ref))
+        if hit is None:
+            continue  # 引用的不是兄弟子卡（如父卡/普通卡/无关文本），不阻塞
+        dep_title, dep_status = hit
+        if dep_title == my_title:
+            continue
+        if dep_status != "Done":
+            unmet.append(dep_title)
+    return unmet
+
+
 # ---------- 模式二：主脚本（cron 调用） ----------
 
 def launch_agent(card_id, original_title, current, target, issue_number, content_id, reason=""):
@@ -1287,10 +1412,12 @@ def run_scan_mode():
     items = get_items()
     # 子任务执行顺序保证：按 issue number 升序处理。子卡由需求分解 agent 的 JSON 顺序创建
     # （先全部后端卡、后全部前端卡），后端卡号小前端卡号大；升序即先后端后前端，
-    # 各列（计划/开发/测试）每轮并发 1，队列顺序 = 执行顺序。DraftIssue 无编号排最后。
+    # 各列每轮并发受 COLUMN_CONCURRENCY 限制（默认 1，计划评审 2），队列顺序 = 执行顺序。
+    # DraftIssue 无编号排最后。
     items.sort(key=lambda c: (c.get("content", {}).get("number") is None,
                               c.get("content", {}).get("number") or 0))
-    busy_columns = set()
+    # 列 -> 本轮已占用并发槽位（处理中卡片占 1 槽，新启动 agent 各占 1 槽）
+    busy_counts = {}
     launched = 0
     resolve_option_ids()
 
@@ -1331,6 +1458,15 @@ def run_scan_mode():
             if label in labels:
                 route_label, route_target = label, target
                 break
+
+        # 依赖门控：兄弟子任务卡未 Done 前，不启动会触碰工作区的 agent
+        # （开发/测试/终审列，以及「需要改动」路由到开发）；计划评审只读，不受门控
+        if current in ("开发", "测试", "终审") or route_target == "测试":
+            unmet = unmet_sibling_deps(card, items)
+            if unmet:
+                print(f"{ts()} 跳过(等待依赖): {title!r} 等待 {', '.join(unmet)}", flush=True)
+                continue
+
         if route_target:
             # 虚拟列 = 该目标对应的处理列（需求分解->开发 由需求分解 agent 处理；开发->测试 由开发 agent 处理）
             virtual = "需求分解" if route_target == "开发" else "开发"
@@ -1341,12 +1477,12 @@ def run_scan_mode():
                 return
             if in_progress:
                 print(f"{ts()} 跳过(处理中): {title!r}", flush=True)
-                busy_columns.add(virtual)
+                busy_counts[virtual] = busy_counts.get(virtual, 0) + 1
                 continue
-            if virtual in busy_columns:
-                print(f"{ts()} 跳过(列忙): {title!r} 列 {virtual!r} 已有工作在进行", flush=True)
+            if column_busy(busy_counts, virtual):
+                print(f"{ts()} 跳过(列忙): {title!r} 列 {virtual!r} 并发已达上限", flush=True)
                 continue
-            busy_columns.add(virtual)
+            busy_counts[virtual] = busy_counts.get(virtual, 0) + 1
 
             # 摘路由标签（避免下轮重复触发），并清除可能的 halt 停止标记
             remove_label(issue_number, label=route_label)
@@ -1378,7 +1514,7 @@ def run_scan_mode():
             return
         if in_progress:
             print(f"{ts()} 跳过(处理中): {title!r}", flush=True)
-            busy_columns.add(current)
+            busy_counts[current] = busy_counts.get(current, 0) + 1
             continue
 
         # 已因测试失败超限停止流转的卡：不再自动处理，直到人工 --reset 或加路由标签
@@ -1387,10 +1523,10 @@ def run_scan_mode():
                   f"请人工介入后运行 --reset {card_id} 或加路由标签", flush=True)
             continue
 
-        if current in busy_columns:
-            print(f"{ts()} 跳过(列忙): {title!r} 列 {current!r} 已有工作在进行", flush=True)
+        if column_busy(busy_counts, current):
+            print(f"{ts()} 跳过(列忙): {title!r} 列 {current!r} 并发已达上限", flush=True)
             continue
-        busy_columns.add(current)
+        busy_counts[current] = busy_counts.get(current, 0) + 1
 
         target = TRANSITIONS[current]
 
@@ -1403,13 +1539,35 @@ def run_scan_mode():
 
 # ---------- 入口 ----------
 
-def run_loop_mode(interval=600):
-    """自循环模式：每 interval 秒从扫描看板重新开始一轮。
+def run_loop_mode(interval=720):
+    """自循环模式：按固定时间网格触发——对齐整点的 interval 秒网格（如 720s = :00/:12/:24/:36/:48 触发）。
+    启动后先等到下一个网格点再开始首轮；恰好落在网格点（1 秒内）时立即执行本 tick。
     每轮独立获取 cron flock（与 cron 实例互斥，重叠时跳过本轮）；
     启动的后台 agent 均独立进程组，循环退出不影响它们。"""
-    print(f"{ts()} [loop] 自循环模式启动，每 {interval}s 扫描一次（Ctrl+C 退出）", flush=True)
+
+    def _next_grid():
+        # 对齐整点网格：next_run 恒为下一个 interval 整数倍时刻（整点对齐，非启动时刻偏移）。
+        # 原实现带「距网格点不足 1 秒立即执行」窗口，扫描很快（如看板空闲、测试用短 interval）
+        # 时会反复命中已过网格点导致死循环；恒返回未来点则每网格点恰好一轮。
+        now = time.time()
+        return (int(now // interval) + 1) * interval
+
+    print(f"{ts()} [loop] 自循环模式启动，每 {interval}s 对齐整点网格触发"
+          f"（下次扫描约 {datetime.fromtimestamp(_next_grid()).strftime('%H:%M:%S')}，Ctrl+C 退出）", flush=True)
     while True:
-        next_run = time.time() + interval
+        # 先等到网格点再扫描：原实现「先扫描后等待」，扫描耗时几十秒必然越过
+        # next_run，睡眠循环立即退出，外层随即再扫一轮——每个网格点执行 2 次扫描
+        # （且启动时立即扫首轮，与 docstring「先等网格点」不符）。
+        next_run = _next_grid()
+        while True:
+            remaining = next_run - time.time()
+            if remaining <= 0:
+                break
+            try:
+                time.sleep(min(remaining, 60))
+            except KeyboardInterrupt:
+                print(f"\n{ts()} [loop] 收到 Ctrl+C，退出循环", flush=True)
+                return
         cron_lock_fd = None
         try:
             cron_lock_fd = open(CRON_LOCK, "w")
@@ -1428,16 +1586,6 @@ def run_loop_mode(interval=600):
                 if cron_lock_fd:
                     fcntl.flock(cron_lock_fd, fcntl.LOCK_UN)
                     cron_lock_fd.close()
-        # 分段睡眠，可及时响应 Ctrl+C
-        while True:
-            remaining = next_run - time.time()
-            if remaining <= 0:
-                break
-            try:
-                time.sleep(min(remaining, 60))
-            except KeyboardInterrupt:
-                print(f"\n{ts()} [loop] 收到 Ctrl+C，退出循环", flush=True)
-                return
 
 
 def main():
@@ -1459,9 +1607,9 @@ def main():
         print(f"{ts()} 已清除卡片 {card_id} 的失败状态，可重新自动流转")
         return
 
-    # --loop 模式：自循环扫描（--interval 秒，默认 300）
+    # --loop 模式：自循环扫描（--interval 秒，默认 720 = 每 12 分钟对齐整点网格）
     if "--loop" in sys.argv:
-        interval = 600
+        interval = 720
         if "--interval" in sys.argv:
             i = sys.argv.index("--interval")
             interval = int(sys.argv[i + 1])

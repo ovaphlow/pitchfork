@@ -1,0 +1,104 @@
+{{define "title"}}指挥中心大屏{{end}}
+{{define "content"}}
+<main class="command-dashboard">
+  <h1>指挥中心大屏</h1>
+
+  <section id="command-venue-map">
+    <h2>三维场馆地图</h2>
+    <div class="venue-map-static" role="img" aria-label="三维场馆地图静态示意（模拟示例，不接真实系统）">
+      <span class="venue-map-stage">主场馆三维沙盘示意</span>
+    </div>
+  </section>
+
+  <section id="command-session">
+    <h2>会话配置</h2>
+    <dl>
+      <dt>实训方式</dt><dd>{{.Session.Mode}}</dd>
+      <dt>主场馆</dt><dd>{{.Session.MainVenue}}</dd>
+      <dt>联训场馆</dt>
+      <dd>{{range $index, $venue := .Session.JointVenues}}{{if $index}}、{{end}}{{$venue}}{{end}}</dd>
+    </dl>
+  </section>
+
+  <section id="command-zones">
+    <h2>区域热力</h2>
+    <button type="button" hx-get="/crate-api/prototype/v1/drills/{{.RunID}}/zone-densities" hx-target="#command-zones" hx-swap="innerHTML">刷新热力</button>
+    <ul class="zone-grid">
+      {{range .Zones}}
+      <li class="zone-cell {{if lt .PeopleCount 300}}zone-low{{else if le .PeopleCount 800}}zone-medium{{else}}zone-high{{end}}">
+        <span class="zone-name">{{.ZoneName}}</span>
+        <span class="zone-count">{{.PeopleCount}}</span>
+        <span class="zone-level">{{if lt .PeopleCount 300}}低{{else if le .PeopleCount 800}}中{{else}}高{{end}}</span>
+      </li>
+      {{end}}
+    </ul>
+  </section>
+
+  <section id="command-devices">
+    <h2>设备状态</h2>
+    <button type="button" hx-get="/crate-api/prototype/v1/drills/{{.RunID}}/devices" hx-target="#command-devices" hx-swap="innerHTML">刷新设备</button>
+    <ul class="device-list">
+      {{range .Devices}}
+      <li class="device-cell {{if eq .Status "告警"}}device-warning{{else if eq .Status "离线"}}device-offline{{else}}device-normal{{end}}">
+        <span class="device-name">{{.DeviceName}}</span>
+        <span class="device-type">{{.DeviceType}}</span>
+        <span class="device-status">{{.Status}}</span>
+        {{if .Note}}<span class="device-note">{{.Note}}</span>{{end}}
+      </li>
+      {{end}}
+    </ul>
+  </section>
+
+  <section id="command-departments">
+    <h2>部门联动</h2>
+    <table>
+      <thead>
+        <tr><th>部门</th><th>状态</th><th>说明</th></tr>
+      </thead>
+      <tbody>
+        {{range .Departments}}
+        <tr>
+          <td>{{.Department}}</td>
+          <td class="department-status">{{.Status}}</td>
+          <td>{{if .Note}}{{.Note}}{{else}}—{{end}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </section>
+
+  <section id="command-messages">
+    <h2>消息流</h2>
+    <button type="button" hx-get="/crate-api/prototype/v1/drills/{{.RunID}}/messages" hx-target="#command-messages" hx-swap="innerHTML">刷新消息</button>
+    <ul class="message-stream">
+      {{range .Messages}}
+      <li class="message-item">
+        <span class="message-sender">{{.SenderType}} · {{.SenderName}}</span>
+        <span class="message-content">{{.Content}}</span>
+      </li>
+      {{end}}
+    </ul>
+  </section>
+
+  <section id="command-orders">
+    <h2>指令列表</h2>
+    <table>
+      <thead>
+        <tr><th>指令</th><th>内容</th><th>优先级</th><th>接收方</th><th>状态</th><th>反馈</th></tr>
+      </thead>
+      <tbody>
+        {{range .Orders}}
+        <tr>
+          <td>{{.Title}}</td>
+          <td>{{.Content}}</td>
+          <td>{{.Priority}}</td>
+          <td>{{.TargetType}} · {{.TargetName}}</td>
+          <td class="order-status">{{.Status}}</td>
+          <td class="order-feedback">{{if .Feedback}}{{.Feedback}}{{else}}—{{end}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </section>
+</main>
+{{end}}

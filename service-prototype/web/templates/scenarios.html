@@ -1,0 +1,127 @@
+{{define "title"}}演练场景模板管理{{end}}
+{{define "content"}}
+<main>
+  <h1>演练场景模板管理</h1>
+  <p id="scenario-feedback" role="status"></p>
+
+  <section id="scenario-create">
+    <h2>新建场景</h2>
+    <form hx-post="/crate-api/prototype/v1/scenarios" hx-target="#scenario-feedback" hx-swap="innerHTML">
+      <label>名称 <input name="name" required></label>
+      <label>分类
+        <select name="category">
+          <option>大客流聚集</option>
+          <option>停电与基础设施</option>
+          <option>火灾</option>
+          <option>气象灾害</option>
+        </select>
+      </label>
+      <label>背景 <textarea name="background" required></textarea></label>
+      <label>状态
+        <select name="status">
+          <option value="启用">启用</option>
+          <option value="停用">停用</option>
+        </select>
+      </label>
+      <button type="submit">创建</button>
+    </form>
+  </section>
+
+  <section id="scenario-list">
+    <h2>内置场景模板</h2>
+    <table>
+      <thead>
+        <tr><th>名称</th><th>分类</th><th>状态</th><th>背景</th></tr>
+      </thead>
+      <tbody>
+        {{range .Scenarios}}
+        <tr>
+          <td>{{.Name}}</td>
+          <td>{{.Category}}</td>
+          <td>{{.Status}}</td>
+          <td>{{.Background}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+
+    {{range .Scenarios}}
+    <article>
+      <h3>{{.Name}} <span class="category">{{.Category}}</span> <span class="status">{{.Status}}</span></h3>
+      <p class="background">{{.Background}}</p>
+
+      <h4>编辑场景</h4>
+      <form hx-put="/crate-api/prototype/v1/scenarios/{{.ID}}" hx-target="#scenario-feedback" hx-swap="innerHTML">
+        <label>名称 <input name="name" value="{{.Name}}" required></label>
+        <label>分类
+          <select name="category">
+            <option value="大客流聚集" {{if eq .Category "大客流聚集"}}selected{{end}}>大客流聚集</option>
+            <option value="停电与基础设施" {{if eq .Category "停电与基础设施"}}selected{{end}}>停电与基础设施</option>
+            <option value="火灾" {{if eq .Category "火灾"}}selected{{end}}>火灾</option>
+            <option value="气象灾害" {{if eq .Category "气象灾害"}}selected{{end}}>气象灾害</option>
+          </select>
+        </label>
+        <label>背景 <textarea name="background" required>{{.Background}}</textarea></label>
+        <label>状态
+          <select name="status">
+            <option value="启用" {{if eq .Status "启用"}}selected{{end}}>启用</option>
+            <option value="停用" {{if eq .Status "停用"}}selected{{end}}>停用</option>
+          </select>
+        </label>
+        <button type="submit">保存</button>
+      </form>
+
+      <h4>停用场景</h4>
+      <form hx-put="/crate-api/prototype/v1/scenarios/{{.ID}}" hx-target="#scenario-feedback" hx-swap="innerHTML">
+        <input type="hidden" name="name" value="{{.Name}}">
+        <input type="hidden" name="category" value="{{.Category}}">
+        <input type="hidden" name="background" value="{{.Background}}">
+        <input type="hidden" name="status" value="停用">
+        <button type="submit">停用</button>
+      </form>
+
+      <h4>演练步骤</h4>
+      <ol>
+        {{range .Steps}}
+        <li>
+          <span class="step-order">{{.SortOrder}}</span> <span class="step-title">{{.Title}}</span>
+          <span class="step-description">{{.Description}}</span>
+          <form hx-put="/crate-api/prototype/v1/steps/{{.ID}}" hx-target="#scenario-feedback" hx-swap="innerHTML">
+            <input type="number" name="sort_order" value="{{.SortOrder}}" min="0">
+            <input name="title" value="{{.Title}}" required>
+            <input name="description" value="{{.Description}}">
+            <button type="submit">保存步骤</button>
+          </form>
+        </li>
+        {{end}}
+      </ol>
+      <form hx-post="/crate-api/prototype/v1/scenarios/{{.ID}}/steps" hx-target="#scenario-feedback" hx-swap="innerHTML">
+        <input type="number" name="sort_order" value="1" min="0">
+        <input name="title" required>
+        <input name="description">
+        <button type="submit">新增步骤</button>
+      </form>
+
+      <h4>考核要点</h4>
+      <ul>
+        {{range .Points}}
+        <li>
+          <span class="point-title">{{.Title}}</span> <span class="point-description">{{.Description}}</span>
+          <form hx-put="/crate-api/prototype/v1/assessment-points/{{.ID}}" hx-target="#scenario-feedback" hx-swap="innerHTML">
+            <input name="title" value="{{.Title}}" required>
+            <input name="description" value="{{.Description}}">
+            <button type="submit">保存要点</button>
+          </form>
+        </li>
+        {{end}}
+      </ul>
+      <form hx-post="/crate-api/prototype/v1/scenarios/{{.ID}}/assessment-points" hx-target="#scenario-feedback" hx-swap="innerHTML">
+        <input name="title" required>
+        <input name="description">
+        <button type="submit">新增要点</button>
+      </form>
+    </article>
+    {{end}}
+  </section>
+</main>
+{{end}}

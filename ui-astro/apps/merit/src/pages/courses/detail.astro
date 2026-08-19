@@ -1,0 +1,14 @@
+---
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import CourseDetail from "../../components/courses/CourseDetail.svelte";
+
+// 静态 CSR 应用：课程 ID 经查询参数传入（与 aceso 既有静态路由模式一致），
+// 组件在客户端按 URL 查询参数回退解析。
+const courseId = Astro.url.searchParams.get("id") ?? "";
+---
+
+<BaseLayout title="课程详情">
+  <main class="mx-auto w-full max-w-4xl px-6 py-10">
+    <CourseDetail client:load courseId={courseId} />
+  </main>
+</BaseLayout>

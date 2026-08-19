@@ -1,0 +1,224 @@
+{{define "title"}}舆情应对实训{{end}}
+{{define "content"}}
+<main>
+  <h1>舆情应对实训</h1>
+  <p id="opinion-feedback" role="status"></p>
+
+  <section id="opinion-event">
+    <h2>舆情事件背景</h2>
+    <button type="button" hx-get="/crate-api/prototype/v1/drills/{{.RunID}}/opinion-event" hx-target="#opinion-event" hx-swap="innerHTML">刷新事件</button>
+    <dl>
+      <dt>事件编号</dt><dd class="event-id">{{.Event.ID}}</dd>
+      <dt>事件名称</dt><dd>{{.Event.EventName}}</dd>
+      <dt>涉事主体</dt><dd>{{.Event.Subject}}</dd>
+      <dt>等级</dt><dd>{{.Event.Level}}</dd>
+      <dt>状态</dt><dd>{{.Event.Status}}</dd>
+      <dt>发生时间</dt><dd>{{if .Event.OccurredAt}}{{.Event.OccurredAt}}{{else}}—{{end}}</dd>
+      <dt>事件摘要</dt><dd>{{.Event.Summary}}</dd>
+    </dl>
+    <form hx-put="/crate-api/prototype/v1/drills/{{.RunID}}/opinion-event" hx-target="#opinion-feedback" hx-swap="innerHTML">
+      <label>事件名称 <input name="event_name" value="{{.Event.EventName}}" required></label>
+      <label>涉事主体 <input name="subject" value="{{.Event.Subject}}"></label>
+      <label>事件摘要 <textarea name="summary">{{.Event.Summary}}</textarea></label>
+      <label>发生时间 <input type="datetime-local" name="occurred_at" value="{{.Event.OccurredAt}}"></label>
+      <label>等级
+        <select name="level">
+          <option value="高热" {{if eq .Event.Level "高热"}}selected{{end}}>高热</option>
+          <option value="中热" {{if eq .Event.Level "中热"}}selected{{end}}>中热</option>
+          <option value="低热" {{if eq .Event.Level "低热"}}selected{{end}}>低热</option>
+        </select>
+      </label>
+      <label>状态
+        <select name="status">
+          <option value="监测中" {{if eq .Event.Status "监测中"}}selected{{end}}>监测中</option>
+          <option value="已预警" {{if eq .Event.Status "已预警"}}selected{{end}}>已预警</option>
+          <option value="已处置" {{if eq .Event.Status "已处置"}}selected{{end}}>已处置</option>
+        </select>
+      </label>
+      <button type="submit">保存事件配置</button>
+    </form>
+  </section>
+
+  <section id="opinion-posts">
+    <h2>舆情信息流</h2>
+    <button type="button" hx-get="/crate-api/prototype/v1/drills/{{.RunID}}/posts" hx-target="#opinion-posts" hx-swap="innerHTML">刷新舆情</button>
+    <form hx-post="/crate-api/prototype/v1/drills/{{.RunID}}/posts" hx-target="#opinion-feedback" hx-swap="innerHTML">
+      <label>来源
+        <select name="source">
+          <option value="微博">微博</option>
+          <option value="抖音">抖音</option>
+          <option value="新闻媒体">新闻媒体</option>
+          <option value="论坛">论坛</option>
+          <option value="其他">其他</option>
+        </select>
+      </label>
+      <label>内容 <textarea name="content" required></textarea></label>
+      <label>情感
+        <select name="sentiment">
+          <option value="负面">负面</option>
+          <option value="中性">中性</option>
+          <option value="正面">正面</option>
+        </select>
+      </label>
+      <label>热度 <input type="number" name="heat" value="50" min="0" required></label>
+      <button type="submit">新增模拟舆情</button>
+    </form>
+    <table>
+      <thead>
+        <tr><th>编号</th><th>来源</th><th>内容</th><th>情感</th><th>热度</th><th>预警状态</th><th>操作</th></tr>
+      </thead>
+      <tbody>
+        {{range .Posts}}
+        <tr>
+          <td class="post-id">{{.ID}}</td>
+          <td>{{.Source}}</td>
+          <td>{{.Content}}</td>
+          <td>{{.Sentiment}}</td>
+          <td>{{.Heat}}</td>
+          <td>{{if eq .WarnStatus "已预警"}}<span class="warn-mark">已预警</span>{{else}}未预警{{end}}</td>
+          <td>
+            {{if eq .WarnStatus "未预警"}}
+            <form hx-put="/crate-api/prototype/v1/drills/{{$.RunID}}/posts/{{.ID}}" hx-target="#opinion-feedback" hx-swap="innerHTML">
+              <input type="hidden" name="warn_status" value="已预警">
+              <button type="submit">执行预警</button>
+            </form>
+            {{end}}
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </section>
+
+  <section id="opinion-releases">
+    <h2>信息发布</h2>
+    <button type="button" hx-get="/crate-api/prototype/v1/drills/{{.RunID}}/releases" hx-target="#opinion-releases" hx-swap="innerHTML">刷新发布</button>
+    <form hx-post="/crate-api/prototype/v1/drills/{{.RunID}}/releases" hx-target="#opinion-feedback" hx-swap="innerHTML">
+      <label>发布渠道
+        <select name="channel">
+          <option value="官网公告">官网公告</option>
+          <option value="微信公众号">微信公众号</option>
+          <option value="微博官方号">微博官方号</option>
+          <option value="新闻媒体通稿">新闻媒体通稿</option>
+        </select>
+      </label>
+      <label>标题 <input name="title" required></label>
+      <label>内容 <textarea name="content" required></textarea></label>
+      <label>媒体名称 <input name="media_name" placeholder="新闻媒体通稿时填写"></label>
+      <button type="submit">新建发布</button>
+    </form>
+    <table>
+      <thead>
+        <tr><th>编号</th><th>渠道</th><th>标题</th><th>内容</th><th>媒体名称</th><th>状态</th><th>状态流转</th></tr>
+      </thead>
+      <tbody>
+        {{range .Releases}}
+        <tr>
+          <td class="release-id">{{.ID}}</td>
+          <td>{{.Channel}}</td>
+          <td>{{.Title}}</td>
+          <td>{{.Content}}</td>
+          <td>{{if .MediaName}}{{.MediaName}}{{else}}—{{end}}</td>
+          <td>{{.Status}}</td>
+          <td>
+            <form hx-put="/crate-api/prototype/v1/drills/{{$.RunID}}/releases/{{.ID}}" hx-target="#opinion-feedback" hx-swap="innerHTML">
+              <select name="status">
+                <option value="草稿" {{if eq .Status "草稿"}}selected{{end}}>草稿</option>
+                <option value="待审核" {{if eq .Status "待审核"}}selected{{end}}>待审核</option>
+                <option value="已发布" {{if eq .Status "已发布"}}selected{{end}}>已发布</option>
+                <option value="已撤回" {{if eq .Status "已撤回"}}selected{{end}}>已撤回</option>
+              </select>
+              <button type="submit">更新状态</button>
+            </form>
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </section>
+
+  <section id="opinion-complaints">
+    <h2>投诉处理</h2>
+    <button type="button" hx-get="/crate-api/prototype/v1/drills/{{.RunID}}/complaints" hx-target="#opinion-complaints" hx-swap="innerHTML">刷新投诉</button>
+    <form hx-post="/crate-api/prototype/v1/drills/{{.RunID}}/complaints" hx-target="#opinion-feedback" hx-swap="innerHTML">
+      <label>投诉人 <input name="complainant" required></label>
+      <label>渠道
+        <select name="channel">
+          <option value="现场">现场</option>
+          <option value="电话">电话</option>
+          <option value="网络留言">网络留言</option>
+          <option value="12345转办">12345转办</option>
+          <option value="其他">其他</option>
+        </select>
+      </label>
+      <label>投诉类型
+        <select name="complaint_type">
+          <option value="入馆受阻">入馆受阻</option>
+          <option value="参观受限">参观受限</option>
+          <option value="服务态度">服务态度</option>
+          <option value="设施问题">设施问题</option>
+          <option value="其他">其他</option>
+        </select>
+      </label>
+      <label>投诉内容 <textarea name="content" required></textarea></label>
+      <button type="submit">登记投诉</button>
+    </form>
+    <table>
+      <thead>
+        <tr><th>编号</th><th>投诉人</th><th>渠道</th><th>类型</th><th>内容</th><th>状态</th><th>处理措施</th><th>处理人</th></tr>
+      </thead>
+      <tbody>
+        {{range .Complaints}}
+        <tr>
+          <td class="complaint-id">{{.ID}}</td>
+          <td>{{.Complainant}}</td>
+          <td>{{.Channel}}</td>
+          <td>{{.ComplaintType}}</td>
+          <td>{{.Content}}</td>
+          <td>{{.Status}}</td>
+          <td>{{if .Handling}}{{.Handling}}{{else}}—{{end}}</td>
+          <td>{{if .Handler}}{{.Handler}}{{else}}—{{end}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+    {{range .Complaints}}
+    <article class="complaint-handling">
+      <h4>受理/办结：{{.Complainant}}（{{.ID}}）</h4>
+      <form hx-put="/crate-api/prototype/v1/drills/{{$.RunID}}/complaints/{{.ID}}" hx-target="#opinion-feedback" hx-swap="innerHTML">
+        <label>投诉人 <input name="complainant" value="{{.Complainant}}" required></label>
+        <label>渠道
+          <select name="channel">
+            <option value="现场" {{if eq .Channel "现场"}}selected{{end}}>现场</option>
+            <option value="电话" {{if eq .Channel "电话"}}selected{{end}}>电话</option>
+            <option value="网络留言" {{if eq .Channel "网络留言"}}selected{{end}}>网络留言</option>
+            <option value="12345转办" {{if eq .Channel "12345转办"}}selected{{end}}>12345转办</option>
+            <option value="其他" {{if eq .Channel "其他"}}selected{{end}}>其他</option>
+          </select>
+        </label>
+        <label>投诉类型
+          <select name="complaint_type">
+            <option value="入馆受阻" {{if eq .ComplaintType "入馆受阻"}}selected{{end}}>入馆受阻</option>
+            <option value="参观受限" {{if eq .ComplaintType "参观受限"}}selected{{end}}>参观受限</option>
+            <option value="服务态度" {{if eq .ComplaintType "服务态度"}}selected{{end}}>服务态度</option>
+            <option value="设施问题" {{if eq .ComplaintType "设施问题"}}selected{{end}}>设施问题</option>
+            <option value="其他" {{if eq .ComplaintType "其他"}}selected{{end}}>其他</option>
+          </select>
+        </label>
+        <label>投诉内容 <textarea name="content" required>{{.Content}}</textarea></label>
+        <label>状态
+          <select name="status">
+            <option value="待受理" {{if eq .Status "待受理"}}selected{{end}}>待受理</option>
+            <option value="处理中" {{if eq .Status "处理中"}}selected{{end}}>处理中</option>
+            <option value="已办结" {{if eq .Status "已办结"}}selected{{end}}>已办结</option>
+          </select>
+        </label>
+        <label>处理措施 <textarea name="handling">{{.Handling}}</textarea></label>
+        <label>处理人 <input name="handler" value="{{.Handler}}"></label>
+        <button type="submit">提交处理</button>
+      </form>
+    </article>
+    {{end}}
+  </section>
+</main>
+{{end}}

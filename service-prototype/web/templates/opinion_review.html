@@ -1,0 +1,85 @@
+{{define "title"}}媒体沟通与舆情复盘{{end}}
+{{define "content"}}
+<main>
+  <h1>媒体沟通与舆情复盘</h1>
+  <p id="opinion-review-feedback" role="status"></p>
+
+  <section id="press-conference">
+    <h2>新闻发布会媒体问答</h2>
+    <button type="button" hx-get="/crate-api/prototype/v1/drills/{{.RunID}}/media-questions" hx-target="#press-conference" hx-swap="innerHTML">刷新问答</button>
+
+    <h3>新增提问</h3>
+    <form hx-post="/crate-api/prototype/v1/drills/{{.RunID}}/media-questions" hx-target="#opinion-review-feedback" hx-swap="innerHTML">
+      <label>媒体名称 <input name="media_name" required></label>
+      <label>记者 <input name="reporter"></label>
+      <label>问题 <textarea name="question" required></textarea></label>
+      <label>问题类型
+        <select name="question_type">
+          <option value="事实类">事实类</option>
+          <option value="质疑类">质疑类</option>
+          <option value="尖锐类">尖锐类</option>
+        </select>
+      </label>
+      <label>回答 <textarea name="answer"></textarea></label>
+      <label>回答状态
+        <select name="status">
+          <option value="未回答">未回答</option>
+          <option value="已回答">已回答</option>
+        </select>
+      </label>
+      <button type="submit">新增提问</button>
+    </form>
+
+    <h3>媒体问答记录</h3>
+    <ul class="question-list">
+      {{range .Questions}}
+      <li class="question-item">
+        <p class="question-meta">
+          <span class="question-id">{{.ID}}</span>
+          <span class="question-type">{{.QuestionType}}</span>
+          <span class="question-status">{{.Status}}</span>
+        </p>
+        <p class="question-source">{{.MediaName}} · {{.Reporter}}</p>
+        <p class="question-text">{{.Question}}</p>
+        {{if .Answer}}<p class="question-answer">{{.Answer}}</p>{{end}}
+        {{if .AnsweredAt}}<p class="question-answered-at">回答时间：{{.AnsweredAt}}</p>{{end}}
+        <form hx-put="/crate-api/prototype/v1/drills/{{$.RunID}}/media-questions/{{.ID}}" hx-target="#opinion-review-feedback" hx-swap="innerHTML">
+          <label>回答 <textarea name="answer">{{.Answer}}</textarea></label>
+          <label>回答状态
+            <select name="status">
+              <option value="未回答"{{if eq .Status "未回答"}} selected{{end}}>未回答</option>
+              <option value="已回答"{{if eq .Status "已回答"}} selected{{end}}>已回答</option>
+            </select>
+          </label>
+          <button type="submit">撰写回答</button>
+        </form>
+      </li>
+      {{end}}
+    </ul>
+  </section>
+
+  <section id="after-action-review">
+    <h2>舆情复盘</h2>
+    <button type="button" hx-get="/crate-api/prototype/v1/drills/{{.RunID}}/review" hx-target="#after-action-review" hx-swap="innerHTML">刷新复盘</button>
+
+    <h3>保存复盘</h3>
+    <form hx-put="/crate-api/prototype/v1/drills/{{.RunID}}/review" hx-target="#opinion-review-feedback" hx-swap="innerHTML">
+      <label>事件经过 <textarea name="case_summary">{{.Review.CaseSummary}}</textarea></label>
+      <label>处置亮点 <textarea name="highlights">{{.Review.Highlights}}</textarea></label>
+      <label>存在问题 <textarea name="problems">{{.Review.Problems}}</textarea></label>
+      <label>经验教训 <textarea name="lessons">{{.Review.Lessons}}</textarea></label>
+      <label>改进建议 <textarea name="suggestions">{{.Review.Suggestions}}</textarea></label>
+      <button type="submit">保存复盘</button>
+    </form>
+
+    <h3>复盘记录</h3>
+    <dl class="review-sections">
+      <dt>事件经过</dt><dd>{{.Review.CaseSummary}}</dd>
+      <dt>处置亮点</dt><dd>{{.Review.Highlights}}</dd>
+      <dt>存在问题</dt><dd>{{.Review.Problems}}</dd>
+      <dt>经验教训</dt><dd>{{.Review.Lessons}}</dd>
+      <dt>改进建议</dt><dd>{{.Review.Suggestions}}</dd>
+    </dl>
+  </section>
+</main>
+{{end}}

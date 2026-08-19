@@ -1,0 +1,10 @@
+---
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import QuestionForm from "../../components/questions/QuestionForm.svelte";
+---
+
+<BaseLayout title="新建题目">
+  <main class="mx-auto w-full max-w-3xl px-6 py-10">
+    <QuestionForm client:load mode="create" />
+  </main>
+</BaseLayout>

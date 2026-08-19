@@ -1,0 +1,119 @@
+{{define "title"}}演练执行与考核{{end}}
+{{define "content"}}
+<main>
+  <h1>演练执行与考核</h1>
+  <p id="drill-feedback" role="status"></p>
+
+  <section id="drill-create">
+    <h2>新建演练任务</h2>
+    <form hx-post="/crate-api/prototype/v1/drills" hx-target="#drill-feedback" hx-swap="innerHTML">
+      <label>任务标题 <input name="title" required></label>
+      <label>演练场景
+        <select name="scenario_id" required>
+          {{range .Scenarios}}
+          <option value="{{.ID}}">{{.Name}}</option>
+          {{end}}
+        </select>
+      </label>
+      <button type="submit">创建任务</button>
+    </form>
+  </section>
+
+  <section id="drill-list">
+    <h2>演练任务列表</h2>
+    <table>
+      <thead>
+        <tr><th>标题</th><th>场景</th><th>状态</th></tr>
+      </thead>
+      <tbody>
+        {{range .Runs}}
+        <tr>
+          <td>{{.Title}}</td>
+          <td>{{.ScenarioName}}</td>
+          <td>{{.Status}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+
+    {{range $run := .Runs}}
+    <article>
+      <h3>{{$run.Title}} <span class="scenario">{{$run.ScenarioName}}</span> <span class="status">{{$run.Status}}</span></h3>
+
+      <h4>状态机操作</h4>
+      <div class="state-actions">
+        <form hx-post="/crate-api/prototype/v1/drills/{{$run.ID}}/start" hx-target="#drill-feedback" hx-swap="innerHTML">
+          <button type="submit">开始</button>
+        </form>
+        <form hx-post="/crate-api/prototype/v1/drills/{{$run.ID}}/complete" hx-target="#drill-feedback" hx-swap="innerHTML">
+          <button type="submit">完成</button>
+        </form>
+        <form hx-post="/crate-api/prototype/v1/drills/{{$run.ID}}/terminate" hx-target="#drill-feedback" hx-swap="innerHTML">
+          <button type="submit">终止</button>
+        </form>
+      </div>
+
+      <h4>演练流程步骤</h4>
+      <ol>
+        {{range $step := $run.Steps}}
+        <li>
+          <span class="step-order">{{$step.SortOrder}}</span> <span class="step-title">{{$step.Title}}</span>
+          <span class="step-description">{{$step.Description}}</span>
+          <form hx-put="/crate-api/prototype/v1/drills/{{$run.ID}}/steps/{{$step.ID}}" hx-target="#drill-feedback" hx-swap="innerHTML">
+            <label>执行状态
+              <select name="status">
+                <option value="已执行">已执行</option>
+                <option value="跳过">跳过</option>
+              </select>
+            </label>
+            <input name="action_note" placeholder="处置说明">
+            <button type="submit">保存执行记录</button>
+          </form>
+        </li>
+        {{end}}
+      </ol>
+
+      <h4>模拟事件演示</h4>
+      <form hx-post="/crate-api/prototype/v1/drills/{{$run.ID}}/sim-events" hx-target="#drill-feedback" hx-swap="innerHTML">
+        <label>事件类型
+          <select name="event_type" required>
+            <option value="客流密度超阈值">客流密度超阈值</option>
+            <option value="供配电异常报警">供配电异常报警</option>
+            <option value="烟感探测器触发">烟感探测器触发</option>
+            <option value="气象预警接收">气象预警接收</option>
+            <option value="其他">其他</option>
+          </select>
+        </label>
+        <button type="submit">触发模拟事件</button>
+      </form>
+      <ul>
+        {{range $event := $run.SimEvents}}
+        <li>
+          <span class="event-type">{{$event.EventType}}</span> <span class="event-status">{{$event.Status}}</span>
+          <pre class="event-payload">{{$event.Payload}}</pre>
+          <form hx-put="/crate-api/prototype/v1/drills/{{$run.ID}}/sim-events/{{$event.ID}}" hx-target="#drill-feedback" hx-swap="innerHTML">
+            <input type="hidden" name="status" value="已处置">
+            <button type="submit">标记已处置</button>
+          </form>
+        </li>
+        {{end}}
+      </ul>
+
+      <h4>考核评分</h4>
+      <ul>
+        {{range $point := $run.Points}}
+        <li>
+          <span class="point-title">{{$point.Title}}</span>
+          <form hx-put="/crate-api/prototype/v1/drills/{{$run.ID}}/assessments/{{$point.ID}}" hx-target="#drill-feedback" hx-swap="innerHTML">
+            <label>得分 <input type="number" name="score" min="0" max="100" required></label>
+            <input name="comment" placeholder="评语">
+            <button type="submit">提交评分</button>
+          </form>
+        </li>
+        {{end}}
+      </ul>
+    </article>
+    {{end}}
+  </section>
+</main>
+{{end}}

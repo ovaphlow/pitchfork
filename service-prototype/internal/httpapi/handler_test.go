@@ -6,7 +6,26 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/ovaphlow/pitchfork/service-prototype/internal/assignments"
+	"github.com/ovaphlow/pitchfork/service-prototype/internal/chapters"
+	"github.com/ovaphlow/pitchfork/service-prototype/internal/courses"
+	"github.com/ovaphlow/pitchfork/service-prototype/internal/dispatch"
+	"github.com/ovaphlow/pitchfork/service-prototype/internal/drills"
+	"github.com/ovaphlow/pitchfork/service-prototype/internal/evaluation"
+	"github.com/ovaphlow/pitchfork/service-prototype/internal/examrecords"
+	"github.com/ovaphlow/pitchfork/service-prototype/internal/opinion"
+	"github.com/ovaphlow/pitchfork/service-prototype/internal/papers"
+	"github.com/ovaphlow/pitchfork/service-prototype/internal/progress"
+	"github.com/ovaphlow/pitchfork/service-prototype/internal/questions"
 )
+
+// testMux builds a mux with fresh in-memory course, chapter, question,
+// assignment, progress, paper, exam-record, drill, dispatch, opinion
+// and evaluation stores so every test starts from an empty dataset.
+func testMux(allowedOrigins []string) http.Handler {
+	return NewMux(allowedOrigins, courses.NewInMemoryStore(), chapters.NewInMemoryStore(), questions.NewInMemoryStore(), assignments.NewInMemoryStore(), progress.NewInMemoryStore(), papers.NewInMemoryStore(), examrecords.NewInMemoryStore(), drills.NewInMemoryStore(), dispatch.NewInMemoryStore(), opinion.NewInMemoryStore(), evaluation.NewInMemoryStore())
+}
 
 func get(handler http.Handler, target string, header map[string]string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet, target, nil)
@@ -20,7 +39,7 @@ func get(handler http.Handler, target string, header map[string]string) *httptes
 
 // healthz 经统一路由模式 /crate-api/prototype/v1/{resource}（resource=healthz）返回 200 与 JSON。
 func TestHealthzViaUnifiedRoute(t *testing.T) {
-	recorder := get(NewMux(nil), "/crate-api/prototype/v1/healthz", nil)
+	recorder := get(testMux(nil), "/crate-api/prototype/v1/healthz", nil)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", recorder.Code)
 	}
@@ -38,7 +57,7 @@ func TestHealthzViaUnifiedRoute(t *testing.T) {
 
 // {resource} 动态段取值正确：未知资源走同一通配路由并返回 404 JSON。
 func TestResourceDynamicSegment(t *testing.T) {
-	recorder := get(NewMux(nil), "/crate-api/prototype/v1/subjects", nil)
+	recorder := get(testMux(nil), "/crate-api/prototype/v1/subjects", nil)
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404 for unknown resource", recorder.Code)
 	}
@@ -50,7 +69,7 @@ func TestResourceDynamicSegment(t *testing.T) {
 // 未知路径 404 且响应体为 { "error": ... } JSON。
 func TestUnknownPathReturnsJSON404(t *testing.T) {
 	for _, target := range []string{"/", "/unknown", "/crate-api/prototype/v1", "/crate-api/prototype/v1/healthz/extra"} {
-		recorder := get(NewMux(nil), target, nil)
+		recorder := get(testMux(nil), target, nil)
 		if recorder.Code != http.StatusNotFound {
 			t.Fatalf("%s: status = %d, want 404", target, recorder.Code)
 		}
@@ -66,7 +85,7 @@ func TestUnknownPathReturnsJSON404(t *testing.T) {
 
 // 方法不匹配 405、含 Allow 头，响应体为 JSON 错误。
 func TestMethodNotAllowedReturnsJSON405WithAllow(t *testing.T) {
-	handler := NewMux(nil)
+	handler := testMux(nil)
 	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch} {
 		req := httptest.NewRequest(method, "/crate-api/prototype/v1/healthz", nil)
 		recorder := httptest.NewRecorder()
@@ -93,7 +112,7 @@ func corsRequest(method, target, origin string) *httptest.ResponseRecorder {
 		req.Header.Set("Origin", origin)
 	}
 	recorder := httptest.NewRecorder()
-	NewMux([]string{"https://allowed.example"}).ServeHTTP(recorder, req)
+	testMux([]string{"https://allowed.example"}).ServeHTTP(recorder, req)
 	return recorder
 }
 
@@ -160,7 +179,7 @@ func TestCORSNoOriginBehavesAsPlainRequest(t *testing.T) {
 
 // 空允许列表 = 任何 Origin 都不放行（等价于未配置）。
 func TestCORSNoAllowedOriginsRejectsAll(t *testing.T) {
-	recorder := get(NewMux(nil), "/crate-api/prototype/v1/healthz", map[string]string{"Origin": "https://any.example"})
+	recorder := get(testMux(nil), "/crate-api/prototype/v1/healthz", map[string]string{"Origin": "https://any.example"})
 	if recorder.Header().Get("Access-Control-Allow-Origin") != "" {
 		t.Fatalf("empty allow list must not emit CORS headers")
 	}
@@ -173,7 +192,7 @@ func TestCORSNoAllowedOriginsRejectsAll(t *testing.T) {
 
 // GET /demo 返回 200 且 Content-Type 为 text/html，内容为渲染后的页面。
 func TestDemoPageServesHTML(t *testing.T) {
-	recorder := get(NewMux(nil), "/demo", nil)
+	recorder := get(testMux(nil), "/demo", nil)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", recorder.Code)
 	}
@@ -187,7 +206,7 @@ func TestDemoPageServesHTML(t *testing.T) {
 
 // GET /crate-api/prototype/v1/demo-fragment 返回 200、text/html，响应体为 HTML 片段。
 func TestDemoFragmentServesHTMLFragment(t *testing.T) {
-	recorder := get(NewMux(nil), "/crate-api/prototype/v1/demo-fragment", nil)
+	recorder := get(testMux(nil), "/crate-api/prototype/v1/demo-fragment", nil)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", recorder.Code)
 	}
@@ -202,7 +221,7 @@ func TestDemoFragmentServesHTMLFragment(t *testing.T) {
 
 // 经 go:embed 提供的静态资产（htmx.min.js）GET 返回 200 且非空。
 func TestStaticAssetServedViaEmbed(t *testing.T) {
-	recorder := get(NewMux(nil), "/static/htmx.min.js", nil)
+	recorder := get(testMux(nil), "/static/htmx.min.js", nil)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", recorder.Code)
 	}
@@ -216,12 +235,33 @@ func TestStaticAssetServedViaEmbed(t *testing.T) {
 
 // 缺失资产返回 404 JSON。
 func TestStaticAssetMissingReturnsJSON404(t *testing.T) {
-	recorder := get(NewMux(nil), "/static/does-not-exist.js", nil)
+	recorder := get(testMux(nil), "/static/does-not-exist.js", nil)
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", recorder.Code)
 	}
 	var payload map[string]string
 	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil || payload["error"] == "" {
 		t.Fatalf("body %q is not a JSON error", recorder.Body.String())
+	}
+}
+
+// ─── #44 场景模板管理页 ──────────────────────────────────────
+
+// GET /demo/scenarios 返回 200 且 Content-Type 为 text/html，页面内容由
+// handler 注入的真实 drills.SeedData 渲染（四大内置场景名称都在，空数据
+// 或错数据不得通过）。
+func TestScenariosPageServesHTML(t *testing.T) {
+	recorder := get(testMux(nil), "/demo/scenarios", nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", recorder.Code)
+	}
+	if contentType := recorder.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "text/html") {
+		t.Fatalf("Content-Type = %q, want text/html", contentType)
+	}
+	body := recorder.Body.String()
+	for _, name := range []string{"大客流聚集应急演练", "停电与基础设施故障应急演练", "火灾应急处置演练", "气象灾害应急演练"} {
+		if !strings.Contains(body, name) {
+			t.Fatalf("page body does not contain built-in scenario %q (SeedData not injected)", name)
+		}
 	}
 }

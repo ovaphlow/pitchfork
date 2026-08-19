@@ -1,0 +1,10 @@
+---
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import AssignmentManager from "../../components/assignments/AssignmentManager.svelte";
+---
+
+<BaseLayout title="培训任务指派">
+  <main class="mx-auto w-full max-w-6xl px-6 py-10">
+    <AssignmentManager client:load />
+  </main>
+</BaseLayout>

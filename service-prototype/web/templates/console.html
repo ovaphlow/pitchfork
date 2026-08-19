@@ -1,0 +1,212 @@
+{{define "title"}}指挥调度操作与现场终端{{end}}
+{{define "content"}}
+<main>
+  <h1>指挥调度操作与现场终端</h1>
+  <p id="console-feedback" role="status"></p>
+
+  <section id="console-command">
+    <h2>指挥员操作</h2>
+
+    <section id="console-session">
+      <h3>会话配置</h3>
+      <dl>
+        <dt>实训方式</dt><dd>{{.Session.Mode}}</dd>
+        <dt>主场馆</dt><dd>{{.Session.MainVenue}}</dd>
+        <dt>联训场馆</dt>
+        <dd>{{range $index, $venue := .Session.JointVenues}}{{if $index}}、{{end}}{{$venue}}{{end}}</dd>
+      </dl>
+      <form hx-put="/crate-api/prototype/v1/drills/{{.RunID}}/command-session" hx-target="#console-feedback" hx-swap="innerHTML">
+        <label>实训方式
+          <select name="mode">
+            <option value="桌面推演">桌面推演</option>
+            <option value="实战演练">实战演练</option>
+            <option value="远程协同">远程协同</option>
+          </select>
+        </label>
+        <label>主场馆 <input name="main_venue" required></label>
+        <label>联训场馆 <input name="joint_venues" placeholder="多个场馆用顿号分隔"></label>
+        <button type="submit">保存会话配置</button>
+      </form>
+    </section>
+
+    <section id="console-orders">
+      <h3>下达指令</h3>
+      <form hx-post="/crate-api/prototype/v1/drills/{{.RunID}}/orders" hx-target="#console-feedback" hx-swap="innerHTML">
+        <label>指令标题 <input name="title" required></label>
+        <label>指令内容 <textarea name="content" required></textarea></label>
+        <label>优先级
+          <select name="priority">
+            <option value="普通">普通</option>
+            <option value="紧急">紧急</option>
+            <option value="特急">特急</option>
+          </select>
+        </label>
+        <label>接收方类型
+          <select name="target_type">
+            <option value="部门">部门</option>
+            <option value="小组">小组</option>
+            <option value="个人">个人</option>
+          </select>
+        </label>
+        <label>接收方名称 <input name="target_name" required></label>
+        <label>截止时间 <input type="datetime-local" name="deadline"></label>
+        <button type="submit">下达指令</button>
+      </form>
+      <table>
+        <thead>
+          <tr><th>编号</th><th>指令</th><th>内容</th><th>优先级</th><th>接收方</th><th>截止时间</th><th>状态</th></tr>
+        </thead>
+        <tbody>
+          {{range .Orders}}
+          <tr>
+            <td class="order-id">{{.ID}}</td>
+            <td>{{.Title}}</td>
+            <td>{{.Content}}</td>
+            <td>{{.Priority}}</td>
+            <td>{{.TargetType}} · {{.TargetName}}</td>
+            <td>{{if .Deadline}}{{.Deadline}}{{else}}—{{end}}</td>
+            <td>{{.Status}}</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </section>
+
+    <section id="console-departments">
+      <h3>部门联动</h3>
+      <form hx-put="/crate-api/prototype/v1/drills/{{.RunID}}/departments/{{(index .Departments 0).Department}}" hx-target="#console-feedback" hx-swap="innerHTML">
+        <p>联动部门：{{(index .Departments 0).Department}}</p>
+        <label>联动状态
+          <select name="status">
+            <option value="未响应">未响应</option>
+            <option value="已响应">已响应</option>
+            <option value="已到位">已到位</option>
+            <option value="处置中">处置中</option>
+            <option value="已完成">已完成</option>
+          </select>
+        </label>
+        <label>处置说明 <input name="note"></label>
+        <button type="submit">更新部门联动</button>
+      </form>
+      <table>
+        <thead>
+          <tr><th>编号</th><th>部门</th><th>状态</th><th>说明</th></tr>
+        </thead>
+        <tbody>
+          {{range .Departments}}
+          <tr>
+            <td class="department-id">{{.ID}}</td>
+            <td>{{.Department}}</td>
+            <td>{{.Status}}</td>
+            <td>{{if .Note}}{{.Note}}{{else}}—{{end}}</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </section>
+  </section>
+
+  <section id="console-field">
+    <h2>现场终端</h2>
+
+    <section id="console-messages">
+      <h3>发送消息</h3>
+      <form hx-post="/crate-api/prototype/v1/drills/{{.RunID}}/messages" hx-target="#console-feedback" hx-swap="innerHTML">
+        <label>发送方类型
+          <select name="sender_type">
+            <option value="指挥中心">指挥中心</option>
+            <option value="现场人员">现场人员</option>
+          </select>
+        </label>
+        <label>发送人 <input name="sender_name" required></label>
+        <label>消息内容 <input name="content" required></label>
+        <button type="submit">发送消息</button>
+      </form>
+      <ul>
+        {{range .Messages}}
+        <li>
+          <span class="message-id">{{.ID}}</span>
+          <span class="message-sender">{{.SenderType}} · {{.SenderName}}</span>
+          <span class="message-content">{{.Content}}</span>
+        </li>
+        {{end}}
+      </ul>
+    </section>
+
+    <section id="console-zones">
+      <h3>上报热力</h3>
+      <form hx-post="/crate-api/prototype/v1/drills/{{.RunID}}/zone-densities" hx-target="#console-feedback" hx-swap="innerHTML">
+        <label>区域名称 <input name="zone_name" required></label>
+        <label>人数 <input type="number" name="people_count" min="0" required></label>
+        <button type="submit">上报热力</button>
+      </form>
+      <ul>
+        {{range .Zones}}
+        <li>
+          <span class="zone-id">{{.ID}}</span>
+          <span class="zone-name">{{.ZoneName}}</span>
+          <span class="zone-count">{{.PeopleCount}}</span>
+        </li>
+        {{end}}
+      </ul>
+    </section>
+
+    <section id="console-devices">
+      <h3>上报设备</h3>
+      <form hx-post="/crate-api/prototype/v1/drills/{{.RunID}}/devices" hx-target="#console-feedback" hx-swap="innerHTML">
+        <label>设备名称 <input name="device_name" required></label>
+        <label>设备类型
+          <select name="device_type">
+            <option value="供配电">供配电</option>
+            <option value="消防">消防</option>
+            <option value="安防">安防</option>
+            <option value="电梯">电梯</option>
+            <option value="空调通风">空调通风</option>
+            <option value="广播通信">广播通信</option>
+            <option value="其他">其他</option>
+          </select>
+        </label>
+        <label>运行状态
+          <select name="status">
+            <option value="正常">正常</option>
+            <option value="告警">告警</option>
+            <option value="离线">离线</option>
+          </select>
+        </label>
+        <label>备注 <input name="note"></label>
+        <button type="submit">上报设备</button>
+      </form>
+      <ul>
+        {{range .Devices}}
+        <li>
+          <span class="device-id">{{.ID}}</span>
+          <span class="device-name">{{.DeviceName}}</span>
+          <span class="device-type">{{.DeviceType}}</span>
+          <span class="device-status">{{.Status}}</span>
+          {{if .Note}}<span class="device-note">{{.Note}}</span>{{end}}
+        </li>
+        {{end}}
+      </ul>
+    </section>
+
+    <section id="console-order-feedback">
+      <h3>指令反馈</h3>
+      {{range .Orders}}{{if eq .Status "执行中"}}
+      <p>指令：{{.Title}}（{{.ID}}）</p>
+      <form hx-put="/crate-api/prototype/v1/drills/{{$.RunID}}/orders/{{.ID}}" hx-target="#console-feedback" hx-swap="innerHTML">
+        <label>执行状态
+          <select name="status">
+            <option value="待接收">待接收</option>
+            <option value="已接收">已接收</option>
+            <option value="执行中">执行中</option>
+            <option value="已完成">已完成</option>
+          </select>
+        </label>
+        <label>反馈 <textarea name="feedback" placeholder="执行情况说明"></textarea></label>
+        <button type="submit">更新指令状态与反馈</button>
+      </form>
+      {{end}}{{end}}
+    </section>
+  </section>
+</main>
+{{end}}

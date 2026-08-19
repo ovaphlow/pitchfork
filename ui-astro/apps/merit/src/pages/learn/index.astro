@@ -1,0 +1,10 @@
+---
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import CourseLearning from "../../components/learning/CourseLearning.svelte";
+---
+
+<BaseLayout title="课程学习">
+  <main class="mx-auto w-full max-w-6xl px-6 py-10">
+    <CourseLearning client:load />
+  </main>
+</BaseLayout>

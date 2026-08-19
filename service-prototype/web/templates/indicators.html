@@ -1,0 +1,89 @@
+{{define "title"}}评估指标配置{{end}}
+{{define "content"}}
+<main>
+  <h1>评估指标配置</h1>
+  <p id="indicator-feedback" role="status"></p>
+
+  <section id="indicator-filter">
+    <h2>维度筛选</h2>
+    <form method="get" action="/demo/evaluation/indicators">
+      <label>维度
+        <select name="dimension">
+          <option value="">全部维度</option>
+          {{range .DimensionOptions}}
+          <option value="{{.}}" {{if eq $.ActiveDimension .}}selected{{end}}>{{.}}</option>
+          {{end}}
+        </select>
+      </label>
+      <button type="submit">筛选</button>
+    </form>
+  </section>
+
+  <section id="indicator-create">
+    <h2>新建指标</h2>
+    <form hx-post="/crate-api/prototype/v1/evaluation/indicators" hx-target="#indicator-feedback" hx-swap="innerHTML">
+      <label>维度
+        <select name="dimension" required>
+          {{range .DimensionOptions}}<option value="{{.}}">{{.}}</option>{{end}}
+        </select>
+      </label>
+      <label>指标名称 <input name="title" required></label>
+      <label>权重 <input type="number" name="weight" value="1" min="1"></label>
+      <label>演示 <input type="checkbox" name="demo" value="true"></label>
+      <label>排序 <input type="number" name="sort_order" value="0" min="0"></label>
+      <label>描述 <input name="description"></label>
+      <button type="submit">创建</button>
+    </form>
+  </section>
+
+  <section id="indicator-list">
+    <h2>指标字典</h2>
+    {{range .Groups}}
+    <section class="dimension-group">
+      <h3>{{.Name}}</h3>
+      <table>
+        <thead>
+          <tr><th>指标名称</th><th>权重</th><th>排序</th><th>演示</th><th>描述</th></tr>
+        </thead>
+        <tbody>
+          {{range .Indicators}}
+          <tr>
+            <td>{{.Title}}</td>
+            <td>{{.Weight}}</td>
+            <td>{{.SortOrder}}</td>
+            <td>{{if .Demo}}<span class="demo-badge">演示</span>{{end}}</td>
+            <td>{{.Description}}</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+
+      {{range .Indicators}}
+      {{$indicator := .}}
+      <article class="indicator-edit">
+        <h4>编辑：{{$indicator.Title}}</h4>
+        <form hx-put="/crate-api/prototype/v1/evaluation/indicators/{{$indicator.ID}}" hx-target="#indicator-feedback" hx-swap="innerHTML">
+          <label>维度
+            <select name="dimension" required>
+              {{range $.DimensionOptions}}
+              <option value="{{.}}" {{if eq . $indicator.Dimension}}selected{{end}}>{{.}}</option>
+              {{end}}
+            </select>
+          </label>
+          <label>指标名称 <input name="title" value="{{$indicator.Title}}" required></label>
+          <label>权重 <input type="number" name="weight" value="{{$indicator.Weight}}" min="1"></label>
+          <label>演示 <input type="checkbox" name="demo" value="true" {{if $indicator.Demo}}checked{{end}}></label>
+          <label>排序 <input type="number" name="sort_order" value="{{$indicator.SortOrder}}" min="0"></label>
+          <label>描述 <input name="description" value="{{$indicator.Description}}"></label>
+          <button type="submit">保存</button>
+        </form>
+        <form hx-delete="/crate-api/prototype/v1/evaluation/indicators/{{$indicator.ID}}" hx-target="#indicator-feedback" hx-swap="innerHTML">
+          <button type="submit">删除</button>
+        </form>
+      </article>
+      {{end}}
+    </section>
+    {{end}}
+  </section>
+</main>
+{{end}}

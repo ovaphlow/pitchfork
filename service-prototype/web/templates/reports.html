@@ -1,0 +1,119 @@
+{{define "title"}}综合评估与报告{{end}}
+{{define "content"}}
+<main>
+  <h1>综合评估与报告</h1>
+  <p id="report-feedback" role="status"></p>
+
+  <section id="report-selector">
+    <h2>选择演练</h2>
+    <form method="get" action="/demo/evaluation/reports">
+      <label>演练
+        <select name="run_id">
+          {{range .Runs}}
+          <option value="{{.ID}}"{{if eq $.SelectedRunID .ID}} selected{{end}}>{{.Title}}</option>
+          {{end}}
+        </select>
+      </label>
+      <button type="submit">查看报告</button>
+    </form>
+    {{if .Notice}}
+    <p class="notice">{{.Notice}}</p>
+    {{end}}
+  </section>
+
+  {{if .Run}}
+  <section id="report-run">
+    <h2>{{.Run.Title}} <span class="run-status">{{.Run.Status}}</span></h2>
+
+    <h3>自动得分</h3>
+    <ul id="auto-scores">
+      {{range .AutoScores}}
+      <li class="auto-score"><span class="indicator-title">{{.Title}}</span> {{if .HasScore}}<span class="score">{{.Score}}</span>{{else}}<span class="unscored">未评分</span>{{end}}</li>
+      {{end}}
+    </ul>
+
+    <h3>演示指标</h3>
+    <ul id="demo-indicators">
+      {{range .DemoIndicators}}
+      <li class="demo-indicator"><span class="indicator-title">{{.Title}}</span> {{if .HasScore}}<span class="score">{{.Score}}</span>{{else}}<span class="unscored">未评分(演示)</span>{{end}}</li>
+      {{end}}
+    </ul>
+
+    <h3>演示得分</h3>
+    {{with .DemoScoreForm}}
+    <form hx-put="/crate-api/prototype/v1/drills/{{.RunID}}" hx-target="#report-feedback" hx-swap="innerHTML">
+      <input type="hidden" name="scenario_id" value="{{.ScenarioID}}">
+      <input type="hidden" name="title" value="{{.Title}}">
+      {{range .Inputs}}
+      <label>{{.Title}} <input name="metadata.demo_scores.{{.IndicatorID}}" value="{{.Value}}" min="0" max="100"></label>
+      {{end}}
+      <button type="submit">保存演示得分</button>
+    </form>
+    {{end}}
+
+    <h3>评分</h3>
+    {{range .ScoreForms}}
+    <fieldset class="indicator-forms">
+      <legend>{{.Title}}</legend>
+      {{range .Forms}}
+      {{if eq .Method "PUT"}}
+      <form hx-put="{{.Action}}" hx-target="#report-feedback" hx-swap="innerHTML">
+      {{else}}
+      <form hx-post="{{.Action}}" hx-target="#report-feedback" hx-swap="innerHTML">
+      {{end}}
+        <input type="hidden" name="score_type" value="{{.ScoreType}}">
+        {{if eq .Method "POST"}}<input type="hidden" name="indicator_id" value="{{.IndicatorID}}">{{end}}
+        <span class="score-type">{{.ScoreType}}</span>
+        <label>评分人 <input name="rater" value="{{.Rater}}" required></label>
+        {{if .ShowTarget}}<label>被评对象 <input name="target" value="{{.Target}}" required></label>{{end}}
+        <label>得分 <input type="number" name="score" value="{{.Score}}" min="0" max="100" required></label>
+        <input name="comment" value="{{.Comment}}" placeholder="评语">
+        <button type="submit">提交</button>
+      </form>
+      {{end}}
+    </fieldset>
+    {{end}}
+
+    <h3>评估报告</h3>
+    <form hx-post="{{.GenerateAction}}" hx-target="#report-feedback" hx-swap="innerHTML">
+      <button type="submit">生成/刷新报告</button>
+    </form>
+
+    <section id="report-area">
+      <p class="overall">总分：<span class="overall-score">{{.Report.OverallScore}}</span></p>
+
+      <h4>维度得分</h4>
+      <ul id="dimension-scores">
+        {{range .Report.DimensionScores}}
+        <li><span class="dimension">{{.Dimension}}</span> <span class="score">{{.Score}}</span></li>
+        {{end}}
+      </ul>
+
+      <h4>指标明细</h4>
+      <table id="indicator-details">
+        <thead>
+          <tr><th>维度</th><th>指标</th><th>得分</th><th>类型</th></tr>
+        </thead>
+        <tbody>
+          {{range .Report.IndicatorRows}}
+          <tr class="indicator-row">
+            <td>{{.Dimension}}</td>
+            <td>{{.Title}}</td>
+            <td>{{if .HasScore}}{{.Score}}{{else}}{{if .Demo}}未评分(演示){{else}}未评分{{end}}{{end}}</td>
+            <td>{{if .Demo}}演示{{else}}自动{{end}}</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+
+      <h4>建议</h4>
+      <ul id="suggestions">
+        {{range .Report.Suggestions}}
+        <li class="suggestion"><span class="suggestion-dimension">{{.Dimension}}</span> <span class="suggestion-level">{{.Level}}</span> <span class="suggestion-text">{{.Text}}</span></li>
+        {{end}}
+      </ul>
+    </section>
+  </section>
+  {{end}}
+</main>
+{{end}}

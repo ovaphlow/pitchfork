@@ -1,0 +1,10 @@
+---
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import PaperList from "../../components/papers/PaperList.svelte";
+---
+
+<BaseLayout title="试卷管理">
+  <main class="mx-auto w-full max-w-6xl px-6 py-10">
+    <PaperList client:load />
+  </main>
+</BaseLayout>

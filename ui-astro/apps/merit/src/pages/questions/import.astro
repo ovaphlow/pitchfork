@@ -1,0 +1,10 @@
+---
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import QuestionImport from "../../components/questions/QuestionImport.svelte";
+---
+
+<BaseLayout title="批量导入题目">
+  <main class="mx-auto w-full max-w-4xl px-6 py-10">
+    <QuestionImport client:load />
+  </main>
+</BaseLayout>

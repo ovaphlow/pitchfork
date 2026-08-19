@@ -1,0 +1,14 @@
+---
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import QuestionForm from "../../components/questions/QuestionForm.svelte";
+
+// 静态 CSR 应用：题目 ID 经查询参数传入（与 aceso 既有静态路由模式一致），
+// 组件在客户端按 URL 查询参数回退解析。
+const questionId = Astro.url.searchParams.get("id") ?? "";
+---
+
+<BaseLayout title="编辑题目">
+  <main class="mx-auto w-full max-w-3xl px-6 py-10">
+    <QuestionForm client:load mode="edit" questionId={questionId} />
+  </main>
+</BaseLayout>

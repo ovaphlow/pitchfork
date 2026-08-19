@@ -1,0 +1,10 @@
+---
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import PaperForm from "../../components/papers/PaperForm.svelte";
+---
+
+<BaseLayout title="新建试卷">
+  <main class="mx-auto w-full max-w-3xl px-6 py-10">
+    <PaperForm client:load mode="create" />
+  </main>
+</BaseLayout>

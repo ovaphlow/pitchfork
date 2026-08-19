@@ -12,6 +12,7 @@
   "dependencies": {
     "@astrojs/check": "^0.9.4",
     "@astrojs/svelte": "^7.2.5",
+    "@pitchfork/shared": "workspace:*",
     "@tailwindcss/vite": "^4.1.0",
     "astro": "^5.7.0",
     "htmx.org": "^2.0.10",
