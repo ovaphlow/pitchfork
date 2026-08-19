@@ -20,10 +20,11 @@ import java.time.Duration
 import java.time.LocalDate
 import java.time.OffsetDateTime
 
-private fun nursingNumericDouble(value: Any?): Double? = when (value) {
+/** 数量/成本序列化：以十进制文本（toPlainString）无损表达，不经过 Double。 */
+private fun nursingDecimalText(value: Any?): String? = when (value) {
     null -> null
-    is Number -> value.toDouble()
-    else -> value.toString().toDoubleOrNull()
+    else -> value.toString().toBigDecimalOrNull()?.stripTrailingZeros()?.toPlainString()
+        ?: value.toString()
 }
 
 /** 十进制文本规范化（去除尾零与小数位差异），用于幂等比较键，不经过 Double */
@@ -178,7 +179,7 @@ class TaskExecutionService(
                 .put("executor", row.getValue("executor")?.toString())
                 .put("status", row.getValue("status")?.toString())
                 .put("stock_operation_detail_id", row.getValue("stock_operation_detail_id")?.toString())
-                .put("quantity", nursingNumericDouble(row.getValue("quantity")))
+                .put("quantity", nursingDecimalText(row.getValue("quantity")))
                 .put("note", row.getValue("note")?.toString())
                 .put("metadata", row.getValue("metadata") as? JsonObject)
                 .put("created_at", row.getValue("created_at")?.toString())
@@ -627,7 +628,7 @@ class TaskExecutionService(
                     .execute(DatabaseConfig.tuple(consQuery))
                     .map { consRows ->
                         val consumptions = JsonArray()
-                        var totalCost = 0.0
+                        var totalCost = BigDecimal.ZERO
                         var warehouse = ""
                         for (cr in consRows) {
                             val c =
@@ -640,13 +641,15 @@ class TaskExecutionService(
                                     .put("lot_id", cr.getValue("lot_id")?.toString())
                                     .put("batch_no", cr.getValue("batch_no")?.toString())
                                     .put("warehouse", cr.getValue("warehouse")?.toString())
-                                    .put("quantity", nursingNumericDouble(cr.getValue("quantity")))
+                                    .put("quantity", nursingDecimalText(cr.getValue("quantity")))
                                     .put("unit", cr.getValue("unit")?.toString())
-                                    .put("unit_cost", nursingNumericDouble(cr.getValue("unit_cost")))
-                                    .put("total_cost", nursingNumericDouble(cr.getValue("total_cost")))
+                                    .put("unit_cost", nursingDecimalText(cr.getValue("unit_cost")))
+                                    .put("total_cost", nursingDecimalText(cr.getValue("total_cost")))
                             consumptions.add(c)
                             warehouse = cr.getValue("warehouse")?.toString() ?: ""
-                            totalCost += nursingNumericDouble(cr.getValue("total_cost")) ?: 0.0
+                            totalCost = totalCost.add(
+                                cr.getValue("total_cost")?.toString()?.toBigDecimalOrNull() ?: BigDecimal.ZERO,
+                            )
                         }
                         record.put("consumptions", consumptions)
                         record.put(
@@ -654,7 +657,7 @@ class TaskExecutionService(
                             JsonObject()
                                 .put("count", consumptions.size())
                                 .put("warehouse", warehouse)
-                                .put("total_cost", totalCost),
+                                .put("total_cost", totalCost.stripTrailingZeros().toPlainString()),
                         )
                         record
                     }
@@ -811,7 +814,7 @@ class TaskExecutionService(
                         JsonObject()
                             .put("count", row.getValue("cnt") as? Long ?: 0L)
                             .put("warehouse", row.getValue("warehouse")?.toString())
-                            .put("total_cost", nursingNumericDouble(row.getValue("total_cost")) ?: 0.0)
+                            .put("total_cost", nursingDecimalText(row.getValue("total_cost")) ?: "0")
                 }
                 result
             }
@@ -840,7 +843,7 @@ class TaskExecutionService(
                     JsonObject()
                         .put("count", row.getValue("cnt") as? Long ?: 0L)
                         .put("warehouse", row.getValue("warehouse")?.toString())
-                        .put("total_cost", nursingNumericDouble(row.getValue("total_cost")) ?: 0.0)
+                        .put("total_cost", nursingDecimalText(row.getValue("total_cost")) ?: "0")
                 }
             }
     }
@@ -887,10 +890,10 @@ class TaskExecutionService(
                             .put("lot_id", row.getValue("lot_id")?.toString())
                             .put("batch_no", row.getValue("batch_no")?.toString())
                             .put("warehouse", row.getValue("warehouse")?.toString())
-                            .put("quantity", nursingNumericDouble(row.getValue("quantity")))
+                            .put("quantity", nursingDecimalText(row.getValue("quantity")))
                             .put("unit", row.getValue("unit")?.toString())
-                            .put("unit_cost", nursingNumericDouble(row.getValue("unit_cost")))
-                            .put("total_cost", nursingNumericDouble(row.getValue("total_cost")))
+                            .put("unit_cost", nursingDecimalText(row.getValue("unit_cost")))
+                            .put("total_cost", nursingDecimalText(row.getValue("total_cost")))
                             .put("created_at", row.getValue("created_at")?.toString()),
                     )
                 }

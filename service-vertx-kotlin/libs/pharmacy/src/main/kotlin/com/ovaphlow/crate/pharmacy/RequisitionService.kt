@@ -7,6 +7,7 @@ import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyRequisitions
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
+import io.vertx.pgclient.PgException
 import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.RowSet
@@ -108,6 +109,37 @@ class RequisitionService(
                         doCreate(conn, body, key, userId, fingerprint, now)
                     }
                 }
+        }.recover { error: Throwable ->
+            // 并发同键创建：唯一索引冲突（23505）不能以 500 泄漏。回读幂等键
+            // 比对指纹后返回原单据或 409，而不是把 SQL 唯一冲突暴露给调用方。
+            if (error is PgException && error.sqlState == "23505") {
+                findByIdempotencyKey(pool, key)
+                    .compose { existing: Row? ->
+                        if (existing == null) {
+                            Future.failedFuture(
+                                ConflictException("idempotency key raced during concurrent create"),
+                            )
+                        } else {
+                            val storedFingerprint = existing.getValue(1)?.toString()
+                            if (storedFingerprint != fingerprint) {
+                                Future.failedFuture(
+                                    ConflictException("idempotency key already used with a different request"),
+                                )
+                            } else {
+                                loadDetail(pool, existing.getValue(0)?.toString() ?: "")
+                                    .map { detail: JsonObject ->
+                                        CreateResult(
+                                            id = detail.getString("id") ?: "",
+                                            replayed = true,
+                                            requisition = detail,
+                                        )
+                                    }
+                            }
+                        }
+                    }
+            } else {
+                Future.failedFuture(error)
+            }
         }
     }
 
@@ -198,6 +230,19 @@ class RequisitionService(
         val requested = requestedApproveMap(body)
         return lockItems(conn, header.getString("id") ?: "")
             .compose { rows: List<Row> ->
+                // 请求明细集合必须与已审批明细完全一致：既不能缺失也不能多出。
+                // 缺失/多出的项目属于“不同审批集合”，应返回 409 而非接受额外明细。
+                val existingIds = rows.map { it.getString("id") }.toSet()
+                val extra = requested.keys.filter { it !in existingIds }
+                val missing = existingIds.filter { it !in requested.keys }
+                if (extra.isNotEmpty() || missing.isNotEmpty()) {
+                    return@compose Future.failedFuture(
+                        ConflictException(
+                            "requisition is already APPROVED with a different approval set" +
+                                (if (extra.isNotEmpty()) " (extra items: ${extra.joinToString()})" else ""),
+                        ),
+                    )
+                }
                 val matches = rows.all { row ->
                     val entry = requested[row.getString("id")]
                     entry != null &&
@@ -224,6 +269,19 @@ class RequisitionService(
                 }
                 if (approveMap.size != existingIds.size) {
                     return@compose Future.failedFuture(IllegalArgumentException("approval must cover every requisition item"))
+                }
+                // 每项批准量不得超过申领量（计划 3.1：0 <= approved <= requested）
+                val overApproved = rows.firstOrNull { row ->
+                    val entry = approveMap[row.getString("id")]!!
+                    val requested = qtyOf(row.getValue("requested_quantity")) ?: BigDecimal.ZERO
+                    entry.first.compareTo(requested) > 0
+                }
+                if (overApproved != null) {
+                    return@compose Future.failedFuture(
+                        IllegalArgumentException(
+                            "approved_quantity must not exceed requested_quantity for item ${overApproved.getString("id")}",
+                        ),
+                    )
                 }
                 val approved = rows.mapNotNull { row ->
                     val entry = approveMap[row.getString("id")]!!

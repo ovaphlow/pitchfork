@@ -633,6 +633,12 @@ class StockService(
                     Future.failedFuture(
                         ConflictException("insufficient reservation: only ${stock.lockedQuantity} locked, required ${item.quantity}"),
                     )
+                } else if (stock.quantity < item.quantity) {
+                    // 预留损坏（locked_quantity 高于实际 quantity）时，出库会扣出负库存；
+                    // 必须以源库存 quantity 校验兜底，而不是照常扣减。
+                    Future.failedFuture(
+                        ConflictException("reservation corrupted: source quantity ${stock.quantity} below transfer ${item.quantity}"),
+                    )
                 } else {
                     lockAllSources(client, sourceWarehouse, ordered, resolved, index + 1, acc + stock)
                 }

@@ -205,4 +205,36 @@ class RequisitionStockServiceTest {
         assertTrue(result.succeeded())
         verify(exactly = 3) { prepared.execute(any<Tuple>()) }
     }
+
+    // ========================================================================
+    //  调拨确认（基础数量，无批次）
+    //  序列：库存预览 → 物资 → 库存锁定（forUpdate）→ 目标 upsert → 出/入操作 → 明细 → 源/目标更新
+    // ========================================================================
+
+    @Test
+    fun `confirmReservedTransfer rejects corrupted reservation where quantity below transfer`() {
+        // 预留损坏：locked_quantity(5) 足以覆盖，但源 quantity(1) 低于调拨量(3)；
+        // 锁定阶段必须拒绝，否则出库会把源库存扣成负数。
+        sequence(
+            rowsOf(stockRow("stock-1", null, BigDecimal.ONE, locked = BigDecimal.valueOf(5), totalCost = BigDecimal.ONE)),
+            rowsOf(materialRow()),
+            rowsOf(stockRow("stock-1", null, BigDecimal.ONE, locked = BigDecimal.valueOf(5), totalCost = BigDecimal.ONE)),
+        )
+        val error = failureOf(
+            service.confirmReservedTransfer(
+                client,
+                StockService.RequisitionTransferCommand(
+                    sourceWarehouse = "西药库",
+                    destinationWarehouse = "一护理站库存",
+                    requisitionId = "req-1",
+                    requisitionNo = "PH-REQ-1",
+                    dispensedBy = "user-1",
+                    items = listOf(StockService.RequisitionTransferItem("mat-1", null, BigDecimal.valueOf(3))),
+                ),
+            ),
+        )
+        assertTrue(error is ConflictException, "expected ConflictException but was ${error::class.simpleName}")
+        assertTrue(error.message!!.contains("reservation corrupted"), "unexpected message: ${error.message}")
+        verify(exactly = 3) { prepared.execute(any<Tuple>()) }
+    }
 }

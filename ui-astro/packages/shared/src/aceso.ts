@@ -331,7 +331,7 @@ export interface NursingTaskExecution {
   executor: string | null;
   status: string;
   stock_operation_detail_id: string | null;
-  quantity: number | null;
+  quantity: DecimalText | null;
   note: string | null;
   metadata: Record<string, unknown> | null;
   created_at: string;
@@ -345,7 +345,7 @@ export interface NursingTaskExecutionInput {
   actual_time?: string;
   executor?: string;
   note?: string;
-  quantity?: number;
+  quantity?: DecimalText;
   stock_operation_detail_id?: string;
   metadata?: Record<string, unknown>;
 }
@@ -359,7 +359,7 @@ export interface NursingTodayExecution {
   executor: string | null;
   status: string;
   stock_operation_detail_id: string | null;
-  quantity: number | null;
+  quantity: DecimalText | null;
   note: string | null;
   metadata: Record<string, unknown> | null;
   created_at: string;
