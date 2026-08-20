@@ -599,6 +599,54 @@ export async function deleteWarehouse(id: string): Promise<void> {
   await request<void>(`/settings/${encodeURIComponent(id)}`, { method: "DELETE" }, { service: "nexus" });
 }
 
+// ========================================================================
+//  Nexus API — Role Directory (角色目录)
+// ========================================================================
+
+export interface NexusRole {
+  id: string;
+  role_code: string;
+  display_name: string;
+  description: string;
+  permission_codes: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface NexusRoleInput {
+  role_code: string;
+  display_name: string;
+  description?: string;
+  permission_codes?: string[];
+}
+
+/** 角色列表：按 role_code 升序，默认取第一页 20 条 */
+export function listRoles(params: { page?: number; page_size?: number } = {}): Promise<NexusRole[]> {
+  const query = new URLSearchParams();
+  if (params.page !== undefined) query.set("page", String(params.page));
+  if (params.page_size !== undefined) query.set("page_size", String(params.page_size));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<NexusRole[]>(`/roles${suffix}`, {}, { service: "nexus" });
+}
+
+export function createRole(input: NexusRoleInput): Promise<NexusRole> {
+  return request<NexusRole>("/roles", {
+    method: "POST",
+    body: JSON.stringify(input),
+  }, { service: "nexus" });
+}
+
+export function updateRole(id: string, input: NexusRoleInput): Promise<NexusRole> {
+  return request<NexusRole>(`/roles/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  }, { service: "nexus" });
+}
+
+export async function deleteRole(id: string): Promise<void> {
+  await request<void>(`/roles/${encodeURIComponent(id)}`, { method: "DELETE" }, { service: "nexus" });
+}
+
 /** 发药单等业务页面使用的仓库下拉选项；无配置时返回空数组 */
 export async function listWarehouseOptions(): Promise<WarehouseOption[]> {
   const warehouses = await listWarehouses();

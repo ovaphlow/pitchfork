@@ -4,6 +4,7 @@ pub mod error;
 pub mod files;
 pub mod interactions;
 pub mod messages;
+pub mod roles;
 pub mod settings;
 
 use std::path::PathBuf;
@@ -54,6 +55,7 @@ pub fn app(state: AppState, max_upload_bytes: usize) -> Router {
         .nest("/messages", messages::router())
         .nest("/files", files::router())
         .nest("/interactions", interactions::router())
+        .nest("/roles", roles::router())
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_identity,

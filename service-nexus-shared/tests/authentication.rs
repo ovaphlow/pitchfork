@@ -20,7 +20,7 @@ async fn every_shared_resource_requires_an_identity_cookie() {
     };
     let router = app(state, 1024);
 
-    for resource in ["settings", "messages", "files", "interactions"] {
+    for resource in ["settings", "messages", "files", "interactions", "roles"] {
         let response = router
             .clone()
             .oneshot(
