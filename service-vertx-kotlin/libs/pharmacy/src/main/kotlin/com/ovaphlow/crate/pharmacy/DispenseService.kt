@@ -70,11 +70,11 @@ class DispenseService(
                 .put("order_execution_id", row.getValue("order_execution_id")?.toString())
                 .put("material_id", row.getValue("material_id")?.toString())
                 .put("lot_id", row.getValue("lot_id")?.toString())
-                .put("prescribed_quantity", decimalApi(row.getValue("prescribed_quantity") as? BigDecimal))
-                .put("dispensed_quantity", decimalApi(row.getValue("dispensed_quantity") as? BigDecimal))
+                .put("prescribed_quantity", decimalApi(row.getBigDecimal("prescribed_quantity")))
+                .put("dispensed_quantity", decimalApi(row.getBigDecimal("dispensed_quantity")))
                 .put("stock_operation_detail_id", row.getValue("stock_operation_detail_id")?.toString())
-                .put("unit_cost", decimalApi(row.getValue("unit_cost") as? BigDecimal))
-                .put("total_cost", decimalApi(row.getValue("total_cost") as? BigDecimal))
+                .put("unit_cost", decimalApi(row.getBigDecimal("unit_cost")))
+                .put("total_cost", decimalApi(row.getBigDecimal("total_cost")))
                 .put("metadata", row.getValue("metadata") as? JsonObject)
         }
     }

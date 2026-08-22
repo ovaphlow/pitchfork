@@ -59,6 +59,7 @@ class RequisitionService(
         r.CANCEL_REASON.`as`("cancel_reason"),
         r.UPDATED_AT.`as`("updated_at"),
     )
+        .from(r)
 
     private val itemSelect = ctx.select(
         ri.ID.`as`("id"),
@@ -71,7 +72,9 @@ class RequisitionService(
         ri.LOT_ID.`as`("lot_id"),
         ri.OUTBOUND_STOCK_OPERATION_DETAIL_ID.`as`("outbound_stock_operation_detail_id"),
         ri.INBOUND_STOCK_OPERATION_DETAIL_ID.`as`("inbound_stock_operation_detail_id"),
+        ri.METADATA.`as`("metadata"),
     )
+        .from(ri)
 
     /** 创建成功结果：`replayed` 为 true 表示 Idempotency-Key 命中并返回原单据（200）。 */
     data class CreateResult(val id: String, val replayed: Boolean, val requisition: JsonObject)
@@ -582,16 +585,18 @@ class RequisitionService(
     //  共享读取
     // ========================================================================
 
-    private fun loadDetail(client: SqlClient, id: String): Future<JsonObject> =
-        client.preparedQuery(DatabaseConfig.sql(headerSelect.where(r.ID.eq(id))))
-            .execute(DatabaseConfig.tuple(headerSelect.where(r.ID.eq(id))))
+    private fun loadDetail(client: SqlClient, id: String): Future<JsonObject> {
+        val headerQuery = headerSelect.where(r.ID.eq(id))
+        return client.preparedQuery(DatabaseConfig.sql(headerQuery))
+            .execute(DatabaseConfig.tuple(headerQuery))
             .compose { rows: RowSet<Row> ->
                 if (rows.size() == 0) {
                     Future.failedFuture(NotFoundException("requisition not found: $id"))
                 } else {
                     val header = headerToJson(rows.iterator().next())
-                    client.preparedQuery(DatabaseConfig.sql(itemSelect.where(ri.REQUISITION_ID.eq(id))))
-                        .execute(DatabaseConfig.tuple(itemSelect.where(ri.REQUISITION_ID.eq(id))))
+                    val itemQuery = itemSelect.where(ri.REQUISITION_ID.eq(id))
+                    client.preparedQuery(DatabaseConfig.sql(itemQuery))
+                        .execute(DatabaseConfig.tuple(itemQuery))
                         .map { itemRows: RowSet<Row> ->
                             val items = JsonArray()
                             for (row in itemRows) {
@@ -601,6 +606,7 @@ class RequisitionService(
                         }
                 }
             }
+    }
 
     private fun findByIdempotencyKey(client: SqlClient, key: String): Future<Row?> =
         client.preparedQuery(
@@ -619,9 +625,10 @@ class RequisitionService(
             )
             .map { rows: RowSet<Row> -> if (rows.size() > 0) rows.iterator().next() else null }
 
-    private fun lockHeader(client: SqlClient, id: String): Future<Row> =
-        client.preparedQuery(DatabaseConfig.sql(headerSelect.where(r.ID.eq(id)).forUpdate()))
-            .execute(DatabaseConfig.tuple(headerSelect.where(r.ID.eq(id)).forUpdate()))
+    private fun lockHeader(client: SqlClient, id: String): Future<Row> {
+        val lockHeaderQuery = headerSelect.where(r.ID.eq(id)).forUpdate()
+        return client.preparedQuery(DatabaseConfig.sql(lockHeaderQuery))
+            .execute(DatabaseConfig.tuple(lockHeaderQuery))
             .compose { rows: RowSet<Row> ->
                 if (rows.size() == 0) {
                     Future.failedFuture(NotFoundException("requisition not found: $id"))
@@ -629,15 +636,14 @@ class RequisitionService(
                     Future.succeededFuture(rows.iterator().next())
                 }
             }
+    }
 
-    private fun lockItems(client: SqlClient, requisitionId: String): Future<List<Row>> =
-        client.preparedQuery(
-            DatabaseConfig.sql(itemSelect.where(ri.REQUISITION_ID.eq(requisitionId)).orderBy(ri.ID).forUpdate()),
-        )
-            .execute(
-                DatabaseConfig.tuple(itemSelect.where(ri.REQUISITION_ID.eq(requisitionId)).orderBy(ri.ID).forUpdate()),
-            )
+    private fun lockItems(client: SqlClient, requisitionId: String): Future<List<Row>> {
+        val lockItemsQuery = itemSelect.where(ri.REQUISITION_ID.eq(requisitionId)).orderBy(ri.ID).forUpdate()
+        return client.preparedQuery(DatabaseConfig.sql(lockItemsQuery))
+            .execute(DatabaseConfig.tuple(lockItemsQuery))
             .map { rows: RowSet<Row> -> rows.map { it } }
+    }
 
     // ========================================================================
     //  序列化

@@ -51,7 +51,7 @@ class ReturnService(
             .put("status", row.getValue("status")?.toString())
             .put("operator", row.getValue("operator")?.toString())
             .put("metadata", row.getValue("metadata") as? JsonObject)
-            .put("total_quantity", decimalApi(row.getValue("total_quantity") as? BigDecimal))
+            .put("total_quantity", if (row.getColumnIndex("total_quantity") >= 0) decimalApi(row.getBigDecimal("total_quantity")) else null)
             .put("created_at", row.getValue("created_at")?.toString())
             .put("confirmed_at", row.getValue("confirmed_at")?.toString())
 
@@ -59,10 +59,10 @@ class ReturnService(
             .put("id", row.getValue("id")?.toString())
             .put("return_id", row.getValue("return_id")?.toString())
             .put("dispense_item_id", row.getValue("dispense_item_id")?.toString())
-            .put("quantity", decimalApi(row.getValue("quantity") as? BigDecimal))
+            .put("quantity", decimalApi(row.getBigDecimal("quantity")))
             .put("stock_operation_detail_id", row.getValue("stock_operation_detail_id")?.toString())
-            .put("unit_cost", decimalApi(row.getValue("unit_cost") as? BigDecimal))
-            .put("total_cost", decimalApi(row.getValue("total_cost") as? BigDecimal))
+            .put("unit_cost", decimalApi(row.getBigDecimal("unit_cost")))
+            .put("total_cost", decimalApi(row.getBigDecimal("total_cost")))
             .put("metadata", row.getValue("metadata") as? JsonObject)
     }
 
@@ -355,16 +355,16 @@ class ReturnService(
     }
 
     private fun sourceFromRow(row: Row, returnRow: Boolean = false): ReturnSource = ReturnSource(
-        returnItemId = row.getString("return_item_id") ?: "",
+        returnItemId = if (row.getColumnIndex("return_item_id") >= 0) row.getString("return_item_id") ?: "" else "",
         dispenseId = row.getString("dispense_id") ?: "",
         dispenseItemId = row.getString("dispense_item_id") ?: "",
         patientId = row.getString("patient_id") ?: "",
         warehouse = row.getString("warehouse") ?: "",
         materialId = row.getString("material_id") ?: "",
         lotId = row.getString("lot_id"),
-        quantity = if (returnRow) row.getValue("return_quantity") as? BigDecimal ?: BigDecimal.ZERO
-        else row.getValue("dispensed_quantity") as? BigDecimal ?: BigDecimal.ZERO,
-        unitCost = row.getValue("unit_cost") as? BigDecimal ?: BigDecimal.ZERO,
+        quantity = if (returnRow) row.getBigDecimal("return_quantity") ?: BigDecimal.ZERO
+        else row.getBigDecimal("dispensed_quantity") ?: BigDecimal.ZERO,
+        unitCost = row.getBigDecimal("unit_cost") ?: BigDecimal.ZERO,
         originalStockOperationDetailId = row.getString("original_stock_operation_detail_id") ?: "",
         returnStockOperationDetailId = if (returnRow) row.getString("return_stock_operation_detail_id") else null,
         returnStatus = if (returnRow) row.getString("return_status") ?: "" else "",
@@ -394,7 +394,7 @@ class ReturnService(
             .and(PHARMACY_RETURNS.STATUS.ne("CANCELLED"))
         return connection.preparedQuery(DatabaseConfig.sql(query))
             .execute(DatabaseConfig.tuple(query))
-            .map { rows -> rows.iterator().next().getValue("reserved_quantity") as? BigDecimal ?: BigDecimal.ZERO }
+            .map { rows -> rows.iterator().next().getBigDecimal("reserved_quantity") ?: BigDecimal.ZERO }
     }
 
     private fun rejectUnknown(body: JsonObject, allowed: Set<String>): IllegalArgumentException? {
