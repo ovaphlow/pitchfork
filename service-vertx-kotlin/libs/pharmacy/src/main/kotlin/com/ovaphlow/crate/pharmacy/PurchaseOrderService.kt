@@ -44,7 +44,7 @@ class PurchaseOrderService(
     private val pr = PharmacyPurchaseReceipts.PHARMACY_PURCHASE_RECEIPTS
     private val pri = PharmacyPurchaseReceiptItems.PHARMACY_PURCHASE_RECEIPT_ITEMS
 
-    private val headerSelect = ctx.select(
+    private fun headerSelect() = ctx.select(
         o.ID.`as`("id"),
         o.PURCHASE_ORDER_NO.`as`("purchase_order_no"),
         o.WAREHOUSE.`as`("warehouse"),
@@ -64,7 +64,7 @@ class PurchaseOrderService(
     )
         .from(o)
 
-    private val orderItemSelect = ctx.select(
+    private fun orderItemSelect() = ctx.select(
         oi.ID.`as`("id"),
         oi.PURCHASE_ORDER_ID.`as`("purchase_order_id"),
         oi.MATERIAL_ID.`as`("material_id"),
@@ -73,7 +73,7 @@ class PurchaseOrderService(
     )
         .from(oi)
 
-    private val receiptSelect = ctx.select(
+    private fun receiptSelect() = ctx.select(
         pr.ID.`as`("id"),
         pr.RECEIPT_NO.`as`("receipt_no"),
         pr.PURCHASE_ORDER_ID.`as`("purchase_order_id"),
@@ -86,7 +86,7 @@ class PurchaseOrderService(
     )
         .from(pr)
 
-    private val receiptItemSelect = ctx.select(
+    private fun receiptItemSelect() = ctx.select(
         pri.ID.`as`("id"),
         pri.RECEIPT_ID.`as`("receipt_id"),
         pri.PURCHASE_ORDER_ITEM_ID.`as`("purchase_order_item_id"),
@@ -746,7 +746,7 @@ class PurchaseOrderService(
     // ========================================================================
 
     private fun loadOrderDetail(client: SqlClient, id: String): Future<JsonObject> {
-        val headerQuery = headerSelect.where(o.ID.eq(id))
+        val headerQuery = headerSelect().where(o.ID.eq(id))
         return client.preparedQuery(DatabaseConfig.sql(headerQuery))
             .execute(DatabaseConfig.tuple(headerQuery))
             .compose { rows: RowSet<Row> ->
@@ -754,14 +754,14 @@ class PurchaseOrderService(
                     Future.failedFuture(NotFoundException("purchase order not found: $id"))
                 } else {
                     val header = orderHeaderToJson(rows.iterator().next())
-                    val orderItemQuery = orderItemSelect.where(oi.PURCHASE_ORDER_ID.eq(id)).orderBy(oi.ID)
+                    val orderItemQuery = orderItemSelect().where(oi.PURCHASE_ORDER_ID.eq(id)).orderBy(oi.ID)
                     client.preparedQuery(DatabaseConfig.sql(orderItemQuery))
                         .execute(DatabaseConfig.tuple(orderItemQuery))
                         .compose { itemRows: RowSet<Row> ->
                             val items = JsonArray()
                             for (row in itemRows) items.add(orderItemToJson(row))
                             header.put("items", items)
-                            val receiptQuery = receiptSelect.where(pr.PURCHASE_ORDER_ID.eq(id)).orderBy(pr.RECEIVED_AT)
+                            val receiptQuery = receiptSelect().where(pr.PURCHASE_ORDER_ID.eq(id)).orderBy(pr.RECEIVED_AT)
                             client.preparedQuery(DatabaseConfig.sql(receiptQuery))
                                 .execute(DatabaseConfig.tuple(receiptQuery))
                                 .map { receiptRows: RowSet<Row> ->
@@ -785,7 +785,7 @@ class PurchaseOrderService(
     }
 
     private fun loadReceiptDetail(client: SqlClient, id: String): Future<JsonObject> {
-        val receiptQuery = receiptSelect.where(pr.ID.eq(id))
+        val receiptQuery = receiptSelect().where(pr.ID.eq(id))
         return client.preparedQuery(DatabaseConfig.sql(receiptQuery))
             .execute(DatabaseConfig.tuple(receiptQuery))
             .compose { rows: RowSet<Row> ->
@@ -793,7 +793,7 @@ class PurchaseOrderService(
                     Future.failedFuture(NotFoundException("purchase receipt not found: $id"))
                 } else {
                     val header = receiptToJson(rows.iterator().next())
-                    val receiptItemQuery = receiptItemSelect.where(pri.RECEIPT_ID.eq(id)).orderBy(pri.ID)
+                    val receiptItemQuery = receiptItemSelect().where(pri.RECEIPT_ID.eq(id)).orderBy(pri.ID)
                     client.preparedQuery(DatabaseConfig.sql(receiptItemQuery))
                         .execute(DatabaseConfig.tuple(receiptItemQuery))
                         .map { itemRows: RowSet<Row> ->
@@ -840,7 +840,7 @@ class PurchaseOrderService(
             .map { rows: RowSet<Row> -> if (rows.size() > 0) rows.iterator().next() else null }
 
     private fun lockHeader(client: SqlClient, id: String): Future<Row> {
-        val lockHeaderQuery = headerSelect.where(o.ID.eq(id)).forUpdate()
+        val lockHeaderQuery = headerSelect().where(o.ID.eq(id)).forUpdate()
         return client.preparedQuery(DatabaseConfig.sql(lockHeaderQuery))
             .execute(DatabaseConfig.tuple(lockHeaderQuery))
             .compose { rows: RowSet<Row> ->
@@ -853,7 +853,7 @@ class PurchaseOrderService(
     }
 
     private fun lockOrderItems(client: SqlClient, orderId: String): Future<List<Row>> {
-        val lockOrderItemsQuery = orderItemSelect.where(oi.PURCHASE_ORDER_ID.eq(orderId)).orderBy(oi.ID).forUpdate()
+        val lockOrderItemsQuery = orderItemSelect().where(oi.PURCHASE_ORDER_ID.eq(orderId)).orderBy(oi.ID).forUpdate()
         return client.preparedQuery(DatabaseConfig.sql(lockOrderItemsQuery))
             .execute(DatabaseConfig.tuple(lockOrderItemsQuery))
             .map { rows: RowSet<Row> -> rows.map { it } }
