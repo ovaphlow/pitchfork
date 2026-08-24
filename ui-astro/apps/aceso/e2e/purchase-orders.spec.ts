@@ -371,11 +371,11 @@ async function closeOrderViaUi(page: Page, supplier: string, reason: string): Pr
   await expect(row).toContainText("已关闭");
 }
 
-/** 收货弹窗：按索引填写每个订单项的到货行（索引与订单项顺序一致，每项一行）。 */
+/** 收货弹窗：按物资匹配对应收货块并填写到货行（服务端明细顺序不保证与提交一致）。 */
 async function receiveOrderViaUi(
   page: Page,
   supplier: string,
-  lines: Array<{ quantity: string; batchNo: string; productionDate: string; expiryDate: string; manufacturer: string; unitCost: string }>,
+  lines: Array<{ materialId: string; quantity: string; batchNo: string; productionDate: string; expiryDate: string; manufacturer: string; unitCost: string }>,
 ): Promise<void> {
   const row = page.getByRole("row").filter({ hasText: supplier });
   const receiveButton = row.getByRole("button").first(); // 供应商收货 / 继续收货
@@ -386,13 +386,14 @@ async function receiveOrderViaUi(
   // 每项收货块：rounded-md border border-border p-3 space-y-2（外层订单头无 space-y-2）。
   // 该弹窗各 Input 未传显式 id，重复 label 派生的 id 相同，getByLabel 会把两个块的
   // 同名单一 id 都解析到第一个块，故按块内 input 固定顺序（收货数量、实际成本、批号、
-  // 生产企业、生产日期、有效期）定位。
+  // 生产企业、生产日期、有效期）定位；块以物资 ID 文本唯一匹配。
   const itemBlocks = modal.locator("div.rounded-md.border.border-border.p-3.space-y-2");
   await expect(itemBlocks).toHaveCount(lines.length);
-  for (let index = 0; index < lines.length; index += 1) {
-    const inputs = itemBlocks.nth(index).locator("input");
+  for (const line of lines) {
+    const block = itemBlocks.filter({ hasText: line.materialId }).first();
+    await expect(block).toHaveCount(1);
+    const inputs = block.locator("input");
     await expect(inputs).toHaveCount(6);
-    const line = lines[index];
     await inputs.nth(0).fill(line.quantity);
     await inputs.nth(1).fill(line.unitCost);
     await inputs.nth(2).fill(line.batchNo);
@@ -406,6 +407,13 @@ async function receiveOrderViaUi(
 }
 
 // ─── API 捕获与 DB 断言 ────────────────────────────────────────────────────
+
+/** 按物资 ID 取回订单项（响应明细顺序由 ULID 排序决定，不保证与提交一致）。 */
+function itemOf(order: PurchaseOrder, materialId: string): PurchaseOrderItem {
+  const item = order.items?.find((candidate) => candidate.material_id === materialId);
+  if (!item) throw new Error(`purchase order item missing for material ${materialId}`);
+  return item;
+}
 
 async function captureOrder(page: Page, supplier: string): Promise<PurchaseOrder> {
   const list = await api<PurchaseOrderList>(
@@ -632,8 +640,8 @@ test("014 主线：UI 建单→审核→同订单项双批次分批收货→收�
   expect(draft.warehouse).toBe(warehouse);
   expect(draft.supplier_name).toBe(supplier);
   expect(draft.items ?? []).toHaveLength(2);
-  expect(Number(draft.items?.[0]?.ordered_quantity ?? "0")).toBe(100);
-  expect(Number(draft.items?.[1]?.ordered_quantity ?? "0")).toBe(40);
+  expect(Number(itemOf(draft, item1.materialId).ordered_quantity)).toBe(100);
+  expect(Number(itemOf(draft, item2.materialId).ordered_quantity)).toBe(40);
   expect(draft.requester_id).toBeTruthy();
   expect(draft.receipts ?? []).toHaveLength(0);
 
@@ -654,15 +662,15 @@ test("014 主线：UI 建单→审核→同订单项双批次分批收货→收�
 
   // 第一批到货：item1 批次 A 60 件 + item2 批次 C 20 件 → 部分收货
   await receiveOrderViaUi(page, supplier, [
-    { quantity: "60", batchNo: `${FIXTURE_PREFIX}${suffix}-A`, productionDate: "2026-04-01", expiryDate: "2028-03-31", manufacturer: "某制药一厂", unitCost: "12.5" },
-    { quantity: "20", batchNo: `${FIXTURE_PREFIX}${suffix}-C`, productionDate: "2026-05-01", expiryDate: "2028-04-30", manufacturer: "某制药二厂", unitCost: "12.5" },
+    { materialId: item1.materialId, quantity: "60", batchNo: `${FIXTURE_PREFIX}${suffix}-A`, productionDate: "2026-04-01", expiryDate: "2028-03-31", manufacturer: "某制药一厂", unitCost: "12.5" },
+    { materialId: item2.materialId, quantity: "20", batchNo: `${FIXTURE_PREFIX}${suffix}-C`, productionDate: "2026-05-01", expiryDate: "2028-04-30", manufacturer: "某制药二厂", unitCost: "12.5" },
   ]);
   const partial = await captureOrder(page, supplier);
   expect(partial.status).toBe("PARTIALLY_RECEIVED");
-  expect(Number(partial.items?.[0]?.received_quantity ?? "0")).toBe(60);
-  expect(Number(partial.items?.[0]?.remaining_quantity ?? "0")).toBe(40);
-  expect(Number(partial.items?.[1]?.received_quantity ?? "0")).toBe(20);
-  expect(Number(partial.items?.[1]?.remaining_quantity ?? "0")).toBe(20);
+  expect(Number(itemOf(partial, item1.materialId).received_quantity)).toBe(60);
+  expect(Number(itemOf(partial, item1.materialId).remaining_quantity)).toBe(40);
+  expect(Number(itemOf(partial, item2.materialId).received_quantity)).toBe(20);
+  expect(Number(itemOf(partial, item2.materialId).remaining_quantity)).toBe(20);
   expect(partial.receipts ?? []).toHaveLength(1);
   const firstReceiptId = partial.receipts?.[0]?.id;
   expect(firstReceiptId).toBeTruthy();
@@ -684,17 +692,17 @@ test("014 主线：UI 建单→审核→同订单项双批次分批收货→收�
 
   // 第二批到货：item1 批次 B 40 件 + item2 批次 D 20 件 → 收讫（同订单项两批次分批到货）
   await receiveOrderViaUi(page, supplier, [
-    { quantity: "40", batchNo: `${FIXTURE_PREFIX}${suffix}-B`, productionDate: "2026-06-01", expiryDate: "2028-05-31", manufacturer: "某制药一厂", unitCost: "12.5" },
-    { quantity: "20", batchNo: `${FIXTURE_PREFIX}${suffix}-D`, productionDate: "2026-06-15", expiryDate: "2028-06-14", manufacturer: "某制药二厂", unitCost: "12.5" },
+    { materialId: item1.materialId, quantity: "40", batchNo: `${FIXTURE_PREFIX}${suffix}-B`, productionDate: "2026-06-01", expiryDate: "2028-05-31", manufacturer: "某制药一厂", unitCost: "12.5" },
+    { materialId: item2.materialId, quantity: "20", batchNo: `${FIXTURE_PREFIX}${suffix}-D`, productionDate: "2026-06-15", expiryDate: "2028-06-14", manufacturer: "某制药二厂", unitCost: "12.5" },
   ]);
   const received = await captureOrder(page, supplier);
   expect(received.status).toBe("RECEIVED");
   expect(received.receipts ?? []).toHaveLength(2);
   // 每项积压已收量等于订购量，剩余为 0
-  expect(Number(received.items?.[0]?.received_quantity ?? "0")).toBe(100);
-  expect(Number(received.items?.[0]?.remaining_quantity ?? "0")).toBe(0);
-  expect(Number(received.items?.[1]?.received_quantity ?? "0")).toBe(40);
-  expect(Number(received.items?.[1]?.remaining_quantity ?? "0")).toBe(0);
+  expect(Number(itemOf(received, item1.materialId).received_quantity)).toBe(100);
+  expect(Number(itemOf(received, item1.materialId).remaining_quantity)).toBe(0);
+  expect(Number(itemOf(received, item2.materialId).received_quantity)).toBe(40);
+  expect(Number(itemOf(received, item2.materialId).remaining_quantity)).toBe(0);
 
   // 库存与成本：初始 2 件 + 两次收货，锁定量恒为 0
   const stock1 = await readStockTotals(warehouse, item1.materialId);
@@ -774,7 +782,7 @@ test("014 部分收货后关闭余量：CLOSED 且不新增库存操作，不再
 
   // UI 部分收货 4 件 → PARTIALLY_RECEIVED
   await receiveOrderViaUi(page, supplier, [
-    { quantity: "4", batchNo: `${FIXTURE_PREFIX}${suffix}-E`, productionDate: "2026-02-01", expiryDate: "2028-01-31", manufacturer: "某制药厂", unitCost: "3.00" },
+    { materialId: item.materialId, quantity: "4", batchNo: `${FIXTURE_PREFIX}${suffix}-E`, productionDate: "2026-02-01", expiryDate: "2028-01-31", manufacturer: "某制药厂", unitCost: "3.00" },
   ]);
   const partial = await captureOrder(page, supplier);
   expect(partial.status).toBe("PARTIALLY_RECEIVED");

@@ -435,7 +435,7 @@ test("开始、完成、跳过、取消成功后今日列表和统计区均刷�
 
   // 开始：PENDING -> IN_PROGRESS
   await workbench.revealActions();
-  await workbench.row("统计开始操作").getByRole("button", { name: "开始" }).evaluate((el) => el.click());
+  await workbench.row("统计开始操作").getByRole("button", { name: "开始" }).evaluate((el: HTMLElement) => el.click());
   await expect(workbench.row("统计开始操作").getByText("执行中")).toBeVisible();
   await expect(stats.value("计划任务")).toHaveText("4");
   await expect(stats.value("应完成")).toHaveText("4");
@@ -444,7 +444,7 @@ test("开始、完成、跳过、取消成功后今日列表和统计区均刷�
 
   // 完成：IN_PROGRESS -> COMPLETED
   await workbench.revealActions();
-  await workbench.row("统计完成操作").getByRole("button", { name: "完成" }).evaluate((el) => el.click());
+  await workbench.row("统计完成操作").getByRole("button", { name: "完成" }).evaluate((el: HTMLElement) => el.click());
   await expect(page.getByText("完成任务", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "确认完成" }).click({ force: true });
   await expect(workbench.row("统计完成操作").getByText("已完成")).toBeVisible();
@@ -454,7 +454,7 @@ test("开始、完成、跳过、取消成功后今日列表和统计区均刷�
 
   // 跳过：PENDING -> SKIPPED，必须填写原因
   await workbench.revealActions();
-  await workbench.row("统计跳过操作").getByRole("button", { name: "跳过" }).evaluate((el) => el.click());
+  await workbench.row("统计跳过操作").getByRole("button", { name: "跳过" }).evaluate((el: HTMLElement) => el.click());
   await expect(page.getByText("跳过任务", { exact: true })).toBeVisible();
   await page.getByLabel("跳过原因").fill("自动化验收跳过");
   await page.getByRole("button", { name: "确认跳过" }).click({ force: true });
@@ -465,7 +465,7 @@ test("开始、完成、跳过、取消成功后今日列表和统计区均刷�
 
   // 取消：PENDING -> CANCELLED，必须填写原因
   await workbench.revealActions();
-  await workbench.row("统计取消操作").getByRole("button", { name: "取消" }).evaluate((el) => el.click());
+  await workbench.row("统计取消操作").getByRole("button", { name: "取消" }).evaluate((el: HTMLElement) => el.click());
   await expect(page.getByText("取消任务", { exact: true })).toBeVisible();
   await page.getByLabel("取消原因").fill("自动化验收取消");
   await page.getByRole("button", { name: "确认取消" }).click({ force: true });
@@ -489,7 +489,7 @@ test("统计请求失败时今日列表仍可操作", async ({ page }) => {
   await expect(page.getByText(/无法加载统计数据|无法连接到服务，请检查网络或服务状态|Failed to fetch|NetworkError|net::ERR_FAILED/i)).toBeVisible();
 
   await workbench.revealActions();
-  await workbench.row("统计开始操作").getByRole("button", { name: "开始" }).evaluate((el) => el.click());
+  await workbench.row("统计开始操作").getByRole("button", { name: "开始" }).evaluate((el: HTMLElement) => el.click());
   await expect(workbench.row("统计开始操作").getByText("执行中")).toBeVisible();
   await expect(stats.rows()).toHaveCount(0);
 });
