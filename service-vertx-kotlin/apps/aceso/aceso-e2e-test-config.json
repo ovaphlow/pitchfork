@@ -1,0 +1,16 @@
+{
+  "database": {
+    "host": "127.0.0.1",
+    "port": 55432,
+    "database": "aceso_test",
+    "user": "ovaphlow",
+    "pool-size": 10
+  },
+  "server": {
+    "port": 8422,
+    "cors-origins": ["http://127.0.0.1:4324", "http://localhost:4324"]
+  },
+  "nexus": { "base-url": "http://127.0.0.1:8423" },
+  "identity": { "base-url": "http://127.0.0.1:8430" },
+  "console-level": "INFO"
+}

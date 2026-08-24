@@ -217,16 +217,23 @@ export default function RequisitionsSection() {
 
   // ── 审批 ───────────────────────────────────────────────────────────
 
-  const openApprove = (requisition: PharmacyRequisition) => {
-    setApproveTarget(requisition);
+  const openApprove = async (requisition: PharmacyRequisition) => {
     setApproveError("");
-    setApproveRows(
-      (requisition.items ?? []).map((item) => ({
-        itemId: item.id,
-        approvedQuantity: String(item.requested_quantity ?? 1),
-        lotId: "",
-      })),
-    );
+    // 列表接口不返回 items；审批必须先加载详情，否则弹窗没有可审批明细。
+    try {
+      const detail = await getPharmacyRequisition(requisition.id);
+      setApproveTarget(detail);
+      setApproveRows(
+        (detail.items ?? []).map((item) => ({
+          itemId: item.id,
+          approvedQuantity: String(item.requested_quantity ?? 1),
+          lotId: "",
+        })),
+      );
+    } catch (approveErr) {
+      setApproveError(errorMessage(approveErr, "无法加载申领单明细"));
+      return;
+    }
     if (requisition.warehouse) void loadStocks(requisition.warehouse);
   };
 

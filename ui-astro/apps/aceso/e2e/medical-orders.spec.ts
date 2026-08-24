@@ -31,6 +31,8 @@ interface MedicalOrder {
   status: string;
   task_id: string | null;
   end_time: string | null;
+  nurse_checked_by?: string | null;
+  nurse_checked_at?: string | null;
   execution_summary?: Record<string, number>;
 }
 
@@ -92,9 +94,65 @@ async function cleanupDatabase() {
       [fixturePattern],
     );
     await client.query(
-      `DELETE FROM healthcare.medical_records record
+      `DELETE FROM healthcare.payments payment
+       USING healthcare.bills bill
+       WHERE payment.bill_id = bill.id
+         AND (payment.id LIKE $1 OR bill.id LIKE $1 OR bill.encounter_id LIKE $1
+              OR bill.encounter_id IN (SELECT id FROM healthcare.encounters WHERE encounter_no LIKE $1))`,
+      [fixturePattern],
+    );
+    await client.query(
+      `DELETE FROM healthcare.bills bill
+       WHERE bill.id LIKE $1 OR bill.encounter_id LIKE $1
+          OR bill.encounter_id IN (SELECT id FROM healthcare.encounters WHERE encounter_no LIKE $1)`,
+      [fixturePattern],
+    );
+    await client.query(
+      `DELETE FROM healthcare.deposit_records record
        WHERE record.id LIKE $1 OR record.encounter_id LIKE $1
           OR record.encounter_id IN (SELECT id FROM healthcare.encounters WHERE encounter_no LIKE $1)`,
+      [fixturePattern],
+    );
+    await client.query(
+      `DELETE FROM healthcare.followup_records record
+       WHERE record.id LIKE $1 OR record.encounter_id LIKE $1
+          OR record.encounter_id IN (SELECT id FROM healthcare.encounters WHERE encounter_no LIKE $1)`,
+      [fixturePattern],
+    );
+    await client.query(
+      `DELETE FROM healthcare.followup_plans plan
+       WHERE plan.id LIKE $1 OR plan.encounter_id LIKE $1
+          OR plan.encounter_id IN (SELECT id FROM healthcare.encounters WHERE encounter_no LIKE $1)`,
+      [fixturePattern],
+    );
+    await client.query(
+      `DELETE FROM healthcare.vital_sign_records record
+       WHERE record.id LIKE $1 OR record.encounter_id LIKE $1
+          OR record.encounter_id IN (SELECT id FROM healthcare.encounters WHERE encounter_no LIKE $1)`,
+      [fixturePattern],
+    );
+    await client.query(
+      `DELETE FROM healthcare.chronic_disease_registrations record
+       WHERE record.id LIKE $1 OR record.encounter_id LIKE $1
+          OR record.encounter_id IN (SELECT id FROM healthcare.encounters WHERE encounter_no LIKE $1)`,
+      [fixturePattern],
+    );
+    await client.query(
+      `DELETE FROM healthcare.health_checkup_members member
+       WHERE member.id LIKE $1 OR member.encounter_id LIKE $1
+          OR member.encounter_id IN (SELECT id FROM healthcare.encounters WHERE encounter_no LIKE $1)`,
+      [fixturePattern],
+    );
+    await client.query(
+      `DELETE FROM healthcare.progress_notes note
+       WHERE note.id LIKE $1 OR note.encounter_id LIKE $1
+          OR note.encounter_id IN (SELECT id FROM healthcare.encounters WHERE encounter_no LIKE $1)`,
+      [fixturePattern],
+    );
+    await client.query(
+      `DELETE FROM healthcare.diagnoses diagnosis
+       WHERE diagnosis.id LIKE $1 OR diagnosis.encounter_id LIKE $1
+          OR diagnosis.encounter_id IN (SELECT id FROM healthcare.encounters WHERE encounter_no LIKE $1)`,
       [fixturePattern],
     );
     await client.query(
@@ -207,6 +265,7 @@ async function api<T>(page: Page, path: string, options: { method?: string; body
           "Content-Type": "application/json",
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
+        credentials: "include",
         body: body === undefined ? undefined : JSON.stringify(body),
       });
       const text = await response.text();
@@ -330,6 +389,71 @@ test("选择活动入住并开立用药医嘱后列表详情与结构化输入�
   await detail.getByRole("button", { name: "关闭" }).click();
 });
 
+test("护士核对前药房不可见，核对后药房可见", async ({ page }) => {
+  const admission = await createActiveAdmission(page, "NURSE");
+  const order = await api<MedicalOrder>(page, `/crate-api/healthcare/v1/encounters/${admission.encounter.id}/orders`, {
+    method: "POST",
+    body: {
+      order_type: "MEDICATION",
+      order_class: "LONG_TERM",
+      order_content: "护士核对测试医嘱",
+      doctor: "王医生",
+      start_time: "2026-08-06T08:00:00+08:00",
+      order_details: { drug_name: "阿莫西林" },
+    },
+  });
+
+  // 核对前：药房待接方列表不可见
+  await page.goto("/dashboard/pharmacy");
+  await page.waitForLoadState("networkidle");
+  await expect(page.getByRole("row").filter({ hasText: "护士核对测试医嘱" })).not.toBeVisible();
+
+  // 绕过 UI 直接调用发药接口也必须被门禁拒绝
+  const beforeStatus = await page.evaluate(
+    async ({ baseUrl, orderId }) => {
+      const response = await fetch(`${baseUrl}/crate-api/pharmacy/v1/dispenses/from-medical-order`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          medical_order_id: orderId,
+          warehouse: "主库",
+          material_id: "dummy-material",
+          lot_id: "dummy-lot",
+          dispensed_quantity: "1",
+        }),
+      });
+      return response.status;
+    },
+    { baseUrl: requiredEnvironment("PLAYWRIGHT_API_BASE_URL", API_BASE_URL), orderId: order.id },
+  );
+  expect(beforeStatus).toBe(409);
+
+  // 护理工作台进入“医嘱核对”并确认核对
+  await page.goto("/dashboard/inpatient");
+  await page.waitForLoadState("networkidle");
+  await page.getByRole("button", { name: "长者照护档案" }).click();
+  await page.getByRole("button", { name: `${FIXTURE_PREFIX}NURSE` }).click();
+  await page.getByRole("button", { name: "医嘱核对" }).click();
+  const card = page.getByRole("heading", { name: "医嘱核对" }).locator("xpath=../..");
+  await expect(card.getByText("待核对")).toBeVisible();
+  await card.getByRole("button", { name: "确认核对" }).click();
+  await expect(card.getByText("已核对")).toBeVisible({ timeout: 10000 });
+  await expect(card.getByRole("button", { name: "确认核对" })).not.toBeVisible();
+
+  // 核对后：服务端审计字段非空
+  const checked = await api<MedicalOrder>(page, `/crate-api/healthcare/v1/orders/${order.id}`);
+  expect(checked.nurse_checked_by).toBeTruthy();
+  expect(checked.nurse_checked_at).toBeTruthy();
+
+  // 药房待接方列表出现该医嘱及核对信息
+  await page.goto("/dashboard/pharmacy");
+  await page.waitForLoadState("networkidle");
+  const pharmacyRow = page.getByRole("row").filter({ hasText: "护士核对测试医嘱" });
+  await expect(pharmacyRow).toBeVisible();
+  await expect(pharmacyRow).toContainText("护士核对");
+});
+
 test("开立诊疗医嘱后列表筛选与刷新保持一致", async ({ page }) => {
   const admission = await createActiveAdmission(page, "THERAPY");
   await page.goto(`/dashboard/orders?encounter_id=${admission.encounter.id}`);
@@ -348,7 +472,7 @@ test("开立诊疗医嘱后列表筛选与刷新保持一致", async ({ page }) 
 
   const row = page.getByRole("row").filter({ hasText: "康复理疗 30 分钟" });
   await expect(row).toBeVisible();
-  await expect(row).toContainText("诊疗");
+  await expect(row).toContainText("治疗医嘱");
 
   // 类型筛选
   await page.locator("#order-type-filter").selectOption("MEDICATION");
@@ -379,6 +503,7 @@ test("停嘱后显示服务端终态且重复点击不重发请求", async ({ pa
     method: "POST",
     body: {
       order_type: "MEDICATION",
+      order_class: "LONG_TERM",
       order_content: "降压药 1 片",
       doctor: "周医生",
       start_time: "2026-08-03T08:00:00+08:00",
@@ -418,6 +543,7 @@ test("作废与完成显示服务端终态", async ({ page }) => {
     method: "POST",
     body: {
       order_type: "THERAPY",
+      order_class: "LONG_TERM",
       order_content: "理疗作废用例",
       doctor: "孙医生",
       start_time: "2026-08-03T09:00:00+08:00",
@@ -428,6 +554,7 @@ test("作废与完成显示服务端终态", async ({ page }) => {
     method: "POST",
     body: {
       order_type: "EXAMINATION",
+      order_class: "LONG_TERM",
       order_content: "胸片检查",
       doctor: "李医生",
       start_time: "2026-08-03T10:00:00+08:00",
@@ -473,6 +600,11 @@ test("服务端校验错误可见且开立表单输入保留", async ({ page }) 
   // 缺正文/医生/开始时间直接保存 → 前端校验错误
   await modal.getByRole("button", { name: "保存医嘱" }).click();
   await expect(modal.getByRole("alert")).toContainText("医嘱正文、医生和开始时间不能为空");
+  // 可访问性：错误提示通过 aria-describedby/aria-invalid 关联缺失字段
+  await expect(modal.locator("#order-content")).toHaveAttribute("aria-invalid", "true");
+  await expect(modal.locator("#order-content")).toHaveAttribute("aria-describedby", "order-form-error");
+  await expect(modal.getByLabel("医生（必填）")).toHaveAttribute("aria-invalid", "true");
+  await expect(modal.getByLabel("开始时间（必填）")).toHaveAttribute("aria-invalid", "true");
   // 输入保留
   await modal.locator("#order-content").fill("会被保留的医嘱正文");
   await modal.getByLabel("医生（必填）").fill("保留医生");
@@ -498,6 +630,7 @@ test("详情执行汇总只读展示且无执行入口", async ({ page }) => {
     method: "POST",
     body: {
       order_type: "MEDICATION",
+      order_class: "LONG_TERM",
       order_content: "汇总测试医嘱",
       doctor: "吴医生",
       start_time: "2026-08-04T08:00:00+08:00",
@@ -525,6 +658,92 @@ test("详情执行汇总只读展示且无执行入口", async ({ page }) => {
   await detail.getByRole("button", { name: "关闭" }).click();
 });
 
+// ——— 医生诊疗工作台：病程、诊断与四类医嘱 ———
+
+test("医生诊疗工作台新增病程诊断与四类医嘱且刷新保留并跨入住隔离", async ({ page }) => {
+  const admission = await createActiveAdmission(page, "CLINIC");
+  await page.goto(`/dashboard/orders?encounter_id=${admission.encounter.id}`);
+  await page.waitForLoadState("networkidle");
+
+  // 新增病程记录
+  await page.getByRole("button", { name: "新增病程记录" }).click();
+  let modal = modalByTitle(page, "新增病程记录");
+  await modal.locator("#note-content").fill("今日精神状态稳定，食欲一般，继续观察。");
+  await modal.getByLabel("医生（必填）").fill("张医生");
+  await modal.getByRole("button", { name: "保存病程记录" }).click();
+  await page.waitForLoadState("networkidle");
+  await expect(page.getByText("今日精神状态稳定，食欲一般，继续观察。")).toBeVisible();
+
+  // 新增主要诊断
+  await page.getByRole("button", { name: "新增诊断" }).click();
+  modal = modalByTitle(page, "新增诊断");
+  await modal.locator("#diagnosis-type").selectOption("PRIMARY");
+  await modal.locator("#diagnosis-date").fill("2026-08-08");
+  await modal.getByLabel("诊断内容（必填）").fill("高血压");
+  await modal.getByLabel("医生（必填）").fill("张医生");
+  await modal.getByRole("button", { name: "保存诊断" }).click();
+  await page.waitForLoadState("networkidle");
+  await expect(page.getByRole("row").filter({ hasText: "高血压" })).toBeVisible();
+
+  // 四类医嘱：用药、治疗、检查、检验
+  async function createOrder(orderType: string, content: string, itemText?: string) {
+    await page.getByRole("button", { name: "开立医嘱" }).click();
+    const orderModal = modalByTitle(page, "开立医嘱");
+    await orderModal.locator("#order-type").selectOption(orderType);
+    await orderModal.locator("#order-content").fill(content);
+    await orderModal.getByLabel("医生（必填）").fill("张医生");
+    await orderModal.getByLabel("开始时间（必填）").fill("2026-08-08T09:00");
+    if (orderType === "MEDICATION") {
+      await orderModal.getByLabel("药名（必填）").fill("降压药");
+    } else if (orderType === "THERAPY") {
+      await orderModal.getByLabel("诊疗项目（必填）").fill("康复理疗");
+    } else {
+      await orderModal.getByLabel("项目名称（必填）").fill(itemText ?? "项目");
+    }
+    await orderModal.getByRole("button", { name: "保存医嘱" }).click();
+    await page.waitForLoadState("networkidle");
+    await expect(page.getByRole("row").filter({ hasText: content })).toBeVisible();
+  }
+
+  await createOrder("MEDICATION", "诊疗降压药医嘱", "降压药");
+  await createOrder("THERAPY", "诊疗康复理疗医嘱", "康复理疗");
+  await createOrder("EXAMINATION", "诊疗胸片检查医嘱", "胸部X线");
+  await createOrder("LAB_TEST", "诊疗血常规检验医嘱", "血常规");
+
+  // 刷新后仍保留
+  await page.reload();
+  await page.waitForLoadState("networkidle");
+  await expect(page.getByText("今日精神状态稳定，食欲一般，继续观察。")).toBeVisible();
+  await expect(page.getByRole("row").filter({ hasText: "高血压" })).toBeVisible();
+  for (const content of ["诊疗降压药医嘱", "诊疗康复理疗医嘱", "诊疗胸片检查医嘱", "诊疗血常规检验医嘱"]) {
+    await expect(page.getByRole("row").filter({ hasText: content })).toBeVisible();
+  }
+
+  // 切换到另一位老人：不串数据
+  const other = await createActiveAdmission(page, "CLINIC2");
+  await page.goto(`/dashboard/orders?encounter_id=${other.encounter.id}`);
+  await page.waitForLoadState("networkidle");
+  await expect(page.getByText("今日精神状态稳定，食欲一般，继续观察。")).not.toBeVisible();
+  await expect(page.getByRole("row").filter({ hasText: "高血压" })).not.toBeVisible();
+  for (const content of ["诊疗降压药医嘱", "诊疗康复理疗医嘱", "诊疗胸片检查医嘱", "诊疗血常规检验医嘱"]) {
+    await expect(page.getByRole("row").filter({ hasText: content })).not.toBeVisible();
+  }
+});
+
+test("已离院医生诊疗只读且无新增入口", async ({ page }) => {
+  const admission = await createActiveAdmission(page, "CLINICDISC", "2026-07-01");
+  await api(page, `/crate-api/healthcare/v1/encounters/${admission.encounter.id}/discharge`, {
+    method: "PATCH",
+    body: { discharge_date: "2026-07-31T00:00:00+08:00" },
+  });
+  await page.goto(`/dashboard/orders?encounter_id=${admission.encounter.id}`);
+  await page.waitForLoadState("networkidle");
+  await expect(page.getByText(/仅可查看历史病程、诊断和医嘱/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "新增病程记录" })).not.toBeVisible();
+  await expect(page.getByRole("button", { name: "新增诊断" })).not.toBeVisible();
+  await expect(page.getByRole("button", { name: "开立医嘱" })).not.toBeVisible();
+});
+
 // ——— 用例 5：窄屏可操作且不重叠 ———
 
 test("窄屏下列表筛选开立与详情均可操作且文字不重叠", async ({ page }) => {
@@ -534,6 +753,7 @@ test("窄屏下列表筛选开立与详情均可操作且文字不重叠", async
     method: "POST",
     body: {
       order_type: "MEDICATION",
+      order_class: "LONG_TERM",
       order_content: "窄屏用药医嘱",
       doctor: "郑医生",
       start_time: "2026-08-05T08:00:00+08:00",

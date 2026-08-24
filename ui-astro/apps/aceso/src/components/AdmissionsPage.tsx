@@ -882,7 +882,7 @@ export default function AdmissionsPage() {
             办理去世将收束该入住全部医嘱、任务与照护周期，并关闭患者档案。此操作不可撤销，请确认后再提交。
           </p>
           {deathError && (
-            <div role="alert" className="rounded-lg border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">
+            <div id="death-error" role="alert" className="rounded-lg border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">
               {deathError}
             </div>
           )}
@@ -896,11 +896,14 @@ export default function AdmissionsPage() {
             }}
           >
             <Input
+              id="death-date"
               label="去世时间（必填）"
               type="datetime-local"
               value={deathDate}
               onChange={(event) => setDeathDate(event.target.value)}
               required
+              aria-invalid={deathError ? true : undefined}
+              aria-describedby={deathError ? "death-error" : undefined}
             />
             <div className="flex flex-col gap-1.5">
               <label className="text-sm font-medium text-fg-muted" htmlFor="death-cause">去世原因（可选）</label>
@@ -912,6 +915,8 @@ export default function AdmissionsPage() {
                 rows={3}
                 placeholder="如：自然死亡、疾病恶化等"
                 className="w-full resize-none rounded-md border border-border bg-surface px-3 py-2 text-sm text-fg placeholder:text-fg-dimmed focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                aria-invalid={deathError ? true : undefined}
+                aria-describedby={deathError ? "death-error" : undefined}
               />
             </div>
             <div className="flex justify-end gap-3 pt-1">

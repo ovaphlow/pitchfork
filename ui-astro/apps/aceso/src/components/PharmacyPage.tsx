@@ -392,6 +392,8 @@ export default function PharmacyPage() {
       setActionTarget(null);
       setActionKind("");
       void loadDispenses();
+      // 取消/状态变化可能影响待接方列表的已接方标记，同步刷新避免出现旧状态
+      void loadOrders();
     } catch (error) {
       setActionError(errorMessage(error, "操作失败"));
     } finally {
@@ -877,52 +879,6 @@ export default function PharmacyPage() {
         </Card>
       )}
 
-      {/* ── 创建退药单弹窗 ─────────────────────────────────────────── */}
-      <Modal open={returnTarget !== null} onClose={() => setReturnTarget(null)} title="创建退药单">
-        {returnTarget && (
-          <div className="space-y-4">
-            <div className="rounded-md border border-border p-3 text-sm space-y-1">
-              <div className="font-medium text-fg-emphasis">{returnTarget.dispense_no} · {patientName.get(returnTarget.patient_id) ?? returnTarget.patient_id}</div>
-              <div className="text-xs text-fg-dimmed">退药确认后，基础数量将退回原仓库并增加库存；物资、批次和成本由原发药记录锁定。</div>
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <label className="text-sm font-medium text-fg-muted" htmlFor="return-item">退药明细</label>
-              <select
-                id="return-item"
-                className={selectClass}
-                value={returnForm.itemId}
-                onChange={(event) => {
-                  const item = returnTarget.items.find((candidate) => candidate.id === event.target.value);
-                  setReturnForm((current) => ({ ...current, itemId: event.target.value, quantity: String(item?.dispensed_quantity ?? 1) }));
-                }}
-              >
-                <option value="">请选择发药明细</option>
-                {returnTarget.items.map((item) => (
-                  <option key={item.id} value={item.id}>{item.material_id || "药品"} · 批次 {item.lot_id || "无"} · 原发 {item.dispensed_quantity ?? "—"}</option>
-                ))}
-              </select>
-            </div>
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Input label="退药数量" type="number" min={1} value={returnForm.quantity} onChange={(event) => setReturnForm((current) => ({ ...current, quantity: event.target.value }))} />
-              <div className="flex flex-col gap-1.5">
-                <label className="text-sm font-medium text-fg-muted" htmlFor="return-operator">操作人</label>
-                <select id="return-operator" className={selectClass} value={returnForm.operator} onChange={(event) => setReturnForm((current) => ({ ...current, operator: event.target.value }))}>
-                  <option value="">请选择操作人</option>
-                  {subjects.map((subject) => <option key={subject.id} value={subject.display_name}>{subject.display_name}</option>)}
-                </select>
-              </div>
-            </div>
-            <Input label="退药原因" value={returnForm.reason} onChange={(event) => setReturnForm((current) => ({ ...current, reason: event.target.value }))} placeholder="例如：老人未使用" />
-            <Input label="备注（可选）" value={returnForm.remark} onChange={(event) => setReturnForm((current) => ({ ...current, remark: event.target.value }))} />
-            {returnError && <p className="text-sm text-danger">{returnError}</p>}
-            <div className="flex justify-end gap-2 pt-2">
-              <Button variant="secondary" onClick={() => setReturnTarget(null)}>取消</Button>
-              <Button loading={returnSaving} onClick={() => void handleCreateReturn()}>创建退药单</Button>
-            </div>
-          </div>
-        )}
-      </Modal>
-
       {/* ── 退药确认/取消弹窗 ─────────────────────────────────────── */}
       <Modal open={returnAction !== null} onClose={() => setReturnAction(null)} title={returnActionKind === "confirm" ? "确认退药入库" : "取消退药单"}>
         {returnAction && (
@@ -1203,6 +1159,52 @@ export default function PharmacyPage() {
 
             <div className="flex justify-end pt-2">
               <Button variant="secondary" onClick={() => setDetailOpen(false)}>关闭</Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* ── 创建退药单弹窗 ─────────────────────────────────────────── */}
+      <Modal open={returnTarget !== null} onClose={() => setReturnTarget(null)} title="创建退药单">
+        {returnTarget && (
+          <div className="space-y-4">
+            <div className="rounded-md border border-border p-3 text-sm space-y-1">
+              <div className="font-medium text-fg-emphasis">{returnTarget.dispense_no} · {patientName.get(returnTarget.patient_id) ?? returnTarget.patient_id}</div>
+              <div className="text-xs text-fg-dimmed">退药确认后，基础数量将退回原仓库并增加库存；物资、批次和成本由原发药记录锁定。</div>
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <label className="text-sm font-medium text-fg-muted" htmlFor="return-item">退药明细</label>
+              <select
+                id="return-item"
+                className={selectClass}
+                value={returnForm.itemId}
+                onChange={(event) => {
+                  const item = returnTarget.items.find((candidate) => candidate.id === event.target.value);
+                  setReturnForm((current) => ({ ...current, itemId: event.target.value, quantity: String(item?.dispensed_quantity ?? 1) }));
+                }}
+              >
+                <option value="">请选择发药明细</option>
+                {returnTarget.items.map((item) => (
+                  <option key={item.id} value={item.id}>{item.material_id || "药品"} · 批次 {item.lot_id || "无"} · 原发 {item.dispensed_quantity ?? "—"}</option>
+                ))}
+              </select>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Input label="退药数量" type="number" min={1} value={returnForm.quantity} onChange={(event) => setReturnForm((current) => ({ ...current, quantity: event.target.value }))} />
+              <div className="flex flex-col gap-1.5">
+                <label className="text-sm font-medium text-fg-muted" htmlFor="return-operator">操作人</label>
+                <select id="return-operator" className={selectClass} value={returnForm.operator} onChange={(event) => setReturnForm((current) => ({ ...current, operator: event.target.value }))}>
+                  <option value="">请选择操作人</option>
+                  {subjects.map((subject) => <option key={subject.id} value={subject.display_name}>{subject.display_name}</option>)}
+                </select>
+              </div>
+            </div>
+            <Input label="退药原因" value={returnForm.reason} onChange={(event) => setReturnForm((current) => ({ ...current, reason: event.target.value }))} placeholder="例如：老人未使用" />
+            <Input label="备注（可选）" value={returnForm.remark} onChange={(event) => setReturnForm((current) => ({ ...current, remark: event.target.value }))} />
+            {returnError && <p className="text-sm text-danger">{returnError}</p>}
+            <div className="flex justify-end gap-2 pt-2">
+              <Button variant="secondary" onClick={() => setReturnTarget(null)}>取消</Button>
+              <Button loading={returnSaving} onClick={() => void handleCreateReturn()}>创建退药单</Button>
             </div>
           </div>
         )}

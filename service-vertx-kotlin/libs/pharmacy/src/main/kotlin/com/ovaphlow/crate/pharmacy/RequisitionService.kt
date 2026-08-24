@@ -39,7 +39,10 @@ class RequisitionService(
     private val r = PharmacyRequisitions.PHARMACY_REQUISITIONS
     private val ri = PharmacyRequisitionItems.PHARMACY_REQUISITION_ITEMS
 
-    private val headerSelect = ctx.select(
+    // jOOQ 查询对象是可变的：每次 `.where(...)` 都会原地追加条件。
+    // 这里必须每次调用都新建查询，禁止用共享 val 累积历史谓词
+    // （曾导致回读 WHERE 叠成 id=$1 AND id=$2 … 永不匹配，创建后报 requisition not found）。
+    private fun headerSelect() = ctx.select(
         r.ID.`as`("id"),
         r.REQUISITION_NO.`as`("requisition_no"),
         r.WAREHOUSE.`as`("warehouse"),
@@ -61,7 +64,7 @@ class RequisitionService(
     )
         .from(r)
 
-    private val itemSelect = ctx.select(
+    private fun itemSelect() = ctx.select(
         ri.ID.`as`("id"),
         ri.REQUISITION_ID.`as`("requisition_id"),
         ri.MATERIAL_ID.`as`("material_id"),
@@ -586,7 +589,7 @@ class RequisitionService(
     // ========================================================================
 
     private fun loadDetail(client: SqlClient, id: String): Future<JsonObject> {
-        val headerQuery = headerSelect.where(r.ID.eq(id))
+        val headerQuery = headerSelect().where(r.ID.eq(id))
         return client.preparedQuery(DatabaseConfig.sql(headerQuery))
             .execute(DatabaseConfig.tuple(headerQuery))
             .compose { rows: RowSet<Row> ->
@@ -594,7 +597,7 @@ class RequisitionService(
                     Future.failedFuture(NotFoundException("requisition not found: $id"))
                 } else {
                     val header = headerToJson(rows.iterator().next())
-                    val itemQuery = itemSelect.where(ri.REQUISITION_ID.eq(id))
+                    val itemQuery = itemSelect().where(ri.REQUISITION_ID.eq(id))
                     client.preparedQuery(DatabaseConfig.sql(itemQuery))
                         .execute(DatabaseConfig.tuple(itemQuery))
                         .map { itemRows: RowSet<Row> ->
@@ -626,7 +629,7 @@ class RequisitionService(
             .map { rows: RowSet<Row> -> if (rows.size() > 0) rows.iterator().next() else null }
 
     private fun lockHeader(client: SqlClient, id: String): Future<Row> {
-        val lockHeaderQuery = headerSelect.where(r.ID.eq(id)).forUpdate()
+        val lockHeaderQuery = headerSelect().where(r.ID.eq(id)).forUpdate()
         return client.preparedQuery(DatabaseConfig.sql(lockHeaderQuery))
             .execute(DatabaseConfig.tuple(lockHeaderQuery))
             .compose { rows: RowSet<Row> ->
@@ -639,7 +642,7 @@ class RequisitionService(
     }
 
     private fun lockItems(client: SqlClient, requisitionId: String): Future<List<Row>> {
-        val lockItemsQuery = itemSelect.where(ri.REQUISITION_ID.eq(requisitionId)).orderBy(ri.ID).forUpdate()
+        val lockItemsQuery = itemSelect().where(ri.REQUISITION_ID.eq(requisitionId)).orderBy(ri.ID).forUpdate()
         return client.preparedQuery(DatabaseConfig.sql(lockItemsQuery))
             .execute(DatabaseConfig.tuple(lockItemsQuery))
             .map { rows: RowSet<Row> -> rows.map { it } }

@@ -80,6 +80,33 @@ const orderFormDefaults: OrderForm = {
   itemName: "",
 };
 
+function hasOrderFieldError(form: OrderForm, field: string): boolean {
+  switch (field) {
+    case "orderContent":
+      return !form.orderContent.trim();
+    case "doctor":
+      return !form.doctor.trim();
+    case "startTime":
+      return !form.startTime.trim();
+    case "drugName":
+      return form.orderType === "MEDICATION" && !form.drugName.trim();
+    case "treatmentItem":
+      return form.orderType === "THERAPY" && !form.treatmentItem.trim();
+    case "itemName":
+      return (form.orderType === "EXAMINATION" || form.orderType === "LAB_TEST") && !form.itemName.trim();
+    case "durationDays": {
+      const value = form.durationDays.trim();
+      if (value === "") return false;
+      const days = Number(value);
+      return !Number.isInteger(days) || days < 1;
+    }
+    case "endTime":
+      return form.orderClass === "TEMPORARY" && !form.endTime.trim() && !form.durationDays.trim() && form.frequencyCode !== "STAT";
+    default:
+      return false;
+  }
+}
+
 const noteFormDefaults: NoteForm = { content: "", physician: "", recordTime: "" };
 
 function todayLocal(): string {
@@ -1076,7 +1103,7 @@ export default function OrdersPage() {
           }}
         >
           {formError && (
-            <div role="alert" className="rounded-lg border border-danger/30 bg-danger-bg px-3 py-2 text-sm text-danger">
+            <div id="order-form-error" role="alert" className="rounded-lg border border-danger/30 bg-danger-bg px-3 py-2 text-sm text-danger">
               {formError}
             </div>
           )}
@@ -1136,48 +1163,62 @@ export default function OrdersPage() {
                 onChange={(event) => setForm((current) => ({ ...current, orderContent: event.target.value }))}
                 placeholder="请输入医嘱正文，最多 2000 字"
                 required
+                aria-invalid={formError && hasOrderFieldError(form, "orderContent") ? true : undefined}
+                aria-describedby={formError && hasOrderFieldError(form, "orderContent") ? "order-form-error" : undefined}
               />
             </div>
 
             <div className="sm:col-span-2">
               <Input
+                id="order-doctor"
                 label="医生（必填）"
                 value={form.doctor}
                 onChange={(event) => setForm((current) => ({ ...current, doctor: event.target.value }))}
                 placeholder="请输入开嘱医生"
                 maxLength={100}
                 required
+                aria-invalid={formError && hasOrderFieldError(form, "doctor") ? true : undefined}
+                aria-describedby={formError && hasOrderFieldError(form, "doctor") ? "order-form-error" : undefined}
               />
             </div>
 
             <div className="sm:col-span-2">
               <Input
+                id="order-start-time"
                 label="开始时间（必填）"
                 type="datetime-local"
                 value={form.startTime}
                 onChange={(event) => setForm((current) => ({ ...current, startTime: event.target.value }))}
                 required
+                aria-invalid={formError && hasOrderFieldError(form, "startTime") ? true : undefined}
+                aria-describedby={formError && hasOrderFieldError(form, "startTime") ? "order-form-error" : undefined}
               />
             </div>
 
             <div className="sm:col-span-2">
               <Input
+                id="order-end-time"
                 label="结束时间（临时医嘱可选）"
                 type="datetime-local"
                 value={form.endTime}
                 onChange={(event) => setForm((current) => ({ ...current, endTime: event.target.value }))}
                 min={form.startTime || undefined}
+                aria-invalid={formError && hasOrderFieldError(form, "endTime") ? true : undefined}
+                aria-describedby={formError && hasOrderFieldError(form, "endTime") ? "order-form-error" : undefined}
               />
             </div>
 
             {form.orderType === "MEDICATION" && (
               <>
                 <Input
+                  id="order-drug-name"
                   label="药名（必填）"
                   value={form.drugName}
                   onChange={(event) => setForm((current) => ({ ...current, drugName: event.target.value }))}
                   placeholder="请输入药名"
                   required
+                  aria-invalid={formError && hasOrderFieldError(form, "drugName") ? true : undefined}
+                  aria-describedby={formError && hasOrderFieldError(form, "drugName") ? "order-form-error" : undefined}
                 />
                 <Input
                   label="剂量"
@@ -1203,11 +1244,14 @@ export default function OrdersPage() {
             {form.orderType === "THERAPY" && (
               <div className="sm:col-span-2">
                 <Input
-                  label="治疗项目（必填）"
+                  id="order-treatment-item"
+                  label="诊疗项目（必填）"
                   value={form.treatmentItem}
                   onChange={(event) => setForm((current) => ({ ...current, treatmentItem: event.target.value }))}
-                  placeholder="请输入治疗项目"
+                  placeholder="请输入诊疗项目"
                   required
+                  aria-invalid={formError && hasOrderFieldError(form, "treatmentItem") ? true : undefined}
+                  aria-describedby={formError && hasOrderFieldError(form, "treatmentItem") ? "order-form-error" : undefined}
                 />
               </div>
             )}
@@ -1215,11 +1259,14 @@ export default function OrdersPage() {
             {(form.orderType === "EXAMINATION" || form.orderType === "LAB_TEST") && (
               <div className="sm:col-span-2">
                 <Input
+                  id="order-item-name"
                   label="项目名称（必填）"
                   value={form.itemName}
                   onChange={(event) => setForm((current) => ({ ...current, itemName: event.target.value }))}
                   placeholder="请输入检查/检验项目名称"
                   required
+                  aria-invalid={formError && hasOrderFieldError(form, "itemName") ? true : undefined}
+                  aria-describedby={formError && hasOrderFieldError(form, "itemName") ? "order-form-error" : undefined}
                 />
               </div>
             )}
@@ -1248,6 +1295,7 @@ export default function OrdersPage() {
                 />
                 <div className="sm:col-span-2">
                   <Input
+                    id="order-duration-days"
                     label="时长（天）"
                     type="number"
                     min={1}
@@ -1255,6 +1303,8 @@ export default function OrdersPage() {
                     value={form.durationDays}
                     onChange={(event) => setForm((current) => ({ ...current, durationDays: event.target.value }))}
                     placeholder="正整数"
+                    aria-invalid={formError && hasOrderFieldError(form, "durationDays") ? true : undefined}
+                    aria-describedby={formError && hasOrderFieldError(form, "durationDays") ? "order-form-error" : undefined}
                   />
                 </div>
               </>

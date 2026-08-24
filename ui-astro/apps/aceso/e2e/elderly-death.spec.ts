@@ -91,9 +91,65 @@ async function cleanupDatabase() {
       [fixturePattern],
     );
     await client.query(
-      `DELETE FROM healthcare.medical_records record
+      `DELETE FROM healthcare.payments payment
+       USING healthcare.bills bill
+       WHERE payment.bill_id = bill.id
+         AND (payment.id LIKE $1 OR bill.id LIKE $1 OR bill.encounter_id LIKE $1
+              OR bill.encounter_id IN (SELECT id FROM healthcare.encounters WHERE encounter_no LIKE $1))`,
+      [fixturePattern],
+    );
+    await client.query(
+      `DELETE FROM healthcare.bills bill
+       WHERE bill.id LIKE $1 OR bill.encounter_id LIKE $1
+          OR bill.encounter_id IN (SELECT id FROM healthcare.encounters WHERE encounter_no LIKE $1)`,
+      [fixturePattern],
+    );
+    await client.query(
+      `DELETE FROM healthcare.deposit_records record
        WHERE record.id LIKE $1 OR record.encounter_id LIKE $1
           OR record.encounter_id IN (SELECT id FROM healthcare.encounters WHERE encounter_no LIKE $1)`,
+      [fixturePattern],
+    );
+    await client.query(
+      `DELETE FROM healthcare.followup_records record
+       WHERE record.id LIKE $1 OR record.encounter_id LIKE $1
+          OR record.encounter_id IN (SELECT id FROM healthcare.encounters WHERE encounter_no LIKE $1)`,
+      [fixturePattern],
+    );
+    await client.query(
+      `DELETE FROM healthcare.followup_plans plan
+       WHERE plan.id LIKE $1 OR plan.encounter_id LIKE $1
+          OR plan.encounter_id IN (SELECT id FROM healthcare.encounters WHERE encounter_no LIKE $1)`,
+      [fixturePattern],
+    );
+    await client.query(
+      `DELETE FROM healthcare.vital_sign_records record
+       WHERE record.id LIKE $1 OR record.encounter_id LIKE $1
+          OR record.encounter_id IN (SELECT id FROM healthcare.encounters WHERE encounter_no LIKE $1)`,
+      [fixturePattern],
+    );
+    await client.query(
+      `DELETE FROM healthcare.chronic_disease_registrations record
+       WHERE record.id LIKE $1 OR record.encounter_id LIKE $1
+          OR record.encounter_id IN (SELECT id FROM healthcare.encounters WHERE encounter_no LIKE $1)`,
+      [fixturePattern],
+    );
+    await client.query(
+      `DELETE FROM healthcare.health_checkup_members member
+       WHERE member.id LIKE $1 OR member.encounter_id LIKE $1
+          OR member.encounter_id IN (SELECT id FROM healthcare.encounters WHERE encounter_no LIKE $1)`,
+      [fixturePattern],
+    );
+    await client.query(
+      `DELETE FROM healthcare.progress_notes note
+       WHERE note.id LIKE $1 OR note.encounter_id LIKE $1
+          OR note.encounter_id IN (SELECT id FROM healthcare.encounters WHERE encounter_no LIKE $1)`,
+      [fixturePattern],
+    );
+    await client.query(
+      `DELETE FROM healthcare.diagnoses diagnosis
+       WHERE diagnosis.id LIKE $1 OR diagnosis.encounter_id LIKE $1
+          OR diagnosis.encounter_id IN (SELECT id FROM healthcare.encounters WHERE encounter_no LIKE $1)`,
       [fixturePattern],
     );
     await client.query(
@@ -206,6 +262,7 @@ async function api<T>(page: Page, path: string, options: { method?: string; body
           "Content-Type": "application/json",
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
+        credentials: "include",
         body: body === undefined ? undefined : JSON.stringify(body),
       });
       const text = await response.text();
@@ -355,6 +412,7 @@ test("办理去世成功后活动清单刷新且服务端终局正确", async ({
     method: "POST",
     body: {
       order_type: "MEDICATION",
+      order_class: "LONG_TERM",
       order_content: "去世收束医嘱",
       doctor: "赵医生",
       start_time: "2026-08-01T10:00:00+08:00",
@@ -438,6 +496,9 @@ test("缺去世时间本地校验显示错误且不丢输入", async ({ page }) 
 
   // 本地校验错误（前端必填拦截，不重发请求）
   await expect(dialog.getByRole("alert")).toBeVisible();
+  // 可访问性：错误提示通过 aria-describedby/aria-invalid 关联到去世时间控件
+  await expect(dialog.locator("#death-date")).toHaveAttribute("aria-invalid", "true");
+  await expect(dialog.locator("#death-date")).toHaveAttribute("aria-describedby", "death-error");
   await expect(dialog.locator("#death-cause")).toHaveValue("未填时间的输入");
   // 服务端未发生去世
   const encounter = await api<Encounter>(page, `/crate-api/healthcare/v1/encounters/${admission.encounter.id}`);
@@ -467,13 +528,17 @@ test("已离院与已去世入住没有医嘱入口", async ({ page }) => {
   await expect(admissionsPage.row(`${FIXTURE_PREFIX}DISC`)).not.toBeVisible();
   await expect(admissionsPage.row(`${FIXTURE_PREFIX}DEC`)).not.toBeVisible();
 
-  // 直接访问医嘱页选择活动入住列表，不应包含已终局入住
+  // 直接访问医嘱页：终局入住仍可只读查看历史，但不提供开立入口
   await page.goto("/dashboard/orders");
   await page.waitForLoadState("networkidle");
   const select = page.locator("#orders-encounter");
-  const options = await select.locator("option").allTextContents();
-  expect(options.join(" ")).not.toContain(`${FIXTURE_PREFIX}DISC`);
-  expect(options.join(" ")).not.toContain(`${FIXTURE_PREFIX}DEC`);
+  for (const suffix of ["DISC", "DEC"]) {
+    const option = select.locator("option").filter({ hasText: `${FIXTURE_PREFIX}${suffix}` }).first();
+    const value = await option.getAttribute("value");
+    expect(value).toBeTruthy();
+    await select.selectOption(value!);
+    await expect(page.getByRole("button", { name: "开立医嘱" })).not.toBeVisible();
+  }
 });
 
 // ——— 用例 5：窄屏去世弹窗可操作且不重叠 ———
@@ -519,8 +584,9 @@ test("窄屏下办理去世弹窗可操作且文字不重叠", async ({ page }) 
   });
   expect(overlaps).toEqual([]);
 
-  // 确认后成功关闭
+  // 确认后成功关闭（等待弹窗消失，避免网络/请求时序抖动）
   await dialog.getByRole("button", { name: "确认办理去世" }).click();
+  await expect(dialog).not.toBeVisible({ timeout: 10000 });
   await page.waitForLoadState("networkidle");
   const encounter = await api<Encounter>(page, `/crate-api/healthcare/v1/encounters/${admission.encounter.id}`);
   expect(encounter.status).toBe("DECEASED");

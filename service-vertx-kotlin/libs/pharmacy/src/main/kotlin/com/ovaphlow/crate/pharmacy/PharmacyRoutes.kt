@@ -31,11 +31,12 @@ object PharmacyRoutes {
             ctx.json(JsonObject().put("status", "ok").put("service", "pharmacy"))
         }
 
-        router.route("/dispenses/*").subRouter(
+        // 同时匹配 /dispenses 和 /dispenses/...：列表契约是无尾斜杠的 /dispenses
+        router.route("/dispenses*").subRouter(
             DispenseRoutes.create(vertx, mPool, medicalOrderReader, inventoryOutboundPort),
         )
-        router.route("/returns/*").subRouter(ReturnRoutes.create(vertx, mPool, inventoryInboundPort))
-        router.route("/requisitions/*").subRouter(
+        router.route("/returns*").subRouter(ReturnRoutes.create(vertx, mPool, inventoryInboundPort))
+        router.route("/requisitions*").subRouter(
             RequisitionRoutes.create(vertx, mPool, inventoryRequisitionTransferPort, authHandler),
         )
         val (orderRouter, receiptRouter) = PurchaseOrderRoutes.create(
@@ -44,8 +45,8 @@ object PharmacyRoutes {
             inventoryPurchaseReceiptPort,
             authHandler,
         )
-        router.route("/purchase-orders/*").subRouter(orderRouter)
-        router.route("/purchase-receipts/*").subRouter(receiptRouter)
+        router.route("/purchase-orders*").subRouter(orderRouter)
+        router.route("/purchase-receipts*").subRouter(receiptRouter)
 
         return router
     }

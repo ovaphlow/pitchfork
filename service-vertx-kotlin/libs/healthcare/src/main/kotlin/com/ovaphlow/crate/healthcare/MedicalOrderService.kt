@@ -239,14 +239,8 @@ class MedicalOrderService(
             .from(maTable.`as`("ma"))
             .where(maOrderId.eq(orderId))
             .groupBy(maResult)
-        val dispensedQuery = ctx.select(DSL.sum(DSL.field("di.dispensed_quantity", java.math.BigDecimal::class.java)).`as`("dispensed_qty"))
-            .from(DSL.table(DSL.name("pharmacy", "pharmacy_dispense_items")).`as`("di"))
-            .join(DSL.table(DSL.name("pharmacy", "pharmacy_dispenses")).`as`("d"))
-            .on(DSL.field("d.id").eq(DSL.field("di.dispense_id")))
-            .where(DSL.field("di.order_item_id").eq(orderId))
-            .and(DSL.field("d.status").eq("DISPENSED"))
         return execute(pool, adminQuery).compose { adminRows ->
-            execute(pool, dispensedQuery).map { dispensedRows ->
+            dispensedQuantity(orderId).map { dispensedQty ->
                 var administeredCount = 0L
                 var administeredQty = java.math.BigDecimal.ZERO
                 var partialCount = 0L
@@ -271,12 +265,6 @@ class MedicalOrderService(
                         "暂缓" -> deferredCount += cnt
                     }
                 }
-                val dispensedQty =
-                    if (dispensedRows.size() == 0) {
-                        null
-                    } else {
-                        (dispensedRows.iterator().next().getValue("dispensed_qty") as? java.math.BigDecimal)
-                    }
                 val remaining = dispensedQty?.subtract(administeredQty)
                 JsonObject()
                     .put("administered_count", administeredCount)
@@ -291,56 +279,106 @@ class MedicalOrderService(
         }
     }
 
+    /**
+     * 药房发药数量是弱关联预留：当当前部署/测试 classpath 未挂载 pharmacy 迁移时，
+     * 直接查询 pharmacy 表会因表不存在而让医嘱详情 500。这里先探测表是否存在，
+     * 不存在时按“未发药”返回 null，保证 healthcare 独立测试与无药房部署可读。
+     */
+    private fun dispensedQuantity(orderId: String): Future<java.math.BigDecimal?> {
+        val dispensedQuery = ctx.select(DSL.sum(DSL.field("di.dispensed_quantity", java.math.BigDecimal::class.java)).`as`("dispensed_qty"))
+            .from(DSL.table(DSL.name("pharmacy", "pharmacy_dispense_items")).`as`("di"))
+            .join(DSL.table(DSL.name("pharmacy", "pharmacy_dispenses")).`as`("d"))
+            .on(DSL.field("d.id").eq(DSL.field("di.dispense_id")))
+            .where(DSL.field("di.order_item_id").eq(orderId))
+            .and(DSL.field("d.status").eq("DISPENSED"))
+        return pharmacyDispenseTablesPresent().compose { present ->
+            if (!present) {
+                Future.succeededFuture(null)
+            } else {
+                execute(pool, dispensedQuery).map { dispensedRows ->
+                    if (dispensedRows.size() == 0) {
+                        null
+                    } else {
+                        (dispensedRows.iterator().next().getValue("dispensed_qty") as? java.math.BigDecimal)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun pharmacyDispenseTablesPresent(): Future<Boolean> {
+        val query = ctx.select(DSL.count().`as`("cnt"))
+            .from(DSL.table(DSL.name("information_schema", "tables")))
+            .where(
+                DSL.field(DSL.name("table_schema")).eq("pharmacy")
+                    .and(DSL.field(DSL.name("table_name")).`in`("pharmacy_dispense_items", "pharmacy_dispenses")),
+            )
+        return execute(pool, query).map { rows ->
+            rows.iterator().next().getLong("cnt") == 2L
+        }
+    }
+
     /** 给药明细列表（按 task 关联，只读）：与执行汇总/给药汇总同源一致 */
     fun listOrderAdministrations(orderId: String): Future<JsonObject> {
-        val query = ctx.select(
-            DSL.field("ma.id").`as`("id"),
-            DSL.field("ma.task_execution_id").`as`("task_execution_id"),
-            DSL.field("ma.result").`as`("result"),
-            DSL.field("ma.administered_quantity").`as`("administered_quantity"),
-            DSL.field("ma.unit").`as`("unit"),
-            DSL.field("ma.dispense_item_id").`as`("dispense_item_id"),
-            DSL.field("ma.lot_id").`as`("lot_id"),
-            DSL.field("ma.warehouse").`as`("warehouse"),
-            DSL.field("ma.administered_by").`as`("administered_by"),
-            DSL.field("ma.administered_at").`as`("administered_at"),
-            DSL.field("ma.reason").`as`("reason"),
-            DSL.field("ma.created_at").`as`("created_at"),
-            DSL.field("e.planned_time").`as`("planned_time"),
-            DSL.field("t.description").`as`("task_description"),
-            DSL.field("di.material_id").`as`("material_id"),
-            DSL.field("mat.name").`as`("material_name"),
-            DSL.field("lot.batch_no").`as`("batch_no"),
-            DSL.field("d.dispense_no").`as`("dispense_no"),
-        )
-            .from(DSL.table(DSL.name("nursing", "medication_administrations")).`as`("ma"))
-            .join(NURSING_TASK_EXECUTIONS.`as`("e"))
-            .on(DSL.field("e.id").eq(DSL.field("ma.task_execution_id")))
-            .join(NURSING_TASKS.`as`("t"))
-            .on(DSL.field("t.id").eq(DSL.field("e.task_id")))
-            .leftJoin(DSL.table(DSL.name("pharmacy", "pharmacy_dispense_items")).`as`("di"))
-            .on(DSL.field("di.id").eq(DSL.field("ma.dispense_item_id")))
-            .leftJoin(DSL.table(DSL.name("public", "materials")).`as`("mat"))
-            .on(DSL.field("mat.id").eq(DSL.field("di.material_id")))
-            .leftJoin(DSL.table(DSL.name("public", "lots")).`as`("lot"))
-            .on(DSL.field("lot.id").eq(DSL.field("di.lot_id")))
-            .leftJoin(DSL.table(DSL.name("pharmacy", "pharmacy_dispenses")).`as`("d"))
-            .on(DSL.field("d.id").eq(DSL.field("di.dispense_id")))
-            .where(DSL.field("t.order_item_id").eq(orderId))
-            .orderBy(DSL.field("ma.administered_at").desc(), DSL.field("ma.id").desc())
-        val countQuery = ctx.select(DSL.count().`as`("total"))
-            .from(DSL.table(DSL.name("nursing", "medication_administrations")).`as`("ma"))
-            .join(NURSING_TASK_EXECUTIONS.`as`("e"))
-            .on(DSL.field("e.id").eq(DSL.field("ma.task_execution_id")))
-            .join(NURSING_TASKS.`as`("t"))
-            .on(DSL.field("t.id").eq(DSL.field("e.task_id")))
-            .where(DSL.field("t.order_item_id").eq(orderId))
-        return execute(pool, countQuery).compose { countRows ->
-            val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(pool, query).map { dataRows ->
-                JsonObject()
-                    .put("records", JsonArray(dataRows.map(::administrationRowJson)))
-                    .put("meta", JsonObject().put("total", total))
+        return pharmacyDispenseTablesPresent().compose { present ->
+            if (!present) {
+                // 无 pharmacy 模块/迁移时，给药发药明细无数据来源，按空列表返回，避免 500。
+                Future.succeededFuture(
+                    JsonObject()
+                        .put("records", JsonArray())
+                        .put("meta", JsonObject().put("total", 0)),
+                )
+            } else {
+                val query = ctx.select(
+                    DSL.field("ma.id").`as`("id"),
+                    DSL.field("ma.task_execution_id").`as`("task_execution_id"),
+                    DSL.field("ma.result").`as`("result"),
+                    DSL.field("ma.administered_quantity").`as`("administered_quantity"),
+                    DSL.field("ma.unit").`as`("unit"),
+                    DSL.field("ma.dispense_item_id").`as`("dispense_item_id"),
+                    DSL.field("ma.lot_id").`as`("lot_id"),
+                    DSL.field("ma.warehouse").`as`("warehouse"),
+                    DSL.field("ma.administered_by").`as`("administered_by"),
+                    DSL.field("ma.administered_at").`as`("administered_at"),
+                    DSL.field("ma.reason").`as`("reason"),
+                    DSL.field("ma.created_at").`as`("created_at"),
+                    DSL.field("e.planned_time").`as`("planned_time"),
+                    DSL.field("t.description").`as`("task_description"),
+                    DSL.field("di.material_id").`as`("material_id"),
+                    DSL.field("mat.name").`as`("material_name"),
+                    DSL.field("lot.batch_no").`as`("batch_no"),
+                    DSL.field("d.dispense_no").`as`("dispense_no"),
+                )
+                    .from(DSL.table(DSL.name("nursing", "medication_administrations")).`as`("ma"))
+                    .join(NURSING_TASK_EXECUTIONS.`as`("e"))
+                    .on(DSL.field("e.id").eq(DSL.field("ma.task_execution_id")))
+                    .join(NURSING_TASKS.`as`("t"))
+                    .on(DSL.field("t.id").eq(DSL.field("e.task_id")))
+                    .leftJoin(DSL.table(DSL.name("pharmacy", "pharmacy_dispense_items")).`as`("di"))
+                    .on(DSL.field("di.id").eq(DSL.field("ma.dispense_item_id")))
+                    .leftJoin(DSL.table(DSL.name("public", "materials")).`as`("mat"))
+                    .on(DSL.field("mat.id").eq(DSL.field("di.material_id")))
+                    .leftJoin(DSL.table(DSL.name("public", "lots")).`as`("lot"))
+                    .on(DSL.field("lot.id").eq(DSL.field("di.lot_id")))
+                    .leftJoin(DSL.table(DSL.name("pharmacy", "pharmacy_dispenses")).`as`("d"))
+                    .on(DSL.field("d.id").eq(DSL.field("di.dispense_id")))
+                    .where(DSL.field("t.order_item_id").eq(orderId))
+                    .orderBy(DSL.field("ma.administered_at").desc(), DSL.field("ma.id").desc())
+                val countQuery = ctx.select(DSL.count().`as`("total"))
+                    .from(DSL.table(DSL.name("nursing", "medication_administrations")).`as`("ma"))
+                    .join(NURSING_TASK_EXECUTIONS.`as`("e"))
+                    .on(DSL.field("e.id").eq(DSL.field("ma.task_execution_id")))
+                    .join(NURSING_TASKS.`as`("t"))
+                    .on(DSL.field("t.id").eq(DSL.field("e.task_id")))
+                    .where(DSL.field("t.order_item_id").eq(orderId))
+                execute(pool, countQuery).compose { countRows ->
+                    val total = countRows.iterator().next().getLong("total") ?: 0L
+                    execute(pool, query).map { dataRows ->
+                        JsonObject()
+                            .put("records", JsonArray(dataRows.map(::administrationRowJson)))
+                            .put("meta", JsonObject().put("total", total))
+                    }
+                }
             }
         }
     }
