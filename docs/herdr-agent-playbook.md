@@ -27,7 +27,17 @@ herdr agent list
 
 ---
 
-## 2. 加载 API 密钥
+## 2. 加载环境变量与密钥
+
+环境变量分两类：Agent 自身需要的 LLM API 密钥（`~/.api.keys`），和项目开发进程需要的配置（各目录下的 `.env`）。两者都用同样的 shell 惯例注入：
+
+```bash
+set -a
+source <文件>
+set +a
+```
+
+### 2.1 Agent 的 API 密钥（~/.api.keys）
 
 用户常用方式是在 shell 中：
 
@@ -52,6 +62,29 @@ herdr workspace create --cwd ~/project --label dev \
 ```
 
 > 注意：`agent start` 本身没有 `--env` 参数。要么先 `pane run` source，要么在创建 Pane 时用 `--env`。
+
+### 2.2 项目开发进程的 `.env`
+
+后端、前端等开发进程的密码和测试账号经各自目录下的 `.env` 注入，启动前同样要先 source（`.env` 不入 Git，路径相对仓库根）：
+
+| 文件 | 内容 |
+|---|---|
+| `service-vertx-kotlin/.env` | 后端数据库密码 `PITCHFORK_DB_PASSWORD` |
+| `service-vertx-kotlin/apps/aceso/.env` | Aceso 数据库密码 |
+| `ui-astro/apps/aceso/.env` | `PUBLIC_API_URL`、Playwright 测试账号与测试库连接 |
+
+```bash
+# 直接在 shell 中（先 cd 到 .env 所在目录）
+set -a; source .env; set +a
+```
+
+在 Herdr 中同理，注意先切到对应目录或使用绝对路径：
+
+```bash
+herdr pane run "$pane" "cd ~/pitchfork/service-vertx-kotlin && set -a; source .env; set +a"
+```
+
+集成测试专用密码（`PITCHFORK_TEST_DB_PASSWORD=pitchfork-test-only`）不属于密钥，按 `docs/aceso-test-database.md` 直接 export 即可。
 
 ---
 
@@ -220,7 +253,7 @@ herdr agent prompt reviewer "请评审当前 diff，只读，不要改代码" --
 | 任务拆解 | Agent 读取需求，产出 task 清单 |
 | 开发 | 开发 Agent 实现代码 |
 | 单元测试 | 独立 Pane 运行测试命令 + `pane wait-output` |
-| 数据库测试 | 独立 Pane 启动测试库并运行集成测试 |
+| 数据库测试 | 独立 Pane 前台启动测试库（`podman compose up`，不加 `-d`），另一 Pane 运行集成测试 |
 | 浏览器 E2E | 独立 Pane 运行 Playwright/Cypress |
 | 评审 | 独立只读 Agent 审查 diff/产物 |
 
@@ -240,3 +273,4 @@ herdr agent prompt reviewer "请评审当前 diff，只读，不要改代码" --
 - 工作目录要使用 Herdr 主机可见的路径；不要在沙箱 `/tmp` 下创建临时目录后直接给 Herdr 用，可能两边不同步。
 - 临时 workspace 用完后可以 `herdr workspace close <ws>` 清理；如果想在 UI 保留，就别 close，并可用 `herdr workspace focus <ws>` 切换过去。
 - `agent prompt --wait` 不保证任务“成功”，只表示 Agent 进入 settled 状态；正确性要靠测试、文件和评审确认。
+- 容器类开发进程（如测试数据库）与其它开发进程一样前台运行、手动管理：用 `podman compose up`（不加 `-d`），占用一个独立 Pane，Ctrl+C 即停止；不要把容器留在后台，避免遗留无人管理的进程。

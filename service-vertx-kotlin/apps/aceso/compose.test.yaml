@@ -1,6 +1,6 @@
 # Aceso 集成测试专用 PostgreSQL，不连接或覆盖 compose.yaml 的业务数据库。
 # 默认映射到 localhost:55432，容器删除后临时数据库数据随之消失。
-# 启动：podman compose -f compose.test.yaml up -d
+# 启动：podman compose -f compose.test.yaml up   （前台运行，不加 -d；Ctrl+C 停止）
 # 关闭：podman compose -f compose.test.yaml down
 
 services:

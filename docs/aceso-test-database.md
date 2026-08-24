@@ -4,14 +4,17 @@
 
 ## 启动
 
+测试数据库与其它开发进程一致，使用前台运行、手动管理（Ctrl+C 停止）：
+
 ```bash
 cd service-vertx-kotlin/apps/aceso
 export PITCHFORK_TEST_DB_PASSWORD=pitchfork-test-only
-podman compose -f compose.test.yaml up -d
-podman compose -f compose.test.yaml ps
+podman compose -f compose.test.yaml up
 ```
 
-测试数据库监听 `127.0.0.1:55432`。容器健康后，测试命令使用映射端口：
+不要加 `-d` 后台运行；前台进程退出即容器停止，避免遗留无人管理的容器。需要确认端口占用时可另开终端执行 `podman compose -f compose.test.yaml ps`。
+
+测试数据库监听 `127.0.0.1:55432`。容器健康后，测试命令在另一个终端运行并使用映射端口：
 
 ```bash
 cd service-vertx-kotlin
@@ -64,6 +67,8 @@ PITCHFORK_DB_PASSWORD=pitchfork-test-only \
 API 健康后，再按计划运行 Playwright；测试结束先关闭 API，再执行本页的 Compose `down`。若不想占用 `8422`，API、Aceso UI 的 `PUBLIC_API_URL` 和 Playwright 的 `PLAYWRIGHT_API_BASE_URL` 必须一起改为同一个测试端口。
 
 ## 关闭
+
+先在前台终端 Ctrl+C 停止容器，然后：
 
 ```bash
 cd service-vertx-kotlin/apps/aceso
