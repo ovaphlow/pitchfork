@@ -25,3 +25,8 @@ node_modules/
 # OS
 .DS_Store
 Thumbs.db
+
+# Playwright artifacts
+apps/aceso/e2e/debug-*.mjs*
+test-results/
+playwright-report/

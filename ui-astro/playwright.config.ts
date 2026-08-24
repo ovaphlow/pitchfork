@@ -5,10 +5,15 @@ if (!baseURL) throw new Error('PLAYWRIGHT_BASE_URL must be set for Aceso browser
 const executablePath = process.env.PLAYWRIGHT_EXECUTABLE_PATH;
 
 /**
- * Playwright 配置 — Aceso 养老院入住照护周期生命周期验收测试。
+ * Playwright 配置 — Aceso 浏览器验收测试。
  *
  * 仅从必填的 PLAYWRIGHT_BASE_URL 读取用户已启动的 Aceso 地址；
  * 不得配置 webServer，不得启动或停止任何用户管理的服务。
+ *
+ * 窄屏项目不使用 Pixel 5 触摸仿真：本产品移动端布局（固定 260px 侧边栏）
+ * 会令布局视口超出设备宽度，Chromium isMobile 自动缩放 + 视觉视口平移导致
+ * 触点坐标漂移（https://github.com/microsoft/playwright/issues 同类问题）。
+ * 改为同宽非触摸视口，验证窄屏响应式（断点、表格横向滚动、元素不重叠）。
  */
 export default defineConfig({
   testDir: './apps/aceso/e2e',
@@ -32,7 +37,11 @@ export default defineConfig({
     },
     {
       name: 'mobile-chrome',
-      use: { ...devices['Pixel 5'] },
+      use: {
+        // 393×851 ≈ Pixel 5 CSS 尺寸，但关闭 isMobile/hasTouch：避免移动端自动缩放
+        viewport: { width: 393, height: 851 },
+        deviceScaleFactor: 1,
+      },
     },
   ],
 });

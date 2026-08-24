@@ -67,7 +67,7 @@ async function cleanupFixtureRoles(page: Page) {
   await page.evaluate(async ({ apiBase, prefix }) => {
     const list = await fetch(`${apiBase}/roles`, { credentials: "include" });
     if (!list.ok) return;
-    const roles: { id: string; role_code: string }[] = await list.json();
+    const roles = (await list.json()) as { id: string; role_code: string }[];
     for (const role of roles) {
       if (role.role_code.startsWith(prefix)) {
         await fetch(`${apiBase}/roles/${encodeURIComponent(role.id)}`, {

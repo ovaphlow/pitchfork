@@ -378,7 +378,7 @@ test("活动养老入住通过 UI 完成复评并修订计划：旧计划终止�
   await page.getByRole("button", { name: "复评并修订计划" }).click();
   await expect(page.getByText("复评并修订照护计划", { exact: true })).toBeVisible();
   await fillRevisionForm(page, "复评后计划");
-  await page.getByRole("button", { name: "提交复评并修订" }).evaluate((el: HTMLButtonElement) => el.click());
+  await page.getByRole("button", { name: "提交复评并修订" }).evaluate((el) => el.click());
 
   // 弹窗关闭，刷新后出现新计划与旧计划终态
   await expect(page.getByText("复评并修订照护计划", { exact: true })).not.toBeVisible();
@@ -426,7 +426,7 @@ test("UI 可读取修订历史详情：复评、上一版计划、新计划版�
 
   await openResidentPlans(page, baseline.encounterNo);
   await expect(page.getByText("修订历史（复评）", { exact: true })).toBeVisible();
-  await page.getByRole("button").filter({ hasText: "修订 1" }).evaluate((el: HTMLButtonElement) => el.click());
+  await page.getByRole("button").filter({ hasText: "修订 1" }).evaluate((el) => el.click());
   await expect(page.getByText("上一版计划（已终止）", { exact: true })).toBeVisible();
   await expect(page.getByText("新计划版本（执行中）", { exact: true })).toBeVisible();
   await expect(page.getByText("基线计划", { exact: true }).last()).toBeVisible();
@@ -455,14 +455,14 @@ test("当前计划存在 IN_PROGRESS 执行时，复评被拒绝且页面数据�
   await expect(page.getByText("基线计划", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "复评并修订计划" }).click();
   await fillRevisionForm(page, "不应出现的新计划");
-  await page.getByRole("button", { name: "提交复评并修订" }).evaluate((el: HTMLButtonElement) => el.click());
+  await page.getByRole("button", { name: "提交复评并修订" }).evaluate((el) => el.click());
 
   // 被拒绝：弹窗保留并显示错误
   await expect(page.getByText("复评并修订照护计划", { exact: true })).toBeVisible();
   await expect(page.getByText(/cannot revise care plan while a task execution is in progress|执行.*进行中/i)).toBeVisible();
 
   // 关闭弹窗后数据不变：无新计划、无修订历史、旧计划仍执行中
-  await page.getByRole("button", { name: "取消" }).evaluate((el: HTMLButtonElement) => el.click());
+  await page.getByRole("button", { name: "取消" }).evaluate((el) => el.click());
   await expect(page.getByText("复评后计划", { exact: true })).toHaveCount(0);
   await expect(page.getByText("不应出现的新计划", { exact: true })).toHaveCount(0);
   await expect(page.getByText("修订历史（复评）", { exact: true })).toHaveCount(0);
