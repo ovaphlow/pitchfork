@@ -1,9 +1,15 @@
 # service-idp-go 实施检查点
 
-更新时间：2026-07-23
+更新时间：2026-08-26（由 07-23 更新；事实同步见下方"下一步建议"）
 
 本文件用于在中断开发或更换会话后快速恢复 `service-idp-go` 的实施上下文。
 代码和文档均已写入工作区；请在审阅后通过 Git 提交形成可恢复的版本点。
+
+> **2026-08-26 状态同步**：原"下一步建议 1. 实现管理员角色授予与撤销"已落地——IDP 现含
+> `identity_roles`/`identity_subject_roles`（迁移 000005/000006，`role_code UNIQUE`、
+> `UNIQUE(subject_id, role_id)`），subject 序列化含 `roles: string[]`，并由
+> [018 计划](./018.nexus-shared-role-directory.md)（2026-08-19 起）承接角色目录 CRUD；
+> OIDC 能力推迟至独立评审后实施（见 `oidc-provider.md` 与 `service-idp-go.md` Phase 2/3）。
 
 ## 已完成
 
@@ -46,6 +52,6 @@ go mod verify
 
 ## 下一步建议
 
-1. 实现管理员角色授予与撤销：撤销最后一个启用管理员时继续保持同一保护规则。
+1. （已完成，2026-08-26 同步）管理员角色授予与撤销：`identity_roles`/`identity_subject_roles` 已落地，由 018 Nexus 角色目录计划继续承接 CRUD 与权限码集合；撤销最后一个启用管理员的保护规则仍适用。
 2. 增加审计事件列表和会话管理页面。
 3. 最后补充部署、备份恢复和 Windows/Linux 交付文档。

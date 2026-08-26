@@ -392,7 +392,7 @@ Initial configuration should be environment-based and documented in
 `.env.example`:
 
 ```text
-IDENTITYD_ADDR=127.0.0.1:8432
+IDENTITYD_ADDR=127.0.0.1:8420  （2026-08-26 勘误：实际 `service-idp-go/.env.example`、`.env` 与 `internal/config/config.go` 默认均为 8420；原稿 8432 为笔误）
 IDENTITYD_DATABASE_PATH=.data/identityd.sqlite
 IDENTITYD_BOOTSTRAP_IDENTIFIER=admin
 IDENTITYD_BOOTSTRAP_PASSWORD=<required-on-first-start>

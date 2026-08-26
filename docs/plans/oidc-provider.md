@@ -1,7 +1,9 @@
 # Crate 作为 OIDC 提供方（SSO / OIDC IdP）实现计划
 
-> 模块：`service-vertx-kotlin/libs/oidc`
 > 角色：OIDC **提供方（IdP）**，自实现，不对接外部 IdP
+
+> 模块：`service-vertx-kotlin/libs/oidc`
+> **⚠️ 2026-08-26 评审修正（实施前必读）**：本计划尚未满足根 `AGENTS.md` 的实施门槛——①缺"角色、职责与交接"章节（须补齐后方可作为多角色流水线计划执行）；②§9/§10 验证/测试为对运行中服务直连 curl 冒烟、无隔离测试库/清理/后置能力口径，须改为独立可销毁测试库（如 `oidc_test`）与拒绝/并发边界断言；③迁移号段已由 V600+ 修正为 V700+（见 §4，V600–699 为 Aceso dining 占用）。
 > 范围：仅后端 API（登录 UI 由前端负责）
 ## 1. 目标与范围
 
@@ -46,19 +48,19 @@ libs/oidc/
 
 ## 4. 数据表迁移（Flyway）
 
-> **迁移文件位置**：采用 per-lib 分散方案，迁移文件放在 `libs/oidc/src/main/resources/db/migration/` 目录下，使用 V600+ 版本号。与现有 users、settings、pharmacy、nursing、healthcare、inventories 等 lib 做法一致。Flyway 在运行时通过 `locations("classpath:db/migration")` 自动聚合当前 app 所依赖的各个 lib jar 中的迁移文件，每个 app 仅执行其依赖范围内的迁移（例如不依赖 `libs/oidc` 的 app 不会收到 oidc 迁移）。jOOQ 生成类沿用 per-lib 约定（见 §3）。
+> **迁移文件位置**：采用 per-lib 分散方案，迁移文件放在 `libs/oidc/src/main/resources/db/migration/` 目录下，使用 V700+ 版本号（2026-08-26 评审勘误：原稿 V600+ 与 Aceso dining 的 V600–V699 号段冲突，根 `AGENTS.md` 规定"新增 lib 按最大号段递增 100"，故改为 V700–V704）。与现有 users、settings、pharmacy、nursing、healthcare、inventories 等 lib 做法一致。Flyway 在运行时通过 `locations("classpath:db/migration")` 自动聚合当前 app 所依赖的各个 lib jar 中的迁移文件，每个 app 仅执行其依赖范围内的迁移（例如不依赖 `libs/oidc` 的 app 不会收到 oidc 迁移）。jOOQ 生成类沿用 per-lib 约定（见 §3）。
 
-- **`oidc_clients`**（`V600`）：`id` VARCHAR(32) PK (ULID)、`client_id` VARCHAR(64) UNIQUE、`client_secret_hash` VARCHAR(255) (bcrypt，可空用于公开客户端)、`name` VARCHAR(128)、`redirect_uris` JSONB、`login_page_uris` JSONB（可选，未登录时 302 跳转的目标前端登录页 URL 列表，见 §6）、`grant_types` JSONB、`scopes` JSONB、`status` VARCHAR(16) (`启用`/`禁用`)、`created_at`/`updated_at` TIMESTAMPTZ。
-- **`oidc_signing_keys`**（`V601`）：`kid` VARCHAR(64) PK、`alg` VARCHAR(8) (`RS256`)、`public_jwk` JSONB、`private_pem` TEXT、`status` VARCHAR(16) (`激活`/`已轮换`/`已吊销`)、`created_at` TIMESTAMPTZ、`expires_at` TIMESTAMPTZ。用于 JWKS 跨重启稳定与密钥轮换（状态语义见 §5）。
-- **`oidc_refresh_tokens`**（`V602`）：`token` VARCHAR(64) PK、`user_id` VARCHAR(32) NOT NULL、`client_id` VARCHAR(64) NOT NULL、`expires_at` TIMESTAMPTZ NOT NULL、`revoked` BOOLEAN NOT NULL DEFAULT false、`created_at` TIMESTAMPTZ NOT NULL DEFAULT now()。索引：`idx_oidc_refresh_tokens_user_id`。不透明 refresh token 落地；`/revoke` 通过置 `revoked=true` 立即吊销（轮转时旧 token 一并置 `revoked=true`）。
-- **`oidc_auth_codes`**（`V603`，授权码流程用）：`code` VARCHAR(64) PK、`user_id` VARCHAR(32) NOT NULL、`client_id` VARCHAR(64) NOT NULL、`redirect_uri` TEXT NOT NULL、`code_challenge` VARCHAR(128) NOT NULL、`code_challenge_method` VARCHAR(8) NOT NULL (`S256`)、`scope` TEXT、`nonce` VARCHAR(64)、`expires_at` TIMESTAMPTZ NOT NULL（短 TTL ~5min）、`used` BOOLEAN NOT NULL DEFAULT false（授权码一次性使用标记，`/token` 交换成功后置 `true`，后续请求直接拒绝 `invalid_grant`）。索引：`idx_oidc_auth_codes_user_id`。
-- **`oidc_sessions`**（`V604`，**UNLOGGED 表**，服务端登录会话，**本期新增能力**）：`id` VARCHAR(32) PK (ULID)、`user_id` VARCHAR(32) NOT NULL、`client_id` VARCHAR(64)、`sso_token` VARCHAR(64) NOT NULL（即 `crate_sso` cookie 的不透明值，该 cookie 为本期首次引入，此前登录为无状态 HS256 JWT、不写 cookie）、`scope` TEXT（创建会话时记录的权限范围，用于 `/introspect` 返回）、`expires_at` TIMESTAMPTZ NOT NULL、`revoked` BOOLEAN NOT NULL DEFAULT false、`last_active_at` TIMESTAMPTZ、`created_at` TIMESTAMPTZ NOT NULL DEFAULT now()。索引：`idx_oidc_sessions_sso_token`、`idx_oidc_sessions_user_id`。用途：将登录态落地为**服务端可查、可吊销**的会话，支撑多实例部署、全域登出、并发会话控制（此前的认证无服务端会话层）。
+- **`oidc_clients`**（`V700`）：`id` VARCHAR(32) PK (ULID)、`client_id` VARCHAR(64) UNIQUE、`client_secret_hash` VARCHAR(255) (bcrypt，可空用于公开客户端)、`name` VARCHAR(128)、`redirect_uris` JSONB、`login_page_uris` JSONB（可选，未登录时 302 跳转的目标前端登录页 URL 列表，见 §6）、`grant_types` JSONB、`scopes` JSONB、`status` VARCHAR(16) (`启用`/`禁用`)、`created_at`/`updated_at` TIMESTAMPTZ。
+- **`oidc_signing_keys`**（`V701`）：`kid` VARCHAR(64) PK、`alg` VARCHAR(8) (`RS256`)、`public_jwk` JSONB、`private_pem` TEXT、`status` VARCHAR(16) (`激活`/`已轮换`/`已吊销`)、`created_at` TIMESTAMPTZ、`expires_at` TIMESTAMPTZ。用于 JWKS 跨重启稳定与密钥轮换（状态语义见 §5）。
+- **`oidc_refresh_tokens`**（`V702`）：`token` VARCHAR(64) PK、`user_id` VARCHAR(32) NOT NULL、`client_id` VARCHAR(64) NOT NULL、`expires_at` TIMESTAMPTZ NOT NULL、`revoked` BOOLEAN NOT NULL DEFAULT false、`created_at` TIMESTAMPTZ NOT NULL DEFAULT now()。索引：`idx_oidc_refresh_tokens_user_id`。不透明 refresh token 落地；`/revoke` 通过置 `revoked=true` 立即吊销（轮转时旧 token 一并置 `revoked=true`）。
+- **`oidc_auth_codes`**（`V703`，授权码流程用）：`code` VARCHAR(64) PK、`user_id` VARCHAR(32) NOT NULL、`client_id` VARCHAR(64) NOT NULL、`redirect_uri` TEXT NOT NULL、`code_challenge` VARCHAR(128) NOT NULL、`code_challenge_method` VARCHAR(8) NOT NULL (`S256`)、`scope` TEXT、`nonce` VARCHAR(64)、`expires_at` TIMESTAMPTZ NOT NULL（短 TTL ~5min）、`used` BOOLEAN NOT NULL DEFAULT false（授权码一次性使用标记，`/token` 交换成功后置 `true`，后续请求直接拒绝 `invalid_grant`）。索引：`idx_oidc_auth_codes_user_id`。
+- **`oidc_sessions`**（`V704`，**UNLOGGED 表**，服务端登录会话，**本期新增能力**）：`id` VARCHAR(32) PK (ULID)、`user_id` VARCHAR(32) NOT NULL、`client_id` VARCHAR(64)、`sso_token` VARCHAR(64) NOT NULL（即 `crate_sso` cookie 的不透明值，该 cookie 为本期首次引入，此前登录为无状态 HS256 JWT、不写 cookie）、`scope` TEXT（创建会话时记录的权限范围，用于 `/introspect` 返回）、`expires_at` TIMESTAMPTZ NOT NULL、`revoked` BOOLEAN NOT NULL DEFAULT false、`last_active_at` TIMESTAMPTZ、`created_at` TIMESTAMPTZ NOT NULL DEFAULT now()。索引：`idx_oidc_sessions_sso_token`、`idx_oidc_sessions_user_id`。用途：将登录态落地为**服务端可查、可吊销**的会话，支撑多实例部署、全域登出、并发会话控制（此前的认证无服务端会话层）。
 
 > **外键约束说明**：为保持灵活性和性能，表间不设置数据库层面的外键约束。引用完整性（如 `user_id` 必须存在于 `users` 表）由应用层（`OidcService`、`OidcClientService` 等）在业务逻辑中保证。
 
 > **UNLOGGED 取舍**：该表不写 WAL、不进流复制，崩溃/故障切换后内容会丢失（会话需重新登录），换来更低写放大与更高吞吐——符合会话这类易失态的场景。其他 oidc 表仍为普通 LOGGED 表（令牌/密钥需持久）。Flyway 对 UNLOGGED 建表无特殊处理，正常 `CREATE UNLOGGED TABLE` 即可。
 
-> Flyway 所有 lib 共享一套 `flyway_schema_history`（现有最大版本为 V500 healthcare），故 oidc 表使用 V600+ 号段避免冲突。
+> Flyway 所有 lib 共享一套 `flyway_schema_history`。号段占用：V200+ inventories、V300+ pharmacy、V400+ nursing、V500+ healthcare、V600–V699 Aceso dining（已有 `libs/dining` 的 `V600__create_dining_tables.sql`）；故 oidc 表按根 `AGENTS.md`"新增 lib 按最大号段递增 100"使用 **V700–V704** 号段（2026-08-26 评审勘误，原稿 V600+ 与 dining 冲突）。
 
  迁移文件就位后，运行 `./gradlew :libs:oidc:generateJooq` 生成 `libs/oidc` 专属的 jOOQ 类（沿用 §3 的 per-lib 约定，不依赖 `libs/database` 暴露表类）。
 
@@ -147,9 +149,9 @@ libs/oidc/
   "error_description": "具体的错误描述信息"
 }
 ```
-对应 HTTP 状态码：
-- `400 Bad Request`：`invalid_request`、`invalid_client`、`invalid_grant`、`unauthorized_client`、`unsupported_grant_type`、`invalid_scope`
-- `401 Unauthorized`：未提供 token 或 token 无效
+对应 HTTP 状态码（2026-08-26 评审勘误：RFC 6749 §5.2 / RFC 7009 / RFC 7662 要求 token、revoke、introspect 端点的**客户端认证失败**返回 `401 + WWW-Authenticate: Basic`，不能统一 400）：
+- `401 Unauthorized`：协议端点（`/token`、`/revoke`、`/introspect`）客户端认证失败（`invalid_client`）、未提供 token 或 token 无效
+- `400 Bad Request`：`invalid_request`、`invalid_grant`（非客户端认证失败时）、`unauthorized_client`、`unsupported_grant_type`、`invalid_scope`
 - `403 Forbidden`：token 有效但权限不足
 - `500 Internal Server Error`：服务器内部错误
 
@@ -188,7 +190,7 @@ libs/oidc/
 
 ## 9. 实施步骤（Checklist）
 1. `settings.gradle.kts` 添加 `include("libs:oidc")`；新建 `libs/oidc/build.gradle.kts`（含本模块专属的 `jooq-config.xml` 与 `generateJooq` task，参照 `libs/users/build.gradle.kts` 的 per-lib 模式，仅 `<includes>` 本模块所需表 `oidc_clients|oidc_signing_keys|oidc_refresh_tokens|oidc_auth_codes|oidc_sessions`）。**每个需要 OIDC 的 app**（不限具体目录，含未来新增）在其 `build.gradle.kts` 加入 `implementation(project(":libs:oidc"))`。
-2. 在 `libs/oidc/src/main/resources/db/migration/` 目录下写 5 个 Flyway 迁移文件（V600–V604，其中 `oidc_sessions` 为 UNLOGGED）。位置与 users、pharmacy 等现有 lib 的 per-lib 模式一致。随后跑 `./gradlew :libs:oidc:generateJooq` 生成 `libs/oidc` 专属 jOOQ 类。
+2. 在 `libs/oidc/src/main/resources/db/migration/` 目录下写 5 个 Flyway 迁移文件（V700–V704，其中 `oidc_sessions` 为 UNLOGGED；2026-08-26 自 V600–V604 勘误）。位置与 users、pharmacy 等现有 lib 的 per-lib 模式一致。随后跑 `./gradlew :libs:oidc:generateJooq` 生成 `libs/oidc` 专属 jOOQ 类。
 3. 实现 `OidcKeyService`（密钥持久化 + JWKS + `JWTAuth` RS256 工厂）。
 4. 实现 `OidcClientService`（Crate 自有客户端注册/校验）。**内置种子数据**在应用启动时检查并初始化（`OidcClientService.initSeedClients()`），包含至少一个默认客户端：`client_id="crate-web"`、`client_secret_hash=bcrypt("crate-web-secret")`、`grant_types=["authorization_code","refresh_token","password"]`、`scopes=["openid","profile","email"]`、`redirect_uris` 和 `login_page_uris` 从配置项 `auth.oidc` 读取（开发环境默认 `["http://localhost:4322/callback"]`／`["http://localhost:4322/login"]`），`status="启用"`。后续新增客户端可通过直接操作 `oidc_clients` 表（INSERT SQL）实现，本期不提供 admin API。
 5. 实现 `OidcSessionService`（UNLOGGED `oidc_sessions` 的建/查/吊销：创建会话、按 `sso_token` 取有效会话、按用户吊销全部、更新 `last_active_at`）。
