@@ -8,22 +8,41 @@ import {
   getPaymentSummary,
   listArrears,
   listBills,
+  listDeposits,
   listElderlyAdmissions,
   listFeeItems,
   listPatients,
   listPayments,
+  precheckBillGeneration,
+  previewEncounterBilling,
   settleEncounterBilling,
   type Arrear,
   type Bill,
   type BillItem,
+  type BillPrecheck,
+  type BillPrecheckRequirement,
   type Encounter,
   type FeeItem,
   type Payment,
   type PaymentMethod,
   type PaymentSummary,
+  type SettlementPreview,
 } from "@pitchfork/shared/aceso";
+import { BILLING_BLOCKED_REASONS, FEE_ITEMS_PAGE_PATH, billingErrorMessage } from "./billingMessages";
 
 const PAGE_SIZE = 50;
+
+/** 生成账单前置校验的防抖间隔（ms）：账期输入时不逐字符打接口 */
+const PRECHECK_DEBOUNCE_MS = 300;
+
+/** 结算核销上限用的「本入住欠费合计」一次取足：按 encounter_id 过滤，避免被全局列表截断 */
+const ENCOUNTER_ARREARS_LIMIT = 500;
+
+/** 减免原因的服务端上限（trim 后字符数），与 POST billing-settlement 契约一致 */
+const WRITE_OFF_REASON_MAX_LENGTH = 500;
+
+/** 「系统设置 → 费用项目」在页面文案里的统一写法 */
+const FEE_ITEMS_LOCATION = "「系统设置 → 费用项目」";
 
 const ENCOUNTER_STATUS_LABEL: Record<string, string> = {
   ACTIVE: "在住",
@@ -59,8 +78,9 @@ interface PayableBill {
   period_end: string;
 }
 
+/** 收费域错误中文化（映射表见 ./billingMessages）；保留本地同名包装以减少调用点改动 */
 function errorMessage(error: unknown, fallback: string): string {
-  return error instanceof Error && error.message ? error.message : fallback;
+  return billingErrorMessage(error, fallback);
 }
 
 function formatDateTime(value: string | null | undefined): string {
@@ -86,6 +106,35 @@ function formatAmount(value: number): string {
 function currentMonth(): string {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+}
+
+/** 生成账单前置提示条目（缺项 / 阻塞原因） */
+interface GenerateBlockNotice {
+  key: string;
+  text: string;
+}
+
+/**
+ * 把 precheck 返回的缺项槽位渲染成中文可操作提示。
+ * 只读 `category` / `level` / `enabled_count` 决定措辞，`satisfied` 一律以服务端为准。
+ */
+function requirementNotice(requirement: BillPrecheckRequirement): string {
+  const level = requirement.level?.trim() || null;
+  if (level) {
+    return requirement.enabled_count > 1
+      ? `护理等级「${level}」存在多条启用的「护理费」项目，请到${FEE_ITEMS_LOCATION}只保留一条启用。`
+      : `护理等级「${level}」缺少同名的启用「护理费」项目：护理费名称必须与护理评估的「结果等级」完全一致。`;
+  }
+  if (requirement.enabled_count > 1) {
+    return `「${requirement.category}」存在多条启用的费用项目，请到${FEE_ITEMS_LOCATION}只保留一条启用。`;
+  }
+  const basis =
+    requirement.category === "床位费"
+      ? "自动计费要求「床位费」恰好一条启用项（按在院天数计费）。"
+      : requirement.category === "伙食费"
+        ? "账期内有就餐记录时自动计费要求「伙食费」恰好一条启用项（按折合餐次计费）。"
+        : "自动计费要求该分类恰好一条启用项。";
+  return `缺少启用的「${requirement.category}」费用项目：${basis}`;
 }
 
 export default function BillingPage() {
@@ -131,9 +180,32 @@ export default function BillingPage() {
   // 账单明细
   const [detail, setDetail] = useState<{ bill: Bill; items: BillItem[]; payments: Payment[] } | null>(null);
 
+  // 生成账单前置校验：由服务端 precheck 判定（前端只渲染，不再复刻计价/取级规则）。
+  // null 表示尚未拿到结果或请求失败，两种情况都走刻意降级（不禁用生成）。
+  const [precheck, setPrecheck] = useState<BillPrecheck | null>(null);
+  // 生成/缴费/加项/收束会改变账期状态（如某账期已生成），用它触发 precheck 复验
+  const [precheckTick, setPrecheckTick] = useState(0);
+
   // 结算收束
   const [settleOpen, setSettleOpen] = useState(false);
   const [settling, setSettling] = useState(false);
+  // 结算核销：押金余额（已扣除核销）与本次核销金额输入
+  const [depositBalance, setDepositBalance] = useState<number | null>(null);
+  const [depositLoading, setDepositLoading] = useState(false);
+  const [depositError, setDepositError] = useState("");
+  const [offsetAmount, setOffsetAmount] = useState("");
+  // 结算核销上限用的「本入住欠费合计」：按 encounter_id 单独查询（不再从全局欠费列表里过滤）
+  const [encounterArrears, setEncounterArrears] = useState(0);
+  const [encounterArrearsLoading, setEncounterArrearsLoading] = useState(false);
+  const [encounterArrearsError, setEncounterArrearsError] = useState("");
+  // 结算收束预览（只读）：提交前展示「会发生什么」的权威口径（含区间最终账单，故与卡片上的欠费合计不同源）
+  const [settlePreview, setSettlePreview] = useState<SettlementPreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  // 预览不可用时的中文错误（走 billingMessages）；此时弹窗退化为「不显示预览数字、按后端错误兜底」
+  const [previewError, setPreviewError] = useState("");
+  // 减免确认（本次任务核心）：有未结余额时「勾选确认」与「原因」缺一不可，后端 409 兜底
+  const [writeOffConfirmed, setWriteOffConfirmed] = useState(false);
+  const [writeOffReason, setWriteOffReason] = useState("");
 
   const loadAdmissions = useCallback(async () => {
     setAdmissionsLoading(true);
@@ -211,6 +283,84 @@ export default function BillingPage() {
     }
   }, []);
 
+  /**
+   * 结算核销上限用的「本入住欠费合计」：按 encounter_id 过滤查询（records 与 meta.total 同源）。
+   * 与上方全局「欠费列表」各自独立：这里不受全局列表分页条数限制，避免上限被低估。
+   *
+   * 求和前再按 `row.encounter_id === encounterId` 过滤一次，属**纵深防御**、不是权威口径：
+   * 服务端按 `encounter_id` 过滤才是权威；服务端过滤生效时这一层是幂等的空操作。
+   * 它只用于兜住「服务端参数尚未生效」的过渡态——那时返回的是全局欠费，不过滤会把它们
+   * 求和成「本入住欠费合计」，使核销上限虚高。
+   */
+  const loadEncounterArrears = useCallback(async (encounterId: string) => {
+    if (!encounterId) {
+      setEncounterArrears(0);
+      setEncounterArrearsError("");
+      return;
+    }
+    setEncounterArrearsLoading(true);
+    setEncounterArrearsError("");
+    try {
+      const response = await listArrears({ encounter_id: encounterId, limit: ENCOUNTER_ARREARS_LIMIT });
+      setEncounterArrears(
+        response.records
+          .filter((row) => row.encounter_id === encounterId)
+          .reduce((acc, row) => acc + row.balance, 0),
+      );
+    } catch (error) {
+      setEncounterArrears(0);
+      setEncounterArrearsError(errorMessage(error, "无法加载本入住欠费合计"));
+    } finally {
+      setEncounterArrearsLoading(false);
+    }
+  }, []);
+
+  /** 结算核销所需的押金余额（meta.balance 已扣除核销） */
+  const loadDepositBalance = useCallback(async (encounterId: string) => {
+    if (!encounterId) {
+      setDepositBalance(null);
+      setDepositError("");
+      return;
+    }
+    setDepositLoading(true);
+    setDepositError("");
+    try {
+      const ledger = await listDeposits(encounterId, { limit: 1 });
+      setDepositBalance(ledger.meta.balance);
+    } catch (error) {
+      setDepositBalance(null);
+      setDepositError(errorMessage(error, "无法加载押金余额"));
+    } finally {
+      setDepositLoading(false);
+    }
+  }, []);
+
+  /**
+   * 结算收束预览（只读，与收束实际算法同源）：打开收束弹窗时拉取。
+   *
+   * 失败时**不阻塞收束**：只显示中文错误，`settlePreview` 保持 `null`，
+   * 弹窗内退化为「不显示预览数字、核销上限不做前端校验、减免原因可自愿填写」，
+   * 最终以服务端返回的错误文案兜底（`unsettled bills require explicit write-off` 已有中文映射）。
+   */
+  const loadSettlePreview = useCallback(async (encounterId: string) => {
+    if (!encounterId) {
+      setSettlePreview(null);
+      setPreviewError("");
+      return;
+    }
+    setPreviewLoading(true);
+    setPreviewError("");
+    try {
+      const preview = await previewEncounterBilling(encounterId);
+      setSettlePreview(preview);
+    } catch (error) {
+      setSettlePreview(null);
+      setPreviewError(errorMessage(error, "无法加载结算预览，本次将不显示预览数字，提交后以服务端校验结果为准"));
+    } finally {
+      setPreviewLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     void loadAdmissions();
     void loadFeeItems();
@@ -221,6 +371,49 @@ export default function BillingPage() {
     void loadBills(selectedEncounterId);
   }, [selectedEncounterId, loadBills]);
 
+  useEffect(() => {
+    setOffsetAmount("");
+    // 换入住即作废上一人的预览：避免加载新预览期间用旧数字判定核销上限与减免
+    setSettlePreview(null);
+    setPreviewError("");
+    setWriteOffConfirmed(false);
+    setWriteOffReason("");
+    void loadDepositBalance(selectedEncounterId);
+    void loadEncounterArrears(selectedEncounterId);
+  }, [selectedEncounterId, loadDepositBalance, loadEncounterArrears]);
+
+  /**
+   * 生成账单前置校验：`(selectedEncounterId, month)` 变化时调用服务端 precheck。
+   * 防抖 [PRECHECK_DEBOUNCE_MS] 毫秒（账期输入时不逐字符打接口），cleanup 同时取消防抖与在途响应。
+   */
+  useEffect(() => {
+    if (!selectedEncounterId || !/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+      setPrecheck(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const result = await precheckBillGeneration(selectedEncounterId, month);
+          if (cancelled) return;
+          setPrecheck(result);
+        } catch {
+          if (cancelled) return;
+          // 刻意降级：precheck 不可用时（接口尚未上线、网络错误、401 等）不阻塞生成——
+          // 清空校验结果、不禁用按钮、不显示缺项清单，让用户照常提交，失败以后端返回的错误为准
+          // （已有 billingMessages 的中文映射兜底）。
+          setPrecheck(null);
+        }
+      })();
+    }, PRECHECK_DEBOUNCE_MS);
+    return () => {
+      // 取消防抖与在途响应：账期每敲一个字符只保留最后一次请求的结果
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [selectedEncounterId, month, precheckTick]);
+
   const selectedAdmission = useMemo(
     () => admissions.find((admission) => admission.id === selectedEncounterId) ?? null,
     [admissions, selectedEncounterId],
@@ -228,17 +421,126 @@ export default function BillingPage() {
 
   const admissionById = useMemo(() => new Map(admissions.map((admission) => [admission.id, admission])), [admissions]);
 
-  /** 变更后联动刷新账单与欠费汇总 */
+  // ─── 生成账单前置校验（服务端 precheck 驱动；前端不再复刻取级/计价规则） ───
+
+  /**
+   * 缺项清单 = 服务端标记 `required` 且 `!satisfied` 的槽位。
+   * `satisfied` 由服务端按「启用条数恰好为 1」判定，这里只做过滤，绝不重算。
+   */
+  const missingFeeItems = useMemo(
+    () => (precheck?.requirements ?? []).filter((requirement) => requirement.required && !requirement.satisfied),
+    [precheck],
+  );
+
+  /** 缺项逐条说明 + 非缺项的阻塞原因，共用同一提示区 */
+  const generateBlockNotices = useMemo((): GenerateBlockNotice[] => {
+    const notices: GenerateBlockNotice[] = missingFeeItems.map((requirement) => ({
+      key: `${requirement.category}-${requirement.level ?? ""}`,
+      text: requirementNotice(requirement),
+    }));
+    const blockedBy = precheck?.blocked_by ?? null;
+    if (blockedBy !== null && blockedBy !== "missing_fee_items") {
+      notices.push({ key: blockedBy, text: BILLING_BLOCKED_REASONS[blockedBy] });
+    }
+    return notices;
+  }, [missingFeeItems, precheck]);
+
+  const feeItemsEmpty = !feeItemsLoading && feeItems.length === 0;
+  const generateBlocked = missingFeeItems.length > 0;
+
+  /**
+   * 按钮可用性完全取服务端 `can_generate`；precheck 尚未返回或请求失败（null）时**不禁用**，
+   * 走刻意降级：交给后端在提交时给出错误文案。
+   */
+  const precheckAllowsGenerate = precheck === null ? true : precheck.can_generate;
+
+  const canGenerateBill =
+    Boolean(selectedEncounterId) && !selectedAdmission?.settled_at && precheckAllowsGenerate;
+
+  // ─── 结算核销金额与减免确认 ─────────────────────────────────────────
+
+  // encounterArrears 由 loadEncounterArrears 按 encounter_id 过滤查询后写入（见上方 loader）
+
+  /** 结算卡片显示用的核销上限 = min(押金余额, 欠费合计)（不含尚未生成的区间最终账单） */
+  const offsetLimit = Math.min(Math.max(depositBalance ?? 0, 0), Math.max(encounterArrears, 0));
+
+  /**
+   * 结算弹窗的核销上限：预览的 `max_offset`（= min(押金余额, 未结合计)，已含区间最终账单），
+   * 是权威口径，不再用卡片上基于欠费列表的 [offsetLimit]。
+   * `null` 表示预览不可用（加载中或失败）：此时不做前端上限校验，交由服务端 400/409 兜底。
+   */
+  const previewMaxOffset = settlePreview ? Math.max(settlePreview.max_offset, 0) : null;
+
+  /** 本次收束是否真的生成区间最终账单：账期为 `null` 或金额为 0 都表示不生成 */
+  const hasFinalBill =
+    settlePreview != null && settlePreview.settlement_period !== null && settlePreview.final_bill_total !== 0;
+
+  const offsetCheck = useMemo((): { value: number; error: string } => {
+    const raw = offsetAmount.trim();
+    if (raw === "") return { value: 0, error: "" };
+    if (!/^\d+(\.\d{1,2})?$/.test(raw)) {
+      return { value: 0, error: "押金核销金额必须是不超过两位小数的正数" };
+    }
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value < 0) {
+      return { value: 0, error: "押金核销金额必须是不超过两位小数的正数" };
+    }
+    if (previewMaxOffset !== null && value > previewMaxOffset + 1e-9) {
+      return {
+        value,
+        error: `押金核销金额不得超过核销上限 ¥ ${formatAmount(previewMaxOffset)}（取押金余额与未结合计的较小值，含区间最终账单）`,
+      };
+    }
+    return { value, error: "" };
+  }, [offsetAmount, previewMaxOffset]);
+
+  const offsetValue = offsetCheck.error === "" ? offsetCheck.value : 0;
+
+  /**
+   * 核销后仍未结的金额 = `outstanding_total − 本次核销`（下限 0）。
+   * `null` 表示预览不可用、无从判定——此时不强制减免确认，按后端 409 文案兜底。
+   */
+  const remaining: number | null = settlePreview
+    ? Math.max(settlePreview.outstanding_total - offsetValue, 0)
+    : null;
+
+  /** 减免原因（trim 后）：非空且 ≤ [WRITE_OFF_REASON_MAX_LENGTH] 字符才算有效 */
+  const writeOffReasonTrimmed = writeOffReason.trim();
+  const writeOffReasonValid =
+    writeOffReasonTrimmed !== "" && writeOffReasonTrimmed.length <= WRITE_OFF_REASON_MAX_LENGTH;
+
+  /** 是否必须走减免确认：只有「预览可知核销后仍有未结」时才强制（本次任务核心） */
+  const writeOffRequired = remaining !== null && remaining > 0;
+  /** 减免确认是否已满足：勾选 + 有效原因，缺一不可 */
+  const writeOffSatisfied = writeOffConfirmed && writeOffReasonValid;
+
+  /** 预览判定「即使全额核销仍会剩余未结」：额外提示必须填写减免原因 */
+  const previewRequiresWriteOff = settlePreview?.requires_write_off === true;
+
+  /**
+   * 提交时是否携带减免原因：预览可用时严格按契约（仅 `remaining > 0` 才发送）；
+   * 预览不可用时，操作员自愿填写的有效原因照发——否则一旦后端 409，弹窗内没有补救入口。
+   */
+  const sendWriteOffReason = remaining === null ? writeOffReasonValid : remaining > 0;
+
+  /** 提交按钮可用性：核销金额非法，或必须减免确认而未满足 → 禁用 */
+  const settleDisabled = offsetCheck.error !== "" || (writeOffRequired && !writeOffSatisfied);
+
+  /** 变更后联动刷新账单、全局欠费汇总、本入住欠费合计，并复验生成前置校验 */
   const refreshAfterChange = useCallback(() => {
     void loadBills(selectedEncounterId);
     void loadArrearsAndSummary();
-  }, [selectedEncounterId, loadBills, loadArrearsAndSummary]);
+    void loadEncounterArrears(selectedEncounterId);
+    setPrecheckTick((tick) => tick + 1);
+  }, [selectedEncounterId, loadBills, loadArrearsAndSummary, loadEncounterArrears]);
 
   // ─── 账单生成 ───────────────────────────────────────────────────────
 
   function openGenerate() {
     setMonth(currentMonth());
     setActionError("");
+    // 打开弹窗时复验一次：账期文本没变也要拿到最新状态（如该账期已生成过）
+    setPrecheckTick((tick) => tick + 1);
     setGenerateOpen(true);
   }
 
@@ -246,6 +548,10 @@ export default function BillingPage() {
     if (!selectedEncounterId) return;
     if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
       setActionError("账期格式应为 YYYY-MM");
+      return;
+    }
+    if (generateBlocked) {
+      setActionError("费用字典缺项，请先到「系统设置 → 费用项目」补齐并启用后再生成账单");
       return;
     }
     setGenerating(true);
@@ -379,19 +685,58 @@ export default function BillingPage() {
     (selectedAdmission.status === "DISCHARGED" || selectedAdmission.status === "DECEASED") &&
     !selectedAdmission.settled_at;
 
+  /**
+   * 打开结算收束确认：押金余额与欠费合计已在选择入住时随结算入口加载（卡片显示不变），
+   * 这里只清空上次的核销输入与减免勾选，并拉取只读预览（含区间最终账单的权威口径）。
+   */
+  function openSettle() {
+    setActionError("");
+    setOffsetAmount("");
+    setWriteOffConfirmed(false);
+    setWriteOffReason("");
+    // 先作废上一次的预览：加载新预览期间一律按「预览不可用」处理，不用旧数字做上限与减免判定
+    setSettlePreview(null);
+    void loadSettlePreview(selectedEncounterId);
+    setSettleOpen(true);
+  }
+
   async function handleSettle() {
     if (!selectedEncounterId) return;
+    if (offsetCheck.error) {
+      setActionError(offsetCheck.error);
+      return;
+    }
+    // 减免守卫（第二道；第一道是提交按钮 disabled）：有未结余额必须显式勾选并写明原因
+    if (writeOffRequired && !writeOffSatisfied) {
+      setActionError(
+        `核销后仍未结 ¥ ${formatAmount(remaining ?? 0)}，请勾选「确认减免」并填写减免原因（trim 后不超过 ${WRITE_OFF_REASON_MAX_LENGTH} 字符）后再提交`,
+      );
+      return;
+    }
+    // 请求体：两个键都可省略；核销为 0 时不发 deposit_offset，无需减免时不发 write_off_reason
+    const payload: { depositOffset?: number; writeOffReason?: string } = {
+      ...(offsetValue > 0 ? { depositOffset: offsetValue } : {}),
+      ...(sendWriteOffReason ? { writeOffReason: writeOffReasonTrimmed } : {}),
+    };
     setSettling(true);
     setActionError("");
     try {
-      const encounter = await settleEncounterBilling(selectedEncounterId);
+      const encounter = await settleEncounterBilling(selectedEncounterId, payload);
       setAdmissions((current) =>
         current.map((admission) =>
           admission.id === encounter.id ? { ...admission, ...encounter, patientName: admission.patientName } : admission,
         ),
       );
       setSettleOpen(false);
+      setOffsetAmount("");
+      setWriteOffConfirmed(false);
+      setWriteOffReason("");
+      // 收束后该入住已结算，预览必然 409（已收束）：清空而不重拉，避免把 409 当加载失败展示；
+      // 若弹窗再次打开（选了别的可收束入住），openSettle 会重新拉取最新预览。
+      setSettlePreview(null);
+      setPreviewError("");
       refreshAfterChange();
+      void loadDepositBalance(selectedEncounterId);
     } catch (error) {
       setActionError(errorMessage(error, "结算收束失败"));
     } finally {
@@ -412,7 +757,19 @@ export default function BillingPage() {
     {
       key: "status",
       header: "状态",
-      render: (row) => <Badge variant={BILL_STATUS_VARIANT[row.status] ?? "default"}>{row.status}</Badge>,
+      render: (row) => (
+        <div className="flex flex-wrap items-center gap-1">
+          <Badge variant={BILL_STATUS_VARIANT[row.status] ?? "default"}>{row.status}</Badge>
+          {/* 只有「已结算 且 收束时未结余额 > 0」才标记：outstanding_amount = 0 的已结算账单不显示，避免噪音 */}
+          {row.status === "已结算" && row.outstanding_amount > 0 && (
+            <Badge variant="warning" className="cursor-help">
+              <span title={`收束时未结 ¥ ${formatAmount(row.outstanding_amount)}｜减免原因：${row.write_off_reason ?? "—"}`}>
+                收束时未结
+              </span>
+            </Badge>
+          )}
+        </div>
+      ),
     },
     {
       key: "total_amount",
@@ -459,7 +816,13 @@ export default function BillingPage() {
       header: "时间",
       render: (row) => <span className="text-fg-muted text-sm">{formatDateTime(row.created_at)}</span>,
     },
-    { key: "method", header: "方式", render: (row) => row.method },
+    {
+      key: "method",
+      header: "方式",
+      // 缴费流水可能出现结算核销写入的 method = 押金（客户端不可提交），单独标注区分
+      render: (row) =>
+        row.method === "押金" ? <Badge variant="info">押金核销</Badge> : <span className="text-fg">{row.method}</span>,
+    },
     {
       key: "amount",
       header: "金额（元）",
@@ -502,6 +865,39 @@ export default function BillingPage() {
 
   const modalError = actionError && (
     <div className="rounded-md border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">{actionError}</div>
+  );
+
+  /**
+   * 生成账单前置提示：缺项时逐条说明缺哪一类（文案取自服务端 requirements），
+   * 其余阻塞原因（如该账期已生成）直接显示 `blocked_by` 的中文映射。
+   * 服务端 precheck 不可用时 `generateBlockNotices` 为空 → 不渲染本区块（刻意降级）。
+   */
+  const generateGateNotice = generateBlockNotices.length > 0 && (
+    <div className="mb-4 rounded-md border border-warning/30 bg-warning-bg px-4 py-3 text-sm">
+      <p className="font-medium text-warning">
+        {/* 标题与按钮可用性同源（都取 can_generate），避免出现「已禁用」但按钮可用 */}
+        {precheckAllowsGenerate
+          ? "生成校验提示"
+          : precheck?.blocked_by != null && precheck.blocked_by !== "missing_fee_items"
+            ? "当前账期不能生成账单"
+            : "费用字典缺项，「生成账单」已禁用"}
+      </p>
+      <ul className="mt-2 space-y-1 text-fg-muted">
+        {generateBlockNotices.map((notice) => (
+          <li key={notice.key}>· {notice.text}</li>
+        ))}
+      </ul>
+      {feeItemsEmpty && (
+        <p className="mt-2 text-fg-muted">
+          当前没有任何启用的费用项目。自动计费至少需要：床位费 ×1、护理费 ×每个评估等级 ×1、伙食费 ×1。
+        </p>
+      )}
+      <div className="mt-3">
+        <Button variant="secondary" size="sm" onClick={() => window.location.assign(FEE_ITEMS_PAGE_PATH)}>
+          去配置费用项目
+        </Button>
+      </div>
+    </div>
   );
 
   return (
@@ -561,7 +957,11 @@ export default function BillingPage() {
       <Card
         title="账单列表"
         actions={
-          <Button size="sm" onClick={openGenerate} disabled={!selectedEncounterId || Boolean(selectedAdmission?.settled_at)}>
+          <Button
+            size="sm"
+            onClick={openGenerate}
+            disabled={!canGenerateBill || Boolean(selectedAdmission?.settled_at)}
+          >
             生成账单
           </Button>
         }
@@ -573,6 +973,7 @@ export default function BillingPage() {
             {actionError && !generateOpen && !addItemBill && !payTarget && !settleOpen && !detail && (
               <div className="mb-4 rounded-md border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">{actionError}</div>
             )}
+            {generateGateNotice}
             {selectedAdmission?.settled_at && (
               <p className="mb-4 text-sm text-fg-muted">该入住已完成结算收束，账单已冻结（不可生成账单、手工加项或缴费）。</p>
             )}
@@ -614,17 +1015,38 @@ export default function BillingPage() {
               {selectedAdmission.settled_at
                 ? "该入住已完成结算收束：全部账单已冻结，不可再生成账单、手工加项或缴费。"
                 : canSettle
-                  ? "该入住已离院/去世且未结算：结算收束将生成区间最终账单并冻结全部账单，冻结后不可再生成账单、手工加项或缴费。"
+                  ? "该入住已离院/去世且未结算：结算收束将生成区间最终账单并冻结全部账单，冻结后不可再生成账单、手工加项或缴费。收束时可选择用押金余额手工核销欠费。"
                   : "结算收束适用于已离院/去世的养老入住；在住入住不可结算。"}
             </p>
+            {!selectedAdmission.settled_at && (
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="rounded-md border border-border bg-surface-alt px-4 py-3">
+                  <p className="text-xs text-fg-dimmed">当前押金余额（元）</p>
+                  <p className="text-lg font-bold text-accent mt-0.5">
+                    {depositLoading ? "加载中…" : depositBalance === null ? "—" : formatAmount(depositBalance)}
+                  </p>
+                  <p className="text-xs text-fg-dimmed mt-1">余额 = 累计登记 − 累计退押 − 累计核销</p>
+                </div>
+                <div className="rounded-md border border-border bg-surface-alt px-4 py-3">
+                  <p className="text-xs text-fg-dimmed">本入住欠费合计（元）</p>
+                  <p className="text-lg font-bold text-danger mt-0.5">
+                    {encounterArrearsLoading ? "加载中…" : formatAmount(encounterArrears)}
+                  </p>
+                  <p className="text-xs text-fg-dimmed mt-1">核销上限 = min(押金余额, 欠费合计) = ¥ {formatAmount(offsetLimit)}</p>
+                </div>
+              </div>
+            )}
+            {depositError && (
+              <div className="rounded-md border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">{depositError}</div>
+            )}
+            {encounterArrearsError && (
+              <div className="rounded-md border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">{encounterArrearsError}</div>
+            )}
             {!selectedAdmission.settled_at && (
               <Button
                 variant="warning"
                 disabled={!canSettle}
-                onClick={() => {
-                  setActionError("");
-                  setSettleOpen(true);
-                }}
+                onClick={openSettle}
               >
                 结算收束
               </Button>
@@ -643,20 +1065,29 @@ export default function BillingPage() {
         }
       >
         {summary && (
-          <div className="grid gap-4 md:grid-cols-3 mb-5">
-            <div className="rounded-md border border-border bg-surface-alt px-4 py-3">
-              <p className="text-xs text-fg-dimmed">应缴合计（元）</p>
-              <p className="text-lg font-bold text-fg mt-0.5">{formatAmount(summary.due_amount)}</p>
+          <>
+            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4 mb-5">
+              <div className="rounded-md border border-border bg-surface-alt px-4 py-3">
+                <p className="text-xs text-fg-dimmed">应缴合计（元）</p>
+                <p className="text-lg font-bold text-fg mt-0.5">{formatAmount(summary.due_amount)}</p>
+              </div>
+              <div className="rounded-md border border-border bg-surface-alt px-4 py-3">
+                <p className="text-xs text-fg-dimmed">已缴合计（元）</p>
+                <p className="text-lg font-bold text-success mt-0.5">{formatAmount(summary.paid_amount)}</p>
+              </div>
+              <div className="rounded-md border border-border bg-surface-alt px-4 py-3">
+                <p className="text-xs text-fg-dimmed">欠费合计（元）</p>
+                <p className="text-lg font-bold text-danger mt-0.5">{formatAmount(summary.arrears_amount)}</p>
+              </div>
+              {/* 收束减免：既不是收入（已缴）也不是欠费，故用 warning 系配色以示「已放弃」 */}
+              <div className="rounded-md border border-border bg-surface-alt px-4 py-3">
+                <p className="text-xs text-fg-dimmed">收束减免（元）</p>
+                <p className="text-lg font-bold text-warning mt-0.5">{formatAmount(summary.write_off_amount ?? 0)}</p>
+                <p className="text-xs text-fg-dimmed mt-1">收束时未结而被放弃的金额合计（不并入欠费）</p>
+              </div>
             </div>
-            <div className="rounded-md border border-border bg-surface-alt px-4 py-3">
-              <p className="text-xs text-fg-dimmed">已缴合计（元）</p>
-              <p className="text-lg font-bold text-success mt-0.5">{formatAmount(summary.paid_amount)}</p>
-            </div>
-            <div className="rounded-md border border-border bg-surface-alt px-4 py-3">
-              <p className="text-xs text-fg-dimmed">欠费合计（元）</p>
-              <p className="text-lg font-bold text-danger mt-0.5">{formatAmount(summary.arrears_amount)}</p>
-            </div>
-          </div>
+            <p className="text-xs text-fg-dimmed mt-3 mb-5">应缴 − 已缴 = 欠费 + 收束减免（减免为 0 时即 应缴 − 已缴 = 欠费）</p>
+          </>
         )}
         {arrearsError && (
           <div className="mb-4 rounded-md border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">{arrearsError}</div>
@@ -681,10 +1112,12 @@ export default function BillingPage() {
             {selectedAdmission ? ` 当前入住：${selectedAdmission.patientName}。` : ""}
           </p>
           <Input label="账期（月）" value={month} onChange={(event) => setMonth(event.target.value)} placeholder="YYYY-MM" />
+          {generateGateNotice}
           {modalError}
           <div className="flex justify-end gap-2 pt-2">
             <Button variant="ghost" onClick={() => setGenerateOpen(false)}>取消</Button>
-            <Button loading={generating} onClick={() => void handleGenerate()}>生成账单</Button>
+            {/* 服务端 can_generate 为 false 时禁用；precheck 不可用时不禁用，提交后由后端报错 */}
+            <Button loading={generating} disabled={!precheckAllowsGenerate} onClick={() => void handleGenerate()}>生成账单</Button>
           </div>
         </div>
       </Modal>
@@ -795,6 +1228,14 @@ export default function BillingPage() {
               </span>
               {detail.bill.settled_at && <Badge variant="default">已收束 {formatDateTime(detail.bill.settled_at)}</Badge>}
             </div>
+            {/* 收束时未结（减免）留痕：仅 outstanding_amount > 0 的已结算账单显示 */}
+            {detail.bill.status === "已结算" && detail.bill.outstanding_amount > 0 && (
+              <div className="rounded-md border border-warning/30 bg-warning-bg px-4 py-3 text-sm text-warning">
+                <p className="font-medium">收束时未结 ¥ {formatAmount(detail.bill.outstanding_amount)}</p>
+                <p className="mt-1">减免原因：{detail.bill.write_off_reason ?? "—"}</p>
+                <p className="mt-1 text-xs">该未结余额在结算收束时被显式放弃（减免），已随收束冻结、不可再收。</p>
+              </div>
+            )}
             <div>
               <h4 className="text-sm font-semibold text-fg-muted mb-2">明细（{detail.items.length}）</h4>
               <Table columns={itemColumns} data={detail.items} keyField="id" emptyMessage="暂无明细" />
@@ -831,17 +1272,171 @@ export default function BillingPage() {
         )}
       </Modal>
 
-      {/* 结算收束确认 */}
+      {/* 结算收束确认（含押金核销） */}
       <Modal open={settleOpen} onClose={() => setSettleOpen(false)} title="确认结算收束">
         <div className="space-y-4">
           <p className="text-sm text-fg-muted">
-            将为{selectedAdmission?.patientName ?? ""}生成区间最终账单并冻结全部账单（收束后不可再生成账单、手工加项或缴费），
-            确定继续？
+            将为{selectedAdmission?.patientName ?? ""}生成区间最终账单并冻结全部账单（收束后不可再生成账单、手工加项或缴费）。
           </p>
+
+          {/* 结算预览（只读，与收束实际算法同源）：提交前告知会发生什么，含本次将生成的区间最终账单 */}
+          {previewLoading ? (
+            <div className="flex items-center gap-2 rounded-md border border-border bg-surface-alt px-4 py-3 text-sm text-fg-muted">
+              <LoadingSpinner size={16} />
+              <span>正在加载结算预览…</span>
+            </div>
+          ) : settlePreview ? (
+            <div className="grid gap-3 md:grid-cols-2">
+              <div className="rounded-md border border-border bg-surface-alt px-4 py-3">
+                <p className="text-xs text-fg-dimmed">区间最终账单金额（元）</p>
+                <p className="text-lg font-bold text-fg mt-0.5">
+                  {hasFinalBill ? formatAmount(settlePreview.final_bill_total) : "—"}
+                </p>
+                <p className="text-xs text-fg-dimmed mt-1">
+                  {hasFinalBill
+                    ? `账期 ${formatDate(settlePreview.settlement_period?.start)} ~ ${formatDate(settlePreview.settlement_period?.end)}`
+                    : "本次不生成区间最终账单"}
+                </p>
+              </div>
+              <div className="rounded-md border border-border bg-surface-alt px-4 py-3">
+                <p className="text-xs text-fg-dimmed">当前欠费（核销前，元）</p>
+                <p className="text-lg font-bold text-danger mt-0.5">{formatAmount(settlePreview.pending_balance)}</p>
+                <p className="text-xs text-fg-dimmed mt-1">既有「待缴费」账单未结合计</p>
+              </div>
+              <div className="rounded-md border border-border bg-surface-alt px-4 py-3">
+                <p className="text-xs text-fg-dimmed">收束后未结合计（元）</p>
+                <p className="text-lg font-bold text-warning mt-0.5">{formatAmount(settlePreview.outstanding_total)}</p>
+                <p className="text-xs text-fg-dimmed mt-1">= 当前欠费 + 区间最终账单金额</p>
+              </div>
+              <div className="rounded-md border border-border bg-surface-alt px-4 py-3">
+                <p className="text-xs text-fg-dimmed">当前押金余额（元）</p>
+                <p className="text-lg font-bold text-accent mt-0.5">{formatAmount(settlePreview.deposit_balance)}</p>
+              </div>
+              <div className="rounded-md border border-border bg-surface-alt px-4 py-3 md:col-span-2">
+                <p className="text-xs text-fg-dimmed">可核销上限（元）</p>
+                <p className="text-lg font-bold text-fg mt-0.5">{formatAmount(settlePreview.max_offset)}</p>
+                <p className="text-xs text-fg-dimmed mt-1">
+                  = min(押金余额 ¥ {formatAmount(settlePreview.deposit_balance)}, 未结合计 ¥{" "}
+                  {formatAmount(settlePreview.outstanding_total)})
+                </p>
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-md border border-warning/30 bg-warning-bg px-4 py-3 text-sm text-warning">
+              <p className="font-medium">结算预览不可用</p>
+              <p className="mt-1">{previewError || "无法加载结算预览"}</p>
+              <p className="mt-1 text-xs">
+                本次不显示预览数字，也不做前端核销上限校验：仍可提交，以服务端返回的结果为准
+                （若仍有未结余额，服务端会拒绝并提示填写减免原因）。
+              </p>
+            </div>
+          )}
+
+          <div className="flex flex-col gap-2">
+            <div className="flex items-end gap-2">
+              <div className="flex-1">
+                <Input
+                  label="押金核销金额（元，可留空 = 不核销）"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={offsetAmount}
+                  error={offsetCheck.error || undefined}
+                  onChange={(event) => setOffsetAmount(event.target.value)}
+                  placeholder="如 3000.00"
+                />
+              </div>
+              <Button
+                variant="secondary"
+                disabled={previewMaxOffset === null || previewMaxOffset <= 0}
+                onClick={() => setOffsetAmount(formatAmount(previewMaxOffset ?? 0))}
+              >
+                全部核销
+              </Button>
+            </div>
+            <p className="text-xs text-fg-dimmed">
+              押金核销只在结算收束时发生：核销会同时写入缴费流水（方式「押金」）与押金台账（类型「核销」），
+              押金余额与账单欠费同减，不产生现金流入。
+            </p>
+          </div>
+
+          {depositError && (
+            <div className="rounded-md border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">{depositError}</div>
+          )}
+
+          {/* 减免确认（本次任务核心）：核销后仍有未结时，「勾选确认」与「原因」缺一不可，否则禁止提交 */}
+          {remaining === null ? (
+            <div className="space-y-3 rounded-md border border-border bg-surface-alt px-4 py-3 text-sm">
+              <p className="text-fg-muted">
+                预览不可用，无法在此计算「核销后仍未结」，因此不做强制减免确认。
+                若服务端拒绝并提示仍有未结余额需要减免，请在此填写减免原因后重新提交（服务端以是否提供原因为准）。
+              </p>
+              <div className="flex flex-col gap-1.5">
+                <label className="text-sm font-medium text-fg-muted">
+                  减免原因（可选，最多 {WRITE_OFF_REASON_MAX_LENGTH} 字符）
+                </label>
+                <textarea
+                  value={writeOffReason}
+                  maxLength={WRITE_OFF_REASON_MAX_LENGTH}
+                  rows={3}
+                  onChange={(event) => setWriteOffReason(event.target.value)}
+                  placeholder="如：离院结算，家属书面确认不再追收"
+                  className="px-3 py-2 rounded-md bg-surface border border-border text-sm text-fg placeholder:text-fg-dimmed transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                />
+              </div>
+            </div>
+          ) : remaining > 0 ? (
+            <div className="space-y-3 rounded-md border border-warning/30 bg-warning-bg px-4 py-3 text-sm">
+              <p className="font-medium text-warning">
+                核销后仍未结 ¥ {formatAmount(remaining)}，将随本次收束冻结、不可再收。
+              </p>
+              {previewRequiresWriteOff && (
+                <p className="text-warning">即使全额核销仍会剩余未结，必须填写减免原因。</p>
+              )}
+              <label className="flex items-center gap-2 text-fg cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={writeOffConfirmed}
+                  onChange={(event) => setWriteOffConfirmed(event.target.checked)}
+                />
+                <span>确认减免：我确认放弃上述未结余额，并已取得相应依据</span>
+              </label>
+              <div className="flex flex-col gap-1.5">
+                <label className="text-sm font-medium text-fg-muted">
+                  减免原因（必填，最多 {WRITE_OFF_REASON_MAX_LENGTH} 字符）
+                </label>
+                <textarea
+                  value={writeOffReason}
+                  maxLength={WRITE_OFF_REASON_MAX_LENGTH}
+                  rows={3}
+                  onChange={(event) => setWriteOffReason(event.target.value)}
+                  placeholder="如：离院结算，家属书面确认不再追收"
+                  className="px-3 py-2 rounded-md bg-surface border border-border text-sm text-fg placeholder:text-fg-dimmed transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                />
+                {!writeOffReasonValid && (
+                  <p className="text-xs text-danger">
+                    减免原因不能为空（trim 后），且不超过 {WRITE_OFF_REASON_MAX_LENGTH} 字符
+                  </p>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-md border border-success/30 bg-success-bg px-4 py-3 text-sm text-success">
+              核销后未结清零，无需减免确认。
+            </div>
+          )}
+
           {modalError}
           <div className="flex justify-end gap-2 pt-2">
             <Button variant="ghost" onClick={() => setSettleOpen(false)}>取消</Button>
-            <Button variant="warning" loading={settling} onClick={() => void handleSettle()}>确认结算</Button>
+            <Button
+              variant="warning"
+              loading={settling}
+              disabled={settleDisabled}
+              onClick={() => void handleSettle()}
+            >
+              确认结算
+            </Button>
           </div>
         </div>
       </Modal>

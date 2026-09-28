@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ovaphlow/pitchfork/service-idp-go/internal/database/sqlc"
 	"github.com/ovaphlow/pitchfork/service-idp-go/internal/password"
 )
 
@@ -43,6 +42,89 @@ type Session struct {
 	csrfTokenHash []byte
 }
 
+// loginCredentialRow 是登录校验需要的最小凭据视图。
+type loginCredentialRow struct {
+	SubjectID        string `db:"subject_id"`
+	PasswordHash     string `db:"password_hash"`
+	CredentialStatus string `db:"credential_status"`
+}
+
+// activeSessionRow 是浏览器会话校验需要的视图。
+type activeSessionRow struct {
+	ID                     string    `db:"id"`
+	SubjectID              string    `db:"subject_id"`
+	SubjectSecurityVersion int64     `db:"subject_security_version"`
+	SessionAccess          string    `db:"session_access"`
+	CsrfTokenHash          []byte    `db:"csrf_token_hash"`
+	ExpiresAt              time.Time `db:"expires_at"`
+}
+
+// 枚举值一律经 enums.go 常量以命名参数传入，不写死在 SQL 里，
+// 这样 internal/identity/enums.go 始终是枚举的唯一来源。
+const getLoginCredentialByNormalizedIdentifier = `
+SELECT i.subject_id, c.password_hash, c.credential_status
+FROM identity_identifiers i
+JOIN identity_password_credentials c ON c.subject_id = i.subject_id
+WHERE i.normalized_value = :normalized_value
+  AND i.status = :status
+  AND i.identifier_usage IN (:primary_usage, :secondary_usage)
+LIMIT 1`
+
+const getEnabledSubjectSecurityVersion = `
+SELECT security_version
+FROM identity_subjects
+WHERE id = :id AND status = :status`
+
+const createSession = `
+INSERT INTO identity_sessions(
+    id, subject_id, subject_security_version, token_hash, csrf_token_hash,
+    session_access, authenticated_at, last_seen_at, expires_at, idle_expires_at,
+    metadata, created_at
+) VALUES (
+    :id, :subject_id, :subject_security_version, :token_hash, :csrf_token_hash,
+    :session_access, :authenticated_at, :last_seen_at, :expires_at, :idle_expires_at,
+    :metadata, :created_at
+)`
+
+const getActiveSessionByTokenHash = `
+SELECT id, subject_id, subject_security_version, session_access, csrf_token_hash, expires_at
+FROM identity_sessions
+WHERE token_hash = :token_hash
+  AND revoked_at IS NULL
+  AND expires_at > :now
+  AND idle_expires_at > :now`
+
+const touchActiveSession = `
+UPDATE identity_sessions
+SET last_seen_at = :last_seen_at,
+    idle_expires_at = :idle_expires_at
+WHERE id = :id
+  AND revoked_at IS NULL`
+
+const countSubjectRoleAssignments = `
+SELECT COUNT(*)
+FROM identity_subject_roles AS subject_role
+JOIN identity_roles AS role ON role.id = subject_role.role_id
+WHERE subject_role.subject_id = :subject_id
+  AND role.role_code = :role_code`
+
+const getActiveSessionSubjectByTokenHash = `
+SELECT subject_id
+FROM identity_sessions
+WHERE token_hash = :token_hash
+  AND revoked_at IS NULL`
+
+const revokeActiveSessionByTokenHash = `
+UPDATE identity_sessions
+SET revoked_at = :revoked_at,
+    revoked_reason = :revoked_reason
+WHERE token_hash = :token_hash
+  AND revoked_at IS NULL`
+
+const deleteLoginThrottle = `
+DELETE FROM identity_login_throttles
+WHERE identifier_hash = :identifier_hash AND source_hash = :source_hash`
+
 func Login(ctx context.Context, database *sql.DB, input LoginInput, settings SessionSettings, throttleSettings LoginThrottleSettings) (LoginResult, error) {
 	if settings.TTL <= 0 || settings.IdleTTL <= 0 || settings.IdleTTL > settings.TTL {
 		return LoginResult{}, fmt.Errorf("invalid session settings")
@@ -51,7 +133,7 @@ func Login(ctx context.Context, database *sql.DB, input LoginInput, settings Ses
 		return LoginResult{}, fmt.Errorf("invalid login throttle settings: %w", err)
 	}
 
-	queries := sqlc.New(database)
+	queries := newQuerier(database)
 	now := time.Now().UTC()
 	throttleKey := newLoginThrottleKey(throttleSettings, input.Identifier, input.SourceAddress)
 	locked, err := loginThrottleLocked(ctx, queries, throttleKey, now)
@@ -67,11 +149,12 @@ func Login(ctx context.Context, database *sql.DB, input LoginInput, settings Ses
 		return LoginResult{}, rejectLogin(ctx, database, throttleSettings, throttleKey, now)
 	}
 
-	credential, err := queries.GetLoginCredentialByNormalizedIdentifier(ctx, sqlc.GetLoginCredentialByNormalizedIdentifierParams{
-		NormalizedValue:   normalizedIdentifier,
-		Status:            "启用",
-		IdentifierUsage:   "主登录",
-		IdentifierUsage_2: "辅助登录",
+	var credential loginCredentialRow
+	err = namedGet(ctx, queries, &credential, getLoginCredentialByNormalizedIdentifier, map[string]any{
+		"normalized_value": normalizedIdentifier,
+		"status":           StatusEnabled,
+		"primary_usage":    IdentifierUsagePrimaryLogin,
+		"secondary_usage":  IdentifierUsageSecondaryLogin,
 	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return LoginResult{}, rejectLogin(ctx, database, throttleSettings, throttleKey, now)
@@ -79,12 +162,14 @@ func Login(ctx context.Context, database *sql.DB, input LoginInput, settings Ses
 	if err != nil {
 		return LoginResult{}, fmt.Errorf("load login credential: %w", err)
 	}
-	if credential.CredentialStatus == "已作废" {
+	if credential.CredentialStatus == CredentialStatusVoided {
 		return LoginResult{}, rejectLogin(ctx, database, throttleSettings, throttleKey, now)
 	}
-	securityVersion, err := queries.GetEnabledSubjectSecurityVersion(ctx, sqlc.GetEnabledSubjectSecurityVersionParams{
-		ID:     credential.SubjectID,
-		Status: "启用",
+
+	var securityVersion int64
+	err = namedGet(ctx, queries, &securityVersion, getEnabledSubjectSecurityVersion, map[string]any{
+		"id":     credential.SubjectID,
+		"status": StatusEnabled,
 	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return LoginResult{}, rejectLogin(ctx, database, throttleSettings, throttleKey, now)
@@ -92,6 +177,7 @@ func Login(ctx context.Context, database *sql.DB, input LoginInput, settings Ses
 	if err != nil {
 		return LoginResult{}, fmt.Errorf("load login subject: %w", err)
 	}
+
 	matched, err := password.Verify(input.Password, credential.PasswordHash)
 	if err != nil || !matched {
 		return LoginResult{}, rejectLogin(ctx, database, throttleSettings, throttleKey, now)
@@ -115,23 +201,23 @@ func Login(ctx context.Context, database *sql.DB, input LoginInput, settings Ses
 	if idleExpiresAt.After(expiresAt) {
 		idleExpiresAt = expiresAt
 	}
-	sessionAccess := "完整"
-	if credential.CredentialStatus == "需更新" {
-		sessionAccess = "仅改密"
+	sessionAccess := SessionAccessFull
+	if credential.CredentialStatus == CredentialStatusMustUpdate {
+		sessionAccess = SessionAccessPasswordOnly
 	}
 
-	transaction, err := database.BeginTx(ctx, nil)
+	transaction, err := queries.BeginTxx(ctx, nil)
 	if err != nil {
 		return LoginResult{}, fmt.Errorf("begin login transaction: %w", err)
 	}
 	defer transaction.Rollback()
-	transactionQueries := queries.WithTx(transaction)
-	locked, err = loginThrottleLocked(ctx, transactionQueries, throttleKey, now)
+
+	locked, err = loginThrottleLocked(ctx, transaction, throttleKey, now)
 	if err != nil {
 		return LoginResult{}, err
 	}
 	if locked {
-		if err := recordLoginFailureInTransaction(ctx, transactionQueries, throttleSettings, throttleKey, now); err != nil {
+		if err := recordLoginFailureInTransaction(ctx, transaction, throttleSettings, throttleKey, now); err != nil {
 			return LoginResult{}, err
 		}
 		if err := transaction.Commit(); err != nil {
@@ -139,45 +225,35 @@ func Login(ctx context.Context, database *sql.DB, input LoginInput, settings Ses
 		}
 		return LoginResult{}, ErrInvalidCredentials
 	}
-	if err := transactionQueries.DeleteLoginThrottle(ctx, sqlc.DeleteLoginThrottleParams{
-		IdentifierHash: throttleKey.identifierHash,
-		SourceHash:     throttleKey.sourceHash,
+	if err := namedExec(ctx, transaction, deleteLoginThrottle, map[string]any{
+		"identifier_hash": throttleKey.identifierHash,
+		"source_hash":     throttleKey.sourceHash,
 	}); err != nil {
 		return LoginResult{}, fmt.Errorf("clear login throttle: %w", err)
 	}
-	if err := transactionQueries.CreateSession(ctx, sqlc.CreateSessionParams{
-		ID:                     sessionID,
-		SubjectID:              credential.SubjectID,
-		SubjectSecurityVersion: securityVersion,
-		TokenHash:              sessionTokenHash,
-		CsrfTokenHash:          csrfTokenHash,
-		SessionAccess:          sessionAccess,
-		AuthenticatedAt:        now,
-		LastSeenAt:             now,
-		ExpiresAt:              expiresAt,
-		IdleExpiresAt:          idleExpiresAt,
-		RevokedAt:              sql.NullTime{},
-		RevokedReason:          sql.NullString{},
-		Metadata:               "{}",
-		CreatedAt:              now,
+	if err := namedExec(ctx, transaction, createSession, map[string]any{
+		"id":                       sessionID,
+		"subject_id":               credential.SubjectID,
+		"subject_security_version": securityVersion,
+		"token_hash":               sessionTokenHash,
+		"csrf_token_hash":          csrfTokenHash,
+		"session_access":           sessionAccess,
+		"authenticated_at":         now,
+		"last_seen_at":             now,
+		"expires_at":               expiresAt,
+		"idle_expires_at":          idleExpiresAt,
+		"metadata":                 "{}",
+		"created_at":               now,
 	}); err != nil {
 		return LoginResult{}, fmt.Errorf("create browser session: %w", err)
 	}
-	auditID, err := NewULID(now)
-	if err != nil {
-		return LoginResult{}, err
-	}
-	if err := transactionQueries.InsertAuditEvent(ctx, sqlc.InsertAuditEventParams{
-		ID:              auditID,
-		EventAction:     "登录",
-		Outcome:         "成功",
-		ActorSubjectID:  sql.NullString{String: credential.SubjectID, Valid: true},
-		TargetSubjectID: sql.NullString{String: credential.SubjectID, Valid: true},
-		RequestID:       sql.NullString{},
+	if err := insertAuditEvent(ctx, transaction, auditEvent{
+		Action:          AuditActionLogin,
+		Outcome:         OutcomeSucceeded,
+		ActorSubjectID:  credential.SubjectID,
+		TargetSubjectID: credential.SubjectID,
 		SourceHash:      throttleKey.sourceHash,
-		Metadata:        "{}",
-		CreatedAt:       now,
-	}); err != nil {
+	}, now); err != nil {
 		return LoginResult{}, fmt.Errorf("write login audit event: %w", err)
 	}
 	if err := transaction.Commit(); err != nil {
@@ -199,12 +275,13 @@ func CurrentSession(ctx context.Context, database *sql.DB, rawToken string, sett
 	if err != nil {
 		return Session{}, ErrInvalidSession
 	}
-	queries := sqlc.New(database)
+	queries := newQuerier(database)
 	now := time.Now().UTC()
-	sessionRecord, err := queries.GetActiveSessionByTokenHash(ctx, sqlc.GetActiveSessionByTokenHashParams{
-		TokenHash:     tokenHash,
-		ExpiresAt:     now,
-		IdleExpiresAt: now,
+
+	var sessionRecord activeSessionRow
+	err = namedGet(ctx, queries, &sessionRecord, getActiveSessionByTokenHash, map[string]any{
+		"token_hash": tokenHash,
+		"now":        now,
 	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return Session{}, ErrInvalidSession
@@ -212,9 +289,11 @@ func CurrentSession(ctx context.Context, database *sql.DB, rawToken string, sett
 	if err != nil {
 		return Session{}, fmt.Errorf("load browser session: %w", err)
 	}
-	subjectSecurityVersion, err := queries.GetEnabledSubjectSecurityVersion(ctx, sqlc.GetEnabledSubjectSecurityVersionParams{
-		ID:     sessionRecord.SubjectID,
-		Status: "启用",
+
+	var subjectSecurityVersion int64
+	err = namedGet(ctx, queries, &subjectSecurityVersion, getEnabledSubjectSecurityVersion, map[string]any{
+		"id":     sessionRecord.SubjectID,
+		"status": StatusEnabled,
 	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return Session{}, ErrInvalidSession
@@ -225,6 +304,7 @@ func CurrentSession(ctx context.Context, database *sql.DB, rawToken string, sett
 	if sessionRecord.SubjectSecurityVersion != subjectSecurityVersion {
 		return Session{}, ErrInvalidSession
 	}
+
 	session := Session{
 		ID:            sessionRecord.ID,
 		SubjectID:     sessionRecord.SubjectID,
@@ -236,10 +316,10 @@ func CurrentSession(ctx context.Context, database *sql.DB, rawToken string, sett
 	if idleExpiresAt.After(expiresAt) {
 		idleExpiresAt = expiresAt
 	}
-	updated, err := queries.TouchActiveSession(ctx, sqlc.TouchActiveSessionParams{
-		LastSeenAt:    now,
-		IdleExpiresAt: idleExpiresAt,
-		ID:            session.ID,
+	updated, err := namedExecRows(ctx, queries, touchActiveSession, map[string]any{
+		"last_seen_at":    now,
+		"idle_expires_at": idleExpiresAt,
+		"id":              session.ID,
 	})
 	if err != nil {
 		return Session{}, fmt.Errorf("refresh browser session: %w", err)
@@ -259,11 +339,11 @@ func VerifyCSRF(session Session, rawToken string) bool {
 }
 
 func HasRole(ctx context.Context, database *sql.DB, subjectID string, roleCode string) (bool, error) {
-	assignmentCount, err := sqlc.New(database).CountSubjectRoleAssignments(ctx, sqlc.CountSubjectRoleAssignmentsParams{
-		SubjectID: subjectID,
-		RoleCode:  roleCode,
-	})
-	if err != nil {
+	var assignmentCount int64
+	if err := namedGet(ctx, newQuerier(database), &assignmentCount, countSubjectRoleAssignments, map[string]any{
+		"subject_id": subjectID,
+		"role_code":  roleCode,
+	}); err != nil {
 		return false, fmt.Errorf("check control-plane role: %w", err)
 	}
 	return assignmentCount > 0, nil
@@ -274,27 +354,30 @@ func Logout(ctx context.Context, database *sql.DB, rawToken string) error {
 	if err != nil {
 		return ErrInvalidSession
 	}
-	queries := sqlc.New(database)
+	queries := newQuerier(database)
 	now := time.Now().UTC()
 
-	transaction, err := database.BeginTx(ctx, nil)
+	transaction, err := queries.BeginTxx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin logout transaction: %w", err)
 	}
 	defer transaction.Rollback()
-	transactionQueries := queries.WithTx(transaction)
 
-	subjectID, err := transactionQueries.GetActiveSessionSubjectByTokenHash(ctx, tokenHash)
+	var subjectID string
+	err = namedGet(ctx, transaction, &subjectID, getActiveSessionSubjectByTokenHash, map[string]any{
+		"token_hash": tokenHash,
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrInvalidSession
 	}
 	if err != nil {
 		return fmt.Errorf("load session for logout: %w", err)
 	}
-	revoked, err := transactionQueries.RevokeActiveSessionByTokenHash(ctx, sqlc.RevokeActiveSessionByTokenHashParams{
-		RevokedAt:     sql.NullTime{Time: now, Valid: true},
-		RevokedReason: sql.NullString{String: "用户退出", Valid: true},
-		TokenHash:     tokenHash,
+
+	revoked, err := namedExecRows(ctx, transaction, revokeActiveSessionByTokenHash, map[string]any{
+		"revoked_at":     now,
+		"revoked_reason": RevokedReasonUserLogout,
+		"token_hash":     tokenHash,
 	})
 	if err != nil {
 		return fmt.Errorf("revoke browser session: %w", err)
@@ -302,21 +385,12 @@ func Logout(ctx context.Context, database *sql.DB, rawToken string) error {
 	if revoked != 1 {
 		return ErrInvalidSession
 	}
-	auditID, err := NewULID(now)
-	if err != nil {
-		return err
-	}
-	if err := transactionQueries.InsertAuditEvent(ctx, sqlc.InsertAuditEventParams{
-		ID:              auditID,
-		EventAction:     "退出登录",
-		Outcome:         "成功",
-		ActorSubjectID:  sql.NullString{String: subjectID, Valid: true},
-		TargetSubjectID: sql.NullString{String: subjectID, Valid: true},
-		RequestID:       sql.NullString{},
-		SourceHash:      nil,
-		Metadata:        "{}",
-		CreatedAt:       now,
-	}); err != nil {
+	if err := insertAuditEvent(ctx, transaction, auditEvent{
+		Action:          AuditActionLogout,
+		Outcome:         OutcomeSucceeded,
+		ActorSubjectID:  subjectID,
+		TargetSubjectID: subjectID,
+	}, now); err != nil {
 		return fmt.Errorf("write logout audit event: %w", err)
 	}
 	if err := transaction.Commit(); err != nil {

@@ -22,15 +22,18 @@ import java.time.OffsetDateTime
  *
  * 业务规则（服务端强制）：
  *  1. 登记与退押为同表两类记录（type 中文枚举 登记/退押，应用层白名单管控）；
- *     挂 encounter，不强制关联费用项目字典，结算收束不自动冲抵押金。
- *  2. 金额 NUMERIC(12,2)：登记/退押均为正数且至多两位小数；
- *     余额 = Σ登记 − Σ退押，退押不得超余额（事务内按 encounter 行锁串行化，
- *     余额不为负）。
+ *     挂 encounter，不强制关联费用项目字典。核销为第三类记录（type 核销）：
+ *     由 [DepositOffsetService] 在结算收束时按账期逐笔写入，**不提供独立核销入口**，
+ *     登记/退押接口不接受该 type。
+ *  2. 金额 NUMERIC(12,2)：登记/退押/核销均为正数且至多两位小数；
+ *     余额 = Σ登记 − Σ退押 − Σ核销，退押不得超余额（事务内按 encounter 行锁串行化，
+ *     余额不为负）。核销计入减项后，退押上限判定自动按收紧后的余额生效。
  *  3. 退押为独立操作：不校验 encounter 收束状态（status/discharge_date/
  *     death_date），离院/去世后仍可退押。
  *  4. operator 一律取认证主体（userId），客户端不得提交；
  *     写接口按白名单校验字段（amount/remark/metadata）。
  *  5. 台账按 encounter 倒序分页查询，返回 {records, meta:{total, balance}}；
+ *     核销记录出现在同一台账（metadata 带 bill_id/payment_id/period_start/period_end）；
  *     空台账 records: [] 且 total: 0。
  */
 class DepositService(
@@ -41,6 +44,9 @@ class DepositService(
         const val TYPE_DEPOSIT = "登记"
         const val TYPE_REFUND = "退押"
 
+        /** 结算收束的押金核销减项（由 [DepositOffsetService] 写入） */
+        const val TYPE_OFFSET = "核销"
+
         /** NUMERIC(12,2) 上限：10 位整数 + 2 位小数 */
         val maxAmount = BigDecimal("9999999999.99")
 
@@ -48,7 +54,7 @@ class DepositService(
         private val createKeys = setOf("amount", "remark", "metadata")
 
         /**
-         * 余额计算（纯函数）：余额 = Σ登记 − Σ退押。
+         * 余额计算（纯函数）：余额 = Σ登记 − Σ退押 − Σ核销。
          * 调用方保证不出现使余额为负的退押（createRefund 事务内校验）。
          */
         internal fun balanceOf(entries: List<Pair<String, BigDecimal>>): BigDecimal {
@@ -57,10 +63,29 @@ class DepositService(
                 balance = when (type) {
                     TYPE_DEPOSIT -> balance.add(amount)
                     TYPE_REFUND -> balance.subtract(amount)
+                    TYPE_OFFSET -> balance.subtract(amount)
                     else -> balance
                 }
             }
             return balance
+        }
+
+        /**
+         * 押金余额（只读）：口径唯一来自 [balanceOf]（Σ登记 − Σ退押 − Σ核销）。
+         *
+         * 与实例台账读取（[ledgerRows] / [listDeposits]）同表、同过滤器、同一余额公式，
+         * 不写任何行、可反复调用；供结算预览（`BillService.previewSettlement`）与
+         * 核销上限（[DepositOffsetService]）共用，避免各处重复查询与重复计算余额。
+         */
+        fun balance(client: SqlClient, encounterId: String): Future<BigDecimal> {
+            val query = DatabaseConfig.createDSL()
+                .select(DEPOSIT_RECORDS.TYPE, DEPOSIT_RECORDS.AMOUNT)
+                .from(DEPOSIT_RECORDS)
+                .where(DEPOSIT_RECORDS.ENCOUNTER_ID.eq(encounterId))
+            return client.preparedQuery(DatabaseConfig.sql(query)).execute(DatabaseConfig.tuple(query))
+                .map { rows ->
+                    balanceOf(rows.map { row -> row.getString("type") to row.getBigDecimal("amount") })
+                }
         }
 
         private fun recordJson(row: Row): JsonObject =

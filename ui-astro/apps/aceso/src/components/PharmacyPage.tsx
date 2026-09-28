@@ -910,7 +910,7 @@ export default function PharmacyPage() {
           <div className="space-y-4">
             <div className="rounded-md border border-border p-3 text-sm">
               <div className="font-medium text-fg-emphasis">
-                {createTarget.patient_name} · {createTarget.encounter_no || "无入住号"}
+                {createTarget.patient_name} · {createTarget.encounter_no || "无住院号"}
               </div>
               <div className="mt-1 text-fg-muted">
                 {createTarget.drug_name || createTarget.order_content} ·{" "}

@@ -31,6 +31,7 @@ object HealthcareRoutes {
         feeItemAuthHandler: Handler<RoutingContext>? = null,
         billAuthHandler: Handler<RoutingContext>? = null,
         paymentAuthHandler: Handler<RoutingContext>? = null,
+        encounterAuthHandler: Handler<RoutingContext>? = null,
     ): Router {
         val router = Router.router(vertx)
         val service = HealthcareService(pool)
@@ -74,8 +75,14 @@ object HealthcareRoutes {
                 .onFailure { respondFailure(ctx, it) }
         }
 
+        // 入住创建：责任医生/照护师取自认证中间件写入的 userId，不接受请求体取值。
+        // 认证中间件（IDP 会话校验）由 App 编排层注入；未注入时保持原有 401 兜底。
+        if (encounterAuthHandler != null) {
+            router.post("/encounters").handler(encounterAuthHandler)
+        }
         router.post("/encounters").handler { ctx ->
-            service.createEncounter(body(ctx))
+            val userId = userId(ctx) ?: return@handler
+            service.createEncounter(body(ctx), userId)
                 .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
                 .onFailure { respondCreateFailure(ctx, it) }
         }
@@ -252,8 +259,13 @@ object HealthcareRoutes {
                 .onFailure { respondFailure(ctx, it) }
         }
 
+        // 养老入住：责任医生/照护师同样由服务端按操作人写入。
+        if (encounterAuthHandler != null) {
+            router.post("/elderly-admissions").handler(encounterAuthHandler)
+        }
         router.post("/elderly-admissions").handler { ctx ->
-            service.admitElderly(body(ctx))
+            val userId = userId(ctx) ?: return@handler
+            service.admitElderly(body(ctx), userId)
                 .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
                 .onFailure { respondCreateFailure(ctx, it) }
         }
@@ -826,6 +838,12 @@ object HealthcareRoutes {
             router.post("/encounters/:id/bills").handler(billAuthHandler)
             router.post("/bills/:id/items").handler(billAuthHandler)
             router.post("/encounters/:id/billing-settlement").handler(billAuthHandler)
+            // 只读预览与收束同级暴露金额，挂同一个认证中间件；路径比 /encounters/:id 多两段，
+            // 不会被泛型 encounter 读路由吞掉（由路由测试断言实际命中本处理器）
+            router.get("/encounters/:id/billing-settlement/preview").handler(billAuthHandler)
+            // 生成前置校验（只读）：同样多两段路径，不会被泛型 encounter 读路由吞掉
+            // （由 BillingPrecheckTest 断言实际命中本处理器）
+            router.get("/encounters/:id/bills/precheck").handler(billAuthHandler)
         }
         // 生成账单：体 {month: "YYYY-MM"}；自动计费床位/护理/伙食并落明细快照；状态初始 待缴费
         router.post("/encounters/:id/bills").handler { ctx ->
@@ -841,17 +859,36 @@ object HealthcareRoutes {
                 .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
                 .onFailure { respondFailure(ctx, it) }
         }
-        // 补结算（无请求体）：已离院/去世未结算 → 生成区间最终账单并冻结；
-        // 已全部结算 409；未离院/去世 409；未认证 401。
+        // 补结算：体 {deposit_offset?, write_off_reason?}（两个键均可省略；其他键 400）。
+        // 次序：先建区间最终账单（待缴费）→ 再押金核销 → 再判定未结 → 再冻结，全程同事务；
+        // 核销后仍有未结且未给 write_off_reason → 409（整笔回滚）。
+        // 已全部结算 409；未离院/去世 409；未知字段/金额或原因非法 400；未认证 401。
         router.post("/encounters/:id/billing-settlement").handler { ctx ->
             val userId = userId(ctx) ?: return@handler
-            service.settleEncounterBilling(requiredId(ctx))
+            service.settleEncounterBilling(requiredId(ctx), body(ctx), userId)
                 .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 收束预览（只读）：返回 settlement_period/final_bill_total/pending_balance/
+        // outstanding_total/deposit_balance/max_offset/requires_write_off；
+        // 与收束同一套资格校验与金额算法，不产生任何写入、可反复调用；未认证 401。
+        router.get("/encounters/:id/billing-settlement/preview").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            service.previewEncounterBilling(requiredId(ctx))
+                .onSuccess { ctx.json(it) }
                 .onFailure { respondFailure(ctx, it) }
         }
         // 账单详情（含明细快照）
         router.get("/bills/:id").handler { ctx ->
             billService.getBill(requiredId(ctx))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 生成前置校验（只读）：?month=YYYY-MM；缺字典返回 200 且 blocked_by = missing_fee_items；
+        // month 缺失/非法 400；encounter 不存在 404；未认证 401；不产生任何写入、可反复调用。
+        router.get("/encounters/:id/bills/precheck").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            billService.precheckBillGeneration(requiredId(ctx), ctx.request().getParam("month"))
                 .onSuccess { ctx.json(it) }
                 .onFailure { respondFailure(ctx, it) }
         }
@@ -898,10 +935,12 @@ object HealthcareRoutes {
             ).onSuccess { ctx.json(it) }
                 .onFailure { respondFailure(ctx, it) }
         }
-        // 欠费列表：{records, meta:{total}}；空列表 records: [] 且 total: 0
+        // 欠费列表：{records, meta:{total}}；空列表 records: [] 且 total: 0；
+        // 可选 encounter_id 过滤（records 与 meta.total 同源；省略时行为不变）
         router.get("/payments/arrears").handler { ctx ->
             val userId = userId(ctx) ?: return@handler
             paymentService.listArrears(
+                encounterId = ctx.request().getParam("encounter_id"),
                 limit = limit(ctx),
                 offset = offset(ctx),
             ).onSuccess { ctx.json(it) }

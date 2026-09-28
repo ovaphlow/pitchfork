@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ovaphlow/pitchfork/service-idp-go/internal/database/sqlc"
 	"github.com/ovaphlow/pitchfork/service-idp-go/internal/password"
 )
 
@@ -21,20 +20,54 @@ type ChangePasswordInput struct {
 	NewPassword     string
 }
 
+// passwordCredentialRow 是密码凭据的视图，password_revision 用于乐观并发控制。
+type passwordCredentialRow struct {
+	SubjectID        string `db:"subject_id"`
+	PasswordHash     string `db:"password_hash"`
+	PasswordRevision int64  `db:"password_revision"`
+	CredentialStatus string `db:"credential_status"`
+}
+
+const getPasswordCredentialBySubjectID = `
+SELECT subject_id, password_hash, password_revision, credential_status
+FROM identity_password_credentials
+WHERE subject_id = :subject_id`
+
+const updatePasswordCredential = `
+UPDATE identity_password_credentials
+SET password_hash = :password_hash,
+    credential_status = :credential_status,
+    password_revision = password_revision + 1,
+    changed_at = :changed_at,
+    updated_at = :updated_at
+WHERE subject_id = :subject_id AND password_revision = :password_revision`
+
+const incrementEnabledSubjectSecurityVersion = `
+UPDATE identity_subjects
+SET security_version = security_version + 1, updated_at = :updated_at
+WHERE id = :id AND status = :status`
+
+const revokeActiveSessionsBySubjectID = `
+UPDATE identity_sessions
+SET revoked_at = :revoked_at, revoked_reason = :revoked_reason
+WHERE subject_id = :subject_id AND revoked_at IS NULL`
+
 func ChangePassword(ctx context.Context, database *sql.DB, subjectID string, input ChangePasswordInput) error {
 	newPasswordHash, err := password.Hash(input.NewPassword)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidPasswordInput, err)
 	}
 
-	transaction, err := database.BeginTx(ctx, nil)
+	transaction, err := newQuerier(database).BeginTxx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin password change transaction: %w", err)
 	}
 	defer transaction.Rollback()
-	queries := sqlc.New(database).WithTx(transaction)
 
-	credential, err := queries.GetPasswordCredentialBySubjectID(ctx, subjectID)
+	var credential passwordCredentialRow
+	err = namedGet(ctx, transaction, &credential, getPasswordCredentialBySubjectID, map[string]any{
+		"subject_id": subjectID,
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrPasswordCredentialNotFound
 	}
@@ -48,7 +81,7 @@ func ChangePassword(ctx context.Context, database *sql.DB, subjectID string, inp
 	if !matched {
 		return ErrIncorrectPassword
 	}
-	if err := replacePassword(ctx, queries, subjectID, credential.PasswordRevision, newPasswordHash, "有效", subjectID); err != nil {
+	if err := replacePassword(ctx, transaction, subjectID, credential.PasswordRevision, newPasswordHash, CredentialStatusValid, subjectID); err != nil {
 		return err
 	}
 	if err := transaction.Commit(); err != nil {
@@ -63,21 +96,23 @@ func SetTemporaryPassword(ctx context.Context, database *sql.DB, actorSubjectID 
 		return fmt.Errorf("%w: %v", ErrInvalidPasswordInput, err)
 	}
 
-	transaction, err := database.BeginTx(ctx, nil)
+	transaction, err := newQuerier(database).BeginTxx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin temporary password transaction: %w", err)
 	}
 	defer transaction.Rollback()
-	queries := sqlc.New(database).WithTx(transaction)
 
-	credential, err := queries.GetPasswordCredentialBySubjectID(ctx, subjectID)
+	var credential passwordCredentialRow
+	err = namedGet(ctx, transaction, &credential, getPasswordCredentialBySubjectID, map[string]any{
+		"subject_id": subjectID,
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrPasswordCredentialNotFound
 	}
 	if err != nil {
 		return fmt.Errorf("load password credential: %w", err)
 	}
-	if err := replacePassword(ctx, queries, subjectID, credential.PasswordRevision, temporaryPasswordHash, "需更新", actorSubjectID); err != nil {
+	if err := replacePassword(ctx, transaction, subjectID, credential.PasswordRevision, temporaryPasswordHash, CredentialStatusMustUpdate, actorSubjectID); err != nil {
 		return err
 	}
 	if err := transaction.Commit(); err != nil {
@@ -86,15 +121,15 @@ func SetTemporaryPassword(ctx context.Context, database *sql.DB, actorSubjectID 
 	return nil
 }
 
-func replacePassword(ctx context.Context, queries sqlc.Querier, subjectID string, expectedRevision int64, passwordHash string, credentialStatus string, actorSubjectID string) error {
+func replacePassword(ctx context.Context, queries querier, subjectID string, expectedRevision int64, passwordHash string, credentialStatus string, actorSubjectID string) error {
 	now := time.Now().UTC()
-	updated, err := queries.UpdatePasswordCredential(ctx, sqlc.UpdatePasswordCredentialParams{
-		PasswordHash:     passwordHash,
-		CredentialStatus: credentialStatus,
-		ChangedAt:        now,
-		UpdatedAt:        now,
-		SubjectID:        subjectID,
-		PasswordRevision: expectedRevision,
+	updated, err := namedExecRows(ctx, queries, updatePasswordCredential, map[string]any{
+		"password_hash":     passwordHash,
+		"credential_status": credentialStatus,
+		"changed_at":        now,
+		"updated_at":        now,
+		"subject_id":        subjectID,
+		"password_revision": expectedRevision,
 	})
 	if err != nil {
 		return fmt.Errorf("update password credential: %w", err)
@@ -102,10 +137,10 @@ func replacePassword(ctx context.Context, queries sqlc.Querier, subjectID string
 	if updated != 1 {
 		return ErrPasswordUpdateConflict
 	}
-	updated, err = queries.IncrementEnabledSubjectSecurityVersion(ctx, sqlc.IncrementEnabledSubjectSecurityVersionParams{
-		UpdatedAt: now,
-		ID:        subjectID,
-		Status:    "启用",
+	updated, err = namedExecRows(ctx, queries, incrementEnabledSubjectSecurityVersion, map[string]any{
+		"updated_at": now,
+		"id":         subjectID,
+		"status":     StatusEnabled,
 	})
 	if err != nil {
 		return fmt.Errorf("increment subject security version: %w", err)
@@ -113,28 +148,20 @@ func replacePassword(ctx context.Context, queries sqlc.Querier, subjectID string
 	if updated != 1 {
 		return ErrSubjectNotFound
 	}
-	if _, err := queries.RevokeActiveSessionsBySubjectID(ctx, sqlc.RevokeActiveSessionsBySubjectIDParams{
-		RevokedAt:     sql.NullTime{Time: now, Valid: true},
-		RevokedReason: sql.NullString{String: "凭据变更", Valid: true},
-		SubjectID:     subjectID,
+	if err := namedExec(ctx, queries, revokeActiveSessionsBySubjectID, map[string]any{
+		"revoked_at":     now,
+		"revoked_reason": RevokedReasonCredentialChanged,
+		"subject_id":     subjectID,
 	}); err != nil {
 		return fmt.Errorf("revoke subject sessions after password change: %w", err)
 	}
-	auditID, err := NewULID(now)
-	if err != nil {
-		return err
-	}
-	if err := queries.InsertAuditEvent(ctx, sqlc.InsertAuditEventParams{
-		ID:              auditID,
-		EventAction:     "凭据变更",
-		Outcome:         "成功",
-		ActorSubjectID:  sql.NullString{String: actorSubjectID, Valid: true},
-		TargetSubjectID: sql.NullString{String: subjectID, Valid: true},
-		RequestID:       sql.NullString{},
-		SourceHash:      nil,
+	if err := insertAuditEvent(ctx, queries, auditEvent{
+		Action:          AuditActionCredentialChanged,
+		Outcome:         OutcomeSucceeded,
+		ActorSubjectID:  actorSubjectID,
+		TargetSubjectID: subjectID,
 		Metadata:        fmt.Sprintf(`{"credential_status":%q}`, credentialStatus),
-		CreatedAt:       now,
-	}); err != nil {
+	}, now); err != nil {
 		return fmt.Errorf("write password change audit event: %w", err)
 	}
 	return nil

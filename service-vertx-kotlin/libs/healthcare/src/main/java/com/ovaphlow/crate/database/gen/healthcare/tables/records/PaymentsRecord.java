@@ -70,7 +70,7 @@ public class PaymentsRecord extends UpdatableRecordImpl<PaymentsRecord> {
 
     /**
      * Setter for <code>healthcare.payments.method</code>.
-     * 缴费方式中文枚举：现金/转账/银行卡/微信/支付宝（CHECK 兜底）
+     * 缴费方式中文枚举：现金/转账/银行卡/微信/支付宝/押金（CHECK 兜底）；其中「押金」只由结算收束的押金核销写入，客户端不可通过缴费接口提交
      */
     public void setMethod(String value) {
         set(3, value);
@@ -78,7 +78,7 @@ public class PaymentsRecord extends UpdatableRecordImpl<PaymentsRecord> {
 
     /**
      * Getter for <code>healthcare.payments.method</code>.
-     * 缴费方式中文枚举：现金/转账/银行卡/微信/支付宝（CHECK 兜底）
+     * 缴费方式中文枚举：现金/转账/银行卡/微信/支付宝/押金（CHECK 兜底）；其中「押金」只由结算收束的押金核销写入，客户端不可通过缴费接口提交
      */
     public String getMethod() {
         return (String) get(3);

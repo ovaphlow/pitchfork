@@ -9,7 +9,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/ovaphlow/pitchfork/service-idp-go/internal/database/sqlc"
 	"github.com/ovaphlow/pitchfork/service-idp-go/internal/password"
 )
 
@@ -29,6 +28,12 @@ type Subject struct {
 	UpdatedAt       time.Time `json:"updated_at"`
 }
 
+// Enabled 报告主体当前是否处于启用状态，供 HTTP 层与模板判断使用，
+// 避免在调用点重复比较 status 字面量。
+func (s Subject) Enabled() bool {
+	return s.Status == StatusEnabled
+}
+
 type ListSubjectsInput struct {
 	Limit  int64
 	Offset int64
@@ -45,22 +50,114 @@ type CreateSubjectInput struct {
 	Password    string
 }
 
+// managementSubjectRow 是管理台列表与详情共用的主体视图。
+type managementSubjectRow struct {
+	ID              string    `db:"id"`
+	Status          string    `db:"status"`
+	SecurityVersion int64     `db:"security_version"`
+	DisplayName     string    `db:"display_name"`
+	IdentifierValue string    `db:"identifier_value"`
+	CreatedAt       time.Time `db:"created_at"`
+	UpdatedAt       time.Time `db:"updated_at"`
+}
+
+// countSubjects 被管理台列表和引导流程共用。
+const countSubjects = `
+SELECT COUNT(*)
+FROM identity_subjects`
+
+const listSubjectsForManagement = `
+SELECT s.id, s.status, s.security_version, p.display_name, i.identifier_value, s.created_at, s.updated_at
+FROM identity_subjects s
+JOIN identity_profiles p ON p.subject_id = s.id
+JOIN identity_identifiers i ON i.subject_id = s.id
+WHERE i.identifier_usage = :identifier_usage
+ORDER BY s.created_at DESC
+LIMIT :page_limit OFFSET :page_offset`
+
+const getSubjectForManagement = `
+SELECT s.id, s.status, s.security_version, p.display_name, i.identifier_value, s.created_at, s.updated_at
+FROM identity_subjects s
+JOIN identity_profiles p ON p.subject_id = s.id
+JOIN identity_identifiers i ON i.subject_id = s.id
+WHERE s.id = :id AND i.identifier_usage = :identifier_usage`
+
+const getIdentifierSubjectID = `
+SELECT subject_id
+FROM identity_identifiers
+WHERE identifier_type = :identifier_type AND normalized_value = :normalized_value`
+
+const createSubject = `
+INSERT INTO identity_subjects(
+    id, status, security_version, metadata, created_at, updated_at
+) VALUES (
+    :id, :status, :security_version, :metadata, :created_at, :updated_at
+)`
+
+const createProfile = `
+INSERT INTO identity_profiles(subject_id, display_name, created_at, updated_at)
+VALUES (
+    :subject_id, :display_name, :created_at, :updated_at
+)`
+
+const createIdentifier = `
+INSERT INTO identity_identifiers(
+    id, subject_id, identifier_type, identifier_value, normalized_value,
+    identifier_usage, status, created_at, updated_at
+) VALUES (
+    :id, :subject_id, :identifier_type, :identifier_value, :normalized_value,
+    :identifier_usage, :status, :created_at, :updated_at
+)`
+
+const createPasswordCredential = `
+INSERT INTO identity_password_credentials(
+    id, subject_id, password_hash, password_revision, credential_status,
+    changed_at, created_at, updated_at
+) VALUES (
+    :id, :subject_id, :password_hash, :password_revision, :credential_status,
+    :changed_at, :created_at, :updated_at
+)`
+
+const countEnabledSubjectsByRoleCodeExcludingSubjectID = `
+SELECT COUNT(*)
+FROM identity_subjects AS subject
+JOIN identity_subject_roles AS subject_role ON subject_role.subject_id = subject.id
+JOIN identity_roles AS role ON role.id = subject_role.role_id
+WHERE subject.status = :status
+  AND role.role_code = :role_code
+  AND subject.id <> :subject_id`
+
+const disableSubject = `
+UPDATE identity_subjects
+SET status = :disabled_status,
+    security_version = security_version + 1,
+    disabled_at = :disabled_at,
+    updated_at = :updated_at
+WHERE id = :id AND status = :enabled_status`
+
+const listRoleCodesBySubjectID = `
+SELECT role.role_code
+FROM identity_subject_roles AS subject_role
+JOIN identity_roles AS role ON role.id = subject_role.role_id
+WHERE subject_role.subject_id = :subject_id
+ORDER BY role.role_code`
+
 func ListSubjects(ctx context.Context, database *sql.DB, input ListSubjectsInput) (ListSubjectsResult, error) {
 	if input.Limit <= 0 || input.Offset < 0 {
 		return ListSubjectsResult{}, fmt.Errorf("invalid subject list pagination")
 	}
 
-	queries := sqlc.New(database)
-	total, err := queries.CountSubjectsForManagement(ctx)
-	if err != nil {
+	queries := newQuerier(database)
+	var total int64
+	if err := namedGet(ctx, queries, &total, countSubjects, nil); err != nil {
 		return ListSubjectsResult{}, fmt.Errorf("count subjects for management: %w", err)
 	}
-	rows, err := queries.ListSubjectsForManagement(ctx, sqlc.ListSubjectsForManagementParams{
-		IdentifierUsage: "主登录",
-		Limit:           input.Limit,
-		Offset:          input.Offset,
-	})
-	if err != nil {
+	var rows []managementSubjectRow
+	if err := namedSelect(ctx, queries, &rows, listSubjectsForManagement, map[string]any{
+		"identifier_usage": IdentifierUsagePrimaryLogin,
+		"page_limit":       input.Limit,
+		"page_offset":      input.Offset,
+	}); err != nil {
 		return ListSubjectsResult{}, fmt.Errorf("list subjects for management: %w", err)
 	}
 
@@ -86,7 +183,7 @@ func ListSubjects(ctx context.Context, database *sql.DB, input ListSubjectsInput
 }
 
 func GetSubject(ctx context.Context, database *sql.DB, subjectID string) (Subject, error) {
-	return getSubject(ctx, sqlc.New(database), subjectID)
+	return getSubject(ctx, newQuerier(database), subjectID)
 }
 
 func CreateSubject(ctx context.Context, database *sql.DB, actorSubjectID string, input CreateSubjectInput) (Subject, error) {
@@ -103,17 +200,16 @@ func CreateSubject(ctx context.Context, database *sql.DB, actorSubjectID string,
 		return Subject{}, fmt.Errorf("%w: %v", ErrInvalidSubjectInput, err)
 	}
 
-	queries := sqlc.New(database)
-	transaction, err := database.BeginTx(ctx, nil)
+	transaction, err := newQuerier(database).BeginTxx(ctx, nil)
 	if err != nil {
 		return Subject{}, fmt.Errorf("begin create subject transaction: %w", err)
 	}
 	defer transaction.Rollback()
-	transactionQueries := queries.WithTx(transaction)
 
-	_, err = transactionQueries.GetIdentifierSubjectID(ctx, sqlc.GetIdentifierSubjectIDParams{
-		IdentifierType:  "账号",
-		NormalizedValue: identifier,
+	var existingSubjectID string
+	err = namedGet(ctx, transaction, &existingSubjectID, getIdentifierSubjectID, map[string]any{
+		"identifier_type":  IdentifierTypeAccount,
+		"normalized_value": identifier,
 	})
 	if err == nil {
 		return Subject{}, ErrIdentifierAlreadyExists
@@ -135,67 +231,55 @@ func CreateSubject(ctx context.Context, database *sql.DB, actorSubjectID string,
 	if err != nil {
 		return Subject{}, err
 	}
-	auditEventID, err := NewULID(now)
-	if err != nil {
-		return Subject{}, err
-	}
-
-	if err := transactionQueries.CreateSubject(ctx, sqlc.CreateSubjectParams{
-		ID:              subjectID,
-		Status:          "启用",
-		SecurityVersion: 1,
-		DisabledAt:      sql.NullTime{},
-		Metadata:        "{}",
-		CreatedAt:       now,
-		UpdatedAt:       now,
+	if err := namedExec(ctx, transaction, createSubject, map[string]any{
+		"id":               subjectID,
+		"status":           StatusEnabled,
+		"security_version": 1,
+		"metadata":         "{}",
+		"created_at":       now,
+		"updated_at":       now,
 	}); err != nil {
 		return Subject{}, fmt.Errorf("create subject: %w", err)
 	}
-	if err := transactionQueries.CreateProfile(ctx, sqlc.CreateProfileParams{
-		SubjectID:   subjectID,
-		DisplayName: displayName,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+	if err := namedExec(ctx, transaction, createProfile, map[string]any{
+		"subject_id":   subjectID,
+		"display_name": displayName,
+		"created_at":   now,
+		"updated_at":   now,
 	}); err != nil {
 		return Subject{}, fmt.Errorf("create subject profile: %w", err)
 	}
-	if err := transactionQueries.CreateIdentifier(ctx, sqlc.CreateIdentifierParams{
-		ID:              identifierID,
-		SubjectID:       subjectID,
-		IdentifierType:  "账号",
-		IdentifierValue: identifier,
-		NormalizedValue: identifier,
-		IdentifierUsage: "主登录",
-		Status:          "启用",
-		VerifiedAt:      sql.NullTime{},
-		CreatedAt:       now,
-		UpdatedAt:       now,
+	if err := namedExec(ctx, transaction, createIdentifier, map[string]any{
+		"id":               identifierID,
+		"subject_id":       subjectID,
+		"identifier_type":  IdentifierTypeAccount,
+		"identifier_value": identifier,
+		"normalized_value": identifier,
+		"identifier_usage": IdentifierUsagePrimaryLogin,
+		"status":           StatusEnabled,
+		"created_at":       now,
+		"updated_at":       now,
 	}); err != nil {
 		return Subject{}, fmt.Errorf("create account identifier: %w", err)
 	}
-	if err := transactionQueries.CreatePasswordCredential(ctx, sqlc.CreatePasswordCredentialParams{
-		ID:               credentialID,
-		SubjectID:        subjectID,
-		PasswordHash:     passwordHash,
-		PasswordRevision: 1,
-		CredentialStatus: "有效",
-		ChangedAt:        now,
-		CreatedAt:        now,
-		UpdatedAt:        now,
+	if err := namedExec(ctx, transaction, createPasswordCredential, map[string]any{
+		"id":                credentialID,
+		"subject_id":        subjectID,
+		"password_hash":     passwordHash,
+		"password_revision": 1,
+		"credential_status": CredentialStatusValid,
+		"changed_at":        now,
+		"created_at":        now,
+		"updated_at":        now,
 	}); err != nil {
 		return Subject{}, fmt.Errorf("create password credential: %w", err)
 	}
-	if err := transactionQueries.InsertAuditEvent(ctx, sqlc.InsertAuditEventParams{
-		ID:              auditEventID,
-		EventAction:     "主体创建",
-		Outcome:         "成功",
-		ActorSubjectID:  sql.NullString{String: actorSubjectID, Valid: true},
-		TargetSubjectID: sql.NullString{String: subjectID, Valid: true},
-		RequestID:       sql.NullString{},
-		SourceHash:      nil,
-		Metadata:        "{}",
-		CreatedAt:       now,
-	}); err != nil {
+	if err := insertAuditEvent(ctx, transaction, auditEvent{
+		Action:          AuditActionSubjectCreated,
+		Outcome:         OutcomeSucceeded,
+		ActorSubjectID:  actorSubjectID,
+		TargetSubjectID: subjectID,
+	}, now); err != nil {
 		return Subject{}, fmt.Errorf("write subject creation audit event: %w", err)
 	}
 	if err := transaction.Commit(); err != nil {
@@ -204,7 +288,7 @@ func CreateSubject(ctx context.Context, database *sql.DB, actorSubjectID string,
 
 	return Subject{
 		ID:              subjectID,
-		Status:          "启用",
+		Status:          StatusEnabled,
 		SecurityVersion: 1,
 		DisplayName:     displayName,
 		Identifier:      identifier,
@@ -215,30 +299,29 @@ func CreateSubject(ctx context.Context, database *sql.DB, actorSubjectID string,
 }
 
 func DisableSubject(ctx context.Context, database *sql.DB, actorSubjectID string, subjectID string) (Subject, error) {
-	queries := sqlc.New(database)
-	transaction, err := database.BeginTx(ctx, nil)
+	transaction, err := newQuerier(database).BeginTxx(ctx, nil)
 	if err != nil {
 		return Subject{}, fmt.Errorf("begin disable subject transaction: %w", err)
 	}
 	defer transaction.Rollback()
-	transactionQueries := queries.WithTx(transaction)
 
-	subject, err := getSubject(ctx, transactionQueries, subjectID)
+	subject, err := getSubject(ctx, transaction, subjectID)
 	if err != nil {
 		return Subject{}, err
 	}
-	if subject.Status == "禁用" {
+	if subject.Status == StatusDisabled {
 		if err := transaction.Commit(); err != nil {
 			return Subject{}, fmt.Errorf("commit existing disabled subject: %w", err)
 		}
 		return subject, nil
 	}
 
-	if hasRole(subject.Roles, "identity.admin") {
-		remainingAdministrators, err := transactionQueries.CountEnabledSubjectsByRoleCodeExcludingSubjectID(ctx, sqlc.CountEnabledSubjectsByRoleCodeExcludingSubjectIDParams{
-			Status:   "启用",
-			RoleCode: "identity.admin",
-			ID:       subjectID,
+	if hasRole(subject.Roles, RoleCodeAdministrator) {
+		var remainingAdministrators int64
+		err := namedGet(ctx, transaction, &remainingAdministrators, countEnabledSubjectsByRoleCodeExcludingSubjectID, map[string]any{
+			"status":     StatusEnabled,
+			"role_code":  RoleCodeAdministrator,
+			"subject_id": subjectID,
 		})
 		if err != nil {
 			return Subject{}, fmt.Errorf("count remaining administrators: %w", err)
@@ -249,12 +332,12 @@ func DisableSubject(ctx context.Context, database *sql.DB, actorSubjectID string
 	}
 
 	now := time.Now().UTC()
-	updated, err := transactionQueries.DisableSubject(ctx, sqlc.DisableSubjectParams{
-		Status:     "禁用",
-		DisabledAt: sql.NullTime{Time: now, Valid: true},
-		UpdatedAt:  now,
-		ID:         subjectID,
-		Status_2:   "启用",
+	updated, err := namedExecRows(ctx, transaction, disableSubject, map[string]any{
+		"disabled_status": StatusDisabled,
+		"disabled_at":     now,
+		"updated_at":      now,
+		"id":              subjectID,
+		"enabled_status":  StatusEnabled,
 	})
 	if err != nil {
 		return Subject{}, fmt.Errorf("disable subject: %w", err)
@@ -262,44 +345,37 @@ func DisableSubject(ctx context.Context, database *sql.DB, actorSubjectID string
 	if updated != 1 {
 		return Subject{}, fmt.Errorf("disable subject: expected one enabled subject, updated %d", updated)
 	}
-	if _, err := transactionQueries.RevokeActiveSessionsBySubjectID(ctx, sqlc.RevokeActiveSessionsBySubjectIDParams{
-		RevokedAt:     sql.NullTime{Time: now, Valid: true},
-		RevokedReason: sql.NullString{String: "主体禁用", Valid: true},
-		SubjectID:     subjectID,
+	if err := namedExec(ctx, transaction, revokeActiveSessionsBySubjectID, map[string]any{
+		"revoked_at":     now,
+		"revoked_reason": RevokedReasonSubjectDisabled,
+		"subject_id":     subjectID,
 	}); err != nil {
 		return Subject{}, fmt.Errorf("revoke subject sessions: %w", err)
 	}
-	auditEventID, err := NewULID(now)
-	if err != nil {
-		return Subject{}, err
-	}
-	if err := transactionQueries.InsertAuditEvent(ctx, sqlc.InsertAuditEventParams{
-		ID:              auditEventID,
-		EventAction:     "主体状态变更",
-		Outcome:         "成功",
-		ActorSubjectID:  sql.NullString{String: actorSubjectID, Valid: true},
-		TargetSubjectID: sql.NullString{String: subjectID, Valid: true},
-		RequestID:       sql.NullString{},
-		SourceHash:      nil,
-		Metadata:        `{"status":"禁用"}`,
-		CreatedAt:       now,
-	}); err != nil {
+	if err := insertAuditEvent(ctx, transaction, auditEvent{
+		Action:          AuditActionSubjectStatusChanged,
+		Outcome:         OutcomeSucceeded,
+		ActorSubjectID:  actorSubjectID,
+		TargetSubjectID: subjectID,
+		Metadata:        fmt.Sprintf(`{"status":%q}`, StatusDisabled),
+	}, now); err != nil {
 		return Subject{}, fmt.Errorf("write subject disable audit event: %w", err)
 	}
 	if err := transaction.Commit(); err != nil {
 		return Subject{}, fmt.Errorf("commit disable subject transaction: %w", err)
 	}
 
-	subject.Status = "禁用"
+	subject.Status = StatusDisabled
 	subject.SecurityVersion++
 	subject.UpdatedAt = now
 	return subject, nil
 }
 
-func getSubject(ctx context.Context, queries sqlc.Querier, subjectID string) (Subject, error) {
-	row, err := queries.GetSubjectForManagement(ctx, sqlc.GetSubjectForManagementParams{
-		ID:              subjectID,
-		IdentifierUsage: "主登录",
+func getSubject(ctx context.Context, queries querier, subjectID string) (Subject, error) {
+	var row managementSubjectRow
+	err := namedGet(ctx, queries, &row, getSubjectForManagement, map[string]any{
+		"id":               subjectID,
+		"identifier_usage": IdentifierUsagePrimaryLogin,
 	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return Subject{}, ErrSubjectNotFound
@@ -320,9 +396,11 @@ func getSubject(ctx context.Context, queries sqlc.Querier, subjectID string) (Su
 	)
 }
 
-func subjectFromManagementValues(ctx context.Context, queries sqlc.Querier, subjectID string, status string, securityVersion int64, displayName string, identifier string, createdAt time.Time, updatedAt time.Time) (Subject, error) {
-	roles, err := queries.ListRoleCodesBySubjectID(ctx, subjectID)
-	if err != nil {
+func subjectFromManagementValues(ctx context.Context, queries querier, subjectID string, status string, securityVersion int64, displayName string, identifier string, createdAt time.Time, updatedAt time.Time) (Subject, error) {
+	var roles []string
+	if err := namedSelect(ctx, queries, &roles, listRoleCodesBySubjectID, map[string]any{
+		"subject_id": subjectID,
+	}); err != nil {
 		return Subject{}, fmt.Errorf("list subject roles: %w", err)
 	}
 	if roles == nil {

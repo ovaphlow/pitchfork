@@ -82,9 +82,9 @@ public class Payments extends TableImpl<PaymentsRecord> {
 
     /**
      * The column <code>healthcare.payments.method</code>.
-     * 缴费方式中文枚举：现金/转账/银行卡/微信/支付宝（CHECK 兜底）
+     * 缴费方式中文枚举：现金/转账/银行卡/微信/支付宝/押金（CHECK 兜底）；其中「押金」只由结算收束的押金核销写入，客户端不可通过缴费接口提交
      */
-    public final TableField<PaymentsRecord, String> METHOD = createField(DSL.name("method"), SQLDataType.VARCHAR.nullable(false), this, "缴费方式中文枚举：现金/转账/银行卡/微信/支付宝（CHECK 兜底）");
+    public final TableField<PaymentsRecord, String> METHOD = createField(DSL.name("method"), SQLDataType.VARCHAR.nullable(false), this, "缴费方式中文枚举：现金/转账/银行卡/微信/支付宝/押金（CHECK 兜底）；其中「押金」只由结算收束的押金核销写入，客户端不可通过缴费接口提交");
 
     /**
      * The column <code>healthcare.payments.operator</code>. 操作人，来自认证主体，客户端不得提交
@@ -208,7 +208,7 @@ public class Payments extends TableImpl<PaymentsRecord> {
     @Override
     public List<Check<PaymentsRecord>> getChecks() {
         return Arrays.asList(
-            Internal.createCheck(this, DSL.name("payments_method_check"), "(((method)::text = ANY ((ARRAY['现金'::character varying, '转账'::character varying, '银行卡'::character varying, '微信'::character varying, '支付宝'::character varying])::text[])))", true)
+            Internal.createCheck(this, DSL.name("payments_method_check"), "(((method)::text = ANY ((ARRAY['现金'::character varying, '转账'::character varying, '银行卡'::character varying, '微信'::character varying, '支付宝'::character varying, '押金'::character varying])::text[])))", true)
         );
     }
 

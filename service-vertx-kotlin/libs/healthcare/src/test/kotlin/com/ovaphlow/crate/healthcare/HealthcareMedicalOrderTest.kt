@@ -82,6 +82,11 @@ class HealthcareMedicalOrderTest {
                     Future.failedFuture(IllegalStateException("task insert failed"))
                 } else {
                     val branch = when {
+                        // pharmacy 发药表探测（information_schema 计数）：本文件相关用例
+                        // （详情汇总、路由 200）假定 pharmacy 迁移已挂载但无发药数据，
+                        // 返回 cnt=2 让 present=true，给药汇总走真实查询分支并回落零值，
+                        // 不至于因空行集在 rows.iterator().next() 处抛异常导致 500。
+                        sql.contains("information_schema.tables") -> "pharmacy_tables_present"
                         sql.contains("insert into healthcare.medical_orders") -> "insert_orders"
                         sql.contains("insert into nursing.nursing_tasks") -> "insert_tasks"
                         sql.contains("update healthcare.encounters") -> {
@@ -111,6 +116,7 @@ class HealthcareMedicalOrderTest {
                     val result = when (branch) {
                         "insert_orders", "insert_tasks", "update_encounters", "update_patients",
                         "update_orders", "update_tasks_or_periods", "else" -> rowSet()
+                        "pharmacy_tables_present" -> rows(mapOf("cnt" to 2L))
                         "executions" -> executions
                         "select_one_encounters" -> selectOneEncounters
                         "count_rows" -> countRows

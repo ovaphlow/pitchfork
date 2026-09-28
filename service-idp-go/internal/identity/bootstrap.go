@@ -7,9 +7,26 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ovaphlow/pitchfork/service-idp-go/internal/database/sqlc"
 	"github.com/ovaphlow/pitchfork/service-idp-go/internal/password"
 )
+
+const getRoleIDByCode = `
+SELECT id
+FROM identity_roles
+WHERE role_code = :role_code`
+
+const assignSubjectRole = `
+INSERT INTO identity_subject_roles(id, subject_id, role_id, granted_by_subject_id, created_at)
+VALUES (
+    :id, :subject_id, :role_id, :granted_by_subject_id, :created_at
+)`
+
+const createRoleIfAbsent = `
+INSERT INTO identity_roles(id, role_code, display_name, description, created_at, updated_at)
+VALUES (
+    :id, :role_code, :display_name, :description, :created_at, :updated_at
+)
+ON CONFLICT(role_code) DO NOTHING`
 
 type BootstrapInput struct {
 	Identifier string
@@ -17,21 +34,19 @@ type BootstrapInput struct {
 }
 
 func EnsureBootstrap(ctx context.Context, database *sql.DB, input BootstrapInput) (bool, error) {
-	queries := sqlc.New(database)
-	transaction, err := database.BeginTx(ctx, nil)
+	transaction, err := newQuerier(database).BeginTxx(ctx, nil)
 	if err != nil {
 		return false, fmt.Errorf("begin bootstrap transaction: %w", err)
 	}
 	defer transaction.Rollback()
-	transactionQueries := queries.WithTx(transaction)
 
 	now := time.Now().UTC()
-	if err := seedRoles(ctx, transactionQueries, now); err != nil {
+	if err := seedRoles(ctx, transaction, now); err != nil {
 		return false, err
 	}
 
-	subjectCount, err := transactionQueries.CountSubjects(ctx)
-	if err != nil {
+	var subjectCount int64
+	if err := namedGet(ctx, transaction, &subjectCount, countSubjects, nil); err != nil {
 		return false, fmt.Errorf("count identity subjects: %w", err)
 	}
 	if subjectCount > 0 {
@@ -66,81 +81,71 @@ func EnsureBootstrap(ctx context.Context, database *sql.DB, input BootstrapInput
 	if err != nil {
 		return false, err
 	}
-	auditEventID, err := NewULID(now)
-	if err != nil {
-		return false, err
-	}
-
-	if err := transactionQueries.CreateSubject(ctx, sqlc.CreateSubjectParams{
-		ID:              subjectID,
-		Status:          "启用",
-		SecurityVersion: 1,
-		DisabledAt:      sql.NullTime{},
-		Metadata:        "{}",
-		CreatedAt:       now,
-		UpdatedAt:       now,
+	if err := namedExec(ctx, transaction, createSubject, map[string]any{
+		"id":               subjectID,
+		"status":           StatusEnabled,
+		"security_version": 1,
+		"metadata":         "{}",
+		"created_at":       now,
+		"updated_at":       now,
 	}); err != nil {
 		return false, fmt.Errorf("create bootstrap subject: %w", err)
 	}
-	if err := transactionQueries.CreateProfile(ctx, sqlc.CreateProfileParams{
-		SubjectID:   subjectID,
-		DisplayName: "系统管理员",
-		CreatedAt:   now,
-		UpdatedAt:   now,
+	if err := namedExec(ctx, transaction, createProfile, map[string]any{
+		"subject_id":   subjectID,
+		"display_name": "系统管理员",
+		"created_at":   now,
+		"updated_at":   now,
 	}); err != nil {
 		return false, fmt.Errorf("create bootstrap profile: %w", err)
 	}
-	if err := transactionQueries.CreateIdentifier(ctx, sqlc.CreateIdentifierParams{
-		ID:              identifierID,
-		SubjectID:       subjectID,
-		IdentifierType:  "账号",
-		IdentifierValue: identifier,
-		NormalizedValue: identifier,
-		IdentifierUsage: "主登录",
-		Status:          "启用",
-		VerifiedAt:      sql.NullTime{},
-		CreatedAt:       now,
-		UpdatedAt:       now,
+	if err := namedExec(ctx, transaction, createIdentifier, map[string]any{
+		"id":               identifierID,
+		"subject_id":       subjectID,
+		"identifier_type":  IdentifierTypeAccount,
+		"identifier_value": identifier,
+		"normalized_value": identifier,
+		"identifier_usage": IdentifierUsagePrimaryLogin,
+		"status":           StatusEnabled,
+		"created_at":       now,
+		"updated_at":       now,
 	}); err != nil {
 		return false, fmt.Errorf("create bootstrap identifier: %w", err)
 	}
-	if err := transactionQueries.CreatePasswordCredential(ctx, sqlc.CreatePasswordCredentialParams{
-		ID:               credentialID,
-		SubjectID:        subjectID,
-		PasswordHash:     passwordHash,
-		PasswordRevision: 1,
-		CredentialStatus: "有效",
-		ChangedAt:        now,
-		CreatedAt:        now,
-		UpdatedAt:        now,
+	if err := namedExec(ctx, transaction, createPasswordCredential, map[string]any{
+		"id":                credentialID,
+		"subject_id":        subjectID,
+		"password_hash":     passwordHash,
+		"password_revision": 1,
+		"credential_status": CredentialStatusValid,
+		"changed_at":        now,
+		"created_at":        now,
+		"updated_at":        now,
 	}); err != nil {
 		return false, fmt.Errorf("create bootstrap credential: %w", err)
 	}
 
-	adminRoleID, err := transactionQueries.GetRoleIDByCode(ctx, "identity.admin")
-	if err != nil {
+	var adminRoleID string
+	if err := namedGet(ctx, transaction, &adminRoleID, getRoleIDByCode, map[string]any{
+		"role_code": RoleCodeAdministrator,
+	}); err != nil {
 		return false, fmt.Errorf("find identity admin role: %w", err)
 	}
-	if err := transactionQueries.AssignSubjectRole(ctx, sqlc.AssignSubjectRoleParams{
-		ID:                 grantID,
-		SubjectID:          subjectID,
-		RoleID:             adminRoleID,
-		GrantedBySubjectID: sql.NullString{},
-		CreatedAt:          now,
+	if err := namedExec(ctx, transaction, assignSubjectRole, map[string]any{
+		"id":                    grantID,
+		"subject_id":            subjectID,
+		"role_id":               adminRoleID,
+		"granted_by_subject_id": nil,
+		"created_at":            now,
 	}); err != nil {
 		return false, fmt.Errorf("grant bootstrap administrator role: %w", err)
 	}
-	if err := transactionQueries.InsertAuditEvent(ctx, sqlc.InsertAuditEventParams{
-		ID:              auditEventID,
-		EventAction:     "主体创建",
-		Outcome:         "成功",
-		ActorSubjectID:  sql.NullString{},
-		TargetSubjectID: sql.NullString{String: subjectID, Valid: true},
-		RequestID:       sql.NullString{},
-		SourceHash:      nil,
+	if err := insertAuditEvent(ctx, transaction, auditEvent{
+		Action:          AuditActionSubjectCreated,
+		Outcome:         OutcomeSucceeded,
+		TargetSubjectID: subjectID,
 		Metadata:        `{"actor_source":"bootstrap"}`,
-		CreatedAt:       now,
-	}); err != nil {
+	}, now); err != nil {
 		return false, fmt.Errorf("write bootstrap audit event: %w", err)
 	}
 
@@ -150,27 +155,27 @@ func EnsureBootstrap(ctx context.Context, database *sql.DB, input BootstrapInput
 	return true, nil
 }
 
-func seedRoles(ctx context.Context, queries sqlc.Querier, now time.Time) error {
+func seedRoles(ctx context.Context, queries querier, now time.Time) error {
 	roles := []struct {
 		Code        string
 		DisplayName string
 		Description string
 	}{
-		{Code: "identity.admin", DisplayName: "身份管理员", Description: "管理身份、凭据、角色、会话和恢复操作。"},
-		{Code: "identity.audit.read", DisplayName: "审计查看者", Description: "查看运行概览和不可变审计事件。"},
+		{Code: RoleCodeAdministrator, DisplayName: "身份管理员", Description: "管理身份、凭据、角色、会话和恢复操作。"},
+		{Code: RoleCodeAuditReader, DisplayName: "审计查看者", Description: "查看运行概览和不可变审计事件。"},
 	}
 	for _, role := range roles {
 		roleID, err := NewULID(now)
 		if err != nil {
 			return err
 		}
-		if err := queries.CreateRoleIfAbsent(ctx, sqlc.CreateRoleIfAbsentParams{
-			ID:          roleID,
-			RoleCode:    role.Code,
-			DisplayName: role.DisplayName,
-			Description: role.Description,
-			CreatedAt:   now,
-			UpdatedAt:   now,
+		if err := namedExec(ctx, queries, createRoleIfAbsent, map[string]any{
+			"id":           roleID,
+			"role_code":    role.Code,
+			"display_name": role.DisplayName,
+			"description":  role.Description,
+			"created_at":   now,
+			"updated_at":   now,
 		}); err != nil {
 			return fmt.Errorf("seed role %s: %w", role.Code, err)
 		}

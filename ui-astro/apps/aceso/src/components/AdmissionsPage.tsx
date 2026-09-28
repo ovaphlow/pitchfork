@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Card, Input, Modal, Table, type Column } from "@pitchfork/ui";
 import {
   createElderlyAdmission,
@@ -7,12 +7,14 @@ import {
   getElderlyDischargeHandover,
   listActiveElderlyAdmissions,
   listElderlyAdmissions,
+  listIdentitySubjects,
   listPatients,
   markEncounterDeath,
   type ElderlyAdmissionInput,
   type ElderlyDischargeHandover,
   type ElderlyDischargeHandoverSnapshot,
   type Encounter,
+  type IdentitySubject,
   type Patient,
 } from "@pitchfork/shared/aceso";
 
@@ -22,7 +24,6 @@ interface AdmissionForm {
   admitDate: string;
   department: string;
   ward: string;
-  attendingPhysician: string;
 }
 
 interface AdmissionRow extends Encounter {
@@ -35,7 +36,6 @@ const admissionFormDefaults: AdmissionForm = {
   admitDate: "",
   department: "",
   ward: "",
-  attendingPhysician: "",
 };
 
 function errorMessage(error: unknown, fallback: string): string {
@@ -59,7 +59,7 @@ function toAdmissionInput(form: AdmissionForm): ElderlyAdmissionInput | null {
     admit_date: `${form.admitDate}T00:00:00+08:00`,
     ...(form.department.trim() ? { department: form.department.trim() } : {}),
     ...(form.ward.trim() ? { ward: form.ward.trim() } : {}),
-    ...(form.attendingPhysician.trim() ? { attending_physician: form.attendingPhysician.trim() } : {}),
+    // attending_physician 由服务端按当前操作人写入，不由表单提交
   };
 }
 
@@ -91,7 +91,7 @@ function ExecutionSummary({ summary }: { summary: ElderlyDischargeHandoverSnapsh
   );
 }
 
-function HandoverReadOnly({ handover }: { handover: ElderlyDischargeHandover }) {
+function HandoverReadOnly({ handover, subjectLabel }: { handover: ElderlyDischargeHandover; subjectLabel: (value: string | null | undefined) => string }) {
   const snapshot = handover.snapshot;
   const patient = snapshot.patient;
   const encounter = snapshot.encounter;
@@ -134,7 +134,7 @@ function HandoverReadOnly({ handover }: { handover: ElderlyDischargeHandover }) 
           <p><span className="text-fg-dimmed">住院号：</span>{encounter.encounter_no || "-"}</p>
           <p><span className="text-fg-dimmed">照护单元：</span>{encounter.department || "-"}</p>
           <p><span className="text-fg-dimmed">房间床位：</span>{encounter.ward || "-"}</p>
-          <p><span className="text-fg-dimmed">责任照护人员：</span>{encounter.attending_physician || "-"}</p>
+          <p><span className="text-fg-dimmed">责任照护人员：</span>{subjectLabel(encounter.attending_physician)}</p>
           <p><span className="text-fg-dimmed">入住时间：</span>{formatDateTime(encounter.admit_date)}</p>
           <p><span className="text-fg-dimmed">离院时间：</span>{formatDateTime(encounter.discharge_date)}</p>
           <p className="sm:col-span-2"><span className="text-fg-dimmed">入院诊断：</span>{encounter.admitting_diagnosis || "-"}</p>
@@ -321,6 +321,8 @@ export default function AdmissionsPage() {
   const [loading, setLoading] = useState(true);
   const [dischargedLoading, setDischargedLoading] = useState(false);
   const [pageError, setPageError] = useState("");
+  /** 离院/去世成功后的下一步指引（023：离院不再收束账单，账单需到「养老收费 → 结算收束」收尾） */
+  const [notice, setNotice] = useState("");
   const [editorOpen, setEditorOpen] = useState(false);
   const [form, setForm] = useState<AdmissionForm>(admissionFormDefaults);
   const [formError, setFormError] = useState("");
@@ -351,16 +353,30 @@ export default function AdmissionsPage() {
   const [deathError, setDeathError] = useState("");
   const [deathSubmitting, setDeathSubmitting] = useState(false);
 
+  const [subjects, setSubjects] = useState<IdentitySubject[]>([]);
+
+  const subjectMap = useMemo(
+    () => new Map(subjects.map((subject) => [subject.id, subject.display_name])),
+    [subjects],
+  );
+  /** 责任医生/照护师存的是主体 ID；这里映射为姓名，存量自由文本按原值回退 */
+  const subjectLabel = useCallback(
+    (value: string | null | undefined) => (value ? subjectMap.get(value) ?? value : "-"),
+    [subjectMap],
+  );
+
   const load = useCallback(async () => {
     setLoading(true);
     setPageError("");
     try {
-      const [patientResponse, encounterResponse] = await Promise.all([
+      const [patientResponse, encounterResponse, subjectResponse] = await Promise.all([
         listPatients({ status: "ACTIVE", limit: 100 }),
         listActiveElderlyAdmissions({ limit: 100 }),
+        listIdentitySubjects(1, 100),
       ]);
       const patientById = new Map(patientResponse.records.map((patient) => [patient.id, patient]));
       setPatients(patientResponse.records);
+      setSubjects(subjectResponse.records);
       setAdmissions(encounterResponse.records.map((encounter) => ({
         ...encounter,
         patientName: patientById.get(encounter.patient_id)?.name ?? encounter.patient_id,
@@ -485,13 +501,19 @@ export default function AdmissionsPage() {
     }
   }
 
+  /** 023：离院/去世只标记事实，账单收束是收费页的独立显式动作，成功路径必须给出下一步指引 */
+  const BILLING_SETTLEMENT_HINT =
+    "请到「养老收费 → 结算收束」完成账单收尾（可核销押金，未结部分需说明减免原因）。";
+
   async function handleDischarge(encounter: Encounter) {
     if (!window.confirm(`确认办理住院号 ${encounter.encounter_no} 的离院吗？`)) return;
     setDischargingId(encounter.id);
     setPageError("");
+    setNotice("");
     try {
       await dischargeEncounter(encounter.id, new Date().toISOString());
       await load();
+      setNotice(`已办理离院。该长者的账单尚未收束，${BILLING_SETTLEMENT_HINT}`);
     } catch (error) {
       setPageError(errorMessage(error, "无法办理离院"));
     } finally {
@@ -516,6 +538,7 @@ export default function AdmissionsPage() {
     }
     setDeathSubmitting(true);
     setDeathError("");
+    setNotice("");
     try {
       await markEncounterDeath(deathAdmission.id, {
         death_date: `${deathDateValue}:00+08:00`,
@@ -525,6 +548,7 @@ export default function AdmissionsPage() {
       setDeathDate("");
       setDeathCause("");
       await load();
+      setNotice(`已办理去世。该长者的账单尚未收束，${BILLING_SETTLEMENT_HINT}`);
     } catch (error) {
       // 409/网络/校验失败：保留表单输入，错误独立展示（不得用错误面板替换输入表单）
       setDeathError(errorMessage(error, "无法办理去世"));
@@ -601,7 +625,7 @@ export default function AdmissionsPage() {
     { key: "admit_date", header: "入住日期", className: "min-w-[120px]", render: (row) => formatDate(row.admit_date) },
     { key: "department", header: "照护单元/病区", className: "min-w-[150px]", render: (row) => row.department || "-" },
     { key: "ward", header: "房间床位", className: "min-w-[120px]", render: (row) => row.ward || "-" },
-    { key: "attending_physician", header: "责任医生/照护师", className: "min-w-[160px]", render: (row) => row.attending_physician || "-" },
+    { key: "attending_physician", header: "责任医生/照护师", className: "min-w-[160px]", render: (row) => subjectLabel(row.attending_physician) },
     {
       key: "actions",
       header: "操作",
@@ -664,6 +688,22 @@ export default function AdmissionsPage() {
       </div>
 
       {pageError && <div className="rounded-lg border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">{pageError}</div>}
+
+      {notice && (
+        <div
+          role="status"
+          className="flex flex-wrap items-start justify-between gap-3 rounded-lg border border-success/30 bg-success-bg px-4 py-3 text-sm text-success"
+        >
+          <span>{notice}</span>
+          <button
+            type="button"
+            onClick={() => setNotice("")}
+            className="shrink-0 text-xs font-medium underline-offset-2 hover:underline"
+          >
+            知道了
+          </button>
+        </div>
+      )}
 
       {/* 视图切换 */}
       <div className="flex gap-1 rounded-lg border border-border bg-surface p-1 w-fit">
@@ -790,13 +830,9 @@ export default function AdmissionsPage() {
               onChange={(event) => setForm((current) => ({ ...current, ward: event.target.value }))}
               placeholder="请输入房间和床位"
             />
-            <Input
-              label="责任医生/照护师"
-              value={form.attendingPhysician}
-              onChange={(event) => setForm((current) => ({ ...current, attendingPhysician: event.target.value }))}
-              placeholder="请输入责任人"
-              className="sm:col-span-2"
-            />
+            <p className="text-sm text-fg-muted sm:col-span-2">
+              责任医生/照护师：保存时自动记为当前操作人，不可修改
+            </p>
           </div>
 
           <div className="flex justify-end gap-3 pt-1">
@@ -863,7 +899,7 @@ export default function AdmissionsPage() {
         )}
         {!handoverLoading && !handoverError && handoverData !== null && (
           <>
-            <HandoverReadOnly handover={handoverData} />
+            <HandoverReadOnly handover={handoverData} subjectLabel={subjectLabel} />
             <div className="mt-6 flex justify-end">
               <Button type="button" variant="ghost" onClick={closeHandover}>关闭</Button>
             </div>

@@ -38,8 +38,8 @@ standard OIDC contract. This document does not modify the Kotlin plan.
 - A small server-side administrative UI for user and OIDC-client management.
 - Locally managed accounts, password credentials, browser sessions, account
   disablement, and audit events.
-- SQLite persistence, embedded SQL migrations, and `sqlc`-generated Go query
-  code.
+- SQLite persistence, embedded SQL migrations, and hand-written SQL executed
+  through `database/sql` with `sqlx`.
 - Standard-library `net/http` routing using method-qualified patterns such as
   `GET /crate-api/identity/v1/users` and
   `PATCH /crate-api/identity/v1/users/{id}`.
@@ -77,14 +77,14 @@ protection, rate limiting, audit logging, or strict redirect URI validation.
 | Deployment tenancy | One customer environment per service/database | SQLite stays local, no tenant model is needed, and one customer's identities cannot share a namespace with another customer's deployment. |
 | Database | One local SQLite file in WAL mode | Low operational cost and adequate for a single instance with low-to-moderate login traffic. |
 | SQLite driver | Pure-Go SQLite driver only; start with `modernc.org/sqlite` | Windows and Linux deployments do not need a C toolchain or CGO build path. Phase 0 validates target binary size and startup behaviour. |
-| Query layer | `sqlc` with `database/sql` | SQL stays reviewable and SQLite-specific while Go callers receive typed methods and models. |
+| Query layer | Hand-written SQL with `sqlx` over `database/sql` | SQL stays reviewable and SQLite-specific; `sqlx` adds named parameters and struct scanning without a code generator. See Section 6. |
 | Migrations | Embedded, ordered SQL migrations with a `schema_migrations` table | No persistent migration binary or framework process is required. |
 | IDs | ULID for every persisted primary key | Matches repository-wide ID conventions and supports cross-system references. |
 | Status values | Chinese `启用` and `禁用` values | Matches repository-wide business-enum conventions. |
 | HTML | `html/template` and `go:embed` | Server rendering keeps the control plane light and avoids a separate JavaScript application. |
 | Interaction | Locally served HTMX | Partial page updates without a frontend runtime or external CDN dependency. |
 | Styling | Tailwind CSS v4 compiled during the build | The production service serves static CSS and needs no network access in the browser. |
-| Generated outputs | Commit `sqlc` Go output; do not commit built static assets | Generated query code is required to compile and is reviewable; CI verifies it is synchronized with the SQL source. |
+| Generated outputs | Commit no generated Go code; do not commit built static assets | There is no query generator, so no generated source needs to be regenerated or kept in sync. |
 | Password storage | Argon2id hashes only | Passwords are never reversible or stored as encrypted plaintext. |
 | Token signing | Asymmetric signing keys in the future OIDC phase | Products verify with public JWKS keys and cannot mint tokens themselves. |
 
@@ -95,30 +95,27 @@ service-idp-go/
 ├── cmd/identityd/
 │   └── main.go                  # Configuration, migrations, HTTP lifecycle
 ├── db/
-│   ├── migrations/              # Ordered SQLite DDL; source of schema truth
-│   └── queries/                 # Named SQL consumed by sqlc
+│   └── migrations/              # Ordered SQLite DDL; source of schema truth
 ├── internal/
 │   ├── database/                # Connection, WAL pragmas, embedded migrator
-│   │   └── sqlc/                # Generated, committed Go code; never edited manually
-│   ├── identity/                # User, credential, client, audit services
-│   ├── session/                 # Opaque browser sessions and CSRF validation
-│   ├── web/                     # HTTP handlers, templates, static assets
+│   ├── identity/                # Identity services and their SQL constants
+│   ├── httpapi/                 # HTTP handlers, templates, representation logic
+│   ├── config/                  # Environment configuration
+│   ├── logging/                 # Terminal and JSONL logging
+│   ├── password/                # Argon2id hashing and verification
 │   └── oidc/                    # Added only when Phase 3 begins
 ├── web/
 │   ├── assets/                  # Tailwind source and vendored HTMX source
 │   └── static/                  # Generated CSS and JS served by Go; ignored
-├── sqlc.yaml
 ├── package.json                 # Tailwind/HTMX build-only dependencies
 ├── Makefile
 ├── go.mod
 └── README.md
 ```
 
-Generated `internal/database/sqlc` code is committed, while `web/static`
-assets are not. `make generate` updates the generated query code after a
-migration or query-source change; `make check-generated` regenerates it and
-fails when the working tree differs. `make test`, `make build`, and release
-packaging compile the committed generated source directly.
+Only `web/static` build outputs are ignored; there is no generated Go code to
+commit. `make test`, `make build`, and release packaging compile the
+hand-written source directly.
 
 Login throttling uses a required `IDENTITYD_LOGIN_THROTTLE_SECRET` with at
 least 32 bytes. It is a deployment-specific HMAC key, remains outside SQLite,
@@ -128,45 +125,66 @@ window, failure count, and lockout duration are configurable with
 `IDENTITYD_LOGIN_THROTTLE_WINDOW`, `IDENTITYD_LOGIN_THROTTLE_FAILURES`, and
 `IDENTITYD_LOGIN_THROTTLE_LOCKOUT`.
 
-## 6. `sqlc` Plan
+## 6. SQL Access Layer
 
-Yes, `sqlc` is a strong fit for this project. It supports SQLite and does not
-require an ORM. Migration files provide the schema to the generator; named
-queries in `db/queries/*.sql` become typed Go methods.
+The service uses `github.com/jmoiron/sqlx` over `database/sql` with
+hand-written SQL, matching `service-core-go-stdlib`. SQL lives in Go string
+constants next to the code that uses them in `internal/identity`, and named
+parameters are bound with `sqlx.Named`.
 
-The project will use a configuration equivalent to:
+### Why Not `sqlc`
 
-```yaml
-version: "2"
-sql:
-  - engine: "sqlite"
-    schema: "db/migrations"
-    queries: "db/queries"
-    gen:
-      go:
-        package: "sqlc"
-        out: "internal/database/sqlc"
-        sql_package: "database/sql"
-        emit_json_tags: true
-        emit_interface: true
-```
+`sqlc` was the original decision here and was implemented. It was removed on
+2026-09-28 after three generator defects made it unworkable for this schema.
+All three were reproduced against `sqlc v1.31.1` with the SQLite engine:
 
-`sqlc` is a build-time dependency, pinned to `v1.31.1` in development and CI
-tooling rather than added to this service's runtime `go.mod`. That avoids
-pulling the generator's Go 1.26 dependency graph into a Go 1.24 service. The
-Makefile resolves `$(go env GOPATH)/bin/sqlc` by default and accepts a `SQLC`
-override. Local and CI commands will be:
+1. **`sqlc.arg()` cannot coexist with any comment.** A `--` comment before or
+   inside a query, or a `/* */` block comment, produces `edited query syntax is
+   invalid`. Positional `?` placeholders and comments do work together, so the
+   conflict is specific to named arguments.
+2. **Comments plus multiple queries are unstable.** Two comment lines pass and
+   three fail, independent of the comment text; removing either comment alone
+   can still fail. The observed failure mode was a `SELECT` being merged with a
+   following `UPDATE` and reported as `query "..." specifies parameter ":one"
+   without containing a RETURNING clause`.
+3. **Non-ASCII literals corrupt the generated Go.** A Chinese literal such as
+   `status='启用'` makes code generation truncate a multi-byte character and
+   emit `illegal UTF-8 encoding`. Whether it triggers depends on the byte offset
+   of the literal: the same query generated alone succeeds but fails inside a
+   multi-query file, and `status='启用'` passes while `status='启'` does not.
+
+Defect 3 explains the original query layer's shape. `db/queries/*.sql`
+contained no Chinese at all, every enum value was passed as a parameter from Go,
+and generated parameter structs carried names like `IdentifierUsage_2`. Those
+were workarounds for the generator rather than style choices. Do not reintroduce
+`sqlc` for this schema without re-testing all three cases.
+
+### Conventions
+
+- `internal/identity/sqlx.go` defines a small `querier` interface satisfied by
+  both `*sqlx.DB` and `*sqlx.Tx`, plus `namedGet`, `namedSelect`, `namedExec`,
+  and `namedExecRows` helpers. Domain functions therefore use the same helpers
+  inside and outside transactions, which matters because the SQLite pool is
+  limited to one open connection.
+- Public functions in `internal/identity` keep taking `*sql.DB`; `sqlx` remains
+  an internal implementation detail.
+- Nullable columns map to Go pointers (`*string`, `*time.Time`) rather than
+  `sql.NullString` or `sql.NullTime`.
+- Enum values are defined once in `internal/identity/enums.go` and passed as
+  named parameters. They are deliberately not written into SQL: inlining them
+  would place each value in three locations (the migration `CHECK` constraint,
+  `enums.go`, and the SQL string) instead of two. `enums_test.go` enforces this
+  in both directions.
+
+Because SQL is ordinary Go source, it may use comments freely. The Makefile has
+no `generate` or `check-generated` target and there is no `sqlc.yaml`. Local and
+CI commands are:
 
 ```bash
-make generate
-make check-generated
 make assets
 make test
+make vet
 ```
-
-Only migrations and query files are hand-written. Application services call
-the generated `Queries` interface, which also makes service tests easy to
-isolate.
 
 ## 7. Data Ownership And Persistence Areas
 
@@ -435,8 +453,9 @@ Operational requirements:
 1. Validate `modernc.org/sqlite` on the supported Windows and Linux target
    platforms, including binary size, startup time, WAL behaviour, and backup
    restoration.
-2. Install the pinned `sqlc v1.31.1` build tool and confirm it generates
-   SQLite code in CI.
+2. Confirm `sqlx` against `modernc.org/sqlite`, including named-parameter
+   binding, nullable-column scanning, and transactions under a
+   single-connection pool.
 3. Compile a Tailwind v4 and local HTMX asset pipeline without depending on a
    running Node server in production.
 4. Confirm the one-customer, one-instance, one-SQLite-database deployment
@@ -446,7 +465,7 @@ Operational requirements:
 
 1. Create the independent Go module, Makefile, asset build, and development
    documentation.
-2. Add embedded SQLite migrations and `sqlc` queries for identities,
+2. Add embedded SQLite migrations and the SQL constants for identities,
    credentials, sessions, and audit events.
 3. Implement bootstrap admin creation, local login/logout, authorization,
    session handling, CSRF validation, rate limiting, final-administrator
@@ -464,8 +483,8 @@ administrator cannot be disabled.
 
 ### Phase 2: First-Party Client Registry
 
-1. Finalise the OIDC-client data model, then add migrations, `sqlc` queries,
-   and administrator pages.
+1. Finalise the OIDC-client data model, then add migrations, queries, and
+   administrator pages.
 2. Require exact, HTTPS redirect URI registration except explicitly permitted
    localhost development URLs.
 3. Define allowed scopes and client status, but do not yet expose token
@@ -507,12 +526,12 @@ is invalid.
 | Layer | Coverage |
 | --- | --- |
 | Migration tests | Empty database, repeat startup, malformed migration failure, and upgrade from a previous schema. |
-| `sqlc` integration tests | CRUD, pagination, filtering, status transitions, session revocation, and transaction rollback against temporary SQLite files. |
+| Query integration tests | CRUD, pagination, filtering, status transitions, session revocation, and transaction rollback against temporary SQLite files. |
 | Service tests | Password verification, bootstrap rules, no raw token persistence, authorization, and audit event creation. |
 | HTTP tests | Exact `net/http` method/path matching, redirect-after-write, CSRF, cookie attributes, HTMX partial responses, and 401/403 behaviour. |
 | OIDC conformance tests | Added in Phase 3 for PKCE, redirect URI, code reuse, key rotation, token claims, and revocation. |
 | UI checks | Desktop and narrow viewport screenshots; verify Tailwind output, locally served HTMX, and no clipped or overlapping text. |
-| CI checks | Regenerate and compare committed `sqlc` source, build ignored assets, run `go test ./...`, `go vet ./...`, and execute a minimal startup smoke test. |
+| CI checks | Build ignored assets, run `go test ./...`, `go vet ./...`, and execute a minimal startup smoke test. |
 
 ## 14. Data Model Baseline
 
@@ -520,7 +539,7 @@ The detailed Phase 1 baseline is in
 [`service-idp-go-data-model.md`](./service-idp-go-data-model.md). It defines
 the subject/identifier/credential boundary, profile ownership, control-plane
 roles, session and throttling retention, SQLite constraints, and the initial
-`sqlc` query surface without copying a generic `users` schema.
+query surface without copying a generic `users` schema.
 
 Phase 1 migrations may now be designed from that baseline. OIDC client type,
 signing algorithm, and protocol-specific additions remain Phase 2/3 design
@@ -534,7 +553,7 @@ an HTTPS reverse proxy and an internal DNS name, as defined in Section 11.
 
 Proceed with Phase 0, then implement Phase 1 migrations and queries from the
 Section 14 baseline. This gives the team a small, useful, secure local
-identity-control plane and validates the Go/SQLite/`sqlc`/HTMX stack before
+identity-control plane and validates the Go/SQLite/`sqlx`/HTMX stack before
 taking on the much larger OIDC protocol responsibility.
 
 Do not begin Phase 3 merely because the administration UI exists. OIDC token

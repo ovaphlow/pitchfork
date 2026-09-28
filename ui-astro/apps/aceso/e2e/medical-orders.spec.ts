@@ -674,7 +674,7 @@ test("医生诊疗工作台新增病程诊断与四类医嘱且刷新保留并�
   await page.waitForLoadState("networkidle");
   await expect(page.getByText("今日精神状态稳定，食欲一般，继续观察。")).toBeVisible();
 
-  // 新增主要诊断
+  // 新增主要诊断：主/次只由诊断类型决定，列表「类型」与「主诊断」两列必须一致
   await page.getByRole("button", { name: "新增诊断" }).click();
   modal = modalByTitle(page, "新增诊断");
   await modal.locator("#diagnosis-type").selectOption("PRIMARY");
@@ -683,7 +683,24 @@ test("医生诊疗工作台新增病程诊断与四类医嘱且刷新保留并�
   await modal.getByLabel("医生（必填）").fill("张医生");
   await modal.getByRole("button", { name: "保存诊断" }).click();
   await page.waitForLoadState("networkidle");
-  await expect(page.getByRole("row").filter({ hasText: "高血压" })).toBeVisible();
+  const primaryDiagnosisRow = page.getByRole("row").filter({ hasText: "高血压" });
+  await expect(primaryDiagnosisRow).toBeVisible();
+  await expect(primaryDiagnosisRow.getByText("主要诊断", { exact: true })).toBeVisible();
+  await expect(primaryDiagnosisRow.getByText("主要", { exact: true })).toBeVisible();
+
+  // 次要诊断必须同时表现为「次要诊断」且主诊断列为空，不得出现自相矛盾的行
+  await page.getByRole("button", { name: "新增诊断" }).click();
+  modal = modalByTitle(page, "新增诊断");
+  await modal.locator("#diagnosis-type").selectOption("SECONDARY");
+  await modal.locator("#diagnosis-date").fill("2026-08-08");
+  await modal.getByLabel("诊断内容（必填）").fill("2型糖尿病");
+  await modal.getByLabel("医生（必填）").fill("张医生");
+  await modal.getByRole("button", { name: "保存诊断" }).click();
+  await page.waitForLoadState("networkidle");
+  const secondaryDiagnosisRow = page.getByRole("row").filter({ hasText: "2型糖尿病" });
+  await expect(secondaryDiagnosisRow).toBeVisible();
+  await expect(secondaryDiagnosisRow.getByText("次要诊断", { exact: true })).toBeVisible();
+  await expect(secondaryDiagnosisRow.getByText("主要", { exact: true })).toHaveCount(0);
 
   // 四类医嘱：用药、治疗、检查、检验
   async function createOrder(orderType: string, content: string, itemText?: string) {
@@ -738,7 +755,7 @@ test("已离院医生诊疗只读且无新增入口", async ({ page }) => {
   });
   await page.goto(`/dashboard/orders?encounter_id=${admission.encounter.id}`);
   await page.waitForLoadState("networkidle");
-  await expect(page.getByText(/仅可查看历史病程、诊断和医嘱/)).toBeVisible();
+  await expect(page.getByText(/^该入住已离院，仅可查看历史病程、诊断和医嘱。$/)).toBeVisible();
   await expect(page.getByRole("button", { name: "新增病程记录" })).not.toBeVisible();
   await expect(page.getByRole("button", { name: "新增诊断" })).not.toBeVisible();
   await expect(page.getByRole("button", { name: "开立医嘱" })).not.toBeVisible();

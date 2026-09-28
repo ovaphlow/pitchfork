@@ -8,8 +8,10 @@ import {
   listPatients,
   type DepositLedger,
   type DepositRecord,
+  type DepositType,
   type Encounter,
 } from "@pitchfork/shared/aceso";
+import { billingErrorMessage } from "./billingMessages";
 
 const PAGE_SIZE = 50;
 
@@ -31,8 +33,9 @@ interface Admission extends Encounter {
   patientName: string;
 }
 
+/** 收费域错误中文化（映射表见 ./billingMessages）；保留本地同名包装以减少调用点改动 */
 function errorMessage(error: unknown, fallback: string): string {
-  return error instanceof Error && error.message ? error.message : fallback;
+  return billingErrorMessage(error, fallback);
 }
 
 function formatDateTime(value: string | null | undefined): string {
@@ -117,17 +120,27 @@ export default function DepositsPage() {
     [admissions, selectedEncounterId],
   );
 
-  const totals = useMemo(() => {
-    if (!ledger) return { deposit: 0, refund: 0 };
-    return ledger.records.reduce(
-      (acc, record) => {
-        if (record.type === "登记") acc.deposit += record.amount;
-        else acc.refund += record.amount;
-        return acc;
-      },
-      { deposit: 0, refund: 0 },
-    );
+  /** 台账汇总：按类型显式分流，「核销」不再被并入退押 */
+  const totals = useMemo((): Record<DepositType, number> => {
+    const initial: Record<DepositType, number> = { 登记: 0, 退押: 0, 核销: 0 };
+    if (!ledger) return initial;
+    return ledger.records.reduce((acc, record) => {
+      acc[record.type] += record.amount;
+      return acc;
+    }, initial);
   }, [ledger]);
+
+  /** 台账中是否存在结算收束写入的核销记录（用于展示来源说明） */
+  const hasOffsetRecords = useMemo(
+    () => (ledger?.records ?? []).some((record) => record.type === "核销"),
+    [ledger],
+  );
+
+  /** 核销记录关联的账单 ID（deposit_records.metadata.bill_id，服务端写入） */
+  function offsetBillId(record: DepositRecord): string | null {
+    const billId = record.metadata?.bill_id;
+    return typeof billId === "string" && billId ? billId : null;
+  }
 
   function openModal(kind: "登记" | "退押") {
     setModal(kind);
@@ -171,20 +184,40 @@ export default function DepositsPage() {
       key: "type",
       header: "类型",
       render: (row) => (
-        <Badge variant={row.type === "登记" ? "success" : "warning"}>{row.type}</Badge>
+        <Badge variant={row.type === "登记" ? "success" : row.type === "核销" ? "info" : "warning"}>{row.type}</Badge>
       ),
     },
     {
       key: "amount",
       header: "金额（元）",
       render: (row) => (
-        <span className={row.type === "登记" ? "text-success font-medium" : "text-warning font-medium"}>
+        <span
+          className={
+            row.type === "登记"
+              ? "text-success font-medium"
+              : row.type === "核销"
+                ? "text-accent font-medium"
+                : "text-warning font-medium"
+          }
+        >
           {row.type === "登记" ? "+" : "−"}{formatAmount(row.amount)}
         </span>
       ),
     },
     { key: "operator", header: "操作人", render: (row) => <span className="text-fg-muted text-sm">{row.operator}</span> },
-    { key: "remark", header: "备注", render: (row) => <span className="text-fg-muted text-sm">{row.remark ?? "—"}</span> },
+    {
+      key: "remark",
+      header: "备注",
+      render: (row) => {
+        const billId = row.type === "核销" ? offsetBillId(row) : null;
+        return (
+          <span className="text-fg-muted text-sm">
+            {row.remark ?? (row.type === "核销" ? "结算收束押金核销" : "—")}
+            {billId ? `（关联账单 ${billId}）` : ""}
+          </span>
+        );
+      },
+    },
   ];
 
   return (
@@ -192,7 +225,8 @@ export default function DepositsPage() {
       <div>
         <h2 className="text-lg font-semibold text-fg-emphasis">押金管理</h2>
         <p className="text-sm text-fg-muted mt-1">
-          入住押金登记、退押与台账。退押为独立操作：结算收束不自动冲抵押金，离院/去世后仍可退押。
+          入住押金登记、退押与台账。退押仍是独立操作：结算收束不会自动冲抵押金，离院/去世后仍可退押。
+          押金核销不在本页操作，而是在「养老收费 → 结算收束」时手工选择核销金额；核销会同时记入本台账（类型「核销」）。
         </p>
       </div>
 
@@ -241,20 +275,24 @@ export default function DepositsPage() {
 
       {selectedEncounterId && (
         <>
-          <div className="grid gap-4 md:grid-cols-3">
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
             <Card title="当前押金余额">
               <div className="text-2xl font-bold text-accent">
                 {ledger ? `¥ ${formatAmount(ledger.meta.balance)}` : "—"}
               </div>
-              <p className="text-xs text-fg-dimmed mt-1">余额 = 累计登记 − 累计退押（不为负）</p>
+              <p className="text-xs text-fg-dimmed mt-1">余额 = 累计登记 − 累计退押 − 累计核销（不为负）</p>
             </Card>
             <Card title="累计登记">
-              <div className="text-2xl font-bold text-success">{ledger ? `¥ ${formatAmount(totals.deposit)}` : "—"}</div>
+              <div className="text-2xl font-bold text-success">{ledger ? `¥ ${formatAmount(totals.登记)}` : "—"}</div>
               <p className="text-xs text-fg-dimmed mt-1">本页展示的登记金额合计</p>
             </Card>
             <Card title="累计退押">
-              <div className="text-2xl font-bold text-warning">{ledger ? `¥ ${formatAmount(totals.refund)}` : "—"}</div>
+              <div className="text-2xl font-bold text-warning">{ledger ? `¥ ${formatAmount(totals.退押)}` : "—"}</div>
               <p className="text-xs text-fg-dimmed mt-1">本页展示的退押金额合计</p>
+            </Card>
+            <Card title="累计核销">
+              <div className="text-2xl font-bold text-accent">{ledger ? `¥ ${formatAmount(totals.核销)}` : "—"}</div>
+              <p className="text-xs text-fg-dimmed mt-1">结算收束时用押金抵扣欠费的金额合计</p>
             </Card>
           </div>
 
@@ -269,6 +307,11 @@ export default function DepositsPage() {
           >
             {actionError && !modal && (
               <div className="mb-4 rounded-md border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">{actionError}</div>
+            )}
+            {hasOffsetRecords && (
+              <p className="mb-4 text-xs text-fg-dimmed">
+                核销：结算收束时用押金抵扣欠费，同时写入缴费流水（方式「押金」），关联账单见养老收费页。
+              </p>
             )}
             <Table
               columns={columns}

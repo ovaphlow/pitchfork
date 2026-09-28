@@ -4,6 +4,7 @@ import SessionGuard from "../components/SessionGuard.tsx";
 import SignOutButton from "../components/SignOutButton.tsx";
 import ThemeToggle from "../components/ThemeToggle.tsx";
 import Sidebar from "../components/Sidebar.tsx";
+import BreadcrumbTitle from "../components/BreadcrumbTitle.tsx";
 
 interface Props {
   title: string;
@@ -43,7 +44,7 @@ const currentPath = Astro.url.pathname;
             </svg>
             <span class="text-sm font-semibold text-fg-emphasis">ACESO</span>
             <span class="text-sm text-fg-dimmed mx-2">/</span>
-            <span class="text-sm text-fg font-medium">{title}</span>
+            <BreadcrumbTitle client:only="react" currentPath={currentPath} fallback={title} />
           </div>
 
           <div class="flex items-center gap-3">

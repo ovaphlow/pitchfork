@@ -96,7 +96,7 @@ func (handler Handler) health(responseWriter http.ResponseWriter, request *http.
 // opaque session token themselves.
 func (handler Handler) getCurrentSession(responseWriter http.ResponseWriter, request *http.Request) {
 	session, err := handler.currentSession(request)
-	if err != nil || session.Access != "完整" {
+	if err != nil || session.Access != identity.SessionAccessFull {
 		writeProblem(responseWriter, request, http.StatusUnauthorized, "not-authenticated", "not authenticated")
 		return
 	}
@@ -109,7 +109,7 @@ func (handler Handler) getCurrentSession(responseWriter http.ResponseWriter, req
 func (handler Handler) loginPage(responseWriter http.ResponseWriter, request *http.Request) {
 	if session, err := handler.currentSession(request); err == nil {
 		destination := identityPrefix + "/dashboard"
-		if session.Access == "仅改密" {
+		if session.Access == identity.SessionAccessPasswordOnly {
 			destination = identityPrefix + "/password"
 		}
 		http.Redirect(responseWriter, request, destination, http.StatusSeeOther)
@@ -148,7 +148,7 @@ func (handler Handler) createSession(responseWriter http.ResponseWriter, request
 		return
 	}
 	destination := identityPrefix + "/dashboard"
-	if login.Access == "仅改密" {
+	if login.Access == identity.SessionAccessPasswordOnly {
 		destination = identityPrefix + "/password"
 	}
 	http.Redirect(responseWriter, request, destination, http.StatusSeeOther)
@@ -164,7 +164,7 @@ func (handler Handler) passwordPage(responseWriter http.ResponseWriter, request 
 	responseWriter.Header().Set("Content-Type", "text/html; charset=utf-8")
 	passwordTemplate.Execute(responseWriter, passwordPageData{
 		CSRFToken:        requestCSRFToken(request),
-		PasswordRequired: session.Access == "仅改密",
+		PasswordRequired: session.Access == identity.SessionAccessPasswordOnly,
 		HasError:         request.URL.Query().Get("error") == "1",
 	})
 }
@@ -240,11 +240,11 @@ func (handler Handler) dashboard(responseWriter http.ResponseWriter, request *ht
 		http.Redirect(responseWriter, request, identityPrefix+"/login", http.StatusSeeOther)
 		return
 	}
-	if session.Access != "完整" {
+	if session.Access != identity.SessionAccessFull {
 		writeProblem(responseWriter, request, http.StatusForbidden, "password-change-required", "password change required")
 		return
 	}
-	administrator, err := identity.HasRole(request.Context(), handler.database, session.SubjectID, "identity.admin")
+	administrator, err := identity.HasRole(request.Context(), handler.database, session.SubjectID, identity.RoleCodeAdministrator)
 	if err != nil {
 		writeProblem(responseWriter, request, http.StatusInternalServerError, "internal-error", "could not authorize subject")
 		return
@@ -430,7 +430,7 @@ func (handler Handler) updateSubject(responseWriter http.ResponseWriter, request
 	var subject identity.Subject
 	var err error
 	switch {
-	case input.Status == "禁用" && input.TemporaryPassword == "":
+	case input.Status == identity.StatusDisabled && input.TemporaryPassword == "":
 		subject, err = identity.DisableSubject(request.Context(), handler.database, session.SubjectID, subjectID)
 	case input.Status == "" && input.TemporaryPassword != "":
 		err = identity.SetTemporaryPassword(request.Context(), handler.database, session.SubjectID, subjectID, input.TemporaryPassword)
@@ -507,11 +507,11 @@ func (handler Handler) requireAdministrator(responseWriter http.ResponseWriter, 
 		writeProblem(responseWriter, request, http.StatusUnauthorized, "not-authenticated", "not authenticated")
 		return identity.Session{}, false
 	}
-	if session.Access != "完整" {
+	if session.Access != identity.SessionAccessFull {
 		writeProblem(responseWriter, request, http.StatusForbidden, "password-change-required", "password change required")
 		return identity.Session{}, false
 	}
-	administrator, err := identity.HasRole(request.Context(), handler.database, session.SubjectID, "identity.admin")
+	administrator, err := identity.HasRole(request.Context(), handler.database, session.SubjectID, identity.RoleCodeAdministrator)
 	if err != nil {
 		writeProblem(responseWriter, request, http.StatusInternalServerError, "internal-error", "could not authorize subject")
 		return identity.Session{}, false
@@ -530,11 +530,11 @@ func (handler Handler) requireAdministratorPage(responseWriter http.ResponseWrit
 		http.Redirect(responseWriter, request, identityPrefix+"/login", http.StatusSeeOther)
 		return identity.Session{}, false
 	}
-	if session.Access != "完整" {
+	if session.Access != identity.SessionAccessFull {
 		writeProblem(responseWriter, request, http.StatusForbidden, "password-change-required", "password change required")
 		return identity.Session{}, false
 	}
-	administrator, err := identity.HasRole(request.Context(), handler.database, session.SubjectID, "identity.admin")
+	administrator, err := identity.HasRole(request.Context(), handler.database, session.SubjectID, identity.RoleCodeAdministrator)
 	if err != nil {
 		writeProblem(responseWriter, request, http.StatusInternalServerError, "internal-error", "could not authorize subject")
 		return identity.Session{}, false

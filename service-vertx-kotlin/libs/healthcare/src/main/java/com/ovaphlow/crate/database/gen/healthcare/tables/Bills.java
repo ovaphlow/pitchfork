@@ -119,6 +119,20 @@ public class Bills extends TableImpl<BillsRecord> {
      */
     public final TableField<BillsRecord, OffsetDateTime> SETTLED_AT = createField(DSL.name("settled_at"), SQLDataType.TIMESTAMPWITHTIMEZONE(6), this, "结算时间：离院/去世结算收束时写入，非空 = 该账单已结算");
 
+    /**
+     * The column <code>healthcare.bills.outstanding_amount</code>.
+     * 收束时刻该账单的未结余额快照（账单合计 − Σ缴费，下限 0）；仅在结算收束时写入一次，冻结后不可再改。0 =
+     * 收束时已收妥或已被押金核销；历史「已结算」账单不回填、不猜测，一律保持 0
+     */
+    public final TableField<BillsRecord, BigDecimal> OUTSTANDING_AMOUNT = createField(DSL.name("outstanding_amount"), SQLDataType.NUMERIC(12, 2).nullable(false).defaultValue(DSL.field(DSL.raw("0"), SQLDataType.NUMERIC)), this, "收束时刻该账单的未结余额快照（账单合计 − Σ缴费，下限 0）；仅在结算收束时写入一次，冻结后不可再改。0 = 收束时已收妥或已被押金核销；历史「已结算」账单不回填、不猜测，一律保持 0");
+
+    /**
+     * The column <code>healthcare.bills.write_off_reason</code>.
+     * 收束时未结余额被放弃的原因（减免原因）；仅当 outstanding_amount &gt; 0 时非空，outstanding_amount =
+     * 0 时保持为空
+     */
+    public final TableField<BillsRecord, String> WRITE_OFF_REASON = createField(DSL.name("write_off_reason"), SQLDataType.VARCHAR, this, "收束时未结余额被放弃的原因（减免原因）；仅当 outstanding_amount > 0 时非空，outstanding_amount = 0 时保持为空");
+
     private Bills(Name alias, Table<BillsRecord> aliased) {
         this(alias, aliased, (Field<?>[]) null, null);
     }

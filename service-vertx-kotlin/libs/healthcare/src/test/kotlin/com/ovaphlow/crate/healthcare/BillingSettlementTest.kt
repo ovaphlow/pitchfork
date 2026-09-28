@@ -18,8 +18,10 @@ import io.vertx.sqlclient.RowSet
 import io.vertx.sqlclient.SqlConnection
 import io.vertx.sqlclient.Tuple
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertInstanceOf
 import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.extension.ExtendWith
@@ -29,18 +31,30 @@ import java.time.OffsetDateTime
 import java.util.function.Function as JavaFunction
 
 /**
- * 离院/去世结算收束（SettlementService 集成 + 冻结守卫 + 路由）非数据库测试
+ * 离院/去世结算收束（结算收束端点 + 冻结守卫 + 路由）非数据库测试
  * （mockk + 嵌入式 HTTP，参照 DepositServiceTest 模式，默认流水线运行）。
+ *
+ * **023 决策 A**：离院/去世不再收束账单（原 `BillService.settleEncounter` 已删除），
+ * 账单收尾统一由 `POST /encounters/:id/billing-settlement`（`HealthcareService.settleEncounterBilling`
+ * 三步路径：建最终账单 → 核销 → 未结判定 → 冻结）承担。原先写在离院/去世用例里的
+ * 「区间最终账单生成 / 冻结 / 快照」断言已迁移到收束端点用例（见下方同名意图用例）。
+ *
  * 覆盖验收口径：
- *   - dischargeEncounter/deathEncounter 同事务（同一 withTransaction 连接）依次执行：
- *     区间最终账单生成（明细 = 残段自动计费，无计费项则 0 元封口）+ 全部 bills 置 已结算
- *     并写 settled_at；SQL 序列与区间天数覆盖正确（上期末日+1 至离院/去世日，闭区间）
+ *   - dischargeEncounter/deathEncounter 只做业务事实与照护流程收尾（状态/日期/诊断写入、
+ *     医嘱终止、护理周期关闭）：**不生成区间账单、不冻结账单、不写 encounters.settled_at**，
+ *     账单与押金台账逐行未变
  *   - 冻结后 POST /encounters/:id/bills、/bills/:id/items、/bills/:id/payments 均 409
  *   - POST /encounters/:id/billing-settlement：已离院/去世未结算 → 201 生成区间账单并冻结；
  *     已全部结算 → 409；未离院/去世 → 409；未认证 → 401
  *   - 边界：区间起 > 区间止不生成；最终区间与既有账单完全一致不重复生成；
- *     已结算账单账期覆盖收束日之后仅冻结
+ *     已结算账单账期覆盖收束日之后仅冻结；区间起取「已结清账期末日 + 1」
  *   - 回归：未冻结的既有行为不变（已离院未结算仍可生成账单并裁剪到离院日、仍可缴费）
+ *   - 结算携带 deposit_offset（**021 次序变更**：先建区间最终账单 → 再核销 → 再判定未结 →
+ *     再冻结，因此核销的分配目标包含最终账期）；核销与收束共用同一 withTransaction 与
+ *     同一连接，核销写入（payments/deposit_records）按 SQL 序列先于冻结；
+ *     收束资格不满足（未离院/去世 409）时错误被传播、核销不执行、不进入冻结。
+ *     mockk 桩不模拟数据库回滚，核销/建单写入在桩上仍可见——真实「失败后零残差」只能由
+ *     后置 PostgreSQL 集成测试覆盖，本文件不作回滚断言。
  */
 @ExtendWith(VertxExtension::class)
 class BillingSettlementTest {
@@ -61,9 +75,12 @@ class BillingSettlementTest {
         var bills: MutableList<MutableMap<String, Any?>> = mutableListOf(),
         var billItems: MutableList<Map<String, Any?>> = mutableListOf(),
         var payments: MutableList<Map<String, Any?>> = mutableListOf(),
+        var deposits: MutableList<Map<String, Any?>> = mutableListOf(),
     ) {
         val encounters: MutableList<MutableMap<String, Any?>> = encounters
         val queries = mutableListOf<String>()
+        /** 仅经由 pool（而非事务连接 conn）下发的 SQL：用于断言核销与收束共用同一连接。 */
+        val poolQueries = mutableListOf<String>()
         val tuples = mutableListOf<Pair<String, List<Any?>>>()
         var transactionCalls = 0
             private set
@@ -74,10 +91,10 @@ class BillingSettlementTest {
         val pool = mockk<Pool>()
 
         init {
-            every { conn.preparedQuery(any<String>()) } answers { record(firstArg<String>()); pq }
-            every { conn.preparedQuery(any<String>(), any()) } answers { record(firstArg<String>()); pq }
-            every { pool.preparedQuery(any<String>()) } answers { record(firstArg<String>()); pq }
-            every { pool.preparedQuery(any<String>(), any()) } answers { record(firstArg<String>()); pq }
+            every { conn.preparedQuery(any<String>()) } answers { record(firstArg<String>(), viaPool = false); pq }
+            every { conn.preparedQuery(any<String>(), any()) } answers { record(firstArg<String>(), viaPool = false); pq }
+            every { pool.preparedQuery(any<String>()) } answers { record(firstArg<String>(), viaPool = true); pq }
+            every { pool.preparedQuery(any<String>(), any()) } answers { record(firstArg<String>(), viaPool = true); pq }
             every { pq.execute(any<Tuple>()) } answers {
                 val sql = lastSql
                 val values = tupleValues(firstArg())
@@ -169,22 +186,7 @@ class BillingSettlementTest {
                         Future.succeededFuture(rowSet(*statuses.map { mockRow(mapOf("status" to it)) }.toTypedArray()))
                     }
                     // ——— bills ———
-                    sql.contains("insert into healthcare.bills") && sql.contains("settled_at") -> {
-                        bills.add(
-                            mutableMapOf(
-                                "id" to values[0],
-                                "encounter_id" to values[1],
-                                "period_start" to values[2],
-                                "period_end" to values[3],
-                                "status" to values[4],
-                                "total_amount" to values[5],
-                                "settled_at" to values[6],
-                                "created_at" to values[7],
-                                "updated_at" to values[8],
-                            ),
-                        )
-                        Future.succeededFuture(rowSet())
-                    }
+                    // 021：区间最终账单以 待缴费 建立、insert 不含 settled_at（与 generate 同形状）
                     sql.contains("insert into healthcare.bills") -> {
                         bills.add(
                             mutableMapOf(
@@ -195,18 +197,23 @@ class BillingSettlementTest {
                                 "status" to values[4],
                                 "total_amount" to values[5],
                                 "settled_at" to null,
+                                "outstanding_amount" to BigDecimal.ZERO,
+                                "write_off_reason" to null,
                                 "created_at" to values[6],
                                 "updated_at" to values[7],
                             ),
                         )
                         Future.succeededFuture(rowSet())
                     }
+                    // 021：冻结逐张 UPDATE（status/settled_at/outstanding_amount/updated_at[/write_off_reason]）
                     sql.contains("update healthcare.bills") && sql.contains("settled_at") -> {
-                        val scoped = bills.filter { it["encounter_id"] == values.getOrNull(3) }
-                        for (bill in scoped) {
-                            bill["status"] = values[0]
-                            bill["settled_at"] = values[1]
-                            bill["updated_at"] = values[2]
+                        val target = bills.firstOrNull { it["id"] == values.last() }
+                        if (target != null) {
+                            target["status"] = values[0]
+                            target["settled_at"] = values[1]
+                            target["outstanding_amount"] = values[2]
+                            target["updated_at"] = values[3]
+                            target["write_off_reason"] = if (values.size >= 6) values[4] else null
                         }
                         Future.succeededFuture(rowSet())
                     }
@@ -246,6 +253,39 @@ class BillingSettlementTest {
                         val count = bills.count { it["encounter_id"] == values.getOrNull(0) }
                         Future.succeededFuture(rowSet(mockRow(mapOf("total" to count.toLong()))))
                     }
+                    // ——— 核销目标账单：待缴费 且 余额 > 0，按账期升序（必须先于通用 bills 分支） ———
+                    sql.contains("from healthcare.bills") && sql.contains("left outer join") -> {
+                        val scoped = bills
+                            .filter { it["encounter_id"] == values.getOrNull(2) && it["status"] == values.getOrNull(3) }
+                            .mapNotNull { bill ->
+                                val paid = payments
+                                    .filter { it["bill_id"] == bill["id"] }
+                                    .fold(BigDecimal.ZERO) { acc, payment -> acc.add(payment["amount"] as BigDecimal) }
+                                val balance = (bill["total_amount"] as BigDecimal).subtract(paid)
+                                if (balance.signum() <= 0) {
+                                    null
+                                } else {
+                                    mapOf(
+                                        "id" to bill["id"],
+                                        "period_start" to bill["period_start"],
+                                        "period_end" to bill["period_end"],
+                                        "balance" to balance,
+                                    )
+                                }
+                            }
+                            .sortedWith(
+                                compareBy<Map<String, Any?>> { it["period_start"] as LocalDate }
+                                    .thenBy { it["id"] as String },
+                            )
+                        Future.succeededFuture(rowSet(*scoped.map { mockRow(it) }.toTypedArray()))
+                    }
+                    // ——— 冻结前的全部账单 id（021：逐张写未结快照；必须先于通用 bills 分支） ———
+                    sql.contains("select healthcare.bills.id from healthcare.bills") -> {
+                        val scoped = bills.filter { it["encounter_id"] == values.getOrNull(0) }
+                        Future.succeededFuture(
+                            rowSet(*scoped.map { mockRow(mapOf("id" to it["id"])) }.toTypedArray()),
+                        )
+                    }
                     sql.contains("from healthcare.bills") -> {
                         val scoped = bills.filter { it["id"] == values.getOrNull(0) }
                         Future.succeededFuture(rowSet(*scoped.map { mockRow(it) }.toTypedArray()))
@@ -280,8 +320,9 @@ class BillingSettlementTest {
                         val scoped = billItems.filter { it["bill_id"] == values.getOrNull(0) }
                         Future.succeededFuture(rowSet(*scoped.map { mockRow(it) }.toTypedArray()))
                     }
-                    // ——— payments ———
+                    // ——— payments（含核销写入：8 个绑定值，metadata 在 $6） ———
                     sql.contains("insert into healthcare.payments") -> {
+                        val hasMetadata = values.size >= 8
                         payments.add(
                             mapOf(
                                 "id" to values[0],
@@ -289,11 +330,39 @@ class BillingSettlementTest {
                                 "amount" to values[2],
                                 "method" to values[3],
                                 "operator" to values[4],
-                                "created_at" to values[5],
-                                "updated_at" to values[6],
+                                "metadata" to if (hasMetadata) values[5] else null,
+                                "created_at" to if (hasMetadata) values[6] else values[5],
+                                "updated_at" to if (hasMetadata) values[7] else values[6],
                             ),
                         )
                         Future.succeededFuture(rowSet())
+                    }
+                    // ——— deposit_records（结算核销写入 type = 核销） ———
+                    sql.contains("insert into healthcare.deposit_records") -> {
+                        deposits.add(
+                            mapOf(
+                                "id" to values[0],
+                                "encounter_id" to values[1],
+                                "type" to values[2],
+                                "amount" to values[3],
+                                "operator" to values[4],
+                                "metadata" to values.getOrNull(5),
+                                "created_at" to values.getOrNull(6),
+                                "updated_at" to values.getOrNull(7),
+                            ),
+                        )
+                        Future.succeededFuture(rowSet())
+                    }
+                    // ——— 押金余额（口径唯一来自 DepositService.balanceOf） ———
+                    sql.contains("from healthcare.deposit_records") -> {
+                        val scoped = deposits.filter { it["encounter_id"] == values.getOrNull(0) }
+                        Future.succeededFuture(
+                            rowSet(
+                                *scoped.map {
+                                    mockRow(mapOf("type" to it["type"], "amount" to it["amount"]))
+                                }.toTypedArray(),
+                            ),
+                        )
                     }
                     sql.contains("from healthcare.payments") -> {
                         val scoped = payments.filter { it["bill_id"] == values.getOrNull(0) }
@@ -311,10 +380,11 @@ class BillingSettlementTest {
             }
         }
 
-        private fun record(sql: String) {
+        private fun record(sql: String, viaPool: Boolean = false) {
             val normalizedSql = normalized(sql)
             lastSql = normalizedSql
             queries.add(normalizedSql)
+            if (viaPool) poolQueries.add(normalizedSql)
         }
     }
 
@@ -442,37 +512,96 @@ class BillingSettlementTest {
     private fun amount(value: Any?): BigDecimal =
         BigDecimal.valueOf((value as Number).toDouble())
 
-    /** 区间最终账单的落库元组（含 settled_at 的 insert）。 */
+    /** 区间最终账单的落库元组（021：以 待缴费 建立，insert 不含 settled_at）。 */
     private fun finalBillTuple(stub: DatabaseStub): Pair<String, List<Any?>> =
-        stub.tuples.first { it.first.contains("insert into healthcare.bills") && it.first.contains("settled_at") }
+        stub.tuples.first { it.first.contains("insert into healthcare.bills") }
 
     // ========================================================================
-    //  1. 离院/去世收束：同事务生成区间账单并冻结
+    //  1. 023 解耦：离院/去世不再收束账单；账单收尾由「结算收束」端点承担
     // ========================================================================
 
     @Test
-    fun `离院收束同事务生成区间账单并冻结全部账单`() {
+    fun `离院不再收束账单且账单未被触碰`() {
         val stub = settlementStub(
             bills = mutableListOf(billRow("bill-1", "enc-1", "2026-08-01", "2026-08-31", "5655.00")),
         )
+        stub.deposits.add(depositRow("登记", "5000.00"))
         val service = HealthcareService(stub.pool)
 
         val encounter = service
             .dischargeEncounter("enc-1", JsonObject().put("discharge_date", "2026-09-20T10:00:00+08:00"))
             .toCompletionStage().toCompletableFuture().get()
 
-        // 响应：离院状态 + 冻结标记
+        // 离院本身成功且语义不变（状态 / 离院日期写入）
         assertEquals("DISCHARGED", encounter.getString("status"))
         assertEquals("2026-09-20T10:00+08:00", encounter.getString("discharge_date"))
-        assertNotNull(encounter.getString("settled_at"), "离院收束必须写 encounters.settled_at")
+        assertNull(encounter.getString("settled_at"), "023：离院不得写 encounters.settled_at")
+        assertNull(stub.encounters.single()["settled_at"], "023：离院不得写 encounters.settled_at")
+
+        // 没有账单插入 / 账单状态更新 / 冻结写入，也没有核销台账与缴费流水
+        assertTrue(
+            stub.tuples.none { it.first.contains("insert into healthcare.bills") },
+            "023：离院不得生成区间最终账单: ${stub.tuples.map { it.first }}",
+        )
+        assertTrue(
+            stub.tuples.none { it.first.contains("update healthcare.bills") },
+            "023：离院不得更新任何账单（冻结未发生）: ${stub.tuples.map { it.first }}",
+        )
+        assertTrue(
+            stub.tuples.none { it.first.contains("update healthcare.encounters") && it.first.contains("settled_at") },
+            "023：离院不得写 encounters.settled_at",
+        )
+        assertTrue(stub.tuples.none { it.first.contains("insert into healthcare.payments") })
+        assertTrue(stub.tuples.none { it.first.contains("insert into healthcare.deposit_records") })
+
+        // 既有账单逐行未变（冻结会写 settled_at/outstanding_amount/write_off_reason）
+        val bill = stub.bills.single()
+        assertEquals("待缴费", bill["status"], "023：离院后账单保持原状态")
+        assertNull(bill["settled_at"], "023：离院后账单不得写 settled_at")
+        assertEquals(0, BigDecimal("5655.00").compareTo(amount(bill["total_amount"])))
+        assertNull(bill["outstanding_amount"], "023：离院后未结快照不得写入")
+        assertNull(bill["write_off_reason"], "023：离院后减免原因不得写入")
+
+        // 押金台账未变
+        assertEquals(1, stub.deposits.size, "023：离院不得写押金台账")
+        assertEquals(0, stub.payments.size, "023：离院不得写缴费流水")
+
+        // 离院仍在同一个 withTransaction 连接内完成
+        assertEquals(1, stub.transactionCalls)
+    }
+
+    @Test
+    fun `结算收束生成区间账单并冻结全部账单`() {
+        // 结算断言自「离院收束同事务生成区间账单并冻结全部账单」迁移而来，依据 023 解耦：
+        // 离院不再收束（上一个用例已固定），同一 fixture 改由收束端点完成账单收尾。
+        val stub = settlementStub(
+            bills = mutableListOf(billRow("bill-1", "enc-1", "2026-08-01", "2026-08-31", "5655.00")),
+        )
+        val service = HealthcareService(stub.pool)
+        val discharged = service
+            .dischargeEncounter("enc-1", JsonObject().put("discharge_date", "2026-09-20T10:00:00+08:00"))
+            .toCompletionStage().toCompletableFuture().get()
+        assertNull(discharged.getString("settled_at"), "023：离院不写 settled_at（收束前可收费）")
+        assertTrue(stub.tuples.none { it.first.contains("insert into healthcare.bills") })
+
+        // 收束：未结余额存在 → 必须显式减免确认（021 门禁）
+        val encounter = service
+            .settleEncounterBilling(
+                "enc-1",
+                JsonObject().put("write_off_reason", "离院结算，家属书面确认不再追收"),
+                "cashier-route-1",
+            )
+            .toCompletionStage().toCompletableFuture().get()
+        assertNotNull(encounter.getString("settled_at"), "结算收束必须写 encounters.settled_at")
 
         // 区间最终账单：无已结算账期 → 起 = 入住日 08-01，止 = 离院日 09-20（闭区间 51 天）
         val (sql, values) = finalBillTuple(stub)
         assertEquals(LocalDate.parse("2026-08-01"), values[2], "区间起 = 无已结算账期时取入住日")
         assertEquals(LocalDate.parse("2026-09-20"), values[3], "区间止 = 离院日")
         assertEquals(51, BillingEngine.inclusiveDays(values[2] as LocalDate, values[3] as LocalDate), "闭区间 08-01..09-20 = 51 天")
-        assertEquals("已结算", values[4], "区间最终账单创建即 已结算")
-        assertNotNull(values[6], "区间最终账单必须写 settled_at")
+        // 021 行为变更：区间最终账单改为以 待缴费 建立，创建时不写 settled_at（由冻结阶段统一写）
+        assertEquals("待缴费", values[4], "021：区间最终账单以 待缴费 建立")
+        assertFalse(sql.contains("settled_at"), "021：区间最终账单创建时不写 settled_at: $sql")
         assertEquals(
             0,
             BigDecimal("9255.00").compareTo(values[5] as BigDecimal),
@@ -491,20 +620,26 @@ class BillingSettlementTest {
             assertEquals("已结算", bill["status"], "冻结后该 encounter 全部账单必须为 已结算")
             assertNotNull(bill["settled_at"], "冻结后每张账单必须写 settled_at")
         }
+        // 收束端点强制减免留痕：区间最终账单与既有未结账单都写未结快照 + 同一条减免原因
+        val reason = "离院结算，家属书面确认不再追收"
+        val finalBillRow = stub.bills.first { it["id"] == values[0] }
+        assertEquals(0, BigDecimal("9255.00").compareTo(amount(finalBillRow["outstanding_amount"])))
+        assertEquals(reason, finalBillRow["write_off_reason"])
+        val existingBillRow = stub.bills.first { it["id"] == "bill-1" }
+        assertEquals(0, BigDecimal("5655.00").compareTo(amount(existingBillRow["outstanding_amount"])))
+        assertEquals(reason, existingBillRow["write_off_reason"], "021：未结行必须带减免原因（不允许静默结转）")
 
-        // SQL 序列：区间账单生成 → 账单冻结 → encounter 冻结 → 离院状态更新，全程同一事务连接
+        // SQL 序列：区间账单生成 → 账单冻结 → encounter 冻结
         val insertIndex = stub.queries.indexOfFirst { it.contains("insert into healthcare.bills") }
         val freezeBillsIndex = stub.queries.indexOfFirst { it.contains("update healthcare.bills") && it.contains("settled_at") }
         val freezeEncounterIndex = stub.queries.indexOfFirst { it.contains("update healthcare.encounters") && it.contains("settled_at") }
-        val dischargeIndex = stub.queries.indexOfFirst { it.contains("update healthcare.encounters") && it.contains("discharge_date") }
         assertTrue(insertIndex in 0 until freezeBillsIndex, "区间账单必须先于冻结: ${stub.queries}")
         assertTrue(freezeBillsIndex < freezeEncounterIndex, "账单冻结必须先于 encounter 冻结: ${stub.queries}")
-        assertTrue(freezeEncounterIndex < dischargeIndex, "结算冻结必须先于离院状态更新: ${stub.queries}")
-        assertEquals(1, stub.transactionCalls, "整个离院收束必须在同一个 withTransaction 连接内")
     }
 
     @Test
-    fun `去世收束同事务按已结清账期末日加一生成区间账单并冻结`() {
+    fun `去世不再收束账单且账单未被触碰`() {
+        // 023 决策 A：去世与离院同构，只标记事实，账单收尾统一由「结算收束」承担
         val stub = settlementStub(
             bills = mutableListOf(billRow("bill-1", "enc-1", "2026-08-01", "2026-08-31", "5655.00", status = "已结清")),
         )
@@ -521,42 +656,100 @@ class BillingSettlementTest {
 
         assertEquals("DECEASED", encounter.getString("status"))
         assertEquals("2026-09-20T14:00+08:00", encounter.getString("death_date"))
-        assertNotNull(encounter.getString("settled_at"), "去世收束必须写 encounters.settled_at")
+        assertNull(encounter.getString("settled_at"), "023：去世不得写 encounters.settled_at")
+        assertNull(stub.encounters.single()["settled_at"], "023：去世不得写 encounters.settled_at")
 
-        // 区间 = MAX(已结清 period_end)+1 = 09-01 ～ 去世日 09-20（闭区间 20 天）
+        assertTrue(
+            stub.tuples.none { it.first.contains("insert into healthcare.bills") },
+            "023：去世不得生成区间最终账单: ${stub.tuples.map { it.first }}",
+        )
+        assertTrue(
+            stub.tuples.none { it.first.contains("update healthcare.bills") },
+            "023：去世不得更新任何账单（冻结未发生）: ${stub.tuples.map { it.first }}",
+        )
+        assertTrue(
+            stub.tuples.none { it.first.contains("update healthcare.encounters") && it.first.contains("settled_at") },
+            "023：去世不得写 encounters.settled_at",
+        )
+        assertTrue(stub.tuples.none { it.first.contains("insert into healthcare.payments") })
+        assertTrue(stub.tuples.none { it.first.contains("insert into healthcare.deposit_records") })
+
+        val bill = stub.bills.single()
+        assertEquals("已结清", bill["status"], "023：去世后账单保持原状态")
+        assertNull(bill["settled_at"], "023：去世后账单不得写 settled_at")
+        assertNull(bill["outstanding_amount"])
+        assertNull(bill["write_off_reason"])
+        assertEquals(0, stub.payments.size)
+        assertEquals(1, stub.transactionCalls, "去世仍在同一个 withTransaction 连接内完成")
+    }
+
+    @Test
+    fun `结算收束按已结清账期末日加一生成区间账单并冻结`() {
+        // 结算断言自「去世收束同事务按已结清账期末日加一生成区间账单并冻结」迁移而来，
+        // 依据 023 解耦：去世不再收束，同一 fixture 改由收束端点完成账单收尾。
+        val stub = settlementStub(
+            bills = mutableListOf(billRow("bill-1", "enc-1", "2026-08-01", "2026-08-31", "5655.00", status = "已结清")),
+        )
+        val service = HealthcareService(stub.pool)
+        service
+            .deathEncounter(
+                "enc-1",
+                JsonObject()
+                    .put("death_date", "2026-09-20T14:00:00+08:00")
+                    .put("death_cause", "心脏骤停"),
+            )
+            .toCompletionStage().toCompletableFuture().get()
+
+        val encounter = service
+            .settleEncounterBilling(
+                "enc-1",
+                JsonObject().put("write_off_reason", "去世结算，剩余未结确认为减免"),
+                "cashier-route-1",
+            )
+            .toCompletionStage().toCompletableFuture().get()
+        assertNotNull(encounter.getString("settled_at"), "结算收束必须写 settled_at")
+
+        // 区间 = MAX(已结清账期末日 08-31) + 1 至 去世日 09-20（闭区间 20 天）
         val (sql, values) = finalBillTuple(stub)
         assertEquals(LocalDate.parse("2026-09-01"), values[2], "区间起 = 已结清账期末日 08-31 + 1")
         assertEquals(LocalDate.parse("2026-09-20"), values[3], "区间止 = 去世日")
         assertEquals(20, BillingEngine.inclusiveDays(values[2] as LocalDate, values[3] as LocalDate), "闭区间 09-01..09-20 = 20 天")
-        assertEquals("已结算", values[4])
-        assertNotNull(values[6])
+        // 021 行为变更：区间最终账单以 待缴费 建立、创建时不写 settled_at
+        assertEquals("待缴费", values[4])
+        assertFalse(sql.contains("settled_at"), "021：区间最终账单创建时不写 settled_at: $sql")
         assertEquals(
             0,
             BigDecimal("3675.00").compareTo(values[5] as BigDecimal),
-            "区间账单自动计费 = 床位 20×100 + 护理 20×80 + 伙食 2.5×30",
+            "区间账单自动计费 = 床位 20 天×100 + 护理 20 天×80 + 伙食 2.5×30",
         )
-        // 已结清账单也按「全部账单 = 已结算」冻结
-        assertEquals("已结算", stub.bills.first { it["id"] == "bill-1" }["status"])
-        assertNotNull(stub.bills.first { it["id"] == "bill-1" }["settled_at"])
-        assertEquals(1, stub.transactionCalls, "整个去世收束必须在同一个 withTransaction 连接内")
+        // 已结清账单也按「全部账单 = 已结算」冻结（未结为 0、无减免原因）
+        val billOne = stub.bills.first { it["id"] == "bill-1" }
+        assertEquals("已结算", billOne["status"])
+        assertNotNull(billOne["settled_at"])
+        assertEquals(0, BigDecimal.ZERO.compareTo(amount(billOne["outstanding_amount"])))
+        assertNull(billOne["write_off_reason"])
+        val finalBillRow = stub.bills.first { it["id"] == values[0] }
+        assertEquals(0, BigDecimal("3675.00").compareTo(amount(finalBillRow["outstanding_amount"])))
+        assertEquals("去世结算，剩余未结确认为减免", finalBillRow["write_off_reason"])
     }
 
     @Test
     fun `收束时区间起大于区间止不生成区间账单仅冻结`() {
-        // 已结清账单账期已覆盖到收束日之后（08-31 > 08-20）：区间起 09-01 > 止 08-20
+        // 023 解耦后该边界由收束端点承载：已离院（离院日 08-20）且已结清账单账期
+        // 覆盖到收束日之后（08-31 > 08-20）→ 区间起 09-01 > 止 08-20
         val stub = settlementStub(
             encounters = mutableListOf(
                 encounterRow(
                     mapOf(
-                        "status" to "ACTIVE",
-                        "discharge_date" to null,
+                        "status" to "DISCHARGED",
+                        "discharge_date" to OffsetDateTime.parse("2026-08-20T10:00:00+08:00"),
                     ),
                 ),
             ),
             bills = mutableListOf(billRow("bill-1", "enc-1", "2026-08-01", "2026-08-31", "5655.00", status = "已结清")),
         )
         HealthcareService(stub.pool)
-            .dischargeEncounter("enc-1", JsonObject().put("discharge_date", "2026-08-20T10:00:00+08:00"))
+            .settleEncounterBilling("enc-1", JsonObject(), "cashier-route-1")
             .toCompletionStage().toCompletableFuture().get()
 
         assertTrue(
@@ -564,6 +757,7 @@ class BillingSettlementTest {
             "区间起 > 区间止时不得生成区间账单: ${stub.tuples.map { it.first }}",
         )
         assertEquals("已结算", stub.bills.single()["status"])
+        assertNotNull(stub.bills.single()["settled_at"])
         assertNotNull(stub.encounters.single()["settled_at"])
     }
 
@@ -655,9 +849,141 @@ class BillingSettlementTest {
                 ),
             ),
         )
-        val cause = causeOf(HealthcareService(stub.pool).settleEncounterBilling("enc-1"))
+        // 三参签名：body 省略核销（空对象 = 不核销），operator 取既有认证主体字面量
+        val cause = causeOf(HealthcareService(stub.pool).settleEncounterBilling("enc-1", JsonObject(), "cashier-route-1"))
         assertInstanceOf(ConflictException::class.java, cause)
         assertTrue(cause.message?.contains("already settled") == true, "got: ${cause.message}")
+    }
+
+    // ========================================================================
+    //  2.1 结算携带押金核销：同事务编排与失败传播
+    // ========================================================================
+
+    private fun depositRow(type: String, amount: String): Map<String, Any?> =
+        mapOf(
+            "id" to "dep-$type-$amount",
+            "encounter_id" to "enc-1",
+            "type" to type,
+            "amount" to BigDecimal(amount),
+            "operator" to "cashier-1",
+            "metadata" to null,
+            "created_at" to OffsetDateTime.parse("2026-08-01T09:00:00+08:00"),
+            "updated_at" to OffsetDateTime.parse("2026-08-01T09:00:00+08:00"),
+        )
+
+    @Test
+    fun `结算携带核销时与收束同事务且核销先于冻结`() {
+        // 已有 待缴费 账单账期 07-01..07-31（早于收束区间 08-01..09-20）：
+        // 核销目标按账期升序，先行命中的必然是 bill-1，断言不依赖 ULID 排序
+        val stub = settlementStub(
+            encounters = mutableListOf(
+                encounterRow(
+                    mapOf(
+                        "status" to "DISCHARGED",
+                        "discharge_date" to OffsetDateTime.parse("2026-09-20T10:00:00+08:00"),
+                    ),
+                ),
+            ),
+            bills = mutableListOf(billRow("bill-1", "enc-1", "2026-07-01", "2026-07-31", "5655.00")),
+        )
+        stub.deposits.add(depositRow("登记", "5000.00"))
+
+        // 021 行为变更：核销后仍有未结（bill-1 余额 4655 + 最终账单 9255）必须显式提供减免原因
+        val encounter = HealthcareService(stub.pool)
+            .settleEncounterBilling(
+                "enc-1",
+                JsonObject()
+                    .put("deposit_offset", 1000)
+                    .put("write_off_reason", "离院结算，家属书面确认不再追收"),
+                "cashier-route-1",
+            )
+            .toCompletionStage().toCompletableFuture().get()
+
+        assertNotNull(encounter.getString("settled_at"), "结算收束必须写 settled_at")
+
+        // 同一事务、同一连接：只进入一次 withTransaction，且全部 SQL 经事务连接下发
+        assertEquals(1, stub.transactionCalls, "核销与收束必须共用同一个 withTransaction")
+        assertTrue(stub.poolQueries.isEmpty(), "核销与收束不得经 pool 执行 SQL: ${stub.poolQueries}")
+
+        // 核销写入：payments(method = 押金) + deposit_records(type = 核销)，operator 取认证主体
+        val paymentInserts = stub.tuples.filter { it.first.contains("insert into healthcare.payments") }
+        assertEquals(1, paymentInserts.size, "核销额 1000 < 账单余额 5655 → 命中一笔")
+        assertEquals(PaymentService.METHOD_DEPOSIT, paymentInserts.single().second[3])
+        assertEquals("cashier-route-1", paymentInserts.single().second[4])
+        assertEquals("bill-1", paymentInserts.single().second[1])
+        assertEquals(0, BigDecimal("1000").compareTo(amount(paymentInserts.single().second[2])))
+        val paymentMetadata = paymentInserts.single().second[5] as JsonObject
+        assertEquals(true, paymentMetadata.getBoolean("deposit_offset"))
+        assertEquals("enc-1", paymentMetadata.getString("encounter_id"))
+
+        val depositInserts = stub.tuples.filter { it.first.contains("insert into healthcare.deposit_records") }
+        assertEquals(1, depositInserts.size)
+        assertEquals(DepositOffsetService.TYPE_OFFSET, depositInserts.single().second[2])
+        val depositMetadata = depositInserts.single().second[5] as JsonObject
+        assertEquals("bill-1", depositMetadata.getString("bill_id"))
+        assertEquals(paymentInserts.single().second[0], depositMetadata.getString("payment_id"))
+        assertEquals("2026-07-01", depositMetadata.getString("period_start"))
+        assertEquals("2026-07-31", depositMetadata.getString("period_end"))
+
+        // SQL 序列（021 次序变更）：区间账单生成 → 核销写入 → 账单冻结 → encounter 冻结
+        val offsetIndex = stub.queries.indexOfFirst { it.contains("insert into healthcare.payments") }
+        val insertBillIndex = stub.queries.indexOfFirst { it.contains("insert into healthcare.bills") }
+        val freezeBillsIndex =
+            stub.queries.indexOfFirst { it.contains("update healthcare.bills") && it.contains("settled_at") }
+        val freezeEncounterIndex =
+            stub.queries.indexOfFirst { it.contains("update healthcare.encounters") && it.contains("settled_at") }
+        assertTrue(insertBillIndex in 0 until offsetIndex, "021：区间最终账单生成必须先于核销: ${stub.queries}")
+        assertTrue(offsetIndex < freezeBillsIndex, "核销必须先于账单冻结")
+        assertTrue(freezeBillsIndex < freezeEncounterIndex, "账单冻结先于 encounter 冻结")
+
+        // 冻结后该 encounter 全部账单为 已结算 + settled_at（收束语义未被核销改变）
+        for (bill in stub.bills) {
+            assertEquals("已结算", bill["status"], "冻结后该 encounter 全部账单必须为 已结算")
+            assertNotNull(bill["settled_at"], "冻结后每张账单必须写 settled_at")
+        }
+        // 未结行带减免原因、已结清行保持 NULL
+        val billOne = stub.bills.first { it["id"] == "bill-1" }
+        assertEquals(0, BigDecimal("4655.00").compareTo(amount(billOne["outstanding_amount"])))
+        assertEquals("离院结算，家属书面确认不再追收", billOne["write_off_reason"])
+    }
+
+    @Test
+    fun `结算资格不满足时错误被传播且不进入冻结`() {
+        // encounter 在住（ACTIVE，未离院/去世）→ 阶段一资格校验不满足 409
+        val stub = settlementStub(
+            bills = mutableListOf(billRow("bill-1", "enc-1", "2026-08-01", "2026-08-31", "5655.00")),
+        )
+        stub.deposits.add(depositRow("登记", "5000.00"))
+
+        val cause = causeOf(
+            HealthcareService(stub.pool)
+                .settleEncounterBilling("enc-1", JsonObject().put("deposit_offset", 100), "cashier-route-1"),
+        )
+        assertInstanceOf(ConflictException::class.java, cause)
+        assertTrue(cause.message?.contains("not discharged or deceased") == true, "got: ${cause.message}")
+
+        // 同一事务、同一连接：只开一次事务；失败被原样传播，且不继续执行冻结
+        assertEquals(1, stub.transactionCalls)
+        assertTrue(stub.poolQueries.isEmpty(), "核销与收束不得经 pool 执行 SQL: ${stub.poolQueries}")
+        assertTrue(
+            stub.tuples.none { it.first.contains("update healthcare.bills") && it.first.contains("settled_at") },
+            "收束失败不得冻结账单",
+        )
+        assertTrue(
+            stub.tuples.none { it.first.contains("update healthcare.encounters") && it.first.contains("settled_at") },
+            "收束失败不得写 encounters.settled_at",
+        )
+        assertNull(stub.encounters.single()["settled_at"])
+
+        // 021 次序变更：资格校验是第一步，失败即中止，核销与建单都不执行
+        // （020 是「先核销 → 再收束」，资格不满足时核销写入已发生）。
+        assertTrue(stub.tuples.none { it.first.contains("insert into healthcare.bills") }, "资格不满足不得生成区间账单")
+        assertTrue(stub.tuples.none { it.first.contains("insert into healthcare.payments") }, "资格不满足不得核销")
+        assertTrue(stub.tuples.none { it.first.contains("insert into healthcare.deposit_records") })
+        // 限制说明：mockk 桩不模拟 PostgreSQL 事务回滚，本用例在桩上未产生任何核销/建单写入，
+        // 因此「未进入写入」可在桩上断言；真实「失败后零残差」仍由后置 PostgreSQL 集成测试覆盖。
+        assertEquals(1, stub.deposits.size, "只有预置的登记记录，本次核销未执行")
+        assertEquals(0, stub.payments.size, "本次核销未执行")
     }
 
     // ========================================================================
@@ -718,16 +1044,21 @@ class BillingSettlementTest {
             bills = mutableListOf(billRow("bill-1", "enc-1", "2026-08-01", "2026-08-31", "5655.00")),
         )
         withServer(vertx, stub, userId = "cashier-route-1") { port ->
-            httpRequest(vertx, port, HttpMethod.POST, "/healthcare/v1/encounters/enc-1/billing-settlement")
+            // 021 行为变更：存在未结账单必须显式带上 write_off_reason，否则 409
+            httpRequest(
+                vertx, port, HttpMethod.POST, "/healthcare/v1/encounters/enc-1/billing-settlement",
+                JsonObject().put("write_off_reason", "离院结算，家属书面确认不再追收"),
+            )
                 .map { (status, body) ->
                     ctx.verify {
                         assertEquals(201, status, "补结算必须 201")
                         assertNotNull(body.getString("settled_at"), "响应 encounter 必须带 settled_at 冻结标记")
-                        // 区间账单 08-01..09-20（无已结算账期 → 起 = 入住日）已结算并冻结
+                        // 区间账单 08-01..09-20（无已结算账期 → 起 = 入住日）以 待缴费 建立后被冻结
                         val (sql, values) = finalBillTuple(stub)
                         assertEquals(LocalDate.parse("2026-08-01"), values[2])
                         assertEquals(LocalDate.parse("2026-09-20"), values[3])
-                        assertEquals("已结算", values[4])
+                        assertEquals("待缴费", values[4], "021：区间最终账单以 待缴费 建立")
+                        assertFalse(sql.contains("settled_at"), "021：创建时不写 settled_at: $sql")
                         assertEquals(0, BigDecimal("9255.00").compareTo(values[5] as BigDecimal))
                         for (bill in stub.bills) {
                             assertEquals("已结算", bill["status"])
@@ -816,7 +1147,11 @@ class BillingSettlementTest {
             bills = mutableListOf(billRow("bill-1", "enc-1", "2026-08-01", "2026-08-31", "5655.00")),
         )
         withServer(vertx, stub, userId = "cashier-route-1") { port ->
-            httpRequest(vertx, port, HttpMethod.POST, "/healthcare/v1/encounters/enc-1/billing-settlement")
+            // 021：区间与既有账单一致（不生成最终账单），bill-1 未结 → 需显式减免确认
+            httpRequest(
+                vertx, port, HttpMethod.POST, "/healthcare/v1/encounters/enc-1/billing-settlement",
+                JsonObject().put("write_off_reason", "区间已封口，剩余未结确认为减免"),
+            )
                 .map { (status, body) ->
                     ctx.verify {
                         assertEquals(201, status)
@@ -850,16 +1185,20 @@ class BillingSettlementTest {
             bills = mutableListOf(billRow("bill-1", "enc-1", "2026-08-01", "2026-08-15", "1500.00")),
         )
         withServer(vertx, stub, userId = "cashier-route-1") { port ->
-            httpRequest(vertx, port, HttpMethod.POST, "/healthcare/v1/encounters/enc-1/billing-settlement")
+            // 021：bill-1 未结 1500 → 必须显式减免确认
+            httpRequest(
+                vertx, port, HttpMethod.POST, "/healthcare/v1/encounters/enc-1/billing-settlement",
+                JsonObject().put("write_off_reason", "无计费字典，剩余未结确认为减免"),
+            )
                 .map { (status, body) ->
                     ctx.verify {
                         assertEquals(201, status, "无可计费项也必须成功收束（0 元封口账单）")
                         val (sql, values) = finalBillTuple(stub)
                         assertEquals(LocalDate.parse("2026-08-01"), values[2])
                         assertEquals(LocalDate.parse("2026-08-20"), values[3], "封口账单账期仍须正确（闭区间）")
-                        assertEquals("已结算", values[4])
+                        assertEquals("待缴费", values[4], "021：封口账单同样以 待缴费 建立")
                         assertEquals(0, BigDecimal.ZERO.compareTo(values[5] as BigDecimal), "封口账单 0 元")
-                        assertNotNull(values[6])
+                        assertFalse(sql.contains("settled_at"), "021：创建时不写 settled_at: $sql")
                         // 无自动明细
                         assertTrue(
                             stub.billItems.none { it["bill_id"] == values[0] },
@@ -869,6 +1208,10 @@ class BillingSettlementTest {
                             assertEquals("已结算", bill["status"])
                             assertNotNull(bill["settled_at"])
                         }
+                        // 0 元封口账单的未结快照为 0、无减免原因
+                        val sealed = stub.bills.first { it["id"] == values[0] }
+                        assertEquals(0, BigDecimal.ZERO.compareTo(amount(sealed["outstanding_amount"])))
+                        assertNull(sealed["write_off_reason"])
                     }
                 }
         }.onComplete { ar ->

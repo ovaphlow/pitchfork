@@ -29,12 +29,18 @@ import java.time.OffsetDateTime
  *  2. 余额归零后账单状态流转 待缴费 → 已结清（同一事务内更新）；
  *     部分缴费后余额 > 0 仍为待缴费；非待缴费账单不可缴费（400）。
  *  3. 金额 NUMERIC(12,2)：正数且至多两位小数，上限 9999999999.99。
- *  4. 缴费方式中文枚举：现金/转账/银行卡/微信/支付宝
- *     （DB CHECK 兜底 + 应用层白名单校验 400）。
+ *  4. 缴费方式中文枚举：现金/转账/银行卡/微信/支付宝/押金
+ *     （DB CHECK 兜底 + 应用层白名单校验 400）。其中「押金」不在客户端可提交白名单内：
+ *     它只由结算收束的押金核销（[DepositOffsetService]）写入，客户端无法伪造。
  *  5. 欠费列表 = 状态待缴费且余额 > 0 的账单，分页返回
  *     {records, meta:{total}}，记录含 paid_amount（累计缴费）与 balance（余额）。
- *  6. summary：应缴 = Σ账单合计、已缴 = Σ缴费金额、欠费 = Σ待缴费账单余额，
+ *  6. summary 三口径 + 减免单项：
+ *     应缴 = Σ账单合计、已缴 = Σ缴费金额、欠费 = Σ待缴费账单余额，
  *     满足 应缴 − 已缴 = 欠费（已结清账单余额恒为 0，由状态机保证）。
+ *     核销产生的 payments 行（method = 押金）计入「已缴」，因此该恒等式不变，
+ *     此处的「已缴」意为「已收妥，含押金抵扣」，并非现金流入。
+ *     减免 = Σ(已结算账单的 outstanding_amount)：收束时被放弃的未结余额快照（021 新增），
+ *     减免是收束动作产生的第三项，**不并入欠费**、不改变上面的恒等式。
  *  7. 冻结守卫：结算收束后（encounters.settled_at 非空）缴费一律 409。
  */
 class PaymentService(
@@ -49,7 +55,18 @@ class PaymentService(
         const val METHOD_WECHAT = "微信"
         const val METHOD_ALIPAY = "支付宝"
 
-        /** 缴费方式白名单：非法值 400 */
+        /**
+         * 结算核销的记账方式：只由 [DepositOffsetService] 在结算收束时写入，
+         * **不在客户端可提交白名单内**（见 [methods]），
+         * `POST /bills/:id/payments` 提交该值仍返回 400。
+         */
+        const val METHOD_DEPOSIT = "押金"
+
+        /**
+         * 客户端可提交的缴费方式白名单（非法值 400）：保持 5 值不变。
+         * 「押金」不放行——核销是写入 method = 押金的唯一路径，DB CHECK 的放宽
+         * 只为服务端内部写入服务，不构成客户端入口。
+         */
         val methods = setOf(METHOD_CASH, METHOD_TRANSFER, METHOD_BANK_CARD, METHOD_WECHAT, METHOD_ALIPAY)
 
         /** NUMERIC(12,2) 上限：10 位整数 + 2 位小数 */
@@ -180,11 +197,15 @@ class PaymentService(
      * 欠费列表：状态 待缴费 且 余额 > 0 的账单（余额 = 合计 − 累计缴费），
      * 账期倒序分页，返回 {records, meta:{total}}；空列表 records: [] 且 total: 0。
      * 记录含 paid_amount（累计缴费）与 balance（余额），供结算收束读账。
+     *
+     * [encounterId] 可选：传入时只返回该入住的欠费账单，**数据与计数同源过滤**
+     * （[arrearsQuery] 与 [arrearsCountQuery] 加同一条件），`meta.total` 为过滤后的行数；
+     * 省略时行为与改动前逐字段一致。不存在/非法的 id 只是过滤条件 → 空列表（不返回 404）。
      */
-    fun listArrears(limit: Int = 50, offset: Int = 0): Future<JsonObject> {
-        return execute(pool, arrearsCountQuery()).compose { countRows ->
+    fun listArrears(encounterId: String? = null, limit: Int = 50, offset: Int = 0): Future<JsonObject> {
+        return execute(pool, arrearsCountQuery(encounterId)).compose { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(pool, arrearsQuery(limit, offset)).map { dataRows ->
+            execute(pool, arrearsQuery(encounterId, limit, offset)).map { dataRows ->
                 JsonObject()
                     .put("records", JsonArray(dataRows.map(::arrearsJson)))
                     .put("meta", JsonObject().put("total", total))
@@ -198,19 +219,25 @@ class PaymentService(
 
     /**
      * 汇总：应缴 = Σ账单合计（全部账单）、已缴 = Σ缴费金额（全部流水）、
-     * 欠费 = Σ待缴费账单余额；恒等式 应缴 − 已缴 = 欠费
-     * （已结清账单余额恒为 0，由状态机保证）。无数据时三项均为 0。
+     * 欠费 = Σ待缴费账单余额、减免 = Σ已结算账单的 outstanding_amount（收束时被放弃的未结快照）。
+     * 恒等式 应缴 − 已缴 = 欠费 不变（已结清账单余额恒为 0，由状态机保证）；
+     * 减免单独成项、不并入欠费。无数据时四项均为 0。
      */
     fun summary(): Future<JsonObject> =
         execute(pool, summaryDueQuery()).compose { dueRows ->
             execute(pool, summaryPaidQuery()).compose { paidRows ->
                 execute(pool, summaryArrearsQuery()).compose { arrearsRows ->
-                    Future.succeededFuture(
+                    execute(pool, summaryWriteOffQuery()).map { writeOffRows ->
                         JsonObject()
                             .put("due_amount", dueRows.iterator().next().getBigDecimal("due_amount"))
                             .put("paid_amount", paidRows.iterator().next().getBigDecimal("paid_amount"))
-                            .put("arrears_amount", arrearsRows.iterator().next().getBigDecimal("arrears_amount")),
-                    )
+                            .put("arrears_amount", arrearsRows.iterator().next().getBigDecimal("arrears_amount"))
+                            .put(
+                                "write_off_amount",
+                                writeOffRows.iterator().asSequence().firstOrNull()
+                                    ?.getBigDecimal("write_off_amount") ?: BigDecimal.ZERO,
+                            )
+                    }
                 }
             }
         }
@@ -327,7 +354,8 @@ class PaymentService(
     private val ppbBillId = DSL.field(DSL.name("ppb", "bill_id"), String::class.java)
     private val ppbPaid = DSL.field(DSL.name("ppb", "paid"), BigDecimal::class.java)
 
-    private fun arrearsBase() =
+    /** 欠费基数（数据与计数共用）：可选 encounter_id 过滤条件对两者同源生效。 */
+    private fun arrearsBase(encounterId: String?) =
         ctx.select(
             BILLS.ID,
             BILLS.ENCOUNTER_ID,
@@ -341,17 +369,22 @@ class PaymentService(
             BILLS.UPDATED_AT,
         ).from(BILLS)
             .leftJoin(paidPerBill).on(ppbBillId.eq(BILLS.ID))
-            .where(BILLS.STATUS.eq(BillingEngine.STATUS_PENDING))
-            .and(BILLS.TOTAL_AMOUNT.gt(DSL.coalesce(ppbPaid, BigDecimal.ZERO)))
+            .where(
+                listOfNotNull(
+                    BILLS.STATUS.eq(BillingEngine.STATUS_PENDING),
+                    BILLS.TOTAL_AMOUNT.gt(DSL.coalesce(ppbPaid, BigDecimal.ZERO)),
+                    encounterId?.let { BILLS.ENCOUNTER_ID.eq(it) },
+                ),
+            )
 
-    private fun arrearsQuery(limit: Int, offset: Int): Query =
-        arrearsBase()
+    private fun arrearsQuery(encounterId: String?, limit: Int, offset: Int): Query =
+        arrearsBase(encounterId)
             .orderBy(BILLS.PERIOD_START.desc(), BILLS.ID.desc())
             .limit(limit)
             .offset(offset)
 
-    private fun arrearsCountQuery(): Query =
-        ctx.select(DSL.count().`as`("total")).from(arrearsBase().asTable("arrears"))
+    private fun arrearsCountQuery(encounterId: String?): Query =
+        ctx.select(DSL.count().`as`("total")).from(arrearsBase(encounterId).asTable("arrears"))
 
     private fun summaryDueQuery(): Query =
         ctx.select(DSL.coalesce(DSL.sum(BILLS.TOTAL_AMOUNT), BigDecimal.ZERO).`as`("due_amount")).from(BILLS)
@@ -369,6 +402,13 @@ class PaymentService(
             .leftJoin(paidPerBill).on(ppbBillId.eq(BILLS.ID))
             .where(BILLS.STATUS.eq(BillingEngine.STATUS_PENDING))
             .and(BILLS.TOTAL_AMOUNT.gt(DSL.coalesce(ppbPaid, BigDecimal.ZERO)))
+
+    /** 减免合计 = Σ(已结算账单的 outstanding_amount)：收束时被放弃的未结余额快照。 */
+    private fun summaryWriteOffQuery(): Query =
+        ctx.select(
+            DSL.coalesce(DSL.sum(BILLS.OUTSTANDING_AMOUNT), BigDecimal.ZERO).`as`("write_off_amount"),
+        ).from(BILLS)
+            .where(BILLS.STATUS.eq(BillingEngine.STATUS_SETTLED))
 
     private fun arrearsJson(row: Row): JsonObject =
         JsonObject()

@@ -9,8 +9,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/ovaphlow/pitchfork/service-idp-go/internal/database/sqlc"
 )
 
 type LoginThrottleSettings struct {
@@ -24,6 +22,34 @@ type loginThrottleKey struct {
 	identifierHash []byte
 	sourceHash     []byte
 }
+
+// loginThrottleRow 是登录限流记录的视图。locked_until 可空，用指针表达。
+type loginThrottleRow struct {
+	ID              string     `db:"id"`
+	IdentifierHash  []byte     `db:"identifier_hash"`
+	SourceHash      []byte     `db:"source_hash"`
+	FailedCount     int64      `db:"failed_count"`
+	WindowStartedAt time.Time  `db:"window_started_at"`
+	LockedUntil     *time.Time `db:"locked_until"`
+	UpdatedAt       time.Time  `db:"updated_at"`
+}
+
+const getLoginThrottle = `
+SELECT id, identifier_hash, source_hash, failed_count, window_started_at, locked_until, updated_at
+FROM identity_login_throttles
+WHERE identifier_hash = :identifier_hash AND source_hash = :source_hash`
+
+const upsertLoginThrottle = `
+INSERT INTO identity_login_throttles(
+    id, identifier_hash, source_hash, failed_count, window_started_at, locked_until, updated_at
+) VALUES (
+    :id, :identifier_hash, :source_hash, :failed_count, :window_started_at, :locked_until, :updated_at
+)
+ON CONFLICT(identifier_hash, source_hash) DO UPDATE SET
+    failed_count = excluded.failed_count,
+    window_started_at = excluded.window_started_at,
+    locked_until = excluded.locked_until,
+    updated_at = excluded.updated_at`
 
 func (settings LoginThrottleSettings) validate() error {
 	if len(settings.Secret) < 32 {
@@ -61,10 +87,11 @@ func normalizedSourceAddress(value string) string {
 	return "unknown"
 }
 
-func loginThrottleLocked(ctx context.Context, queries sqlc.Querier, key loginThrottleKey, now time.Time) (bool, error) {
-	throttle, err := queries.GetLoginThrottle(ctx, sqlc.GetLoginThrottleParams{
-		IdentifierHash: key.identifierHash,
-		SourceHash:     key.sourceHash,
+func loginThrottleLocked(ctx context.Context, queries querier, key loginThrottleKey, now time.Time) (bool, error) {
+	var throttle loginThrottleRow
+	err := namedGet(ctx, queries, &throttle, getLoginThrottle, map[string]any{
+		"identifier_hash": key.identifierHash,
+		"source_hash":     key.sourceHash,
 	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
@@ -75,18 +102,18 @@ func loginThrottleLocked(ctx context.Context, queries sqlc.Querier, key loginThr
 	return isLoginThrottleLocked(throttle, now), nil
 }
 
-func isLoginThrottleLocked(throttle sqlc.IdentityLoginThrottle, now time.Time) bool {
-	return throttle.LockedUntil.Valid && throttle.LockedUntil.Time.After(now)
+func isLoginThrottleLocked(throttle loginThrottleRow, now time.Time) bool {
+	return throttle.LockedUntil != nil && throttle.LockedUntil.After(now)
 }
 
 func recordLoginFailure(ctx context.Context, database *sql.DB, settings LoginThrottleSettings, key loginThrottleKey, now time.Time) error {
-	transaction, err := database.BeginTx(ctx, nil)
+	transaction, err := newQuerier(database).BeginTxx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin failed login transaction: %w", err)
 	}
 	defer transaction.Rollback()
 
-	if err := recordLoginFailureInTransaction(ctx, sqlc.New(database).WithTx(transaction), settings, key, now); err != nil {
+	if err := recordLoginFailureInTransaction(ctx, transaction, settings, key, now); err != nil {
 		return err
 	}
 	if err := transaction.Commit(); err != nil {
@@ -95,10 +122,11 @@ func recordLoginFailure(ctx context.Context, database *sql.DB, settings LoginThr
 	return nil
 }
 
-func recordLoginFailureInTransaction(ctx context.Context, queries sqlc.Querier, settings LoginThrottleSettings, key loginThrottleKey, now time.Time) error {
-	throttle, err := queries.GetLoginThrottle(ctx, sqlc.GetLoginThrottleParams{
-		IdentifierHash: key.identifierHash,
-		SourceHash:     key.sourceHash,
+func recordLoginFailureInTransaction(ctx context.Context, queries querier, settings LoginThrottleSettings, key loginThrottleKey, now time.Time) error {
+	var throttle loginThrottleRow
+	err := namedGet(ctx, queries, &throttle, getLoginThrottle, map[string]any{
+		"identifier_hash": key.identifierHash,
+		"source_hash":     key.sourceHash,
 	})
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("load login throttle for failure: %w", err)
@@ -113,46 +141,37 @@ func recordLoginFailureInTransaction(ctx context.Context, queries sqlc.Querier, 
 			windowStartedAt = throttle.WindowStartedAt
 		}
 
-		lockedUntil := sql.NullTime{}
+		var lockedUntil *time.Time
 		if failedCount >= int64(settings.FailureLimit) {
-			lockedUntil = sql.NullTime{Time: now.Add(settings.LockoutDuration), Valid: true}
+			lockedUntil = ref(now.Add(settings.LockoutDuration))
 		}
 		throttleID, err := NewULID(now)
 		if err != nil {
 			return err
 		}
-		if err := queries.UpsertLoginThrottle(ctx, sqlc.UpsertLoginThrottleParams{
-			ID:              throttleID,
-			IdentifierHash:  key.identifierHash,
-			SourceHash:      key.sourceHash,
-			FailedCount:     failedCount,
-			WindowStartedAt: windowStartedAt,
-			LockedUntil:     lockedUntil,
-			UpdatedAt:       now,
+		if err := namedExec(ctx, queries, upsertLoginThrottle, map[string]any{
+			"id":                throttleID,
+			"identifier_hash":   key.identifierHash,
+			"source_hash":       key.sourceHash,
+			"failed_count":      failedCount,
+			"window_started_at": windowStartedAt,
+			"locked_until":      lockedUntil,
+			"updated_at":        now,
 		}); err != nil {
 			return fmt.Errorf("upsert login throttle: %w", err)
 		}
 	}
 
-	auditID, err := NewULID(now)
-	if err != nil {
-		return err
-	}
 	metadata := `{"reason":"invalid_credentials"}`
 	if locked {
 		metadata = `{"reason":"throttled"}`
 	}
-	if err := queries.InsertAuditEvent(ctx, sqlc.InsertAuditEventParams{
-		ID:              auditID,
-		EventAction:     "登录",
-		Outcome:         "失败",
-		ActorSubjectID:  sql.NullString{},
-		TargetSubjectID: sql.NullString{},
-		RequestID:       sql.NullString{},
-		SourceHash:      key.sourceHash,
-		Metadata:        metadata,
-		CreatedAt:       now,
-	}); err != nil {
+	if err := insertAuditEvent(ctx, queries, auditEvent{
+		Action:     AuditActionLogin,
+		Outcome:    OutcomeFailed,
+		SourceHash: key.sourceHash,
+		Metadata:   metadata,
+	}, now); err != nil {
 		return fmt.Errorf("write failed login audit event: %w", err)
 	}
 	return nil

@@ -57,7 +57,6 @@ interface DiagnosisForm {
   icdCode: string;
   diagnosisDate: string;
   physician: string;
-  isMajor: boolean;
   remark: string;
 }
 
@@ -120,7 +119,6 @@ const diagnosisFormDefaults: DiagnosisForm = {
   icdCode: "",
   diagnosisDate: todayLocal(),
   physician: "",
-  isMajor: false,
   remark: "",
 };
 
@@ -210,6 +208,14 @@ const ORDER_DETAIL_LABELS: Record<string, string> = {
   frequency_name: "频次",
   duration_days: "天数",
   remark: "备注",
+};
+
+/** 各医嘱类型的主明细字段，与后端 REQUIRED_DETAIL_KEY 保持一致 */
+const ORDER_PRIMARY_DETAIL_KEY: Record<string, string> = {
+  MEDICATION: "drug_name",
+  THERAPY: "treatment_item",
+  EXAMINATION: "item_name",
+  LAB_TEST: "item_name",
 };
 
 const selectClass = "h-10 rounded-md border border-border bg-surface px-3 text-sm text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent";
@@ -456,7 +462,7 @@ export default function OrdersPage() {
         diagnosis_date: diagnosisDate,
         physician,
         ...(diagnosisForm.icdCode.trim() ? { icd_code: diagnosisForm.icdCode.trim() } : {}),
-        ...(diagnosisForm.isMajor ? { is_major: true } : {}),
+        // is_major 由服务端按 diagnosis_type 派生，不再由表单提交
         ...(diagnosisForm.remark.trim() ? { remark: diagnosisForm.remark.trim() } : {}),
       });
       setDiagnosisForm((current) => ({ ...diagnosisFormDefaults, diagnosisDate: current.diagnosisDate, physician: current.physician }));
@@ -642,6 +648,33 @@ export default function OrdersPage() {
       ),
     },
     {
+      // 列表原本只显示自由文本的医嘱正文，用药医嘱看上去「没有药」。这里补出各类型的
+      // 主明细字段；用药医嘱额外带剂量与用法，因为只有药名的医嘱无法执行。
+      key: "order_detail",
+      header: "药品 / 项目",
+      className: "min-w-[170px] max-w-[240px]",
+      render: (row) => {
+        const primaryKey = ORDER_PRIMARY_DETAIL_KEY[row.order_type];
+        const primary = primaryKey ? row.order_details?.[primaryKey] : undefined;
+        if (primary === undefined || primary === null || primary === "") {
+          return <span className="text-fg-dimmed">-</span>;
+        }
+        const parts = [formatDetailValue(primary)];
+        if (row.order_type === "MEDICATION") {
+          for (const key of ["dose", "unit", "route"]) {
+            const value = row.order_details?.[key];
+            if (value !== undefined && value !== null && value !== "") parts.push(formatDetailValue(value));
+          }
+        }
+        const text = parts.join(" ");
+        return (
+          <span className="block truncate" title={text}>
+            {text}
+          </span>
+        );
+      },
+    },
+    {
       key: "order_content",
       header: "医嘱正文",
       className: "min-w-[240px] max-w-[380px]",
@@ -724,7 +757,9 @@ export default function OrdersPage() {
       key: "is_major",
       header: "主诊断",
       className: "min-w-[80px]",
-      render: (row) => (row.is_major ? <Badge variant="success">主要</Badge> : <span className="text-fg-dimmed">-</span>),
+      // 主/次只由 diagnosis_type 决定；这里按派生值渲染，存量数据中不一致的 is_major 不会显示成矛盾行
+      render: (row) =>
+        row.diagnosis_type === "PRIMARY" ? <Badge variant="success">主要</Badge> : <span className="text-fg-dimmed">-</span>,
     },
     {
       key: "actions",
@@ -754,7 +789,7 @@ export default function OrdersPage() {
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h2 className="text-lg font-semibold text-fg-emphasis">医生诊疗</h2>
-          <p className="mt-1 text-sm text-fg-muted">选择活动入住老人，书写病程记录、录入诊断并开立医嘱</p>
+          <p className="mt-1 text-sm text-fg-muted">选择入住记录，书写病程记录、录入诊断并开立医嘱；已离院记录仅可查看</p>
         </div>
         {admissions.length > 0 && (
           <div className="flex flex-wrap items-end gap-3">
@@ -809,7 +844,7 @@ export default function OrdersPage() {
             <div className={`rounded-lg border px-4 py-3 text-sm ${isReadOnly ? "border-warning/30 bg-warning-bg text-warning" : "border-info/30 bg-info-bg text-info"}`}>
               <div className="flex flex-wrap items-center gap-x-6 gap-y-1">
                 <span className="font-medium">{selectedAdmission.patientName}</span>
-                <span>入住号：{selectedAdmission.encounter_no}</span>
+                <span>住院号：{selectedAdmission.encounter_no}</span>
                 <span>床位：{selectedAdmission.ward || selectedAdmission.department || "未设置"}</span>
                 <span>入住日期：{formatDateTime(selectedAdmission.admit_date)}</span>
                 <Badge variant={selectedAdmission.status === "ACTIVE" ? "success" : "warning"}>
@@ -817,7 +852,7 @@ export default function OrdersPage() {
                 </Badge>
               </div>
               {isReadOnly && (
-                <p className="mt-1 text-sm">该入住已{ENCOUNTER_STATUS_LABEL[selectedAdmission.status] ?? "结束"}，仅可查看历史病程、诊断和医嘱。</p>
+                <p className="mt-1 text-sm">该入住{ENCOUNTER_STATUS_LABEL[selectedAdmission.status] ?? "已结束"}，仅可查看历史病程、诊断和医嘱。</p>
               )}
             </div>
           )}
@@ -851,7 +886,6 @@ export default function OrdersPage() {
                     <div className="mb-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-fg-muted">
                       <span className="font-medium text-fg">{formatDateTime(note.record_time)}</span>
                       <span>{note.physician}</span>
-                      <span className="ml-auto break-all">{note.id}</span>
                     </div>
                     <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-fg">{note.content}</p>
                   </li>
@@ -1063,15 +1097,6 @@ export default function OrdersPage() {
               maxLength={100}
               required
             />
-            <label className="flex items-center gap-2 text-sm text-fg-muted sm:col-span-2">
-              <input
-                type="checkbox"
-                className={radioClass}
-                checked={diagnosisForm.isMajor}
-                onChange={(event) => setDiagnosisForm((current) => ({ ...current, isMajor: event.target.checked }))}
-              />
-              主要诊断（默认按诊断类型区分，如需标记可勾选）
-            </label>
             <div className="flex flex-col gap-1.5 sm:col-span-2">
               <label className="text-sm font-medium text-fg-muted" htmlFor="diagnosis-remark">备注（可选）</label>
               <textarea

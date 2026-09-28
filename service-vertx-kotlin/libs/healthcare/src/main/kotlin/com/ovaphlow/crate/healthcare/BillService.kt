@@ -6,6 +6,7 @@ import com.ovaphlow.crate.database.gen.healthcare.tables.BillItems.BILL_ITEMS
 import com.ovaphlow.crate.database.gen.healthcare.tables.Bills.BILLS
 import com.ovaphlow.crate.database.gen.healthcare.tables.Encounters.ENCOUNTERS
 import com.ovaphlow.crate.database.gen.healthcare.tables.FeeItems.FEE_ITEMS
+import com.ovaphlow.crate.database.gen.healthcare.tables.Payments.PAYMENTS
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingAssessments.NURSING_ASSESSMENTS
 import com.ovaphlow.crate.nursing.ConflictException
 import io.vertx.core.Future
@@ -40,8 +41,13 @@ class DuplicateBillException(message: String) : Exception(message)
  *  4. 明细为字典快照（item 编码/名称/单价），来源 自动/手工；
  *     手工加项可覆盖单价（unit_price 缺省取字典单价）；账单初始状态 待缴费。
  *  5. 明细金额 = 单价 × 数量 ROUND_HALF_UP 到分；合计 = 明细之和。
- *  6. 结算收束：离院/去世同事务生成区间最终账单并冻结；冻结（encounters.settled_at
- *     非空）后生成/加项一律 409；不做撤销/重算/红冲。
+ *  6. 结算收束（023 决策 A 起**唯一入口**是 `HealthcareService.settleEncounterBilling`，
+ *     离院/去世不再收束账单）分三步组合：阶段一 资格校验 + 按需生成区间最终账单
+ *     （状态 待缴费，创建时不写 settled_at）→ 押金核销 → 阶段二 未结余额合计 →
+ *     阶段三 冻结（全部账单置 已结算 + settled_at，逐张写 outstanding_amount 与
+ *     write_off_reason）。冻结（encounters.settled_at 非空）后生成/加项一律 409；
+ *     不做撤销/重算/红冲。收束时仍有未结余额必须由调用方显式提供减免原因，
+ *     否则拒绝（见 `HealthcareService.settleEncounterBilling`）。
  */
 class BillService(
     private val pool: Pool,
@@ -54,10 +60,64 @@ class BillService(
         /** 生成写白名单：账期只接受 month */
         private val generateKeys = setOf("month")
 
+        /** 结算请求体唯一允许的键：核销额 + 减免原因（operator/bill_id/amount 等一律 400） */
+        private val settlementKeys = setOf(KEY_DEPOSIT_OFFSET, KEY_WRITE_OFF_REASON)
+
+        private const val KEY_DEPOSIT_OFFSET = "deposit_offset"
+        private const val KEY_WRITE_OFF_REASON = "write_off_reason"
+
         /** NUMERIC(12,2) 上限：10 位整数 + 2 位小数 */
         val maxAmount = BigDecimal("9999999999.99")
 
         private val monthPattern = Regex("""^(\d{4})-(0[1-9]|1[0-2])$""")
+
+        /** 账期格式错误文案（生成与 precheck 共用的单一来源）。 */
+        private const val MONTH_FORMAT_MESSAGE = "month must be in YYYY-MM format"
+
+        /** 自动计费分类（槽位推导、字典匹配与 precheck 计数共用）。 */
+        private const val CATEGORY_BED = "床位费"
+        private const val CATEGORY_NURSING = "护理费"
+        private const val CATEGORY_MEAL = "伙食费"
+
+        /** 养老入住类型（precheck 资格判定；与结算资格校验同一中文枚举口径）。 */
+        private const val ENCOUNTER_TYPE_ELDERLY = "ELDERLY_CARE"
+
+        /** precheck 机器可读阻断原因（中文提示由前端映射，后端不引入中文业务文案）。 */
+        private const val BLOCK_MISSING_FEE_ITEMS = "missing_fee_items"
+        private const val BLOCK_ALREADY_EXISTS = "already_exists"
+        private const val BLOCK_NOT_OVERLAPPING = "not_overlapping"
+        private const val BLOCK_NO_ADMIT_DATE = "no_admit_date"
+        private const val BLOCK_SETTLED = "settled"
+        private const val BLOCK_NOT_ELDERLY_ADMISSION = "not_elderly_admission"
+
+        /**
+         * 解析并校验结算请求体：只允许 `deposit_offset` 与 `write_off_reason` 两个键。
+         *
+         *  - 其他键（含 amount/operator/bill_id）→ `unsupported settlement keys: <排序后 joinToString>`；
+         *  - `deposit_offset` 的数值校验**委托** [DepositOffsetService.parseOffset]（单一来源，
+         *    省略或 0 = 不核销）；
+         *  - `write_off_reason` 必须是字符串（否则 400），trim 后为空视为未提供（null），
+         *    trim 后超过 500 字符 → 400。
+         */
+        fun parseSettlementRequest(body: JsonObject): SettlementRequest {
+            val extra = body.fieldNames().filter { it !in settlementKeys }.sorted()
+            if (extra.isNotEmpty()) {
+                throw IllegalArgumentException("unsupported settlement keys: ${extra.joinToString(", ")}")
+            }
+            // 数值校验单一来源：只把 deposit_offset 交给 DepositOffsetService.parseOffset
+            val offsetBody = JsonObject()
+            body.getValue(KEY_DEPOSIT_OFFSET)?.let { offsetBody.put(KEY_DEPOSIT_OFFSET, it) }
+            val depositOffset = DepositOffsetService.parseOffset(offsetBody)
+            val rawReason = body.getValue(KEY_WRITE_OFF_REASON)
+            val writeOffReason = when {
+                rawReason == null -> null
+                rawReason is String -> rawReason.trim().takeIf(String::isNotEmpty)?.also {
+                    if (it.length > 500) throw IllegalArgumentException("write_off_reason must not exceed 500 characters")
+                }
+                else -> throw IllegalArgumentException("write_off_reason must be a string")
+            }
+            return SettlementRequest(depositOffset, writeOffReason)
+        }
 
         private fun billJson(row: Row, items: List<JsonObject>): JsonObject =
             JsonObject()
@@ -67,6 +127,8 @@ class BillService(
                 .put("period_end", row.getLocalDate("period_end")?.toString())
                 .put("status", row.getString("status"))
                 .put("settled_at", row.getOffsetDateTime("settled_at")?.toString())
+                .put("outstanding_amount", row.getBigDecimal("outstanding_amount"))
+                .put("write_off_reason", row.getString("write_off_reason"))
                 .put("total_amount", row.getBigDecimal("total_amount"))
                 .put("items", JsonArray(items))
                 .put("created_at", row.getOffsetDateTime("created_at")?.toString())
@@ -142,6 +204,109 @@ class BillService(
     }
 
     // ========================================================================
+    //  生成账单前置校验（只读）
+    // ========================================================================
+
+    /**
+     * 生成账单前置校验（**纯读**，可反复调用，不产生任何写入）：返回结构化数据，
+     * 中文提示由前端按 `blocked_by` / `requirements` 映射（后端不引入业务文案）。
+     *
+     * 资格判定顺序与真实生成路径 [generate] 的校验顺序一致（避免「precheck 说能生成、
+     * 生成却报另一个错」），且逐条对应既有错误码：
+     *  1. `month` 缺失/非法 → 400（沿用 `month must be in YYYY-MM format`，不触发 SQL）；
+     *  2. encounter 不存在 → 404（`encounter not found: <id>`）；
+     *  3. 非养老入住 → `not_elderly_admission`（与结算资格校验同序：非养老 400 在最前）；
+     *  4. 已收束（`encounters.settled_at` 非空）→ `settled`（生成 409）；
+     *  5. 缺 `admit_date` → `no_admit_date`（生成 400）；
+     *  6. 账期与在院区间无重合 → `not_overlapping`（生成 400）；
+     *  7. 该账期账单已存在（[exactBillExists] 同一语义）→ `already_exists`（生成 409）；
+     *  8. 存在 `required && !satisfied` 的槽位 → `missing_fee_items`（生成 400 缺字典）；
+     *     否则 `blocked_by = null`、`can_generate = true`。
+     *
+     * 与生成路径的**唯一差异**：缺字典不抛异常，而是表达为 `requirements` 数据
+     * （缺字典是被查询的业务状态，不是请求错误），因此恒为 200。非养老入住没有对应的
+     * 生成守卫，precheck 按计划口径收紧（保守方向：宁可先挡）。
+     *
+     * 槽位推导与 [computeAutoItems] 共用 [deriveBillingSlots]（唯一实现，禁止各算一套）；
+     * 账期裁剪与 [generate] 逐字一致：`start = max(月首, admit_date)`、
+     * `end = min(月末, discharge_date ?: 月末)`；区间取不到时 `period_start/period_end` 为 null。
+     */
+    fun precheckBillGeneration(encounterId: String, month: String?): Future<JsonObject> {
+        val parsedMonth = try {
+            val raw = month ?: throw IllegalArgumentException(MONTH_FORMAT_MESSAGE)
+            parseMonthString(raw)
+        } catch (error: IllegalArgumentException) {
+            return Future.failedFuture(error)
+        }
+        val monthStart = LocalDate.parse("$parsedMonth-01")
+        val monthEnd = monthStart.withDayOfMonth(monthStart.lengthOfMonth())
+        return pool.withTransaction { connection ->
+            loadEncounter(connection, encounterId).compose { encounter ->
+                val admitDate = encounter.getOffsetDateTime("admit_date")?.toLocalDate()
+                val dischargeDate = encounter.getOffsetDateTime("discharge_date")?.toLocalDate()
+                val stayStart = admitDate?.let { maxOf(it, monthStart) }
+                val stayEnd = minOf(dischargeDate ?: monthEnd, monthEnd)
+                // 与 [generate] 同一裁剪口径：账期起 > 账期止 = 无重合（区间取不到 → null）
+                val interval = if (admitDate != null && stayStart != null && !stayStart.isAfter(stayEnd)) {
+                    stayStart to stayEnd
+                } else {
+                    null
+                }
+                val blocked = when {
+                    encounter.getString("encounter_type") != ENCOUNTER_TYPE_ELDERLY -> BLOCK_NOT_ELDERLY_ADMISSION
+                    encounter.getOffsetDateTime("settled_at") != null -> BLOCK_SETTLED
+                    admitDate == null -> BLOCK_NO_ADMIT_DATE
+                    interval == null -> BLOCK_NOT_OVERLAPPING
+                    else -> null
+                }
+                if (blocked != null) {
+                    Future.succeededFuture(precheckJson(parsedMonth, interval, blocked, emptyList()))
+                } else {
+                    // blocked == null 保证区间可裁剪（否则上面已判 not_overlapping）
+                    val period = interval!!
+                    exactBillExists(connection, encounterId, period.first, period.second).compose { exists ->
+                        precheckRequirements(connection, encounterId, period.first, period.second).map { requirements ->
+                            val reason = when {
+                                exists -> BLOCK_ALREADY_EXISTS
+                                requirements.any { it.required && !it.satisfied } -> BLOCK_MISSING_FEE_ITEMS
+                                else -> null
+                            }
+                            precheckJson(parsedMonth, period, reason, requirements)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /** precheck 响应（字段名与前端 TS 类型逐字一致；`level`/`blocked_by` 取不到时显式 null）。 */
+    private fun precheckJson(
+        month: String,
+        period: Pair<LocalDate, LocalDate>?,
+        blockedBy: String?,
+        requirements: List<PrecheckRequirement>,
+    ): JsonObject {
+        val json = JsonObject()
+            .put("month", month)
+            .put("period_start", period?.first?.toString())
+            .put("period_end", period?.second?.toString())
+            .put("can_generate", blockedBy == null)
+            .put("requirements", JsonArray(requirements.map(::requirementJson)))
+        if (blockedBy == null) json.putNull("blocked_by") else json.put("blocked_by", blockedBy)
+        return json
+    }
+
+    private fun requirementJson(requirement: PrecheckRequirement): JsonObject {
+        val json = JsonObject()
+            .put("category", requirement.category)
+            .put("required", requirement.required)
+            .put("enabled_count", requirement.enabledCount)
+            .put("satisfied", requirement.satisfied)
+        if (requirement.level == null) json.putNull("level") else json.put("level", requirement.level)
+        return json
+    }
+
+    // ========================================================================
     //  手工加项
     // ========================================================================
 
@@ -206,32 +371,195 @@ class BillService(
     }
 
     // ========================================================================
-    //  结算收束（离院/去世）
+    //  结算收束（账单收尾的唯一入口：HealthcareService.settleEncounterBilling）
     // ========================================================================
 
     /** 已收束终态（补结算端点的资格判定）。 */
     private val terminalStatuses = setOf("DISCHARGED", "DECEASED")
 
     /**
-     * 离院/去世结算收束（必须在调用方外层事务内执行，同连接）：
-     *  1. 行锁读 encounter（防并发）后判定：非养老入住 400；
-     *     [requireTerminalStatus] 时非 已离院/已去世 409；已冻结（settled_at 非空）409；
-     *  2. 区间最终账单：账期 = [MAX(已结算账期末日)+1 或入住日, 收束日]（闭区间）；
-     *     区间起 > 区间止不生成；与既有账单账期完全一致时不重复生成（唯一约束防冲突）；
-     *     明细按自动计费（床位/护理/伙食），无可用计费项时生成 0 元封口账单；
-     *     创建即状态 已结算 并写 settled_at；
-     *  3. 冻结：该 encounter 全部 bills 置 已结算 并写 settled_at；
-     *     encounters.settled_at 置结算时间（冻结标记，供生成/加项/缴费做 O(1) 判定）。
-     * 不做撤销/重算/红冲：既有未结账单不重算、不裁剪，直接置 已结算；
-     * 其账期与最终区间重叠属既定口径。
+     * 结算请求体（已校验）：`depositOffset` 省略或 0 = 不核销；
+     * `writeOffReason` trim 后为空 = 未提供。
      */
-    fun settleEncounter(
+    data class SettlementRequest(val depositOffset: BigDecimal, val writeOffReason: String?)
+
+    /** 未结账单（阶段二结果）：余额 = 合计 − Σ缴费，下限 0；只含 > 0 的行。 */
+    data class BillOutstanding(val billId: String, val balance: BigDecimal)
+
+    /**
+     * 阶段一：资格校验 + 解析区间 + 按需生成区间最终账单（状态 待缴费，不写 settled_at）。
+     *
+     * 必须在调用方外层事务内执行（同连接）。资格校验顺序与错误码与既有实现逐字一致：
+     * 非养老入住 400 → [requireTerminalStatus] 时非 已离院/已去世 409 → 已收束 409 →
+     * 缺入住日 400 → 缺离院/去世日 400。
+     *
+     * 返回形状（自定，供 [HealthcareService] 编排与 [previewSettlement] 复用）：
+     * ```
+     * {"encounter_id": "enc-1",
+     *  "settlement_period": {"start": "2026-09-01", "end": "2026-09-28"} | null,
+     *  "final_bill_id": "<新生成账单 id>" | null,
+     *  "final_bill_total": <本轮区间最终账单合计，未生成时为 0>}
+     * ```
+     * `settlement_period` 为 null 表示区间起 > 区间止（不生成）；同账期账单已存在时不重复生成
+     * （`final_bill_id` = null、`final_bill_total` = 0）。
+     */
+    fun prepareSettlement(
         client: SqlClient,
         encounterId: String,
         now: OffsetDateTime,
         requireTerminalStatus: Boolean,
         endDate: LocalDate? = null,
     ): Future<JsonObject> =
+        settlementContext(client, encounterId, requireTerminalStatus, endDate).compose { context ->
+            planFinalBill(client, encounterId, context.admitDate, context.endDate).compose { plan ->
+                if (plan == null || plan.exists) {
+                    Future.succeededFuture(preparationJson(encounterId, plan, null))
+                } else {
+                    insertFinalBill(client, encounterId, plan, now)
+                        .map { billId -> preparationJson(encounterId, plan, billId) }
+                }
+            }
+        }
+
+    /**
+     * 阶段二：该 encounter 全部 `待缴费` 账单的未结余额（合计 − Σ缴费，下限 0），
+     * 只返回 > 0 的行；与 [DepositOffsetService] 的目标账单口径一致，一次聚合查询
+     * （bills LEFT JOIN payments ... GROUP BY ...），按账期升序、同账期按 id 升序。
+     */
+    fun outstandingBills(client: SqlClient, encounterId: String): Future<List<BillOutstanding>> {
+        val paid = DSL.coalesce(DSL.sum(PAYMENTS.AMOUNT), BigDecimal.ZERO)
+        val query = ctx.select(
+            BILLS.ID,
+            BILLS.PERIOD_START,
+            BILLS.PERIOD_END,
+            BILLS.TOTAL_AMOUNT,
+            paid.`as`("paid_amount"),
+            BILLS.TOTAL_AMOUNT.subtract(paid).`as`("balance"),
+        ).from(BILLS)
+            .leftJoin(PAYMENTS).on(PAYMENTS.BILL_ID.eq(BILLS.ID))
+            .where(BILLS.ENCOUNTER_ID.eq(encounterId))
+            .and(BILLS.STATUS.eq(BillingEngine.STATUS_PENDING))
+            .groupBy(BILLS.ID, BILLS.PERIOD_START, BILLS.PERIOD_END, BILLS.TOTAL_AMOUNT)
+            .orderBy(BILLS.PERIOD_START.asc(), BILLS.ID.asc())
+        return execute(client, query).map { rows ->
+            rows.mapNotNull { row ->
+                val balance = row.getBigDecimal("balance")
+                if (balance == null || balance.signum() <= 0) {
+                    null
+                } else {
+                    BillOutstanding(row.getString("id"), balance)
+                }
+            }
+        }
+    }
+
+    /**
+     * 阶段三：冻结 —— 该 encounter 全部 bills 置 `已结算` + `settled_at = now`，
+     * 逐张写收束时刻的未结快照与减免原因；最后把 encounters.settled_at 置位并返回 encounter
+     * （形状与既有响应一致）。
+     *
+     *  - [outstanding]（阶段二结果，> 0 的行）：写实际余额 + 传入原因；
+     *  - 其余账单：`outstanding_amount = 0`、`write_off_reason = NULL`（未结事实不可考）；
+     *  - 账单数量很小，逐张 UPDATE（不用 JSON/字符串拼接 SQL）。
+     */
+    fun freezeSettlement(
+        client: SqlClient,
+        encounterId: String,
+        now: OffsetDateTime,
+        outstanding: List<BillOutstanding>,
+        writeOffReason: String?,
+    ): Future<JsonObject> {
+        val outstandingById = outstanding.associateBy { it.billId }
+        return billIdsOf(client, encounterId).compose { billIds ->
+            var chain: Future<Unit> = Future.succeededFuture()
+            for (billId in billIds) {
+                val row = outstandingById[billId]
+                val balance = row?.balance ?: BigDecimal.ZERO
+                val reason = if (row == null) null else writeOffReason
+                chain = chain.compose {
+                    execute(client, freezeBillQuery(billId, balance, reason, now)).map { Unit }
+                }
+            }
+            chain
+        }.compose {
+            execute(
+                client,
+                ctx.update(ENCOUNTERS)
+                    .set(ENCOUNTERS.SETTLED_AT, now)
+                    .set(ENCOUNTERS.UPDATED_AT, now)
+                    .where(ENCOUNTERS.ID.eq(encounterId)),
+            )
+        }.compose {
+            getEncounter(client, encounterId)
+        }
+    }
+
+    /**
+     * 收束预览（只读）：与执行路径共用 [settlementContext] / [planFinalBill] /
+     * [outstandingBills] 与押金余额口径 [DepositService.balance]，**不写任何行**，可反复调用。
+     *
+     * 返回字段（前端按此对接）：
+     *  - `settlement_period`：解析出的区间 `{start,end}`，无区间时 null；
+     *  - `final_bill_total`：区间为 null 或同账期账单已存在时为 0，否则 = 自动计费合计；
+     *  - `pending_balance`：既有 `待缴费` 账单未结合计（核销前）；
+     *  - `outstanding_total`：`pending_balance + final_bill_total`；
+     *  - `deposit_balance`：押金余额（Σ登记 − Σ退押 − Σ核销）；
+     *  - `max_offset`：`min(deposit_balance, outstanding_total)`；
+     *  - `requires_write_off`：`outstanding_total > max_offset`。
+     *
+     * 资格校验与执行路径同一套（非养老 400 / 不存在 404 / 未离院去世或已收束 409）。
+     */
+    fun previewSettlement(
+        client: SqlClient,
+        encounterId: String,
+        requireTerminalStatus: Boolean,
+    ): Future<JsonObject> =
+        settlementContext(client, encounterId, requireTerminalStatus, null).compose { context ->
+            planFinalBill(client, encounterId, context.admitDate, context.endDate).compose { plan ->
+                outstandingBills(client, encounterId).compose { outstanding ->
+                    val pending = outstanding.fold(BigDecimal.ZERO) { acc, item -> acc.add(item.balance) }
+                    val finalTotal = plan?.total ?: BigDecimal.ZERO
+                    DepositService.balance(client, encounterId).map { deposit ->
+                        val outstandingTotal = pending.add(finalTotal)
+                        val maxOffset = deposit.min(outstandingTotal)
+                        JsonObject()
+                            .put("settlement_period", periodJson(plan))
+                            .put("final_bill_total", finalTotal)
+                            .put("pending_balance", pending)
+                            .put("outstanding_total", outstandingTotal)
+                            .put("deposit_balance", deposit)
+                            .put("max_offset", maxOffset)
+                            .put("requires_write_off", outstandingTotal > maxOffset)
+                    }
+                }
+            }
+        }
+
+    /** 阶段一/预览共用的中间结果 JSON（区间、区间最终账单 id 与合计）。 */
+    private fun preparationJson(encounterId: String, plan: FinalBillPlan?, billId: String?): JsonObject =
+        JsonObject()
+            .put("encounter_id", encounterId)
+            .put("settlement_period", periodJson(plan))
+            .put("final_bill_id", billId)
+            .put("final_bill_total", plan?.total ?: BigDecimal.ZERO)
+
+    private fun periodJson(plan: FinalBillPlan?): JsonObject? =
+        plan?.let { JsonObject().put("start", it.start.toString()).put("end", it.end.toString()) }
+
+    /** 结算资格上下文：通过资格校验后的 encounter 与收束区间止。 */
+    private data class SettlementContext(val encounterId: String, val admitDate: LocalDate, val endDate: LocalDate)
+
+    /**
+     * 收束资格校验（阶段一与预览共用；顺序与错误码与既有实现逐字一致）：
+     * 非养老 400 → [requireTerminalStatus] 时非终态 409 → 已收束 409 → 缺入住日 400 →
+     * 缺离院/去世日 400。
+     */
+    private fun settlementContext(
+        client: SqlClient,
+        encounterId: String,
+        requireTerminalStatus: Boolean,
+        endDate: LocalDate?,
+    ): Future<SettlementContext> =
         requireEncounter(client, encounterId).compose { encounter ->
             if (encounter.getString("encounter_type") != "ELDERLY_CARE") {
                 return@compose Future.failedFuture(
@@ -272,94 +600,120 @@ class BillService(
                     IllegalArgumentException("end date is required for settlement"),
                 )
             }
-            settleAndFreeze(client, encounterId, admitDate, end, now)
+            Future.succeededFuture(SettlementContext(encounterId, admitDate, end))
         }
 
-    private fun settleAndFreeze(
+    /** 区间最终账单计划（只读计算）：区间、自动明细、合计与「同账期已存在」标记。 */
+    private data class FinalBillPlan(
+        val start: LocalDate,
+        val end: LocalDate,
+        val items: List<AutoItem>,
+        val total: BigDecimal,
+        val exists: Boolean,
+    )
+
+    /**
+     * 计算区间最终账单计划（只读，执行路径与预览**共用同一实现**）：
+     *  - 区间 = [BillingEngine.settlementInterval]（区间起 = MAX(已结算账期末日)+1 或入住日，
+     *    区间止 = 离院/去世日）；区间起 > 区间止 → null；
+     *  - 与既有账单账期完全一致（[exactBillExists]）时不重复生成（`exists = true`、合计 0）；
+     *  - 否则自动计费（床位/护理/伙食），无可用计费项时按 0 元封口（空明细、合计 0）。
+     */
+    private fun planFinalBill(
         client: SqlClient,
         encounterId: String,
         admitDate: LocalDate,
         endDate: LocalDate,
-        now: OffsetDateTime,
-    ): Future<JsonObject> =
+    ): Future<FinalBillPlan?> =
         maxSettledPeriodEnd(client, encounterId).compose { maxEnd ->
             val interval = BillingEngine.settlementInterval(admitDate, endDate, listOfNotNull(maxEnd))
             if (interval == null) {
-                freezeAndReturn(client, encounterId, now)
+                Future.succeededFuture<FinalBillPlan?>(null)
             } else {
                 val (start, end) = interval
                 exactBillExists(client, encounterId, start, end).compose { exists ->
                     if (exists) {
-                        // 最终区间与既有账单完全一致：唯一约束防冲突，不重复生成，直接冻结
-                        freezeAndReturn(client, encounterId, now)
+                        Future.succeededFuture(FinalBillPlan(start, end, emptyList(), BigDecimal.ZERO, true))
                     } else {
-                        generateFinalBill(client, encounterId, start, end, now)
-                            .compose { freezeAndReturn(client, encounterId, now) }
+                        computeBillItems(client, encounterId, start, end).map { items ->
+                            FinalBillPlan(start, end, items, BillingEngine.totalOf(items.map { it.amount }), false)
+                        }
                     }
                 }
             }
         }
 
-    /** 区间最终账单：自动计费明细；无可用计费项时 0 元封口；创建即 已结算 + settled_at。 */
-    private fun generateFinalBill(
+    /** 区间最终账单：以 `待缴费` 建立（创建时不写 settled_at），明细按自动计费；返回账单 id。 */
+    private fun insertFinalBill(
+        client: SqlClient,
+        encounterId: String,
+        plan: FinalBillPlan,
+        now: OffsetDateTime,
+    ): Future<String> {
+        val billId = Ulid.generate()
+        return execute(
+            client,
+            ctx.insertInto(BILLS)
+                .set(BILLS.ID, billId)
+                .set(BILLS.ENCOUNTER_ID, encounterId)
+                .set(BILLS.PERIOD_START, plan.start)
+                .set(BILLS.PERIOD_END, plan.end)
+                .set(BILLS.STATUS, BillingEngine.STATUS_PENDING)
+                .set(BILLS.TOTAL_AMOUNT, plan.total)
+                .set(BILLS.CREATED_AT, now)
+                .set(BILLS.UPDATED_AT, now),
+        ).compose {
+            insertItems(client, billId, plan.items, now)
+        }.map { billId }
+    }
+
+    /** 自动计费明细：无可用计费项（400）时按 0 元封口处理为空明细（沿用既有 recover 口径）。 */
+    private fun computeBillItems(
         client: SqlClient,
         encounterId: String,
         start: LocalDate,
         end: LocalDate,
-        now: OffsetDateTime,
-    ): Future<Unit> {
-        val billId = Ulid.generate()
-        return computeAutoItems(client, encounterId, start, end)
-            .recover { error ->
-                if (error is IllegalArgumentException) {
-                    // 无可计费项（如字典无启用单价）：0 元封口账单，账期正确即封口
-                    Future.succeededFuture(emptyList())
-                } else {
-                    Future.failedFuture(error)
-                }
+    ): Future<List<AutoItem>> =
+        computeAutoItems(client, encounterId, start, end).recover { error ->
+            if (error is IllegalArgumentException) {
+                // 无可计费项（如字典无启用单价）：0 元封口账单，账期正确即封口
+                Future.succeededFuture(emptyList())
+            } else {
+                Future.failedFuture(error)
             }
-            .compose { items ->
-                val total = BillingEngine.totalOf(items.map { it.amount })
-                execute(
-                    client,
-                    ctx.insertInto(BILLS)
-                        .set(BILLS.ID, billId)
-                        .set(BILLS.ENCOUNTER_ID, encounterId)
-                        .set(BILLS.PERIOD_START, start)
-                        .set(BILLS.PERIOD_END, end)
-                        .set(BILLS.STATUS, BillingEngine.STATUS_SETTLED)
-                        .set(BILLS.TOTAL_AMOUNT, total)
-                        .set(BILLS.SETTLED_AT, now)
-                        .set(BILLS.CREATED_AT, now)
-                        .set(BILLS.UPDATED_AT, now),
-                ).compose { insertItems(client, billId, items, now) }
-            }
-    }
+        }
 
-    /** 冻结：全部 bills 置 已结算 并写 settled_at；encounters.settled_at 置结算时间。 */
-    private fun freezeAndReturn(
-        client: SqlClient,
-        encounterId: String,
-        now: OffsetDateTime,
-    ): Future<JsonObject> =
+    /** 该 encounter 全部账单 id（冻结逐张写未结快照；账单数量很小）。 */
+    private fun billIdsOf(client: SqlClient, encounterId: String): Future<List<String>> =
         execute(
             client,
-            ctx.update(BILLS)
-                .set(BILLS.STATUS, BillingEngine.STATUS_SETTLED)
-                .set(BILLS.SETTLED_AT, now)
-                .set(BILLS.UPDATED_AT, now)
-                .where(BILLS.ENCOUNTER_ID.eq(encounterId)),
-        ).compose {
-            execute(
-                client,
-                ctx.update(ENCOUNTERS)
-                    .set(ENCOUNTERS.SETTLED_AT, now)
-                    .set(ENCOUNTERS.UPDATED_AT, now)
-                    .where(ENCOUNTERS.ID.eq(encounterId)),
-            )
-        }.compose {
-            getEncounter(client, encounterId)
+            ctx.select(BILLS.ID).from(BILLS)
+                .where(BILLS.ENCOUNTER_ID.eq(encounterId))
+                .orderBy(BILLS.ID.asc()),
+        ).map { rows -> rows.map { row -> row.getString("id") } }
+
+    /**
+     * 单张账单冻结：状态 已结算 + settled_at = now + 未结快照；
+     * 未结行写减免原因，其余以 `cast(null as varchar)` 显式置 NULL。
+     */
+    private fun freezeBillQuery(
+        billId: String,
+        outstandingAmount: BigDecimal,
+        writeOffReason: String?,
+        now: OffsetDateTime,
+    ): Query {
+        var query = ctx.update(BILLS)
+            .set(BILLS.STATUS, BillingEngine.STATUS_SETTLED)
+            .set(BILLS.SETTLED_AT, now)
+            .set(BILLS.OUTSTANDING_AMOUNT, outstandingAmount)
+            .set(BILLS.UPDATED_AT, now)
+        query = if (writeOffReason == null) {
+            query.set(BILLS.WRITE_OFF_REASON, DSL.castNull(String::class.java))
+        } else {
+            query.set(BILLS.WRITE_OFF_REASON, writeOffReason)
         }
+        return query.where(BILLS.ID.eq(billId))
+    }
 
     /** 已结算账期末日最大值（状态 已结清/已结算）：无则 null。 */
     private fun maxSettledPeriodEnd(client: SqlClient, encounterId: String): Future<LocalDate?> =
@@ -435,6 +789,9 @@ class BillService(
             BILLS.PERIOD_START,
             BILLS.PERIOD_END,
             BILLS.STATUS,
+            BILLS.SETTLED_AT,
+            BILLS.OUTSTANDING_AMOUNT,
+            BILLS.WRITE_OFF_REASON,
             BILLS.TOTAL_AMOUNT,
             BILLS.CREATED_AT,
             BILLS.UPDATED_AT,
@@ -469,9 +826,14 @@ class BillService(
     private fun validateMonth(body: JsonObject): String {
         rejectForbiddenKeys(body, generateKeys, "bill")
         val raw = body.getValue("month") ?: throw IllegalArgumentException("month is required")
+        return parseMonthString(raw)
+    }
+
+    /** `month` 值格式校验（生成与 precheck 共用的单一实现）：非字符串 400，非 `YYYY-MM` 400。 */
+    private fun parseMonthString(raw: Any?): String {
         val month = raw as? String ?: throw IllegalArgumentException("month must be a string")
         if (!monthPattern.matches(month)) {
-            throw IllegalArgumentException("month must be in YYYY-MM format")
+            throw IllegalArgumentException(MONTH_FORMAT_MESSAGE)
         }
         return month
     }
@@ -531,92 +893,142 @@ class BillService(
 
     private data class FeeItemRow(val id: String, val category: String, val name: String, val unitPrice: BigDecimal)
 
-    /** 计算自动明细：床位（在院天数）/护理（等级分段天数）/伙食（折合餐次）。 */
-    private fun computeAutoItems(
-        connection: SqlClient,
-        encounterId: String,
-        stayStart: LocalDate,
-        stayEnd: LocalDate,
-    ): Future<List<AutoItem>> {
-        val enabledItemsQuery = ctx.select(
+    /**
+     * 本账期计费槽位（槽位推导结果）：`required = false` 表示本账期不会用到该分类
+     * （账期内无就餐记录时的伙食费）。`quantity` 为计价数量（床位/护理 = 闭区间天数，伙食 = 折合餐次）。
+     */
+    private data class BillingSlot(
+        val category: String,
+        val level: String?,
+        val required: Boolean,
+        val quantity: BigDecimal,
+    )
+
+    /** precheck 槽位结果：`satisfied = enabledCount == 1`（0 条与多条都不满足，由服务端判定）。 */
+    private data class PrecheckRequirement(
+        val category: String,
+        val level: String?,
+        val required: Boolean,
+        val enabledCount: Int,
+        val satisfied: Boolean,
+    )
+
+    /**
+     * 启用费用项目字典（一次查询）：[computeAutoItems] 取项与 precheck 槽位计数**共用**。
+     */
+    private fun enabledFeeItemsQuery(): Query =
+        ctx.select(
             FEE_ITEMS.ID,
             FEE_ITEMS.CATEGORY,
             FEE_ITEMS.NAME,
             FEE_ITEMS.UNIT_PRICE,
         ).from(FEE_ITEMS)
             .where(FEE_ITEMS.STATUS.eq(FeeItemService.STATUS_ENABLED))
-        return execute(connection, enabledItemsQuery).compose { rows ->
-            val items = rows.map { row ->
-                FeeItemRow(
-                    id = row.getString("id"),
-                    category = row.getString("category"),
-                    name = row.getString("name"),
-                    unitPrice = row.getBigDecimal("unit_price"),
-                )
-            }
-            try {
-                val autoItems = mutableListOf<AutoItem>()
 
-                // 床位费：分类取唯一启用项 × 闭区间在院天数
-                val bedItem = requireSingleEnabled(items.filter { it.category == "床位费" }, "床位费")
-                val bedDays = BillingEngine.inclusiveDays(stayStart, stayEnd)
-                autoItems += AutoItem(
-                    itemCode = bedItem.id,
-                    itemName = bedItem.name,
-                    unitPrice = bedItem.unitPrice,
-                    quantity = BigDecimal.valueOf(bedDays),
-                    amount = BillingEngine.money(bedItem.unitPrice, BigDecimal.valueOf(bedDays)),
-                )
+    private fun feeItemRowOf(row: Row): FeeItemRow =
+        FeeItemRow(
+            id = row.getString("id"),
+            category = row.getString("category"),
+            name = row.getString("name"),
+            unitPrice = row.getBigDecimal("unit_price"),
+        )
 
-                // 护理费：等级分段，每区间 = 等级字典单价 × 天数
-                val segmentsFuture = loadAssessments(connection, encounterId, stayEnd).map { assessments ->
-                    BillingEngine.nursingSegments(
-                        stayStart,
-                        stayEnd,
-                        assessments.map { (date, createdAt, level) ->
-                            BillingEngine.Assessment(date, createdAt, level)
-                        },
-                    )
+    /** 槽位与启用字典项的匹配口径（取项与计数共用）：护理费按 `level` 匹配 `name`。 */
+    private fun FeeItemRow.matchesSlot(slot: BillingSlot): Boolean =
+        category == slot.category && (slot.level == null || name == slot.level)
+
+    /**
+     * 本账期需要哪些费用项目槽位（**唯一推导实现**，[computeAutoItems] 与 [precheckBillGeneration]
+     * 共用，禁止各算一套）：
+     * ```
+     * 槽位 = [床位费] + [护理费(level) for 账期内每个生效等级] + ([伙食费] if 折合餐次 > 0)
+     * ```
+     * 生效等级取法完全沿用 [BillingEngine.nursingSegments]（同日多份取 `created_at` 最新、
+     * 账期前最后一次评估决定首段、账期内每个变更点各成一段）；账期内无就餐时
+     * 伙食费槽位 `required = false`（不参与计价、也不构成缺项）。
+     */
+    private fun deriveBillingSlots(
+        client: SqlClient,
+        encounterId: String,
+        stayStart: LocalDate,
+        stayEnd: LocalDate,
+    ): Future<List<BillingSlot>> {
+        val bedDays = BigDecimal.valueOf(BillingEngine.inclusiveDays(stayStart, stayEnd))
+        val segmentsFuture = loadAssessments(client, encounterId, stayEnd).map { assessments ->
+            BillingEngine.nursingSegments(
+                stayStart,
+                stayEnd,
+                assessments.map { (date, createdAt, level) ->
+                    BillingEngine.Assessment(date, createdAt, level)
+                },
+            )
+        }
+        val mealFuture = loadMealStatuses(client, encounterId, stayStart, stayEnd)
+            .map { BillingEngine.mealQuantity(it) }
+        return segmentsFuture.compose { segments ->
+            mealFuture.map { mealQuantity ->
+                val slots = mutableListOf(BillingSlot(CATEGORY_BED, null, required = true, quantity = bedDays))
+                slots += segments.map {
+                    BillingSlot(CATEGORY_NURSING, it.level, required = true, quantity = BigDecimal.valueOf(it.days))
                 }
-                // 伙食费：账期内就餐执行折合餐次
-                val mealFuture = loadMealStatuses(connection, encounterId, stayStart, stayEnd)
-                    .map { BillingEngine.mealQuantity(it) }
-
-                segmentsFuture.compose { segments ->
-                    mealFuture.compose { mealQuantity ->
-                        val nursingRows = segments.map { segment ->
-                            val levelItem = requireSingleEnabled(
-                                items.filter { it.category == "护理费" && it.name == segment.level },
-                                "护理费",
-                                level = segment.level,
-                            )
-                            AutoItem(
-                                itemCode = levelItem.id,
-                                itemName = levelItem.name,
-                                unitPrice = levelItem.unitPrice,
-                                quantity = BigDecimal.valueOf(segment.days),
-                                amount = BillingEngine.money(levelItem.unitPrice, BigDecimal.valueOf(segment.days)),
-                            )
-                        }
-                        autoItems += nursingRows
-                        if (mealQuantity.signum() > 0) {
-                            val mealItem = requireSingleEnabled(items.filter { it.category == "伙食费" }, "伙食费")
-                            autoItems += AutoItem(
-                                itemCode = mealItem.id,
-                                itemName = mealItem.name,
-                                unitPrice = mealItem.unitPrice,
-                                quantity = mealQuantity,
-                                amount = BillingEngine.money(mealItem.unitPrice, mealQuantity),
-                            )
-                        }
-                        Future.succeededFuture(autoItems)
-                    }
-                }
-            } catch (error: IllegalArgumentException) {
-                Future.failedFuture(error)
+                slots += BillingSlot(
+                    CATEGORY_MEAL,
+                    null,
+                    required = mealQuantity.signum() > 0,
+                    quantity = mealQuantity,
+                )
+                slots
             }
         }
     }
+
+    /** 槽位取唯一启用字典项并计价（计价口径与错误文案逐字不变）。 */
+    private fun autoItemOf(items: List<FeeItemRow>, slot: BillingSlot): AutoItem {
+        val item = requireSingleEnabled(items.filter { it.matchesSlot(slot) }, slot.category, slot.level)
+        return AutoItem(
+            itemCode = item.id,
+            itemName = item.name,
+            unitPrice = item.unitPrice,
+            quantity = slot.quantity,
+            amount = BillingEngine.money(item.unitPrice, slot.quantity),
+        )
+    }
+
+    /** 槽位 → 启用字典项计数：一次查询取全部启用项，按 `(category, name/level)` 匹配计数。 */
+    private fun precheckRequirements(
+        client: SqlClient,
+        encounterId: String,
+        stayStart: LocalDate,
+        stayEnd: LocalDate,
+    ): Future<List<PrecheckRequirement>> =
+        execute(client, enabledFeeItemsQuery()).compose { rows ->
+            val items = rows.map(::feeItemRowOf)
+            deriveBillingSlots(client, encounterId, stayStart, stayEnd).map { slots ->
+                slots.map { slot ->
+                    val count = items.count { it.matchesSlot(slot) }
+                    PrecheckRequirement(slot.category, slot.level, slot.required, count, count == 1)
+                }
+            }
+        }
+
+    /** 计算自动明细：床位（在院天数）/护理（等级分段天数）/伙食（折合餐次）。 */
+    private fun computeAutoItems(
+        connection: SqlClient,
+        encounterId: String,
+        stayStart: LocalDate,
+        stayEnd: LocalDate,
+    ): Future<List<AutoItem>> =
+        execute(connection, enabledFeeItemsQuery()).compose { rows ->
+            val items = rows.map(::feeItemRowOf)
+            // 取项基于同一份槽位推导结果；required = false 的槽位（账期内无就餐的伙食费）不参与计价
+            deriveBillingSlots(connection, encounterId, stayStart, stayEnd).compose { slots ->
+                try {
+                    Future.succeededFuture(slots.filter { it.required }.map { slot -> autoItemOf(items, slot) })
+                } catch (error: IllegalArgumentException) {
+                    Future.failedFuture(error)
+                }
+            }
+        }
 
     /** 分类/等级取唯一启用字典项：无 → 400，多个 → 400。 */
     private fun requireSingleEnabled(items: List<FeeItemRow>, category: String, level: String? = null): FeeItemRow {
@@ -635,6 +1047,13 @@ class BillService(
     /** 事务内按 encounter 行锁读：不存在 404。 */
     private fun requireEncounter(client: SqlClient, encounterId: String): Future<Row> =
         execute(client, ctx.selectFrom(ENCOUNTERS).where(ENCOUNTERS.ID.eq(encounterId)).forUpdate()).compose { rows ->
+            rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(it) }
+                ?: Future.failedFuture(HealthcareNotFoundException("encounter not found: $encounterId"))
+        }
+
+    /** 只读 encounter 读取（precheck 不加行锁，纯读）：不存在 404。 */
+    private fun loadEncounter(client: SqlClient, encounterId: String): Future<Row> =
+        execute(client, ctx.selectFrom(ENCOUNTERS).where(ENCOUNTERS.ID.eq(encounterId))).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(it) }
                 ?: Future.failedFuture(HealthcareNotFoundException("encounter not found: $encounterId"))
         }
@@ -824,6 +1243,9 @@ class BillService(
             BILLS.PERIOD_START,
             BILLS.PERIOD_END,
             BILLS.STATUS,
+            BILLS.SETTLED_AT,
+            BILLS.OUTSTANDING_AMOUNT,
+            BILLS.WRITE_OFF_REASON,
             BILLS.TOTAL_AMOUNT,
             BILLS.CREATED_AT,
             BILLS.UPDATED_AT,

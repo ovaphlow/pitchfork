@@ -34,6 +34,7 @@ import org.jooq.InsertSetMoreStep
 import org.jooq.JSONB
 import org.jooq.Query
 import org.jooq.impl.DSL
+import java.math.BigDecimal
 import java.time.LocalDate
 import java.time.OffsetDateTime
 import java.time.ZoneId
@@ -54,6 +55,7 @@ class HealthcareService(
         ensureCareUnitActive = { client, careUnit -> ensureCareUnitActiveForHandover(client, careUnit) },
     )
     private val billService = BillService(pool)
+    private val depositOffsetService = DepositOffsetService()
     companion object {
         private val patientStatuses = setOf("ACTIVE", "INACTIVE", "DECEASED")
         private val encounterStatuses = setOf("ACTIVE", "DISCHARGED", "TRANSFERRED")
@@ -146,14 +148,14 @@ class HealthcareService(
         }
     }
 
-    fun createEncounter(body: JsonObject): Future<JsonObject> {
+    fun createEncounter(body: JsonObject, attendingPhysician: String): Future<JsonObject> {
         val patientId = try {
             requiredText(body, "patient_id")
         } catch (error: IllegalArgumentException) {
             return Future.failedFuture(error)
         }
         return getPatient(patientId).compose {
-            createEncounter(pool, body, patientId)
+            createEncounter(pool, body, patientId, attendingPhysician)
         }
     }
 
@@ -233,30 +235,18 @@ class HealthcareService(
                     }
 
                 closePeriodFuture.compose {
-                    // 结算收束：养老入住同事务生成区间最终账单并冻结全部账单（同一连接）
-                    val settlementFuture: Future<Void> =
-                        if (encounter.getString("encounter_type") == "ELDERLY_CARE") {
-                            billService
-                                .settleEncounter(
-                                    connection,
-                                    id,
-                                    now,
-                                    requireTerminalStatus = false,
-                                    endDate = businessDate(dischargeDate),
-                                )
-                                .map<Void> { null }
-                        } else {
-                            Future.succeededFuture()
-                        }
-                    settlementFuture.compose {
-                        val query = ctx.update(ENCOUNTERS)
-                            .set(ENCOUNTERS.DISCHARGE_DATE, dischargeDate)
-                            .set(ENCOUNTERS.DISCHARGE_DIAGNOSIS, body.getString("discharge_diagnosis"))
-                            .set(ENCOUNTERS.STATUS, "DISCHARGED")
-                            .set(ENCOUNTERS.UPDATED_AT, now)
-                            .where(ENCOUNTERS.ID.eq(id))
-                        execute(connection, query).compose { getEncounter(connection, id) }
-                    }
+                    // 023 决策 A：离院只标记业务事实与照护流程收尾（医嘱终止、护理周期关闭、
+                    // 状态/日期/诊断写入），**不再收束账单**。原先在此同事务生成区间最终账单
+                    // 并冻结全部账单，使 settled_at 在离院时即被置位，养老收费页「结算收束」
+                    // 因此永不可达，押金核销与减免门禁形同虚设。
+                    // 账单收尾统一由「结算收束」（settleEncounterBilling，显式三步）承担。
+                    val query = ctx.update(ENCOUNTERS)
+                        .set(ENCOUNTERS.DISCHARGE_DATE, dischargeDate)
+                        .set(ENCOUNTERS.DISCHARGE_DIAGNOSIS, body.getString("discharge_diagnosis"))
+                        .set(ENCOUNTERS.STATUS, "DISCHARGED")
+                        .set(ENCOUNTERS.UPDATED_AT, now)
+                        .where(ENCOUNTERS.ID.eq(id))
+                    execute(connection, query).compose { getEncounter(connection, id) }
                 }
             }
         }
@@ -299,18 +289,8 @@ class HealthcareService(
                         servicePeriodService.closeElderlyCarePeriod(connection, id, businessDate(deathDate), now)
                     }
                     .compose {
-                        // 结算收束：同事务生成区间最终账单并冻结全部账单（同一连接）
-                        billService
-                            .settleEncounter(
-                                connection,
-                                id,
-                                now,
-                                requireTerminalStatus = false,
-                                endDate = businessDate(deathDate),
-                            )
-                            .map<Void> { null }
-                    }
-                    .compose {
+                        // 023 决策 A：去世与离院同构，只标记事实与照护流程收尾，
+                        // **不再收束账单**（账单收尾统一由 settleEncounterBilling 承担）。
                         var query = ctx.update(ENCOUNTERS)
                             .set(ENCOUNTERS.DEATH_DATE, deathDate)
                             .set(ENCOUNTERS.STATUS, "DECEASED")
@@ -336,12 +316,53 @@ class HealthcareService(
         value.atZoneSameInstant(businessZone).toLocalDate()
 
     /**
-     * 补结算：已离院/去世但未结算的养老入住 → 生成区间最终账单并冻结全部账单。
+     * 结算收束（显式三步，021）：已离院/去世但未结算的养老入住 → 生成区间最终账单（`待缴费`）
+     * → 押金核销 → 判定未结 → 冻结全部账单。
      * 已全部结算 409；未离院/去世 409；非养老入住 400。
+     *
+     * 023 决策 A 起这是**账单收尾的唯一入口**：离院/去世本身只标记事实，不再收束账单，
+     * 因此「已离院未收束」是一段正常的可收费窗口，收束由本方法显式触发并强制留痕。
+     *
+     * 请求体只允许 `{"deposit_offset": <金额>, "write_off_reason": "<原因>"}`（其他键 400）。
+     * **次序**：区间最终账单先建（`待缴费`），核销在最终账单之后、减免判定在核销之后
+     * （021 刻意变更 020 的「先核销后收束」，使最终账期同样可被核销）。
+     * 核销、未结判定与冻结在**同一事务、同一连接**内完成；任一环节失败整笔回滚
+     * （区间最终账单、押金台账、缴费流水、账单状态、settled_at 全部撤销）。
+     * 核销后仍有未结余额且未提供 `write_off_reason` → 409（不允许静默把未结账单置 已结算）；
+     * 提供原因时，全部未结账单写入同一条 trim 后的原因。
      */
-    fun settleEncounterBilling(id: String): Future<JsonObject> =
+    fun settleEncounterBilling(id: String, body: JsonObject, operator: String): Future<JsonObject> {
+        val request = try {
+            BillService.parseSettlementRequest(body)
+        } catch (error: IllegalArgumentException) {
+            return Future.failedFuture(error)
+        }
+        return pool.withTransaction { connection ->
+            val now = OffsetDateTime.now()
+            billService.prepareSettlement(connection, id, now, requireTerminalStatus = true).compose {
+                depositOffsetService.offsetArrears(connection, id, request.depositOffset, operator, now)
+            }.compose {
+                billService.outstandingBills(connection, id)
+            }.compose { outstanding ->
+                val total = outstanding.fold(BigDecimal.ZERO) { acc, item -> acc.add(item.balance) }
+                if (total.signum() > 0 && request.writeOffReason == null) {
+                    Future.failedFuture(
+                        ConflictException("unsettled bills require explicit write-off: outstanding $total"),
+                    )
+                } else {
+                    billService.freezeSettlement(connection, id, now, outstanding, request.writeOffReason)
+                }
+            }
+        }
+    }
+
+    /**
+     * 收束预览（只读）：与执行路径共用同一套资格校验、区间解析与金额计算，
+     * **不产生任何写入**，可反复调用。字段见 [BillService.previewSettlement]。
+     */
+    fun previewEncounterBilling(id: String): Future<JsonObject> =
         pool.withTransaction { connection ->
-            billService.settleEncounter(connection, id, OffsetDateTime.now(), requireTerminalStatus = true)
+            billService.previewSettlement(connection, id, requireTerminalStatus = true)
         }
 
     // ——— 医嘱读取/创建/状态机委托（实现位于 MedicalOrderService） ———
@@ -525,7 +546,8 @@ class HealthcareService(
                     .set(DIAGNOSES.PHYSICIAN, input.physician)
                     .set(DIAGNOSES.CREATED_AT, now)
                 input.icdCode?.let { insert = insert.set(DIAGNOSES.ICD_CODE, it) }
-                input.isMajor?.let { insert = insert.set(DIAGNOSES.IS_MAJOR, it) }
+                // is_major 由 diagnosis_type 派生，不接受客户端取值
+                insert = insert.set(DIAGNOSES.IS_MAJOR, isMajorDiagnosis(input.diagnosisType))
                 input.remark?.let { insert = insert.set(DIAGNOSES.METADATA, JSONB.valueOf(JsonObject().put("remark", it).encode())) }
                 execute(connection, insert).map {
                     diagnosisResponse(id, encounterId, input, now)
@@ -883,7 +905,7 @@ class HealthcareService(
         val plan: RevisionPlanInput,
     )
 
-    fun admitElderly(body: JsonObject): Future<JsonObject> {
+    fun admitElderly(body: JsonObject, attendingPhysician: String): Future<JsonObject> {
         val patientId = body.getString("patient_id")?.takeIf(String::isNotBlank)
         val patient = body.getJsonObject("patient")
         if ((patientId == null) == (patient == null)) {
@@ -910,7 +932,7 @@ class HealthcareService(
             patientFuture.compose { resident ->
                 val residentId = requireNotNull(resident.getString("id"))
                 ensureNoActiveElderlyAdmission(connection, residentId)
-                    .compose { createEncounter(connection, body, residentId, "ELDERLY_CARE") }
+                    .compose { createEncounter(connection, body, residentId, attendingPhysician, "ELDERLY_CARE") }
                     .compose { encounter ->
                         val encounterId = requireNotNull(encounter.getString("id"))
                         // admit_date 是周期唯一的开始日期来源
@@ -987,14 +1009,15 @@ class HealthcareService(
         client: SqlClient,
         body: JsonObject,
         patientId: String,
+        attendingPhysician: String,
         forcedType: String? = null,
     ): Future<JsonObject> {
         val id = Ulid.generate()
         val now = OffsetDateTime.now()
         val encounterNo = requiredText(body, "encounter_no")
         return ensureEncounterNoAvailable(client, encounterNo).compose {
-            execute(client, encounterInsert(body, id, patientId, forcedType, now))
-                .map { encounterResponse(body, id, patientId, forcedType, now) }
+            execute(client, encounterInsert(body, id, patientId, attendingPhysician, forcedType, now))
+                .map { encounterResponse(body, id, patientId, attendingPhysician, forcedType, now) }
         }
     }
 
@@ -1054,6 +1077,7 @@ class HealthcareService(
         body: JsonObject,
         id: String,
         patientId: String,
+        attendingPhysician: String,
         forcedType: String?,
         now: OffsetDateTime,
     ): InsertSetMoreStep<EncountersRecord> {
@@ -1072,7 +1096,8 @@ class HealthcareService(
         body.getString("department")?.let { query = query.set(ENCOUNTERS.DEPARTMENT, it) }
         body.getString("ward")?.let { query = query.set(ENCOUNTERS.WARD, it) }
         body.getString("admitting_diagnosis")?.let { query = query.set(ENCOUNTERS.ADMITTING_DIAGNOSIS, it) }
-        body.getString("attending_physician")?.let { query = query.set(ENCOUNTERS.ATTENDING_PHYSICIAN, it) }
+        // 责任医生/照护师由服务端按当前操作人写入，忽略请求体中的同名取值
+        if (attendingPhysician.isNotBlank()) query = query.set(ENCOUNTERS.ATTENDING_PHYSICIAN, attendingPhysician)
         jsonObject(body, "metadata")?.let { query = query.set(ENCOUNTERS.METADATA, JSONB.valueOf(it.encode())) }
         return query
     }
@@ -1082,7 +1107,7 @@ class HealthcareService(
         if (body.containsKey("department")) query = query.set(ENCOUNTERS.DEPARTMENT, body.getString("department"))
         if (body.containsKey("ward")) query = query.set(ENCOUNTERS.WARD, body.getString("ward"))
         if (body.containsKey("admitting_diagnosis")) query = query.set(ENCOUNTERS.ADMITTING_DIAGNOSIS, body.getString("admitting_diagnosis"))
-        if (body.containsKey("attending_physician")) query = query.set(ENCOUNTERS.ATTENDING_PHYSICIAN, body.getString("attending_physician"))
+        // 责任医生/照护师不可修改：取值只来自创建时的操作人，这里不接收请求体
         if (body.containsKey("metadata")) query = query.set(ENCOUNTERS.METADATA, JSONB.valueOf(requireNotNull(jsonObject(body, "metadata", true)).encode()))
         if (body.containsKey("status")) query = query.set(ENCOUNTERS.STATUS, validStatus(body.getString("status"), encounterStatuses - "DISCHARGED", "encounter status"))
         return query.where(ENCOUNTERS.ID.eq(id))
@@ -1110,6 +1135,7 @@ class HealthcareService(
         body: JsonObject,
         id: String,
         patientId: String,
+        attendingPhysician: String,
         forcedType: String?,
         now: OffsetDateTime,
     ): JsonObject =
@@ -1124,7 +1150,7 @@ class HealthcareService(
             .put("discharge_date", null)
             .put("admitting_diagnosis", body.getString("admitting_diagnosis"))
             .put("discharge_diagnosis", null)
-            .put("attending_physician", body.getString("attending_physician"))
+            .put("attending_physician", attendingPhysician.takeIf(String::isNotBlank))
             .put("status", "ACTIVE")
             .put("metadata", body.getJsonObject("metadata"))
             .put("created_at", now.toString())
@@ -1865,9 +1891,17 @@ class HealthcareService(
         val diagnosisDate: LocalDate,
         val physician: String,
         val icdCode: String?,
-        val isMajor: Boolean?,
         val remark: String?,
     )
+
+    /**
+     * 主/次诊断只由 `diagnosis_type` 决定，`is_major` 是它的派生只读字段。
+     *
+     * 二者不是正交维度：`diagnosis_type` 已被闭集校验为二值，`is_major` 因此是它的纯函数。
+     * 允许独立设置会直接产生「次要诊断 + 主诊断」这类自相矛盾的记录，所以写入与响应一律按
+     * `diagnosis_type` 派生；请求体中的 `is_major` 只做形状校验，取值被忽略。
+     */
+    private fun isMajorDiagnosis(diagnosisType: String): Boolean = diagnosisType == "PRIMARY"
 
     private fun validateDiagnosisInput(body: JsonObject): DiagnosisCreateInput {
         rejectUnknownKeys(
@@ -1892,15 +1926,15 @@ class HealthcareService(
             if (it.length > 32) throw IllegalArgumentException("icd_code must not exceed 32 characters")
             it
         }
-        val isMajor = body.getValue("is_major")?.let { value ->
+        // is_major 已改为派生字段：保留形状校验以拒绝畸形输入，但不采用其取值。
+        body.getValue("is_major")?.let { value ->
             if (value !is Boolean) throw IllegalArgumentException("is_major must be a boolean")
-            value
         }
         val remark = optionalText(body, "remark")?.let {
             if (it.length > 500) throw IllegalArgumentException("remark must not exceed 500 characters")
             it
         }
-        return DiagnosisCreateInput(diagnosisType, diagnosisText, diagnosisDate, physician, icdCode, isMajor, remark)
+        return DiagnosisCreateInput(diagnosisType, diagnosisText, diagnosisDate, physician, icdCode, remark)
     }
 
     private fun diagnosisJson(row: Row): JsonObject =
@@ -1912,7 +1946,8 @@ class HealthcareService(
             .put("diagnosis_text", row.getString("diagnosis_text"))
             .put("diagnosis_date", row.getLocalDate("diagnosis_date")?.toString())
             .put("physician", row.getString("physician"))
-            .put("is_major", row.getBoolean("is_major"))
+            // 按 diagnosis_type 派生，使历史数据中不一致的存量 is_major 不再对外暴露
+            .put("is_major", isMajorDiagnosis(row.getString("diagnosis_type")))
             .put("metadata", row.getValue("metadata"))
             .put("created_at", row.getOffsetDateTime("created_at")?.toString())
 
@@ -1930,7 +1965,7 @@ class HealthcareService(
             .put("diagnosis_text", input.diagnosisText)
             .put("diagnosis_date", input.diagnosisDate.toString())
             .put("physician", input.physician)
-            .put("is_major", input.isMajor ?: false)
+            .put("is_major", isMajorDiagnosis(input.diagnosisType))
             .put("metadata", input.remark?.let { JsonObject().put("remark", it) })
             .put("created_at", now.toString())
 

@@ -23,7 +23,6 @@ by a keyed identifier and validated client address.
 ## Requirements
 
 - Go 1.24 or newer
-- `sqlc v1.31.1` in `$(go env GOPATH)/bin` when running `make generate` or `make check-generated`
 - Node.js 20 or newer and pnpm 11 or newer to build local Tailwind and HTMX assets
 
 ## Run
@@ -35,7 +34,6 @@ set -a
 set +a
 make test
 make assets
-make check-generated
 make run
 ```
 
@@ -96,16 +94,16 @@ receive a newly created or updated table-row fragment. HTML and JSON requests
 share the same authorization, CSRF validation, and identity-domain
 transactions.
 
-Generated `internal/database/sqlc` source is committed and must be regenerated
-after changing migrations or query files. Built web assets remain ignored.
+SQL queries are written directly in Go alongside the code that uses them
+(`internal/identity`), so the project has no code-generation step and no
+generated query package to keep in sync. Built web assets remain ignored.
 `web/assets/app.css`, `package.json`, `pnpm-lock.yaml`, and
 `web/scripts/build-assets.mjs` are source. `make assets` produces ignored
 `web/static/app.css` and `web/static/htmx.min.js`, which `make build` embeds in
 the Go binary. It first runs `pnpm install --frozen-lockfile`, so it can be
 used from a clean checkout. Node is therefore a build-time tool only;
 production runs the Go binary without Node or an external CDN. CI should run
-`make assets` and `make check-generated` to reject stale assets or generated
-query code.
+`make assets` to reject stale web assets.
 `IDENTITYD_LOGIN_THROTTLE_SECRET` is required, must contain at least 32 bytes,
 must be unique per deployment, and must remain stable across restarts.
 The terminal receives text logs at `INFO` and above. `WARN` and `ERROR` records

@@ -4,9 +4,9 @@ interface SidebarProps {
   currentPath: string;
 }
 
-type Domain = "医疗" | "养老" | "儿保";
+export type Domain = "医疗" | "养老" | "儿保";
 
-interface MenuChild {
+export interface MenuChild {
   label: string;
   domainLabels?: Partial<Record<Domain, string>>;
   path: string;
@@ -16,18 +16,19 @@ interface MenuChild {
   order?: Partial<Record<Domain, number>>;
 }
 
-interface GroupItem {
+export interface GroupItem {
   type: "group";
   label: string;
   domainLabels?: Partial<Record<Domain, string>>;
   children: MenuChild[];
 }
 
-type Item = GroupItem;
+export type Item = GroupItem;
 
-const STORAGE_KEY = "aceso-domain";
+export const DOMAIN_STORAGE_KEY = "aceso-domain";
+export const DOMAIN_CHANGE_EVENT = "aceso-domain-change";
 
-const items: Item[] = [
+export const menuItems: Item[] = [
   {
     type: "group", label: "居民管理", domainLabels: { 养老: "长者管理", 儿保: "儿童管理" }, children: [
       { label: "居民档案", domainLabels: { 养老: "长者档案", 儿保: "儿童健康档案" }, path: "/dashboard/elders", icon: "👤", domains: ["医疗", "养老", "儿保"] },
@@ -67,17 +68,18 @@ const items: Item[] = [
       { label: "仓库",     path: "/dashboard/warehouses",   icon: "📦", domains: ["医疗", "养老", "儿保"] },
       { label: "物资",     path: "/dashboard/materials",    icon: "🏷️", domains: ["医疗", "养老", "儿保"] },
       { label: "角色",     path: "/dashboard/roles",        icon: "🔐", domains: ["医疗", "养老", "儿保"] },
+      { label: "费用项目", path: "/dashboard/fee-items",    icon: "🧾", domains: ["养老"] },
     ],
   },
 ];
 
-function displayLabel(label: string, domainLabels: Partial<Record<Domain, string>> | undefined, domain: Domain): string {
+export function displayLabel(label: string, domainLabels: Partial<Record<Domain, string>> | undefined, domain: Domain): string {
   return domainLabels?.[domain] ?? label;
 }
 
-function readDomain(): Domain {
+export function readDomain(): Domain {
   try {
-    const stored = localStorage.getItem(STORAGE_KEY);
+    const stored = localStorage.getItem(DOMAIN_STORAGE_KEY);
     if (stored === "医疗" || stored === "养老" || stored === "儿保") return stored;
   } catch { /* SSR */ }
   return "医疗";
@@ -89,10 +91,10 @@ export default function Sidebar({ currentPath }: SidebarProps) {
   useEffect(() => {
     const handler = () => setDomain(readDomain());
     window.addEventListener("storage", handler);
-    window.addEventListener("aceso-domain-change", handler);
+    window.addEventListener(DOMAIN_CHANGE_EVENT, handler);
     return () => {
       window.removeEventListener("storage", handler);
-      window.removeEventListener("aceso-domain-change", handler);
+      window.removeEventListener(DOMAIN_CHANGE_EVENT, handler);
     };
   }, []);
 
@@ -108,7 +110,7 @@ export default function Sidebar({ currentPath }: SidebarProps) {
       </a>
 
       <nav className="flex flex-col gap-1 p-3">
-        {items.map((group, gi) => {
+        {menuItems.map((group, gi) => {
           const visibleChildren = group.children
             .filter((c) => c.domains.includes(domain))
             .sort((a, b) => (a.order?.[domain] ?? Number.MAX_SAFE_INTEGER) - (b.order?.[domain] ?? Number.MAX_SAFE_INTEGER));

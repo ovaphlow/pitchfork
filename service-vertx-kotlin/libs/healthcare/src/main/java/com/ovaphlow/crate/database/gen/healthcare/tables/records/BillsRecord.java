@@ -173,6 +173,42 @@ public class BillsRecord extends UpdatableRecordImpl<BillsRecord> {
         return (OffsetDateTime) get(9);
     }
 
+    /**
+     * Setter for <code>healthcare.bills.outstanding_amount</code>.
+     * 收束时刻该账单的未结余额快照（账单合计 − Σ缴费，下限 0）；仅在结算收束时写入一次，冻结后不可再改。0 =
+     * 收束时已收妥或已被押金核销；历史「已结算」账单不回填、不猜测，一律保持 0
+     */
+    public void setOutstandingAmount(BigDecimal value) {
+        set(10, value);
+    }
+
+    /**
+     * Getter for <code>healthcare.bills.outstanding_amount</code>.
+     * 收束时刻该账单的未结余额快照（账单合计 − Σ缴费，下限 0）；仅在结算收束时写入一次，冻结后不可再改。0 =
+     * 收束时已收妥或已被押金核销；历史「已结算」账单不回填、不猜测，一律保持 0
+     */
+    public BigDecimal getOutstandingAmount() {
+        return (BigDecimal) get(10);
+    }
+
+    /**
+     * Setter for <code>healthcare.bills.write_off_reason</code>.
+     * 收束时未结余额被放弃的原因（减免原因）；仅当 outstanding_amount &gt; 0 时非空，outstanding_amount =
+     * 0 时保持为空
+     */
+    public void setWriteOffReason(String value) {
+        set(11, value);
+    }
+
+    /**
+     * Getter for <code>healthcare.bills.write_off_reason</code>.
+     * 收束时未结余额被放弃的原因（减免原因）；仅当 outstanding_amount &gt; 0 时非空，outstanding_amount =
+     * 0 时保持为空
+     */
+    public String getWriteOffReason() {
+        return (String) get(11);
+    }
+
     // -------------------------------------------------------------------------
     // Primary key information
     // -------------------------------------------------------------------------
@@ -196,7 +232,7 @@ public class BillsRecord extends UpdatableRecordImpl<BillsRecord> {
     /**
      * Create a detached, initialised BillsRecord
      */
-    public BillsRecord(String id, String encounterId, LocalDate periodStart, LocalDate periodEnd, String status, BigDecimal totalAmount, JSONB metadata, OffsetDateTime createdAt, OffsetDateTime updatedAt, OffsetDateTime settledAt) {
+    public BillsRecord(String id, String encounterId, LocalDate periodStart, LocalDate periodEnd, String status, BigDecimal totalAmount, JSONB metadata, OffsetDateTime createdAt, OffsetDateTime updatedAt, OffsetDateTime settledAt, BigDecimal outstandingAmount, String writeOffReason) {
         super(Bills.BILLS);
 
         setId(id);
@@ -209,6 +245,8 @@ public class BillsRecord extends UpdatableRecordImpl<BillsRecord> {
         setCreatedAt(createdAt);
         setUpdatedAt(updatedAt);
         setSettledAt(settledAt);
+        setOutstandingAmount(outstandingAmount);
+        setWriteOffReason(writeOffReason);
         resetChangedOnNotNull();
     }
 }

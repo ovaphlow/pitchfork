@@ -78,6 +78,13 @@ class MedicalOrderAdministrationSummaryTest {
             every { pq.execute(any<Tuple>()) } answers {
                 val sql = queries.last()
                 val branch = when {
+                    // pharmacy 发药表探测（information_schema 计数）：
+                    // 本文件四个用例各自提供 dispensed / administration 行集，语义都是
+                    // 「pharmacy 迁移已挂载（表存在）但无发药数据」，故返回 cnt=2 让
+                    // present=true，代码走真实查询分支后再由 fixture 决定空值/零值；
+                    // 若返回 0 则短路上面的真实查询，dispensed / administration 桩永不生效。
+                    sql.contains("information_schema.tables") -> rowSet(row(mapOf("cnt" to 2L)))
+
                     sql.contains("sum(") && sql.contains("medication_administrations") ->
                         queryRows["administration"] ?: rowSet()
 

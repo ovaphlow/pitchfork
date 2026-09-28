@@ -1,8 +1,5 @@
 import { useState, useCallback } from "react";
-
-type Domain = "医疗" | "养老" | "儿保";
-
-const STORAGE_KEY = "aceso-domain";
+import { DOMAIN_CHANGE_EVENT, DOMAIN_STORAGE_KEY, readDomain, type Domain } from "./Sidebar";
 
 const subtitle: Record<Domain, string> = {
   医疗: "临床诊疗平台",
@@ -10,22 +7,14 @@ const subtitle: Record<Domain, string> = {
   儿保: "儿童保健平台",
 };
 
-function readDomain(): Domain {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored === "医疗" || stored === "养老" || stored === "儿保") return stored;
-  } catch { /* SSR */ }
-  return "医疗";
-}
-
 export default function DashboardPage() {
   const [domain, setDomain] = useState<Domain>(readDomain);
 
   const switchDomain = useCallback((d: Domain) => {
     setDomain(d);
     try {
-      localStorage.setItem(STORAGE_KEY, d);
-      window.dispatchEvent(new Event("aceso-domain-change"));
+      localStorage.setItem(DOMAIN_STORAGE_KEY, d);
+      window.dispatchEvent(new Event(DOMAIN_CHANGE_EVENT));
     } catch { /* SSR */ }
   }, []);
 

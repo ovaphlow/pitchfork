@@ -19,6 +19,7 @@ import io.vertx.sqlclient.RowSet
 import io.vertx.sqlclient.SqlConnection
 import io.vertx.sqlclient.Tuple
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertInstanceOf
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
@@ -120,9 +121,11 @@ class PaymentServiceTest {
                         Future.succeededFuture(rowSet(mockRow(mapOf("arrears_amount" to total))))
                     }
                     sql.contains("count(*)") && sql.contains("left outer join") ->
-                        Future.succeededFuture(rowSet(mockRow(mapOf("total" to arrearsList().size.toLong()))))
+                        Future.succeededFuture(
+                            rowSet(mockRow(mapOf("total" to filteredArrears(sql, values).size.toLong()))),
+                        )
                     sql.contains("left outer join") ->
-                        Future.succeededFuture(rowSet(*arrearsList().map { mockRow(it) }.toTypedArray()))
+                        Future.succeededFuture(rowSet(*filteredArrears(sql, values).map { mockRow(it) }.toTypedArray()))
                     sql.contains("due_amount") -> {
                         val total = bills.fold(BigDecimal.ZERO) { acc, b -> acc.add(b["total_amount"] as BigDecimal) }
                         Future.succeededFuture(rowSet(mockRow(mapOf("due_amount" to total))))
@@ -188,6 +191,18 @@ class PaymentServiceTest {
                     "updated_at" to b["updated_at"],
                 )
             }
+
+        /**
+         * 欠费查询结果：SQL 带 `encounter_id = $N` 条件时按该绑定值过滤（数据与计数同源），
+         * 否则与改动前一致返回全部欠费行。
+         */
+        private fun filteredArrears(sql: String, values: List<Any?>): List<MutableMap<String, Any?>> {
+            val all = arrearsList()
+            val match = Regex("""encounter_id = \$(\d+)""").find(sql) ?: return all
+            val position = match.groupValues[1].toIntOrNull() ?: return all
+            val encounterId = values.getOrNull(position - 1) as? String
+            return all.filter { it["encounter_id"] == encounterId }
+        }
     }
 
     private fun encounterRow(overrides: Map<String, Any?> = emptyMap()): MutableMap<String, Any?> {
@@ -397,6 +412,31 @@ class PaymentServiceTest {
             assertTrue(cause.message?.contains("method must be one of") == true, "got: ${cause.message}")
         }
         assertTrue(stub.queries.isEmpty(), "非法缴费方式不得触发任何 SQL: ${stub.queries}")
+    }
+
+    @Test
+    fun `押金方式不在客户端白名单内服务层返回400且不触发SQL`() {
+        val stub = DatabaseStub(bills = mutableListOf(billRow()))
+        val cause = causeOf(
+            PaymentService(stub.pool)
+                .createPayment("bill-1", paymentBody(mapOf("amount" to 1, "method" to "押金")), "cashier-1"),
+        )
+        assertInstanceOf(IllegalArgumentException::class.java, cause)
+        assertTrue(cause.message?.contains("method must be one of") == true, "got: ${cause.message}")
+        assertTrue(stub.queries.isEmpty(), "客户端伪造核销不得触发任何 SQL: ${stub.queries}")
+        assertEquals(0, stub.transactionCalls)
+
+        // 白名单仍为 5 值且不含「押金」；押金常量仅供服务端核销写入
+        assertEquals("押金", PaymentService.METHOD_DEPOSIT)
+        assertEquals(5, PaymentService.methods.size, "客户端可提交白名单必须保持 5 值")
+        assertTrue(
+            "押金" !in PaymentService.methods,
+            "「押金」只能由 DepositOffsetService 写入，不得进入客户端白名单",
+        )
+        assertEquals(
+            setOf("现金", "转账", "银行卡", "微信", "支付宝"),
+            PaymentService.methods,
+        )
     }
 
     // ——— 4. 缴费流水 ———
@@ -635,6 +675,32 @@ class PaymentServiceTest {
     }
 
     @Test
+    fun `POST缴费提交押金方式返回400且不写入`(vertx: Vertx, ctx: VertxTestContext) {
+        val stub = DatabaseStub(bills = mutableListOf(billRow()))
+        withServer(vertx, stub, userId = "cashier-route-1") { port ->
+            httpRequest(
+                vertx, port, HttpMethod.POST,
+                "/healthcare/v1/bills/bill-1/payments",
+                JsonObject().put("amount", 1).put("method", "押金"),
+            ).map { (status, body) ->
+                ctx.verify {
+                    assertEquals(400, status, "POST /bills/:id/payments 提交 method = 押金 必须 400")
+                    assertTrue(
+                        body.getString("error")?.contains("method must be one of") == true,
+                        "got: ${body.getString("error")}",
+                    )
+                    assertTrue(stub.payments.isEmpty(), "伪造核销不得写入缴费流水")
+                    assertEquals(0, stub.transactionCalls, "白名单校验必须先于事务")
+                    assertEquals(5, PaymentService.methods.size)
+                    assertTrue("押金" !in PaymentService.methods)
+                }
+            }
+        }.onComplete { ar ->
+            if (ar.succeeded()) ctx.completeNow() else ctx.failNow(ar.cause())
+        }
+    }
+
+    @Test
     fun `GET流水与欠费列表返回records和meta`(vertx: Vertx, ctx: VertxTestContext) {
         val stub = DatabaseStub(
             bills = mutableListOf(billRow(mapOf("total_amount" to BigDecimal("1000.00")))),
@@ -803,6 +869,109 @@ class PaymentServiceTest {
             "created_at" to OffsetDateTime.parse(createdAt),
             "updated_at" to OffsetDateTime.parse(createdAt),
         )
+
+    // ——— 9. 欠费列表按入住过滤（022 追加） ———
+
+    /** 多入住欠费 fixture：enc-1 欠 900、enc-2 欠 500 + 200。 */
+    private fun multiEncounterStub(): DatabaseStub = DatabaseStub(
+        bills = mutableListOf(
+            billRow(mapOf("id" to "bill-1", "encounter_id" to "enc-1", "total_amount" to BigDecimal("1000.00"))),
+            billRow(mapOf("id" to "bill-2", "encounter_id" to "enc-2", "total_amount" to BigDecimal("500.00"))),
+            billRow(mapOf("id" to "bill-3", "encounter_id" to "enc-2", "total_amount" to BigDecimal("200.00"))),
+        ),
+        payments = mutableListOf(paymentRecord("100.00", billId = "bill-1")),
+    )
+
+    @Test
+    fun `欠费列表带encounter_id时records与meta total同源过滤`() {
+        val stub = multiEncounterStub()
+        val filtered = PaymentService(stub.pool)
+            .listArrears(encounterId = "enc-2", limit = 50, offset = 0)
+            .toCompletionStage().toCompletableFuture().get()
+
+        val ids = filtered.getJsonArray("records").map { it as JsonObject }.map { it.getString("id") }.toSet()
+        assertEquals(setOf("bill-2", "bill-3"), ids, "只返回该入住的欠费账单")
+        assertEquals(2L, filtered.getJsonObject("meta").getLong("total"), "meta.total 必须是过滤后的行数")
+
+        // 数据与计数同源：两条 SQL 都带 encounter_id 条件，且绑定同一个值
+        val dataSql = stub.queries.first { it.contains("left outer join") && it.contains("fetch next") }
+        val countSql = stub.queries.first { it.contains("count(*)") && it.contains("left outer join") }
+        assertTrue(dataSql.contains("encounter_id = $"), "数据查询必须按入住过滤: $dataSql")
+        assertTrue(countSql.contains("encounter_id = $"), "计数查询必须按入住过滤: $countSql")
+        val dataParams = stub.tuples.first { it.first.contains("fetch next") && it.first.contains("encounter_id") }.second
+        val countParams = stub.tuples.first { it.first.contains("count(*)") && it.first.contains("encounter_id") }.second
+        assertTrue(dataParams.contains("enc-2"), "数据查询绑定 encounter_id: $dataParams")
+        assertTrue(countParams.contains("enc-2"), "计数查询绑定 encounter_id: $countParams")
+    }
+
+    @Test
+    fun `欠费列表不带encounter_id时行为不变`() {
+        val stub = multiEncounterStub()
+        val all = PaymentService(stub.pool)
+            .listArrears(limit = 50, offset = 0)
+            .toCompletionStage().toCompletableFuture().get()
+
+        assertEquals(3, all.getJsonArray("records").size(), "省略 encounter_id 时返回全部欠费")
+        assertEquals(3L, all.getJsonObject("meta").getLong("total"))
+        // 省略过滤时 SQL 与改动前一致：选列含 encounter_id 字段，但**不得**出现 encounter_id 过滤条件
+        val dataSql = stub.queries.first { it.contains("left outer join") && it.contains("fetch next") }
+        val countSql = stub.queries.first { it.contains("count(*)") && it.contains("left outer join") }
+        assertFalse(dataSql.contains("encounter_id = $"), "不带过滤时数据查询不得出现 encounter_id 条件: $dataSql")
+        assertFalse(countSql.contains("encounter_id = $"), "不带过滤时计数查询不得出现 encounter_id 条件: $countSql")
+        // 绑定参数不新增 encounter_id 值；状态与分页参数仍在（limit/offset 仍为参数化绑定）
+        val dataParams = stub.tuples.first { it.first.contains("left outer join") && it.first.contains("fetch next") }.second
+        val countParams = stub.tuples.first { it.first.contains("count(*)") && it.first.contains("left outer join") }.second
+        for (params in listOf(dataParams, countParams)) {
+            assertTrue(
+                params.none { it == "enc-1" || it == "enc-2" },
+                "不带过滤时不得绑定任何 encounter_id 值: $params",
+            )
+            assertEquals(1, params.count { it == BillingEngine.STATUS_PENDING }, "状态条件仍绑定一次: $params")
+        }
+        assertTrue(
+            dataParams.any { (it as? Number)?.toInt() == 50 },
+            "分页 limit 仍为绑定参数: $dataParams",
+        )
+    }
+
+    @Test
+    fun `欠费列表不存在的encounter_id返回空列表且total为0`() {
+        val stub = multiEncounterStub()
+        val empty = PaymentService(stub.pool)
+            .listArrears(encounterId = "enc-missing", limit = 50, offset = 0)
+            .toCompletionStage().toCompletableFuture().get()
+
+        assertEquals(0, empty.getJsonArray("records").size(), "不存在的 id 只是过滤条件，返回空列表而非 404")
+        assertEquals(0L, empty.getJsonObject("meta").getLong("total"))
+    }
+
+    @Test
+    fun `GET欠费列表带encounter_id查询参数按入住过滤`(vertx: Vertx, ctx: VertxTestContext) {
+        val stub = multiEncounterStub()
+        withServer(vertx, stub, userId = "cashier-route-1") { port ->
+            httpRequest(
+                vertx, port, HttpMethod.GET,
+                "/healthcare/v1/payments/arrears?encounter_id=enc-2&limit=50&offset=0",
+            ).compose { (status, body) ->
+                ctx.verify {
+                    assertEquals(200, status)
+                    val ids = body.getJsonArray("records").map { it as JsonObject }.map { it.getString("id") }.toSet()
+                    assertEquals(setOf("bill-2", "bill-3"), ids, "路由必须透传 encounter_id")
+                    assertEquals(2L, body.getJsonObject("meta").getLong("total"))
+                }
+                httpRequest(vertx, port, HttpMethod.GET, "/healthcare/v1/payments/arrears")
+                    .map { (allStatus, allBody) ->
+                        ctx.verify {
+                            assertEquals(200, allStatus)
+                            assertEquals(3, allBody.getJsonArray("records").size(), "省略参数时行为不变")
+                            assertEquals(3L, allBody.getJsonObject("meta").getLong("total"))
+                        }
+                    }
+            }
+        }.onComplete { ar ->
+            if (ar.succeeded()) ctx.completeNow() else ctx.failNow(ar.cause())
+        }
+    }
 }
 
 // ——— mock 基础设施（顶层函数，供测试类与嵌套 stub 共用） ———

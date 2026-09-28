@@ -1,0 +1,8 @@
+---
+import DashboardLayout from "../../layouts/DashboardLayout.astro";
+import FeeItemsPage from "../../components/FeeItemsPage.tsx";
+---
+
+<DashboardLayout title="费用项目">
+  <FeeItemsPage client:only="react" />
+</DashboardLayout>

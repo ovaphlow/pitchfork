@@ -67,7 +67,7 @@ export default function OrdersCheckPage() {
 
   const columns: Column<NurseCheckPendingOrder>[] = [
     { key: "patient_name", header: "长者", render: (row) => row.patient_name || row.patient_id },
-    { key: "encounter_no", header: "入住号", className: "min-w-[110px]", render: (row) => row.encounter_no ?? "-" },
+    { key: "encounter_no", header: "住院号", className: "min-w-[110px]", render: (row) => row.encounter_no ?? "-" },
     { key: "drug_name", header: "药品", className: "min-w-[120px]", render: (row) => String(details(row).drug_name ?? row.order_content) },
     { key: "dose", header: "剂量", render: (row) => {
         const d = details(row);
@@ -112,7 +112,7 @@ export default function OrdersCheckPage() {
         actions={
           <div className="flex flex-wrap items-center gap-2">
             <Input
-              placeholder="搜索药名 / 医嘱内容 / 老人 / 入住号"
+              placeholder="搜索药名 / 医嘱内容 / 老人 / 住院号"
               value={searchInput}
               onChange={(event) => setSearchInput(event.target.value)}
               onKeyDown={(event) => {

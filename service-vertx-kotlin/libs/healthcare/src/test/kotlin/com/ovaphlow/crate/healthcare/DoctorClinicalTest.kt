@@ -60,6 +60,11 @@ class DoctorClinicalTest {
                 val sql = lastSql
                 tuples.add(sql to dcTupleValues(firstArg()))
                 val result = when {
+                    // pharmacy 发药表探测（information_schema 计数）：医嘱详情读取会先探测
+                    // pharmacy 表是否存在。本文件用例只关心医嘱本身（如 order_class 读取兼容），
+                    // 语义为「pharmacy 迁移已挂载但无发药数据」，故返回 cnt=2 让 present=true，
+                    // 给药汇总走真实查询分支并回落零值，而不是在空行集上 next() 抛异常。
+                    sql.contains("information_schema.tables") -> dcRows(dcMockRow(mapOf("cnt" to 2L)))
                     sql.contains("insert into healthcare.progress_notes") -> dcRowSet()
                     sql.contains("insert into healthcare.diagnoses") -> dcRowSet()
                     sql.contains("insert into healthcare.medical_orders") -> dcRowSet()
@@ -471,6 +476,48 @@ class DoctorClinicalTest {
         val insertSql = stub.queries.first { it.contains("insert into healthcare.diagnoses") }
         assertTrue(insertSql.contains("icd_code"), "有编码时保存编码: $insertSql")
         assertTrue(insertSql.contains("metadata"), "remark 写入受控 metadata: $insertSql")
+    }
+
+    @Test
+    fun `诊断主次只由diagnosis_type决定并忽略请求体中的is_major`() {
+        // is_major 是 diagnosis_type 的派生字段。旧调用方仍可传入（形状仍被校验），
+        // 但取值必须被忽略，否则会产生「次要诊断 + 主诊断」这类自相矛盾的记录。
+        val secondaryStub = DatabaseStub()
+        val secondary = HealthcareService(secondaryStub.pool)
+            .createDiagnosis("enc-1", validDiagnosisBody(mapOf("diagnosis_type" to "SECONDARY", "is_major" to true)))
+            .toCompletionStage().toCompletableFuture().get()
+
+        assertEquals("SECONDARY", secondary.getString("diagnosis_type"))
+        assertEquals(false, secondary.getBoolean("is_major"), "次要诊断不得带出 is_major=true")
+        val secondaryValues = secondaryStub.tuples.first { it.first.contains("insert into healthcare.diagnoses") }.second
+        assertTrue(secondaryValues.contains(false), "次要诊断必须落库为 is_major=false: $secondaryValues")
+        assertFalse(secondaryValues.contains(true), "请求体中的 is_major=true 必须被忽略: $secondaryValues")
+
+        val primaryStub = DatabaseStub()
+        val primary = HealthcareService(primaryStub.pool)
+            .createDiagnosis("enc-1", validDiagnosisBody(mapOf("is_major" to false)))
+            .toCompletionStage().toCompletableFuture().get()
+
+        assertEquals("PRIMARY", primary.getString("diagnosis_type"))
+        assertEquals(true, primary.getBoolean("is_major"), "主要诊断必须派生为 is_major=true")
+        val primaryValues = primaryStub.tuples.first { it.first.contains("insert into healthcare.diagnoses") }.second
+        assertTrue(primaryValues.contains(true), "主要诊断必须落库为 is_major=true: $primaryValues")
+        assertFalse(primaryValues.contains(false), "请求体中的 is_major=false 必须被忽略: $primaryValues")
+    }
+
+    @Test
+    fun `诊断读取对存量不一致的is_major仍按diagnosis_type派生`() {
+        // 修复前写入的矛盾行（diagnosis_type=SECONDARY 且 is_major=true）仍可能存在，
+        // 读取路径必须按 diagnosis_type 派生，不再把矛盾暴露给前端。
+        val stub = DatabaseStub(
+            diagnoses = dcRows(diagnosisRow(mapOf("diagnosis_type" to "SECONDARY", "is_major" to true))),
+        )
+        val result = HealthcareService(stub.pool).listDiagnoses("enc-1")
+            .toCompletionStage().toCompletableFuture().get()
+
+        val record = result.getJsonArray("records").getJsonObject(0)
+        assertEquals("SECONDARY", record.getString("diagnosis_type"))
+        assertEquals(false, record.getBoolean("is_major"), "响应必须与 diagnosis_type 一致")
     }
 
     @Test

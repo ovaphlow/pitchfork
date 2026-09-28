@@ -5,6 +5,7 @@ go 1.24.0
 toolchain go1.24.7
 
 require (
+	github.com/jmoiron/sqlx v1.4.0
 	golang.org/x/crypto v0.42.0
 	modernc.org/sqlite v1.38.2
 )

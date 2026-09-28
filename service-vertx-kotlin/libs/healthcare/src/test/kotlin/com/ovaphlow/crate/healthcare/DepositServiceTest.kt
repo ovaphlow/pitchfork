@@ -271,6 +271,76 @@ class DepositServiceTest {
         assertTrue(cause.message?.contains("exceeds") == true, "got: ${cause.message}")
     }
 
+    // ——— 1.1 余额口径计入「核销」（结算收束的押金核销减项） ———
+
+    @Test
+    fun `余额口径计入核销登记减退押再减核销`() {
+        // 纯函数口径：余额 = Σ登记 − Σ退押 − Σ核销
+        assertEquals(
+            0,
+            DepositService.balanceOf(
+                listOf(
+                    "登记" to BigDecimal("1000"),
+                    "退押" to BigDecimal("200"),
+                    "核销" to BigDecimal("300"),
+                ),
+            ).compareTo(BigDecimal("500")),
+            "1000 − 200 − 300 = 500",
+        )
+        // 核销为减项而非加项：漏算核销会得到 800（余额虚高）
+        assertTrue(
+            DepositService.balanceOf(
+                listOf("登记" to BigDecimal("1000"), "退押" to BigDecimal("200"), "核销" to BigDecimal("300")),
+            ) < BigDecimal("800"),
+        )
+        // 未知类型不参与口径（既有行为）
+        assertEquals(
+            0,
+            DepositService.balanceOf(
+                listOf("登记" to BigDecimal("1000"), "未知" to BigDecimal("999")),
+            ).compareTo(BigDecimal("1000")),
+        )
+        assertEquals("核销", DepositService.TYPE_OFFSET)
+    }
+
+    @Test
+    fun `存在核销记录后退押上限按收紧后的余额判定`() {
+        val stub = DatabaseStub(
+            encounters = rows(encounterRow()),
+            records = mutableListOf(
+                depositRecord("1000.00"),
+                depositRecord("200.00", type = "退押"),
+                depositRecord("300.00", type = "核销"),
+            ),
+        )
+        val service = DepositService(stub.pool)
+
+        // 余额 = 1000 − 200 − 300 = 500：超 0.01 → 400 且不写入
+        val insertsBefore = stub.tuples.count { it.first.contains("insert into healthcare.deposit_records") }
+        val cause = causeOf(service.createRefund("enc-1", depositBody(mapOf("amount" to 500.01)), "cashier-1"))
+        assertInstanceOf(IllegalArgumentException::class.java, cause)
+        assertTrue(cause.message?.contains("refund exceeds deposit balance") == true, "got: ${cause.message}")
+        assertTrue(cause.message?.contains("available 500.00") == true, "上限必须按 1000−200−300 收紧: ${cause.message}")
+        assertTrue(cause.message?.contains("requested 500.01") == true, "got: ${cause.message}")
+        assertEquals(
+            insertsBefore,
+            stub.tuples.count { it.first.contains("insert into healthcare.deposit_records") },
+            "超额退押不得写入任何记录",
+        )
+
+        // 边界：等于收紧后的余额（500）必须通过
+        val refund = service.createRefund("enc-1", depositBody(mapOf("amount" to 500)), "cashier-1")
+            .toCompletionStage().toCompletableFuture().get()
+        assertEquals(DepositService.TYPE_REFUND, refund.getString("type"))
+        assertEquals(0, BigDecimal("500").compareTo(refund.getValue("amount") as BigDecimal))
+        assertEquals(
+            0,
+            DepositService.balanceOf(stub.records.map { it["type"] as String to it["amount"] as BigDecimal })
+                .compareTo(BigDecimal.ZERO),
+            "退押至收紧后余额必须归零",
+        )
+    }
+
     // ——— 2. 输入校验 ———
 
     @Test

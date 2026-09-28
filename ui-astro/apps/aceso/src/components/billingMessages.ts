@@ -1,0 +1,192 @@
+// Aceso 收费域（费用字典 / 账单 / 缴费 / 押金核销）后端错误文案的中文映射。
+//
+// 后端沿用 `{ "error": "<message>" }`，message 是英文句式内嵌中文枚举，且被 Kotlin 侧
+// `contains(fragment)` 断言锁定，本期不改后端文案。因此「中文化」只能在前端做：
+// 把已知失败条件翻成「中文 + 去哪修」的可操作提示；未命中的错误也一律给中文兜底，
+// 英文原文只作为次要的可排障信息附在后面，绝不成为主提示。
+
+import type { BillPrecheckBlockedBy } from "@pitchfork/shared/aceso";
+
+/** 费用项目维护页路径：字典缺项时的「去配置」入口 */
+export const FEE_ITEMS_PAGE_PATH = "/dashboard/fee-items";
+
+/** 「系统设置 → 费用项目」在文案里的统一写法 */
+const FEE_ITEMS_LOCATION = "「系统设置 → 费用项目」";
+
+/**
+ * 生成账单前置校验（precheck）的 `blocked_by` 枚举 → 中文可操作提示。
+ *
+ * 判定归服务端（只回机器可读枚举），文案归前端；`missing_fee_items` 的逐条缺项
+ * 由页面按 `requirements` 渲染，这里只给一句总览。
+ */
+export const BILLING_BLOCKED_REASONS: Record<NonNullable<BillPrecheckBlockedBy>, string> = {
+  missing_fee_items: `费用字典缺项，请先到${FEE_ITEMS_LOCATION}补齐并启用所需项目。`,
+  already_exists: "该账期已经生成过账单，不能重复生成。",
+  not_overlapping: "所选账期与该入住的在院区间没有重合。",
+  no_admit_date: "该入住缺少入住日期，无法计费。",
+  settled: "该入住已完成结算收束，不能生成账单。",
+  not_elderly_admission: "只有养老入住可以生成账单。",
+};
+
+export interface BillingErrorMapping {
+  /** 后端 `error.message` 的匹配正则（只用 exec，不加 g 标志） */
+  pattern: RegExp;
+  /** 由捕获组生成中文可操作提示；未用到的捕获组按 `?? ""` 兜底 */
+  render: (match: RegExpExecArray) => string;
+}
+
+/**
+ * 收费域错误映射表：一条 = 一条中文提示 + 其匹配规则。
+ * 顺序即优先级，新增文案只追加条目，不改 function 里的分支。
+ */
+export const BILLING_ERROR_MAPPINGS: BillingErrorMapping[] = [
+  // ─── 费用字典缺项 / 重项（BillService.requireSingleEnabled） ───────────
+  {
+    pattern: /^no enabled fee item for category (.+)$/,
+    render: (m) => `未配置启用的「${m[1] ?? ""}」费用项目。请到${FEE_ITEMS_LOCATION}新增并启用一条「${m[1] ?? ""}」。`,
+  },
+  {
+    pattern: /^no enabled fee item for nursing level (.+)$/,
+    render: (m) =>
+      `护理等级「${m[1] ?? ""}」没有对应的启用护理费项目。护理费名称必须与护理评估的「结果等级」完全一致，请到${FEE_ITEMS_LOCATION}新增并启用。`,
+  },
+  {
+    pattern: /^multiple enabled fee items for category (.+), expected exactly one$/,
+    render: (m) => `「${m[1] ?? ""}」存在多条启用的费用项目，请到${FEE_ITEMS_LOCATION}只保留一条启用。`,
+  },
+  {
+    pattern: /^multiple enabled fee items for nursing level (.+), expected exactly one$/,
+    render: (m) => `护理等级「${m[1] ?? ""}」存在多条启用的护理费项目，请到${FEE_ITEMS_LOCATION}只保留一条启用。`,
+  },
+  {
+    pattern: /^fee item not found/,
+    render: () => "所选费用项目不存在或已被删除，请刷新后重新选择。",
+  },
+  {
+    pattern: /^fee item is disabled/,
+    render: () => `该费用项目已停用，请到${FEE_ITEMS_LOCATION}启用后再试。`,
+  },
+
+  // ─── 结算收束状态（BillService / PaymentService / DepositOffsetService） ─
+  {
+    pattern: /^encounter billing is already settled$/,
+    render: () => "该入住已完成结算收束，不能重复收束。",
+  },
+  {
+    pattern: /^encounter billing is settled, cannot pay$/,
+    render: () => "该入住已完成结算收束，不能再缴费。",
+  },
+  {
+    pattern: /^encounter billing is settled, cannot generate bills$/,
+    render: () => "该入住已完成结算收束，不能生成账单。",
+  },
+  {
+    pattern: /^encounter billing is settled, cannot add items$/,
+    render: () => "该入住已完成结算收束，不能手工加项。",
+  },
+  {
+    pattern: /^bill is settled, cannot add items$/,
+    render: () => "该账单已结清或已结算，不能手工加项。",
+  },
+  {
+    pattern: /^bill status is not 待缴费, cannot pay$/,
+    render: () => "该账单不是「待缴费」状态，不能缴费。",
+  },
+  {
+    pattern: /^bill status is not 待缴费, cannot add items$/,
+    render: () => "该账单不是「待缴费」状态，不能手工加项。",
+  },
+
+  // ─── 金额上限 ────────────────────────────────────────────────────────
+  {
+    pattern: /^deposit offset exceeds available: available (.+), requested (.+)$/,
+    render: (m) =>
+      `押金核销金额超出可用上限 ¥${m[1] ?? ""}（取「押金余额」与「欠费合计」的较小值）。`,
+  },
+  {
+    pattern: /^refund exceeds deposit balance: available (.+), requested (.+)$/,
+    render: (m) => `退押金额超过当前押金余额 ¥${m[1] ?? ""}。`,
+  },
+  {
+    pattern: /^payment exceeds bill total: bill (.+), already paid (.+), requested (.+)$/,
+    render: (m) => `缴费金额超过账单剩余应缴（账单合计 ¥${m[1] ?? ""}，已缴 ¥${m[2] ?? ""}）。`,
+  },
+
+  // ─── 账期与重复生成（BillService） ────────────────────────────────────
+  {
+    pattern: /already exists/,
+    render: () => "该账期已经生成过账单，不能重复生成。",
+  },
+  {
+    pattern: /^encounter is not discharged or deceased/,
+    render: () => "结算收束只适用于已离院/已去世的养老入住。",
+  },
+  {
+    pattern: /^(?:encounter has no discharge date|encounter has no death date)/,
+    render: () => "该入住缺少离院/去世日期，无法结算收束。",
+  },
+  {
+    pattern: /^encounter has no admit date/,
+    render: () => "该入住缺少入住日期，无法计费。",
+  },
+  {
+    pattern: /^encounter does not overlap month/,
+    render: () => "所选账期与该入住的在院区间没有重合。",
+  },
+  {
+    pattern: /^unsupported /,
+    render: () => "请求包含不受支持的字段，请刷新页面重试。",
+  },
+  {
+    pattern: /^deposit_offset/,
+    render: () => "押金核销金额必须是不超过两位小数的正数。",
+  },
+  {
+    pattern: /^(?:month must be in YYYY-MM format|month is required)/,
+    render: () => "账期格式应为 YYYY-MM。",
+  },
+
+  // ─── 收束未结余额与减免（BillService.settleEncounter） ─────────────────
+  {
+    pattern: /^unsettled bills require explicit write-off: outstanding (.+)$/,
+    render: (m) =>
+      `收束时仍有未结余额 ¥${m[1] ?? ""}，需要显式确认减免并填写原因后重新提交。`,
+  },
+  {
+    pattern: /^write_off_reason must not exceed 500 characters$/,
+    render: () => "减免原因不能超过 500 个字符，请精简后重新提交。",
+  },
+  {
+    pattern: /^write_off_reason must be a string$/,
+    render: () => "减免原因必须是文本，请重新填写。",
+  },
+  {
+    pattern: /^write_off_reason/,
+    render: () => "减免原因不合法（须为不超过 500 字符的文本），请重新填写。",
+  },
+];
+
+/** 是否含中文字符（说明 message 已是本地文案，例如前端自校验抛错） */
+const CJK_PATTERN = /[\u4e00-\u9fff]/;
+
+/**
+ * 把后端收费域错误映射为中文可操作提示；未命中时返回中文兜底并附原始信息。
+ *
+ * - 非 `Error` 或无 `message` → 返回 `fallback`；
+ * - 命中 [BILLING_ERROR_MAPPINGS] → 返回对应中文文案；
+ * - 未命中且 `message` 含中文 → 原样返回（已是本地文案）；
+ * - 未命中且 `message` 为英文/其它 → 返回 `${fallback}（原始信息：${message}）`。
+ */
+export function billingErrorMessage(error: unknown, fallback: string): string {
+  const raw = error instanceof Error ? error.message : undefined;
+  const message = typeof raw === "string" ? raw.trim() : "";
+  if (!message) return fallback;
+
+  for (const mapping of BILLING_ERROR_MAPPINGS) {
+    const match = mapping.pattern.exec(message);
+    if (match) return mapping.render(match);
+  }
+
+  if (CJK_PATTERN.test(message)) return message;
+  return `${fallback}（原始信息：${message}）`;
+}

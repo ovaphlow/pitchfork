@@ -1849,6 +1849,7 @@ export interface Diagnosis {
   diagnosis_text: string;
   diagnosis_date: string;
   physician: string;
+  /** 服务端按 diagnosis_type 派生的只读字段：PRIMARY 时为 true */
   is_major: boolean;
   metadata: Record<string, unknown> | null;
   created_at: string;
@@ -1860,7 +1861,6 @@ export interface DiagnosisInput {
   diagnosis_date: string;
   physician: string;
   icd_code?: string;
-  is_major?: boolean;
   /** 备注写入服务端受控 metadata */
   remark?: string;
 }
@@ -1880,7 +1880,6 @@ export function createDiagnosis(encounterId: string, input: DiagnosisInput): Pro
       diagnosis_date: input.diagnosis_date,
       physician: input.physician.trim(),
       ...(input.icd_code?.trim() ? { icd_code: input.icd_code.trim() } : {}),
-      ...(input.is_major !== undefined ? { is_major: input.is_major } : {}),
       ...(input.remark?.trim() ? { remark: input.remark.trim() } : {}),
     }),
   });
@@ -4108,18 +4107,22 @@ export function getMealStatistics(params: {
 // ========================================================================
 //  Healthcare API — Deposit (押金登记与退押)
 //  养老费用管理独立子任务：入住押金登记、退押与台账，挂 encounter
-//  （不强制关联费用项目字典；结算收束不自动冲抵押金）。
+//  （不强制关联费用项目字典；核销由结算收束手工触发，见下方养老收费分组）。
 //  退押为独立操作：不校验 encounter 收束状态，离院/去世后仍可退押。
 // ========================================================================
 
-export type DepositType = "登记" | "退押";
+/**
+ * 押金台账记录类型：`登记` 与 `退押` 由押金管理页提交；
+ * `核销` 由结算收束时的押金核销写入，不是用户可登记的类型。
+ */
+export type DepositType = "登记" | "退押" | "核销";
 
-/** 押金台账记录（登记/退押为同表两类记录） */
+/** 押金台账记录（登记/退押/核销共用同表） */
 export interface DepositRecord {
   id: string;
   encounter_id: string;
   type: DepositType;
-  /** 发生金额（元），登记与退押均为正数；余额 = Σ登记 − Σ退押 */
+  /** 发生金额（元），登记/退押/核销均为正数；余额 = Σ登记 − Σ退押 − Σ核销 */
   amount: number;
   /** 操作人（认证主体，服务端写入） */
   operator: string;
@@ -4157,7 +4160,7 @@ export function createDepositRefund(encounterId: string, input: DepositInput): P
   });
 }
 
-/** 按 encounter 查询押金台账（登记+退押倒序分页）；meta.balance 为当前余额 */
+/** 按 encounter 查询押金台账（登记+退押+核销倒序分页）；meta.balance 为当前余额（已扣除核销） */
 export function listDeposits(
   encounterId: string,
   params: { limit?: number; offset?: number } = {},
@@ -4173,7 +4176,8 @@ export function listDeposits(
 //  Healthcare API — 养老收费 (Fee Items / Bills / Payments / Settlement)
 //  费用字典、账单（按月自动计费 + 手工加项）、缴费与欠费、结算收束入口，
 //  路径 /healthcare/v1/*，沿用 request 封装（token 注入、JSON、401、{records,meta}）。
-//  押金（deposits）为独立子任务：本组不引用押金接口，押金展示只在押金管理页。
+//  结算收束可选携带押金核销金额，核销由服务端同时写入缴费流水（method = 押金）
+//  与押金台账（type = 核销）；押金登记/退押仍只在押金管理页。
 // ========================================================================
 
 // ─── 费用项目字典 (Fee Items) ────────────────────────────────────────
@@ -4288,6 +4292,16 @@ export interface Bill {
   /** 已结清/已结算时间；列表接口不返回该字段 */
   settled_at?: string | null;
   total_amount: number;
+  /**
+   * 收束（结算收束）时刻该账单的未结余额快照：`0` 表示收束时已收妥或已被押金核销；
+   * 历史（V519 之前）收束的账单不回填，恒为 `0`。收束前该值为 `0`。
+   */
+  outstanding_amount: number;
+  /**
+   * 收束时未结余额被放弃（减免）的原因，仅当 `outstanding_amount > 0` 时非空；
+   * 由收束请求的 `write_off_reason` 原样写入，冻结后不可再改。
+   */
+  write_off_reason: string | null;
   /** 仅详情接口返回（列表接口为空数组） */
   items?: BillItem[];
   created_at: string;
@@ -4342,24 +4356,137 @@ export function listBills(
   return request<BillList>(`/healthcare/v1/encounters/${encodeURIComponent(encounterId)}/bills${suffix}`);
 }
 
-/** 结算收束：已离院/去世未结算的养老入住 → 生成区间最终账单并冻结全部账单；返回收束后的 encounter */
-export function settleEncounterBilling(encounterId: string): Promise<Encounter> {
+// ─── 生成账单前置校验 (Bill Precheck) ─────────────────────────────────
+
+/**
+ * 前置校验的单个费用项目槽位：`category` + `level`（仅护理费有意义）唯一确定一个槽位。
+ * `satisfied` 由服务端按「启用条数恰好为 1」判定，前端不得重算。
+ */
+export interface BillPrecheckRequirement {
+  category: FeeItemCategory;
+  /** 仅护理费有意义：本账期生效的护理评估结果等级 */
+  level: string | null;
+  /** 该槽位在本账期是否真会被用到（如账期内无就餐记录时伙食费为 false） */
+  required: boolean;
+  enabled_count: number;
+  satisfied: boolean;
+}
+
+/** 前置校验的机器可读阻塞原因；`null` 表示可生成 */
+export type BillPrecheckBlockedBy =
+  | "missing_fee_items"
+  | "already_exists"
+  | "not_overlapping"
+  | "no_admit_date"
+  | "settled"
+  | "not_elderly_admission";
+
+/** 生成账单前置校验结果（只读，可反复调用） */
+export interface BillPrecheck {
+  month: string;
+  /** 账期裁剪到在院区间后的起止日（缺失时为 null） */
+  period_start: string | null;
+  period_end: string | null;
+  can_generate: boolean;
+  blocked_by: BillPrecheckBlockedBy | null;
+  requirements: BillPrecheckRequirement[];
+}
+
+/**
+ * 生成账单前置校验（只读）：服务端判定能否生成与缺哪些费用项目槽位。
+ * 缺字典属被查询的业务状态，仍返回 200（阻塞原因见 `blocked_by`）。
+ */
+export function precheckBillGeneration(encounterId: string, month: string): Promise<BillPrecheck> {
+  const query = new URLSearchParams({ month });
+  return request<BillPrecheck>(
+    `/healthcare/v1/encounters/${encodeURIComponent(encounterId)}/bills/precheck?${query.toString()}`,
+  );
+}
+
+/**
+ * 结算收束（已离院/去世未结算的养老入住）：生成区间最终账单并冻结全部账单，返回收束后的 encounter。
+ *
+ * 押金核销（`depositOffset`）与未结判定、减免留痕都在**同一事务内**完成：服务端先生成区间最终账单
+ * （以 `待缴费` 建立、同样可被核销），再用押金按 `min(押金余额, 未结合计)` 的上限核销。
+ *
+ * 存在未结余额而未提供 `writeOffReason` 时整个收束被拒（409
+ * `unsettled bills require explicit write-off: outstanding <金额>`），且不产生任何写入；
+ * 提供原因后，核销后仍未结的部分随收束冻结、**不可再收**，并写入账单的 `outstanding_amount`
+ * 与 `write_off_reason`。
+ *
+ * - `depositOffset`：缺省或 `0` 表示不核销（该键不发送）；
+ * - `writeOffReason`：缺省或 trim 后为空表示不提供（该键不发送），非空时发送 trim 后的原文。
+ */
+export function settleEncounterBilling(
+  encounterId: string,
+  options: { depositOffset?: number; writeOffReason?: string } = {},
+): Promise<Encounter> {
+  const { depositOffset } = options;
+  const writeOffReason = options.writeOffReason?.trim();
+  const body: { deposit_offset?: number; write_off_reason?: string } = {};
+  if (depositOffset !== undefined && depositOffset !== 0) body.deposit_offset = depositOffset;
+  if (writeOffReason) body.write_off_reason = writeOffReason;
   return request<Encounter>(`/healthcare/v1/encounters/${encodeURIComponent(encounterId)}/billing-settlement`, {
     method: "POST",
-    body: JSON.stringify({}),
+    body: JSON.stringify(body),
   });
+}
+
+// ─── 结算收束预览 (Billing Settlement Preview) ────────────────────────
+
+/** 预览里的区间最终账单账期（与收束实际生成的账期同源） */
+export interface SettlementPreviewPeriod {
+  start: string;
+  end: string;
+}
+
+/**
+ * 结算收束预览：提交前「会发生什么」的权威口径（只读、可反复调用，不产生任何写入）。
+ *
+ * 口径关系：
+ * - `pending_balance`：既有 `待缴费` 账单的未结合计（**核销前**）；
+ * - `outstanding_total`：`pending_balance + final_bill_total`；
+ * - `max_offset`：`min(deposit_balance, outstanding_total)`，即本次核销上限；
+ * - `requires_write_off`：`outstanding_total > max_offset`，即「即使全额核销仍有未结」。
+ */
+export interface SettlementPreview {
+  /** `null` 表示本次收束不生成区间最终账单 */
+  settlement_period: SettlementPreviewPeriod | null;
+  final_bill_total: number;
+  pending_balance: number;
+  outstanding_total: number;
+  deposit_balance: number;
+  max_offset: number;
+  requires_write_off: boolean;
+}
+
+/**
+ * 结算收束预览（只读）：收束前展示最终账单金额、押金余额、可核销上限与核销后仍需减免的金额。
+ * 资格不满足时与收束一致返回 400/404/409；需认证，未认证 401。
+ */
+export function previewEncounterBilling(encounterId: string): Promise<SettlementPreview> {
+  return request<SettlementPreview>(
+    `/healthcare/v1/encounters/${encodeURIComponent(encounterId)}/billing-settlement/preview`,
+  );
 }
 
 // ─── 缴费与欠费 (Payments / Arrears / Summary) ───────────────────────
 
+/** 客户端可提交的缴费方式（5 种）；与 POST /bills/:id/payments 的服务端白名单一致，提交「押金」会 400 */
 export type PaymentMethod = "现金" | "转账" | "银行卡" | "微信" | "支付宝";
+
+/**
+ * 缴费流水记录的读取类型：含服务端在结算核销时写入的 `押金`。
+ * 客户端不可提交「押金」，提交会 400；展示缴费流水用它，提交缴费用 PaymentMethod。
+ */
+export type PaymentRecordMethod = PaymentMethod | "押金";
 
 /** 缴费流水记录；operator 由服务端写入认证主体 */
 export interface Payment {
   id: string;
   bill_id: string;
   amount: number;
-  method: PaymentMethod;
+  method: PaymentRecordMethod;
   operator: string;
   remark: string | null;
   metadata: Record<string, unknown> | null;
@@ -4418,19 +4545,35 @@ export interface ArrearsList {
   meta: { total: number };
 }
 
-export function listArrears(params: { limit?: number; offset?: number } = {}): Promise<ArrearsList> {
+/**
+ * 欠费列表：`encounter_id` 可选，传入时只返回该入住的欠费行，
+ * 且 `records` 与 `meta.total` 同源过滤（分页总数不再是全局数）；省略时行为与全局列表一致。
+ */
+export function listArrears(
+  params: { encounter_id?: string; limit?: number; offset?: number } = {},
+): Promise<ArrearsList> {
   const query = new URLSearchParams();
+  if (params.encounter_id) query.set("encounter_id", params.encounter_id);
   if (params.limit !== undefined) query.set("limit", String(params.limit));
   if (params.offset !== undefined) query.set("offset", String(params.offset));
   const suffix = query.toString() ? `?${query.toString()}` : "";
   return request<ArrearsList>(`/healthcare/v1/payments/arrears${suffix}`);
 }
 
-/** 收费汇总：应缴 = Σ账单合计、已缴 = Σ缴费金额、欠费 = Σ待缴费账单余额；无数据时三项均为 0 */
+/**
+ * 收费汇总：三项既有口径互不重叠，恒等式 `应缴 − 已缴 = 欠费` 在收束前后均成立。
+ *
+ * - `due_amount` = Σ账单合计（应缴）；
+ * - `paid_amount` = Σ缴费金额（已缴，含收束核销写入的 `method = 押金` 行）；
+ * - `arrears_amount` = Σ(`待缴费` 且余额 > 0 的账单余额)（欠费，收束后恒为 0）；
+ * - `write_off_amount` = Σ(已结算账单的 `outstanding_amount`)（收束时被放弃的减免合计，
+ *   是收束动作产生的第三项，**不并入欠费**）。
+ */
 export interface PaymentSummary {
   due_amount: number;
   paid_amount: number;
   arrears_amount: number;
+  write_off_amount: number;
 }
 
 export function getPaymentSummary(): Promise<PaymentSummary> {
