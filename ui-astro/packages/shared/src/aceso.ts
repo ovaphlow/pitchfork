@@ -308,6 +308,9 @@ export interface NursingTask {
   metadata: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
+  /** 绑定医嘱的类型与结构化明细（未绑定医嘱时为空；前端据此显示药品 / 项目） */
+  order_details?: Record<string, unknown> | null;
+  order_type?: string | null;
 }
 
 export interface NursingTaskInput {
@@ -368,6 +371,9 @@ export interface NursingTodayExecution {
   task_type: string | null;
   task_frequency_name: string | null;
   task_period_id: string | null;
+  /** 绑定医嘱的类型与结构化明细（未绑定医嘱时为空；今日看板显示药品 / 项目） */
+  order_details?: Record<string, unknown> | null;
+  order_type?: string | null;
   /** 长者摘要 */
   patient_id: string | null;
   patient_name: string | null;
@@ -1570,6 +1576,9 @@ export interface MedicationAdministration {
   reason: string | null;
   planned_time: string | null;
   task_description: string | null;
+  /** 绑定医嘱的类型与结构化明细（未绑定医嘱时为空；给药与给药记录显示药品 / 项目） */
+  order_details?: Record<string, unknown> | null;
+  order_type?: string | null;
   patient_name: string | null;
   created_at: string | null;
   updated_at: string | null;

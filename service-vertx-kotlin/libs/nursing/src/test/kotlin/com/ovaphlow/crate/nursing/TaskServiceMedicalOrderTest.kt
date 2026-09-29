@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertInstanceOf
 import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.math.BigDecimal
@@ -24,6 +25,8 @@ import java.time.OffsetDateTime
 /**
  * 医嘱派生护理任务（连接绑定内部协作）的非数据库测试：
  *   - createOrderTask 输入校验与插入 SQL/参数（含 nullable 字段不绑定）
+ *   - list/get 读模型 LEFT JOIN healthcare.medical_orders，带出 order_details / order_type
+ *   - 没有该列的行（lock / 计划任务回读）不抛异常且两键为 null（列探测守卫）
  *   - terminateOrderTask 合法目标联动、非法目标、缺失/异常任务
  *   - 公共 create 白名单仍拒绝 MEDICATION/TREATMENT，既有五类不受影响
  */
@@ -46,6 +49,33 @@ class TaskServiceMedicalOrderTest {
                 val result = if (sql.contains("from nursing.nursing_tasks") && sql.contains("for update")) lockTasks
                 else rowSet()
                 Future.succeededFuture(result)
+            }
+        }
+
+        private fun record(sql: String) {
+            val normalizedSql = normalized(sql)
+            lastSql = normalizedSql
+            queries.add(normalizedSql)
+        }
+    }
+
+    /** list/get 读路径的全库桩：按 SQL 特征分发行集（count → total 行，其余 → data 行）。 */
+    private class PoolStub(
+        var countRows: RowSet<Row> = rowSet(),
+        var dataRows: RowSet<Row> = rowSet(),
+    ) {
+        val queries = mutableListOf<String>()
+        val pool = mockk<Pool>()
+
+        private var lastSql = ""
+        private val pq = mockk<PreparedQuery<RowSet<Row>>>()
+
+        init {
+            every { pool.preparedQuery(any<String>()) } answers { record(firstArg<String>()); pq }
+            every { pool.preparedQuery(any<String>(), any()) } answers { record(firstArg<String>()); pq }
+            every { pq.execute(any<Tuple>()) } answers {
+                val sql = lastSql
+                Future.succeededFuture(if (sql.startsWith("select count")) countRows else dataRows)
             }
         }
 
@@ -154,6 +184,11 @@ class TaskServiceMedicalOrderTest {
         assertEquals("2026-08-01", result.getString("start_date"))
         assertEquals("2026-08-04", result.getString("end_date"))
         assertEquals("ACTIVE", result.getString("status"))
+        // 未绑定医嘱时形状一致：两个键必须存在且为 null
+        assertTrue(result.containsKey("order_details"))
+        assertNull(result.getJsonObject("order_details"))
+        assertTrue(result.containsKey("order_type"))
+        assertNull(result.getString("order_type"))
 
         val (sql, values) = stub.tuples.single()
         assertTrue(sql.contains("insert into nursing.nursing_tasks"), "必须插入 nursing_tasks: $sql")
@@ -191,7 +226,156 @@ class TaskServiceMedicalOrderTest {
         assertTrue(values.contains("MEDICATION"))
     }
 
-    // ——— 3. terminateOrderTask ———
+    // ——— 3. list/get 读模型带出绑定医嘱的结构化明细 ———
+
+    private val medicationDetails = JsonObject()
+        .put("material_id", "mat-1")
+        .put("drug_name", "降压药A")
+        .put("dose", "1")
+        .put("unit", "片")
+        .put("route", "口服")
+
+    private val leftJoinMedicalOrders = Regex("left( outer)? join healthcare\\.medical_orders as mo")
+
+    @Test
+    fun `list按任务LEFT_JOIN医嘱并投影明细与类型`() {
+        val stub =
+            PoolStub(
+                countRows = rows(mapOf("total" to 1L)),
+                dataRows = rows(taskRow(mapOf("order_details" to medicationDetails, "order_type" to "MEDICATION"))),
+            )
+        val result =
+            TaskService(stub.pool).list().toCompletionStage().toCompletableFuture().get()
+
+        // 计数查询保持原样：不加 JOIN（行数与既有语义不变）
+        val countSql = stub.queries.first()
+        assertTrue(countSql.startsWith("select count"), "必须先执行计数查询: $countSql")
+        assertFalse(countSql.contains("medical_orders"), "计数查询不得加入医嘱 JOIN: $countSql")
+
+        val dataSql = stub.queries.last()
+        assertTrue(leftJoinMedicalOrders.containsMatchIn(dataSql), "明细查询必须 LEFT JOIN 绑定医嘱: $dataSql")
+        assertTrue(dataSql.contains("mo.order_details as order_details"), "必须投影医嘱明细: $dataSql")
+        assertTrue(dataSql.contains("mo.order_type as order_type"), "必须投影医嘱类型: $dataSql")
+        assertTrue(dataSql.contains("nt.order_item_id = mo.id"), "必须按任务绑定的医嘱 ID 关联: $dataSql")
+
+        assertEquals(1L, result.getJsonObject("meta").getLong("total"))
+        val record = result.getJsonArray("records").getJsonObject(0)
+        assertEquals("MEDICATION", record.getString("order_type"))
+        assertEquals("降压药A", record.getJsonObject("order_details").getString("drug_name"))
+        // 既有字段与取值不变
+        assertEquals("tsk-1", record.getString("id"))
+        assertEquals("ord-1", record.getString("order_item_id"))
+        assertEquals("阿司匹林 100mg 每日一次", record.getString("description"))
+        assertEquals("ACTIVE", record.getString("status"))
+    }
+
+    @Test
+    fun `list未绑定医嘱的任务仍返回空明细与空类型键`() {
+        // 两种取不到明细的行：查询没有投影该列（create/lock 路径）与 JOIN 命中 NULL
+        val fixtures =
+            listOf(
+                taskRow(mapOf("order_item_id" to null)),
+                taskRow(mapOf("order_item_id" to null, "order_details" to null, "order_type" to null)),
+            )
+        for (fixture in fixtures) {
+            val stub = PoolStub(countRows = rows(mapOf("total" to 1L)), dataRows = rows(fixture))
+            val result =
+                TaskService(stub.pool).list().toCompletionStage().toCompletableFuture().get()
+            val record = result.getJsonArray("records").getJsonObject(0)
+            assertTrue(record.containsKey("order_details"), "返回形状必须保留 order_details 键")
+            assertNull(record.getJsonObject("order_details"), "未绑定医嘱必须返回 null 明细")
+            assertTrue(record.containsKey("order_type"), "返回形状必须保留 order_type 键")
+            assertNull(record.getString("order_type"), "未绑定医嘱必须返回 null 类型")
+        }
+    }
+
+    @Test
+    fun `get按任务LEFT_JOIN医嘱并投影明细与类型`() {
+        val stub =
+            PoolStub(
+                dataRows = rows(taskRow(mapOf("order_details" to medicationDetails, "order_type" to "MEDICATION"))),
+            )
+        val record =
+            TaskService(stub.pool).get("tsk-1").toCompletionStage().toCompletableFuture().get()
+
+        val sql = stub.queries.single()
+        assertTrue(leftJoinMedicalOrders.containsMatchIn(sql), "单条查询必须 LEFT JOIN 绑定医嘱: $sql")
+        assertTrue(sql.contains("mo.order_details as order_details"), "必须投影医嘱明细: $sql")
+        assertTrue(sql.contains("mo.order_type as order_type"), "必须投影医嘱类型: $sql")
+        assertTrue(sql.contains("nt.id = \$"), "必须按任务 id 定位: $sql")
+
+        assertEquals("MEDICATION", record.getString("order_type"))
+        assertEquals("口服", record.getJsonObject("order_details").getString("route"))
+        assertEquals("tsk-1", record.getString("id"))
+    }
+
+    // ——— 3b. 非 JOIN 读路径不得触碰 order_details / order_type 两列 ———
+
+    /**
+     * 严格行桩：只认 fixture 里有的列，取缺失列时**抛 `NoSuchElementException`**
+     * （贴近 `Row.getValue(String)` 的真实实现，而 MockK 默认桩只是返回 null）。
+     * 并且**不实现 `getColumnIndex`**：任何「先探测列是否存在再取值」的写法都会在这里
+     * 立刻炸掉。
+     *
+     * 因此 `TaskService.toJson(row)`（非 JOIN 路径）必须完全不碰这两列：
+     * 一旦有人把两列改成无条件读取，本组用例必红。
+     */
+    private fun strictColumnRow(values: Map<String, Any?>): Row {
+        val row = mockk<Row>()
+        every { row.getValue(any<String>()) } answers {
+            val column = firstArg<String>()
+            if (!values.containsKey(column)) throw NoSuchElementException("Column '$column' not found")
+            values[column]
+        }
+        every { row.getString(any<String>()) } answers { values[firstArg<String>()] as? String }
+        every { row.getLocalDate(any<String>()) } answers { values[firstArg<String>()] as? LocalDate }
+        every { row.getOffsetDateTime(any<String>()) } answers { values[firstArg<String>()] as? OffsetDateTime }
+        every { row.getBigDecimal(any<String>()) } answers { values[firstArg<String>()] as? BigDecimal }
+        return row
+    }
+
+    @Test
+    fun `无医嘱列的行不抛异常且两键为null`() {
+        // lockOrderTask / lockActivePlanTasks / CarePlanRevisionService.readPlanTasks
+        // 三者都对「没有 order_details / order_type 列」的行调用同一个 TaskService.toJson
+        // （readPlanTasks 见 CarePlanRevisionService.kt 中逐行 TaskService.toJson）。
+        for (values in listOf(taskRow(), taskRow(mapOf("order_item_id" to null)))) {
+            val json = TaskService.toJson(strictColumnRow(values))
+            assertTrue(json.containsKey("order_details"), "返回形状必须保留 order_details 键")
+            assertNull(json.getJsonObject("order_details"), "无该列时必须为 null 而不是抛异常")
+            assertTrue(json.containsKey("order_type"), "返回形状必须保留 order_type 键")
+            assertNull(json.getString("order_type"), "无该列时必须为 null 而不是抛异常")
+        }
+    }
+
+    @Test
+    fun `lockOrderTask与lockActivePlanTasks对无医嘱列的行不抛异常`() {
+        val service = TaskService(mockk<Pool>())
+
+        val lockStub = TaskStub(lockTasks = rowSet(strictColumnRow(taskRow())))
+        val locked =
+            requireNotNull(
+                service.lockOrderTask(lockStub.client, "ord-1")
+                    .toCompletionStage().toCompletableFuture().get(),
+            )
+        assertEquals("tsk-1", locked.getString("id"))
+        assertNull(locked.getJsonObject("order_details"))
+        assertNull(locked.getString("order_type"))
+
+        val planStub =
+            TaskStub(
+                lockTasks = rowSet(strictColumnRow(taskRow(mapOf("order_item_id" to null, "plan_item_id" to "pli-1")))),
+            )
+        val planTasks =
+            service.lockActivePlanTasks(planStub.client, "pln-1")
+                .toCompletionStage().toCompletableFuture().get()
+        assertEquals(1, planTasks.size)
+        assertEquals("tsk-1", planTasks[0].getString("id"))
+        assertNull(planTasks[0].getJsonObject("order_details"))
+        assertNull(planTasks[0].getString("order_type"))
+    }
+
+    // ——— 4. terminateOrderTask ———
 
     @Test
     fun `terminateOrderTask成功取消或完成任务`() {
@@ -238,7 +422,7 @@ class TaskServiceMedicalOrderTest {
         }
     }
 
-    // ——— 4. 公共 create 白名单 ———
+    // ——— 5. 公共 create 白名单 ———
 
     @Test
     fun `公共任务接口拒绝MEDICATION与TREATMENT`() {
@@ -289,6 +473,7 @@ private fun mockRow(values: Map<String, Any?>): Row {
     every { row.getLocalDate(any<String>()) } answers { values[firstArg<String>()] as? LocalDate }
     every { row.getOffsetDateTime(any<String>()) } answers { values[firstArg<String>()] as? OffsetDateTime }
     every { row.getBigDecimal(any<String>()) } answers { values[firstArg<String>()] as? BigDecimal }
+    every { row.getLong(any<String>()) } answers { (values[firstArg<String>()] as? Number)?.toLong() }
     return row
 }
 
