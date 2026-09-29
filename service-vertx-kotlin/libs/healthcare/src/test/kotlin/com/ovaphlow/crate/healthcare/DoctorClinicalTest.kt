@@ -248,12 +248,40 @@ class DoctorClinicalTest {
             .put(
                 "order_details",
                 JsonObject()
+                    // 025 MEDICATION 必须绑定目录药品：material_id 必填，drug_name 由服务端取目录名
+                    .put("material_id", "mat-1")
                     .put("drug_name", "降压药")
                     .put("frequency_code", "QD")
                     .put("frequency_name", "每日一次"),
             )
         overrides.forEach { (key, value) -> body.put(key, value) }
         return body
+    }
+
+    /** 025 目录药品端口桩：默认返回与 `drug_name` 一致的 ACTIVE 药品 */
+    private fun drugCatalogPort(
+        name: String? = "降压药",
+        category: String? = "药品",
+        status: String? = "ACTIVE",
+        code: String? = "DEMO-DRUG-001",
+        materialId: String = "mat-1",
+    ): DrugCatalogPort = object : DrugCatalogPort {
+        override fun findDrugMaterial(client: io.vertx.sqlclient.SqlClient, materialId2: String) =
+            Future.succeededFuture(
+                if (materialId2 != materialId) {
+                    null
+                } else {
+                    DrugCatalogMaterial(
+                        id = materialId,
+                        code = code,
+                        name = name,
+                        spec = "10mg/片",
+                        baseUnit = "片",
+                        status = status,
+                        category = category,
+                    )
+                },
+            )
     }
 
     private fun causeOf(future: Future<*>): Throwable {
@@ -626,7 +654,7 @@ class DoctorClinicalTest {
     @Test
     fun `新建医嘱写入order_class且响应带只读展示标签`() {
         val stub = DatabaseStub(orders = dcRows(orderRow(mapOf("order_class" to "TEMPORARY"))))
-        val future = HealthcareService(stub.pool).createOrder(
+        val future = HealthcareService(stub.pool, drugCatalogPort = drugCatalogPort()).createOrder(
             "enc-1",
             validOrderBody(
                 mapOf(
@@ -658,7 +686,7 @@ class DoctorClinicalTest {
                 validOrderBody(
                     mapOf(
                         "order_class" to "TEMPORARY",
-                        "order_details" to JsonObject().put("drug_name", "降压药"),
+                        "order_details" to JsonObject().put("material_id", "mat-1").put("drug_name", "降压药"),
                     ),
                 ),
             ),
@@ -751,12 +779,13 @@ class DoctorClinicalTest {
     @Test
     fun `PRN和STAT仍是频次不替代order_class`() {
         val stub = DatabaseStub(orders = dcRows(orderRow()))
-        val service = HealthcareService(stub.pool)
+        val service = HealthcareService(stub.pool, drugCatalogPort = drugCatalogPort(name = "硝酸甘油"))
 
         // 长期备用医嘱：LONG_TERM + PRN
         val longTermPrn = validOrderBody(
             mapOf(
                 "order_details" to JsonObject()
+                    .put("material_id", "mat-1")
                     .put("drug_name", "硝酸甘油")
                     .put("frequency_code", "PRN")
                     .put("frequency_name", "按需"),
@@ -771,14 +800,149 @@ class DoctorClinicalTest {
             mapOf(
                 "order_class" to "TEMPORARY",
                 "order_details" to JsonObject()
+                    .put("material_id", "mat-1")
                     .put("drug_name", "布洛芬")
                     .put("frequency_code", "STAT")
                     .put("frequency_name", "立即"),
             ),
         )
-        val result2 = HealthcareService(temporaryStub.pool)
+        val result2 = HealthcareService(temporaryStub.pool, drugCatalogPort = drugCatalogPort(name = "布洛芬"))
             .createOrder("enc-1", temporaryStat).toCompletionStage().toCompletableFuture().get()
         assertEquals("TEMPORARY", result2.getString("order_class"))
+    }
+
+    // ——— 3b. 025 药品目录绑定 ———
+
+    @Test
+    fun `用药医嘱缺material_id返回400且不触发SQL`() {
+        val stub = DatabaseStub()
+        val cause = causeOf(
+            HealthcareService(stub.pool, drugCatalogPort = drugCatalogPort()).createOrder(
+                "enc-1",
+                validOrderBody(
+                    mapOf(
+                        "order_details" to JsonObject()
+                            .put("drug_name", "降压药")
+                            .put("frequency_code", "QD")
+                            .put("frequency_name", "每日一次"),
+                    ),
+                ),
+            ),
+        )
+        assertInstanceOf(IllegalArgumentException::class.java, cause)
+        assertTrue(
+            cause.message?.contains("material_id is required for MEDICATION order") == true,
+            "got: ${cause.message}",
+        )
+        assertTrue(stub.queries.isEmpty(), "缺 material_id 必须在任何 SQL 之前返回 400")
+    }
+
+    @Test
+    fun `目录药品不存在返回404`() {
+        val stub = DatabaseStub(encounters = dcRows(encounterRow()), periods = dcRows(periodRow()))
+        val cause = causeOf(
+            HealthcareService(stub.pool, drugCatalogPort = drugCatalogPort()).createOrder(
+                "enc-1",
+                validOrderBody(mapOf("order_details" to JsonObject().put("material_id", "mat-missing"))),
+            ),
+        )
+        assertInstanceOf(HealthcareNotFoundException::class.java, cause)
+        assertTrue(cause.message?.contains("material not found") == true, "got: ${cause.message}")
+        assertTrue(
+            stub.queries.none { it.contains("insert into healthcare.medical_orders") },
+            "目录校验失败不得写医嘱: ${stub.queries}",
+        )
+    }
+
+    @Test
+    fun `非药品物资或未启用返回409`() {
+        val nonDrugStub = DatabaseStub(encounters = dcRows(encounterRow()), periods = dcRows(periodRow()))
+        val cause1 = causeOf(
+            HealthcareService(nonDrugStub.pool, drugCatalogPort = drugCatalogPort(category = "耗材"))
+                .createOrder("enc-1", validOrderBody()),
+        )
+        assertInstanceOf(ConflictException::class.java, cause1)
+        assertTrue(cause1.message?.contains("material is not a drug") == true, "got: ${cause1.message}")
+
+        val inactiveStub = DatabaseStub(encounters = dcRows(encounterRow()), periods = dcRows(periodRow()))
+        val cause2 = causeOf(
+            HealthcareService(inactiveStub.pool, drugCatalogPort = drugCatalogPort(status = "INACTIVE"))
+                .createOrder("enc-1", validOrderBody()),
+        )
+        assertInstanceOf(ConflictException::class.java, cause2)
+        assertTrue(cause2.message?.contains("material is not active") == true, "got: ${cause2.message}")
+
+        for (stub in listOf(nonDrugStub, inactiveStub)) {
+            assertTrue(
+                stub.queries.none { it.contains("insert into healthcare.medical_orders") },
+                "校验失败不得写医嘱: ${stub.queries}",
+            )
+        }
+    }
+
+    @Test
+    fun `drug_name与目录药名不一致返回400`() {
+        val stub = DatabaseStub(encounters = dcRows(encounterRow()), periods = dcRows(periodRow()))
+        val cause = causeOf(
+            HealthcareService(stub.pool, drugCatalogPort = drugCatalogPort(name = "降压药A")).createOrder(
+                "enc-1",
+                validOrderBody(),  // drug_name = 降压药，目录名为 降压药A
+            ),
+        )
+        assertInstanceOf(IllegalArgumentException::class.java, cause)
+        assertTrue(
+            cause.message?.contains("drug_name must match catalog material name") == true,
+            "got: ${cause.message}",
+        )
+        assertTrue(
+            stub.queries.none { it.contains("insert into healthcare.medical_orders") },
+            "名称漂移不得写医嘱: ${stub.queries}",
+        )
+    }
+
+    @Test
+    fun `药品目录端口未配置时fail_closed并返回503语义错误`() {
+        val stub = DatabaseStub(encounters = dcRows(encounterRow()), periods = dcRows(periodRow()))
+        val cause = causeOf(HealthcareService(stub.pool).createOrder("enc-1", validOrderBody()))
+        assertInstanceOf(DrugCatalogUnavailableException::class.java, cause)
+        assertTrue(cause.message?.contains("not configured") == true, "got: ${cause.message}")
+        assertTrue(
+            stub.queries.none { it.contains("insert into healthcare.medical_orders") },
+            "端口缺失必须 fail-closed，不得退化为自由文本开药: ${stub.queries}",
+        )
+    }
+
+    @Test
+    fun `服务端覆写药品目录快照并丢弃客户端伪造入参`() {
+        val stub = DatabaseStub(
+            encounters = dcRows(encounterRow()),
+            periods = dcRows(periodRow()),
+            orders = dcRows(orderRow()),
+        )
+        val body = validOrderBody(
+            mapOf(
+                "order_details" to JsonObject()
+                    .put("material_id", "mat-1")
+                    // 客户端伪造：目录编码/药品名/补绑审计一律由服务端决定
+                    .put("material_code", "FORGED")
+                    .put("material_name", "伪造药名")
+                    .put("material_bound_by", "hacker")
+                    .put("material_bound_at", "1970-01-01T00:00:00Z"),
+            ),
+        )
+        HealthcareService(stub.pool, drugCatalogPort = drugCatalogPort(name = "降压药A"))
+            .createOrder("enc-1", body).toCompletionStage().toCompletableFuture().get()
+
+        val details = stub.tuples
+            .first { it.first.contains("insert into healthcare.medical_orders") }
+            .second.filterIsInstance<JsonObject>()
+            .first { it.containsKey("material_id") }
+        assertEquals("mat-1", details.getString("material_id"))
+        assertEquals("降压药A", details.getString("drug_name"), "drug_name 必须取目录药名")
+        assertEquals("降压药A", details.getString("material_name"), "material_name 必须为目录快照")
+        assertEquals("DEMO-DRUG-001", details.getString("material_code"), "material_code 必须为目录快照")
+        assertFalse(details.containsKey("material_bound_by"), "创建路径不得接受客户端补绑审计")
+        assertFalse(details.containsKey("material_bound_at"), "创建路径不得接受客户端补绑审计")
     }
 
     // ——— 公共辅助 ———

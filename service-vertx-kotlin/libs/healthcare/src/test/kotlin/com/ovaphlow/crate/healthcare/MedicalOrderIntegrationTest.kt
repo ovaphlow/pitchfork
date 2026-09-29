@@ -1,13 +1,17 @@
 package com.ovaphlow.crate.healthcare
 
 import com.ovaphlow.crate.database.DatabaseConfig
+import com.ovaphlow.crate.inventories.InventoriesRoutes
+import com.ovaphlow.crate.inventories.MaterialService
 import com.ovaphlow.crate.nursing.NursingRoutes
+import io.vertx.core.Future
 import io.vertx.core.Vertx
 import io.vertx.core.http.HttpMethod
 import io.vertx.core.json.JsonObject
 import io.vertx.ext.web.Router
 import io.vertx.junit5.VertxExtension
 import io.vertx.junit5.VertxTestContext
+import io.vertx.sqlclient.SqlClient
 import org.junit.jupiter.api.*
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty
@@ -44,6 +48,21 @@ class MedicalOrderIntegrationTest {
         private const val FIXTURE_PREFIX = "mo-"
         private const val HEALTHCARE_BASE = "/healthcare/v1"
         private const val NURSING_BASE = "/nursing/v1"
+        /** 半挂载路径：只用于验证 025 药品目录端口缺失时必须 fail-closed 503 */
+        private const val HEALTHCARE_NO_PORT_BASE = "/healthcare-noport/v1"
+
+        /**
+         * 025 V204 预置的演示药品（固定 ULID 常量，见迁移注释「可稳定引用」）。
+         * 断言 1 用它验证「药品目录可被冻结契约检索到」。
+         */
+        private const val DEMO_DRUG_001_ID = "01J5D3M000000000000000A001"
+        private const val DEMO_DRUG_001_CODE = "DEMO-DRUG-001"
+        private const val DEMO_DRUG_001_NAME = "降压药A"
+
+        /** 025 `mo-` 前缀目录药品 fixture（见 setupFixtures） */
+        private const val DRUG_CODE = "MO-DRUG-ACTIVE"
+        private const val DRUG_NAME = "医嘱测试降压药"
+        private const val INACTIVE_DRUG_NAME = "医嘱停用降压药"
     }
 
     private lateinit var host: String
@@ -63,9 +82,10 @@ class MedicalOrderIntegrationTest {
         port = System.getProperty("integration.db.port", "5432")
         user = System.getProperty("integration.db.user", "ovaphlow")
         password = System.getenv("PITCHFORK_DB_PASSWORD") ?: ""
+        // 兜底门控：只给了 -Dintegration.db.host 而缺密码时，按 JUnit 假设失败 skip 整个类，不让模块变红。
+        Assumptions.assumeTrue(password.isNotBlank(), "integration test skipped: 需要 PITCHFORK_DB_PASSWORD 才会运行")
 
         try {
-            if (password.isBlank()) throw IllegalStateException("PITCHFORK_DB_PASSWORD must be set")
             check(port == "55432" || port == "5432") { "integration test must target the authorized aceso_test port" }
 
             // 连接既有 aceso_test（绝不 DROP/CREATE）；迁移幂等，重复执行安全
@@ -77,9 +97,18 @@ class MedicalOrderIntegrationTest {
             DatabaseConfig.migrate(dbConfig)
             pool = DatabaseConfig.createPool(vertx, dbConfig)
 
-            // 挂载与 aceso Main.kt 相同的 healthcare + nursing 路由
+            // 挂载与 aceso Main.kt 相同的 healthcare + nursing 路由。
+            // 025：药品目录端口必须显式注入（Main.kt 用 MaterialService 适配），
+            // 否则 MEDICATION 医嘱会 fail-closed 503——这里注入与生产一致的适配器。
+            val materialService = MaterialService(pool)
             val rootRouter = Router.router(vertx)
-            rootRouter.route("/healthcare/v1/*").subRouter(HealthcareRoutes.create(vertx, pool))
+            rootRouter.route("/inventories/v1/*").subRouter(InventoriesRoutes.create(vertx, pool))
+            rootRouter.route("/healthcare/v1/*").subRouter(
+                HealthcareRoutes.create(vertx, pool, drugCatalogPort = drugCatalogPort(materialService)),
+            )
+            // 025 §4.5.1 fail-closed 专用挂载点：不注入药品目录端口，
+            // 任何 MEDICATION 医嘱都必须 503 而不是退化为自由文本开药。
+            rootRouter.route("$HEALTHCARE_NO_PORT_BASE/*").subRouter(HealthcareRoutes.create(vertx, pool))
             rootRouter.route("/nursing/v1/*").subRouter(NursingRoutes.create(vertx, pool))
             vertx.createHttpServer()
                 .requestHandler(rootRouter)
@@ -112,9 +141,15 @@ class MedicalOrderIntegrationTest {
 
     @AfterAll
     fun teardown(ctx: VertxTestContext) {
+        // @BeforeAll 被 Assumptions 跳过（缺密码）时 JUnit 仍会调用 @AfterAll：
+        // 此时没有连接池与 fixture，直接结束，避免把 skip 变成失败。
+        if (!::pool.isInitialized) {
+            ctx.completeNow()
+            return
+        }
         cleanupFixtures()
         assertResidualZero()
-        if (::pool.isInitialized) pool.close()
+        pool.close()
         server?.close { ar ->
             if (ar.succeeded()) ctx.completeNow()
             else ctx.failNow(ar.cause())
@@ -186,6 +221,12 @@ class MedicalOrderIntegrationTest {
             stmt.execute("INSERT INTO public.stocks (id, warehouse, material_id, lot_id, quantity, locked_quantity, total_cost) VALUES ('${fixtureId("stock-bait")}', '主库', '${fixtureId("mat-bait")}', '${fixtureId("lot-bait")}', 10, 0, 0) ON CONFLICT (id) DO NOTHING")
             stmt.execute("INSERT INTO public.stock_operations (id, order_no, operation_type, warehouse, status) VALUES ('${fixtureId("op-bait")}', 'MO-OP-1', 'INBOUND', '主库', 'CONFIRMED') ON CONFLICT (id) DO NOTHING")
             stmt.execute("INSERT INTO public.stock_operation_details (id, operation_id, material_id, lot_id, quantity, unit, unit_cost, total_cost) VALUES ('${fixtureId("opd-bait")}', '${fixtureId("op-bait")}', '${fixtureId("mat-bait")}', '${fixtureId("lot-bait")}', 10, 'PACKAGE', 0, 0) ON CONFLICT (id) DO NOTHING")
+
+            // ——— 025 药品目录 fixture（全部 `mo-` 前缀，随既有清理逆序删除）———
+            // 合法目录药品：category = '药品' 且 status = 'ACTIVE'
+            stmt.execute("INSERT INTO public.materials (id, code, name, category, spec, base_unit, quantity_scale, package_unit, package_size, status) VALUES ('${fixtureId("drug")}', 'MO-DRUG-ACTIVE', '医嘱测试降压药', '药品', '10mg/片', '片', 0, '盒', 10, 'ACTIVE') ON CONFLICT (id) DO NOTHING")
+            // 非 ACTIVE 药品：用于验证 status != ACTIVE → 409
+            stmt.execute("INSERT INTO public.materials (id, code, name, category, spec, base_unit, quantity_scale, package_unit, package_size, status) VALUES ('${fixtureId("drug-inactive")}', 'MO-DRUG-INACTIVE', '医嘱停用降压药', '药品', '10mg/片', '片', 0, '盒', 10, 'INACTIVE') ON CONFLICT (id) DO NOTHING")
         }
     }
 
@@ -252,6 +293,28 @@ class MedicalOrderIntegrationTest {
         check(residual() == 0L) { "mo- fixture cleanup left residual data" }
     }
 
+    /**
+     * 025 药品目录端口适配器（测试侧）：与 `apps/aceso/Main.kt` 的
+     * `healthcareDrugCatalogPort` 逐字段一致，全部复用调用方传入的同连接 `client`。
+     */
+    private fun drugCatalogPort(materialService: MaterialService): DrugCatalogPort =
+        object : DrugCatalogPort {
+            override fun findDrugMaterial(client: SqlClient, materialId: String): Future<DrugCatalogMaterial?> =
+                materialService.findMaterialById(client, materialId).map { material ->
+                    material?.let {
+                        DrugCatalogMaterial(
+                            id = it.id,
+                            code = it.code,
+                            name = it.name,
+                            spec = it.spec,
+                            baseUnit = it.baseUnit,
+                            status = it.status,
+                            category = it.category,
+                        )
+                    }
+                }
+        }
+
     private fun request(
         vertx: Vertx,
         method: HttpMethod,
@@ -272,24 +335,40 @@ class MedicalOrderIntegrationTest {
         }.onComplete { client.close() }
     }
 
-    private fun medicationBody(content: String = "阿莫西林 0.5g 每日两次"): JsonObject =
+    /**
+     * 025 起 `MEDICATION` 医嘱必须携带目录物资 `material_id`，`drug_name` 由服务端
+     * 取目录名覆写；默认使用 `mo-drug`（ACTIVE 药品）。
+     *
+     * @param materialId 传 null 表示省略 `material_id`（缺必填 → 400）；
+     *                   传 `OMIT` 之外的哨兵请用 [medicationDetails] 自行构造明细。
+     * @param drugName 显式药名；与目录名不一致时服务端必须 400
+     */
+    private fun medicationBody(
+        content: String = "阿莫西林 0.5g 每日两次",
+        materialId: String? = fixtureId("drug"),
+        drugName: String? = DRUG_NAME,
+    ): JsonObject =
         JsonObject()
             .put("order_type", "MEDICATION")
             .put("order_class", "LONG_TERM")
             .put("order_content", content)
             .put("doctor", "赵医生")
             .put("start_time", "2026-08-01T10:00:00+08:00")
-            .put(
-                "order_details",
-                JsonObject()
-                    .put("drug_name", "阿莫西林")
-                    .put("dose", "0.5g")
-                    .put("unit", "片/次")
-                    .put("route", "口服")
-                    .put("frequency_code", "QD")
-                    .put("frequency_name", "每日一次")
-                    .put("duration_days", 2),
-            )
+            .put("order_details", medicationDetails(materialId, drugName))
+
+    /** 025 `MEDICATION` 明细构造器：`materialId == null` 时不写 `material_id` 键。 */
+    private fun medicationDetails(materialId: String?, drugName: String?): JsonObject {
+        val details = JsonObject()
+            .put("dose", "0.5g")
+            .put("unit", "片/次")
+            .put("route", "口服")
+            .put("frequency_code", "QD")
+            .put("frequency_name", "每日一次")
+            .put("duration_days", 2)
+        if (materialId != null) details.put("material_id", materialId)
+        if (drugName != null) details.put("drug_name", drugName)
+        return details
+    }
 
     private fun therapyBody(content: String = "康复理疗 30 分钟"): JsonObject =
         JsonObject()
@@ -504,23 +583,23 @@ class MedicalOrderIntegrationTest {
                     assertEquals(400, status, "NURSING 类型必须 400")
                     assertNotNull(body.getString("error"))
                 }
-                // 未知明细键
+                // 未知明细键（025：其余明细合法，只留未知键触发 400）
                 val unknown = medicationBody()
-                unknown.put("order_details", JsonObject().put("drug_name", "阿莫西林").put("hacker_key", "x"))
+                unknown.put("order_details", medicationDetails(fixtureId("drug"), DRUG_NAME).put("hacker_key", "x"))
                 request(vertx, HttpMethod.POST, "$HEALTHCARE_BASE/encounters/${fixtureId("enc-1")}/orders", unknown)
             }
             .compose { (status, _) ->
                 ctx.verify { assertEquals(400, status, "未知明细键必须 400") }
                 // 负时长
                 val negDuration = medicationBody()
-                negDuration.put("order_details", JsonObject().put("drug_name", "阿莫西林").put("duration_days", -1))
+                negDuration.put("order_details", medicationDetails(fixtureId("drug"), DRUG_NAME).put("duration_days", -1))
                 request(vertx, HttpMethod.POST, "$HEALTHCARE_BASE/encounters/${fixtureId("enc-1")}/orders", negDuration)
             }
             .compose { (status, _) ->
                 ctx.verify { assertEquals(400, status, "负数时长必须 400") }
                 // 频次 code/name 不成对
                 val pair = medicationBody()
-                pair.put("order_details", JsonObject().put("drug_name", "阿莫西林").put("frequency_code", "QD"))
+                pair.put("order_details", medicationDetails(fixtureId("drug"), DRUG_NAME).also { it.remove("frequency_name") })
                 request(vertx, HttpMethod.POST, "$HEALTHCARE_BASE/encounters/${fixtureId("enc-1")}/orders", pair)
             }
             .compose { (status, _) ->
@@ -540,6 +619,248 @@ class MedicalOrderIntegrationTest {
                         val orders = conn.createStatement().executeQuery("SELECT count(*) FROM healthcare.medical_orders WHERE encounter_id = '${fixtureId("enc-1")}'")
                         orders.next()
                         assertEquals(0, orders.getLong(1), "全部校验失败后不得残留医嘱行")
+                        promise.complete()
+                    }
+                }
+            }
+            .onSuccess { ctx.completeNow() }
+            .onFailure { ctx.failNow(it) }
+    }
+
+    // ——— 025 §7.2 断言 1：药品目录即物资主数据，可被冻结契约检索到 ———
+
+    @Test
+    fun `025药品目录可被category与status检索到且非ACTIVE药品与耗材不出现`(vertx: Vertx, ctx: VertxTestContext) {
+        request(
+            vertx,
+            HttpMethod.GET,
+            "/inventories/v1/materials?category=%E8%8D%AF%E5%93%81&status=ACTIVE&limit=200",
+        )
+            .compose { (status, body) ->
+                ctx.verify {
+                    assertEquals(200, status, "目录检索必须 200: ${body.encode()}")
+                    val records = body.getJsonArray("records")
+                    assertNotNull(records, "响应必须是 {records, meta} 形状")
+                    val ids = records.map { (it as JsonObject).getString("id") }
+                    val names = records.map { (it as JsonObject).getString("name") }
+
+                    // V204 预置演示药品必须可按冻结契约检索到（断言 1 的核心）
+                    assertTrue(
+                        ids.contains(DEMO_DRUG_001_ID),
+                        "V204 预置药品 $DEMO_DRUG_001_CODE 必须出现，实际 id=$ids",
+                    )
+                    assertTrue(names.contains(DEMO_DRUG_001_NAME), "预置药品名必须为 $DEMO_DRUG_001_NAME")
+                    // mo- fixture 的 ACTIVE 药品必须出现
+                    assertTrue(
+                        records.any { (it as JsonObject).getString("code") == DRUG_CODE },
+                        "fixture 药品 $DRUG_CODE 必须出现",
+                    )
+                    // 非 ACTIVE 药品必须被 status 过滤掉
+                    assertTrue(
+                        records.none { (it as JsonObject).getString("name") == INACTIVE_DRUG_NAME },
+                        "INACTIVE 药品不得出现在 status=ACTIVE 结果中",
+                    )
+                    // 耗材必须被 category 过滤掉
+                    assertTrue(
+                        records.none { (it as JsonObject).getString("id") == fixtureId("mat-bait") },
+                        "耗材不得出现在 category=药品 结果中",
+                    )
+                    // 每条都必须是 药品 + ACTIVE
+                    records.forEach {
+                        val row = it as JsonObject
+                        assertEquals("药品", row.getString("category"))
+                        assertEquals("ACTIVE", row.getString("status"))
+                    }
+                }
+                io.vertx.core.Future.succeededFuture<Unit>(Unit)
+            }
+            .onSuccess { ctx.completeNow() }
+            .onFailure { ctx.failNow(it) }
+    }
+
+    // ——— 025 §7.2 断言 2：用药医嘱必须绑定目录药品，四类非法输入的错误码固定 ———
+
+    @Test
+    fun `025用药医嘱缺material_id返回400且不落库不建任务`(vertx: Vertx, ctx: VertxTestContext) {
+        request(
+            vertx,
+            HttpMethod.POST,
+            "$HEALTHCARE_BASE/encounters/${fixtureId("enc-1")}/orders",
+            medicationBody(materialId = null, drugName = DRUG_NAME),
+        )
+            .compose { (status, body) ->
+                ctx.verify {
+                    assertEquals(400, status, "缺 material_id 必须 400: ${body.encode()}")
+                    assertEquals(
+                        "material_id is required for MEDICATION order",
+                        body.getString("error"),
+                        "错误文案必须固定，供前端与测试稳定断言",
+                    )
+                }
+                io.vertx.core.Future.future<Unit> { promise ->
+                    DriverManager.getConnection(jdbcUrl(), user, password).use { conn ->
+                        val orders = conn.createStatement().executeQuery(
+                            "SELECT count(*) FROM healthcare.medical_orders WHERE encounter_id = '${fixtureId("enc-1")}'",
+                        )
+                        orders.next()
+                        assertEquals(0L, orders.getLong(1), "校验失败不得残留医嘱行")
+                        val tasks = conn.createStatement().executeQuery(
+                            "SELECT count(*) FROM nursing.nursing_tasks WHERE encounter_id = '${fixtureId("enc-1")}'",
+                        )
+                        tasks.next()
+                        assertEquals(0L, tasks.getLong(1), "校验失败不得残留护理任务行")
+                        promise.complete()
+                    }
+                }
+            }
+            .onSuccess { ctx.completeNow() }
+            .onFailure { ctx.failNow(it) }
+    }
+
+    @Test
+    fun `025用药医嘱material_id非药品或非ACTIVE或不存在分别409与404`(vertx: Vertx, ctx: VertxTestContext) {
+        // 1. 耗材（category != 药品）→ 409，且不得落库
+        request(
+            vertx,
+            HttpMethod.POST,
+            "$HEALTHCARE_BASE/encounters/${fixtureId("enc-1")}/orders",
+            medicationBody(materialId = fixtureId("mat-bait"), drugName = "诱饵材料"),
+        )
+            .compose { (status, body) ->
+                ctx.verify {
+                    assertEquals(409, status, "耗材作 material_id 必须 409: ${body.encode()}")
+                    assertEquals("material is not a drug: ${fixtureId("mat-bait")}", body.getString("error"))
+                }
+                // 2. 存在但 status != ACTIVE → 409
+                request(
+                    vertx,
+                    HttpMethod.POST,
+                    "$HEALTHCARE_BASE/encounters/${fixtureId("enc-1")}/orders",
+                    medicationBody(materialId = fixtureId("drug-inactive"), drugName = INACTIVE_DRUG_NAME),
+                )
+            }
+            .compose { (status, body) ->
+                ctx.verify {
+                    assertEquals(409, status, "非 ACTIVE 药品必须 409: ${body.encode()}")
+                    assertEquals("material is not active: ${fixtureId("drug-inactive")}", body.getString("error"))
+                }
+                // 3. 物资不存在 → 404
+                request(
+                    vertx,
+                    HttpMethod.POST,
+                    "$HEALTHCARE_BASE/encounters/${fixtureId("enc-1")}/orders",
+                    medicationBody(materialId = fixtureId("ghost"), drugName = "不存在药品"),
+                )
+            }
+            .compose { (status, body) ->
+                ctx.verify {
+                    assertEquals(404, status, "不存在物资必须 404: ${body.encode()}")
+                    assertEquals("material not found: ${fixtureId("ghost")}", body.getString("error"))
+                }
+                io.vertx.core.Future.future<Unit> { promise ->
+                    DriverManager.getConnection(jdbcUrl(), user, password).use { conn ->
+                        val orders = conn.createStatement().executeQuery(
+                            "SELECT count(*) FROM healthcare.medical_orders WHERE encounter_id = '${fixtureId("enc-1")}'",
+                        )
+                        orders.next()
+                        assertEquals(0L, orders.getLong(1), "三类目录校验失败均不得残留医嘱行")
+                        promise.complete()
+                    }
+                }
+            }
+            .onSuccess { ctx.completeNow() }
+            .onFailure { ctx.failNow(it) }
+    }
+
+    @Test
+    fun `025合法目录药品创建医嘱服务端覆写名称与编码且忽略客户端快照入参`(vertx: Vertx, ctx: VertxTestContext) {
+        // 客户端伪造 material_code / material_name / 补绑审计：服务端必须接受入参但一律丢弃
+        val body = medicationBody()
+        val forged = medicationDetails(fixtureId("drug"), DRUG_NAME)
+            .put("material_code", "FORGED-CODE")
+            .put("material_name", "伪造药品名")
+            .put("material_bound_by", "伪造操作人")
+            .put("material_bound_at", "1970-01-01T00:00:00Z")
+        body.put("order_details", forged)
+
+        request(vertx, HttpMethod.POST, "$HEALTHCARE_BASE/encounters/${fixtureId("enc-1")}/orders", body)
+            .compose { (status, order) ->
+                ctx.verify {
+                    assertEquals(201, status, "合法目录药品必须 201: ${order.encode()}")
+                    assertEquals("MEDICATION", order.getString("order_type"))
+                    assertNotNull(order.getString("id"))
+                }
+                io.vertx.core.Future.future<Unit> { promise ->
+                    DriverManager.getConnection(jdbcUrl(), user, password).use { conn ->
+                        val rs = conn.createStatement().executeQuery(
+                            "SELECT order_details::text AS details FROM healthcare.medical_orders WHERE encounter_id = '${fixtureId("enc-1")}'",
+                        )
+                        assertTrue(rs.next(), "医嘱必须落库")
+                        val details = JsonObject(rs.getString("details"))
+                        assertEquals(fixtureId("drug"), details.getString("material_id"), "material_id 必须原样保留")
+                        assertEquals(DRUG_NAME, details.getString("material_name"), "material_name 必须被目录名覆写")
+                        assertEquals(DRUG_NAME, details.getString("drug_name"), "drug_name 必须被目录名覆写")
+                        assertEquals(DRUG_CODE, details.getString("material_code"), "material_code 必须被目录编码覆写")
+                        assertNull(details.getString("material_bound_by"), "开立路径不得写入补绑审计")
+                        assertNull(details.getString("material_bound_at"), "开立路径不得写入补绑时间")
+                        promise.complete()
+                    }
+                }
+            }
+            .onSuccess { ctx.completeNow() }
+            .onFailure { ctx.failNow(it) }
+    }
+
+    @Test
+    fun `025drug_name与目录名不一致返回400且不落库`(vertx: Vertx, ctx: VertxTestContext) {
+        request(
+            vertx,
+            HttpMethod.POST,
+            "$HEALTHCARE_BASE/encounters/${fixtureId("enc-1")}/orders",
+            medicationBody(materialId = fixtureId("drug"), drugName = "与目录不一致的药名"),
+        )
+            .compose { (status, body) ->
+                ctx.verify {
+                    assertEquals(400, status, "药名与目录不一致必须 400: ${body.encode()}")
+                    assertEquals("drug_name must match catalog material name", body.getString("error"))
+                }
+                io.vertx.core.Future.future<Unit> { promise ->
+                    DriverManager.getConnection(jdbcUrl(), user, password).use { conn ->
+                        val orders = conn.createStatement().executeQuery(
+                            "SELECT count(*) FROM healthcare.medical_orders WHERE encounter_id = '${fixtureId("enc-1")}'",
+                        )
+                        orders.next()
+                        assertEquals(0L, orders.getLong(1), "药名漂移不得残留医嘱行")
+                        promise.complete()
+                    }
+                }
+            }
+            .onSuccess { ctx.completeNow() }
+            .onFailure { ctx.failNow(it) }
+    }
+
+    // ——— 025 §4.5.1：端口缺失必须 fail-closed 503，不得退化为自由文本开药 ———
+
+    @Test
+    fun `025药品目录端口未注入时用药医嘱fail-closed返回503`(vertx: Vertx, ctx: VertxTestContext) {
+        request(
+            vertx,
+            HttpMethod.POST,
+            "$HEALTHCARE_NO_PORT_BASE/encounters/${fixtureId("enc-1")}/orders",
+            medicationBody(),
+        )
+            .compose { (status, body) ->
+                ctx.verify {
+                    assertEquals(503, status, "端口缺失必须 503 而不是静默放行: ${body.encode()}")
+                    assertEquals("drug catalog port is not configured", body.getString("error"))
+                }
+                io.vertx.core.Future.future<Unit> { promise ->
+                    DriverManager.getConnection(jdbcUrl(), user, password).use { conn ->
+                        val orders = conn.createStatement().executeQuery(
+                            "SELECT count(*) FROM healthcare.medical_orders WHERE encounter_id = '${fixtureId("enc-1")}'",
+                        )
+                        orders.next()
+                        assertEquals(0L, orders.getLong(1), "fail-closed 不得落库")
                         promise.complete()
                     }
                 }

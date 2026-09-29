@@ -68,7 +68,17 @@ export default function OrdersCheckPage() {
   const columns: Column<NurseCheckPendingOrder>[] = [
     { key: "patient_name", header: "长者", render: (row) => row.patient_name || row.patient_id },
     { key: "encounter_no", header: "住院号", className: "min-w-[110px]", render: (row) => row.encounter_no ?? "-" },
-    { key: "drug_name", header: "药品", className: "min-w-[120px]", render: (row) => String(details(row).drug_name ?? row.order_content) },
+    { key: "drug_name", header: "药品", className: "min-w-[140px]", render: (row) => {
+        const d = details(row);
+        const code = d.material_code ? String(d.material_code) : "";
+        return (
+          <div>
+            <div>{String(d.drug_name ?? row.order_content)}</div>
+            {/* 025：用药医嘱绑定药品目录后展示目录编码，便于核对与药房发药对账 */}
+            <div className="text-xs text-fg-dimmed">{code ? `目录编码 ${code}` : "未绑定药品目录"}</div>
+          </div>
+        );
+      } },
     { key: "dose", header: "剂量", render: (row) => {
         const d = details(row);
         return d.dose ? `${String(d.dose)}${d.unit ? ` ${String(d.unit)}` : ""}` : "-";

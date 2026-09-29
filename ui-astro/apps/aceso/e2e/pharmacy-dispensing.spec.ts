@@ -434,6 +434,7 @@ async function createMedicationOrder(
   page: Page,
   admission: AdmissionResponse,
   suffix: string,
+  material: { materialId: string; materialName: string },
 ): Promise<MedicalOrder> {
   const order = await api<MedicalOrder>(
     page,
@@ -447,7 +448,9 @@ async function createMedicationOrder(
         doctor: "测试医生",
         start_time: "2026-08-06T08:00:00+08:00",
         order_details: {
-          drug_name: "氨氯地平片",
+          // 025：用药医嘱必须从目录选药，material_id 必填且 drug_name 必须等于目录名
+          material_id: material.materialId,
+          drug_name: material.materialName,
           dose: "1",
           unit: "片",
           route: "口服",
@@ -472,6 +475,17 @@ async function selectFirstOption(page: Page, selectLocator: Locator) {
   await selectLocator.selectOption(value);
 }
 
+/**
+ * 选择第一个可用库存批次。
+ * 025 起发药弹窗把「药品物资」与「库存批次」拆成两个选择器：`#dispense-stock` 必选，
+ * 否则前端会以「请选择可用库存批次」拦下提交。
+ */
+async function selectFirstStock(page: Page, modal: Locator) {
+  const stockSelect = modal.locator("#dispense-stock");
+  await expect(stockSelect).toBeEnabled({ timeout: 10_000 });
+  await selectFirstOption(page, stockSelect);
+}
+
 async function createDispenseViaUi(
   page: Page,
   order: MedicalOrder,
@@ -485,7 +499,17 @@ async function createDispenseViaUi(
   const modal = modalByTitle(page, "创建发药单");
   await expect(modal).toBeVisible();
   await modal.locator("#dispense-warehouse").selectOption(warehouse);
-  await selectFirstOption(page, modal.locator("#dispense-material"));
+
+  // 025：医嘱已绑定目录药品时 #dispense-material 禁用且只有一个选项（预选医嘱绑定药品），
+  // 只有历史自由文本医嘱才需要药房在这里补选目录药品。
+  const materialSelect = modal.locator("#dispense-material");
+  if (!(await materialSelect.isDisabled())) {
+    await selectFirstOption(page, materialSelect);
+  } else {
+    await expect(materialSelect.locator("option")).toHaveCount(1);
+  }
+
+  await selectFirstStock(page, modal);
   await modal.locator("#dispense-operator").waitFor({ state: "visible" });
   await selectFirstOption(page, modal.locator("#dispense-operator"));
   await modal.getByRole("button", { name: "创建发药单" }).click();
@@ -522,9 +546,11 @@ test.afterEach(async () => {
 test("药房主线：接方→审方→调配→发药确认，库存出库只发生一次", async ({ page }) => {
   const suffix = "FLOW";
   const admission = await createActiveAdmission(page, suffix);
-  const order = await createMedicationOrder(page, admission, suffix);
   const warehouse = await getWarehouseCode(page);
+  // 025：药品目录物资必须先建好（含批次与入库），医嘱才能绑定它；
+  // 顺序与 011 相反——现在是「先建目录药品，再按目录开医嘱」。
   const inventory = await createInventoryFixture(page, suffix, warehouse);
+  const order = await createMedicationOrder(page, admission, suffix, inventory);
 
   await createDispenseViaUi(page, order, warehouse);
 
@@ -611,9 +637,9 @@ test("药房主线：接方→审方→调配→发药确认，库存出库只�
 test("取消后不产生库存操作，且医嘱可重新接方；重复接方返回 409", async ({ page }) => {
   const suffix = "CANCEL";
   const admission = await createActiveAdmission(page, suffix);
-  const order = await createMedicationOrder(page, admission, suffix);
   const warehouse = await getWarehouseCode(page);
   const inventory = await createInventoryFixture(page, suffix, warehouse);
+  const order = await createMedicationOrder(page, admission, suffix, inventory);
 
   await createDispenseViaUi(page, order, warehouse);
 
@@ -661,7 +687,7 @@ test("取消后不产生库存操作，且医嘱可重新接方；重复接方�
     },
   );
   const createdDetail = created.items[0];
-  expect(createdDetail?.material_id).toBeTruthy();
+  expect(createdDetail?.material_id).toBe(inventory.materialId);
   const duplicateStatus = await page.evaluate(
     async ({ baseUrl, body }) => {
       const response = await fetch(`${baseUrl}/crate-api/pharmacy/v1/dispenses/from-medical-order`, {
@@ -684,4 +710,67 @@ test("取消后不产生库存操作，且医嘱可重新接方；重复接方�
     },
   );
   expect(duplicateStatus).toBe(409);
+});
+
+/**
+ * 计划 §7.3 手测主线第 7 条的反向用例（选错药 → 被服务端拒绝）。
+ *
+ * 025 之后 UI 已不可能触发：医嘱绑定目录药品时 `#dispense-material` 被禁用且只有
+ * 绑定药品一个选项（见 PharmacyPage.tsx）。因此这里降级为 **API 层断言**，
+ * 验证服务端仍然是最终权威——即使绕过 UI 提交不一致的 `material_id` 也必须 409。
+ */
+test("025反向用例：绕过 UI 提交与医嘱绑定不一致的药品由服务端拒绝且无副作用", async ({ page }) => {
+  const suffix = "MISMATCH";
+  const admission = await createActiveAdmission(page, suffix);
+  const warehouse = await getWarehouseCode(page);
+  // 医嘱绑定 inventory；另一个目录药品 other 用于构造「选错药」
+  const inventory = await createInventoryFixture(page, suffix, warehouse);
+  const other = await createInventoryFixture(page, `${suffix}2`, warehouse);
+  const order = await createMedicationOrder(page, admission, suffix, inventory);
+
+  const rejected = await page.evaluate(
+    async ({ baseUrl, body }) => {
+      const response = await fetch(`${baseUrl}/crate-api/pharmacy/v1/dispenses/from-medical-order`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(body),
+      });
+      return { status: response.status, body: await response.json().catch(() => ({})) };
+    },
+    {
+      baseUrl: requiredEnvironment("PLAYWRIGHT_API_BASE_URL", API_BASE_URL),
+      body: {
+        medical_order_id: order.id,
+        warehouse,
+        material_id: other.materialId,
+        lot_id: other.lotId,
+        dispensed_quantity: "1",
+      },
+    },
+  );
+  expect(rejected.status).toBe(409);
+  expect(String(rejected.body.error)).toBe("material_id does not match the prescribed drug");
+
+  // 无副作用：该入住没有发药单，两个物资都没有出库明细，库存保持入库时的数量
+  const dispenses = await databasePool.query<{ count: string }>(
+    `SELECT count(*)::text AS count FROM pharmacy.pharmacy_dispenses WHERE encounter_id = $1`,
+    [admission.encounter.id],
+  );
+  expect(dispenses.rows[0]?.count ?? "0").toBe("0");
+
+  const outbound = await databasePool.query<{ count: string }>(
+    `SELECT count(*)::text AS count
+     FROM public.stock_operation_details detail
+     JOIN public.stock_operations operation ON operation.id = detail.operation_id
+     WHERE detail.material_id = ANY($1) AND operation.operation_type = 'OUTBOUND'`,
+    [[inventory.materialId, other.materialId]],
+  );
+  expect(outbound.rows[0]?.count ?? "0").toBe("0");
+
+  const stocks = await databasePool.query<{ quantity: string }>(
+    `SELECT quantity::text AS quantity FROM public.stocks WHERE material_id = ANY($1) ORDER BY material_id`,
+    [[inventory.materialId, other.materialId]],
+  );
+  expect(stocks.rows.map((row) => Number(row.quantity))).toEqual([10, 10]);
 });

@@ -32,9 +32,14 @@ object HealthcareRoutes {
         billAuthHandler: Handler<RoutingContext>? = null,
         paymentAuthHandler: Handler<RoutingContext>? = null,
         encounterAuthHandler: Handler<RoutingContext>? = null,
+        /**
+         * 025 药品目录端口：由 Aceso `Main.kt` 注入。为 null 时 `MEDICATION` 医嘱
+         * fail-closed 返回 503（部署未接线），绝不退化为自由文本开药。
+         */
+        drugCatalogPort: DrugCatalogPort? = null,
     ): Router {
         val router = Router.router(vertx)
-        val service = HealthcareService(pool)
+        val service = HealthcareService(pool, drugCatalogPort = drugCatalogPort)
         val chronicDiseaseService = ChronicDiseaseService(pool)
         val followupService = FollowupService(pool, chronicDiseaseService = chronicDiseaseService)
         val vitalSignService = VitalSignService(pool)
@@ -989,6 +994,8 @@ object HealthcareRoutes {
             is NotFoundException -> respond(ctx, 404, error.message)
             is ConflictException -> respond(ctx, 409, error.message)
             is DuplicateBillException -> respond(ctx, 409, error.message)
+            // 025 药品目录端口未接线：fail-closed，不降级为跳过校验
+            is DrugCatalogUnavailableException -> respond(ctx, 503, error.message)
             else -> {
                 log.error("healthcare route error", error)
                 respond(ctx, 500, "internal error")

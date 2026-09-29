@@ -12,9 +12,10 @@ object DispenseRoutes {
         pool: Pool,
         medicalOrderReader: MedicalOrderReader,
         inventoryOutboundPort: InventoryOutboundPort,
+        drugCatalogPort: DrugCatalogPort? = null,
     ): Router {
         val router = Router.router(vertx)
-        val service = DispenseService(pool, medicalOrderReader, inventoryOutboundPort)
+        val service = DispenseService(pool, medicalOrderReader, inventoryOutboundPort, drugCatalogPort)
 
         router.route().handler(BodyHandler.create())
 
@@ -31,8 +32,10 @@ object DispenseRoutes {
         }
 
         // ─── 4.2 从医嘱创建发药单 ───────────────────────────────────────────
+        // 025 补绑路径需要可信操作人：取服务端解析的认证身份（ctx["userId"]），
+        // 不接受客户端自由文本；无身份且医嘱未绑定时由服务返回 401。
         router.post("/from-medical-order").handler { ctx ->
-            service.createFromMedicalOrder(PharmacyRoutes.body(ctx))
+            service.createFromMedicalOrder(PharmacyRoutes.body(ctx), ctx.get<String>("userId"))
                 .onSuccess { result ->
                     ctx.response().setStatusCode(201)
                     ctx.json(result)
@@ -114,6 +117,10 @@ object DispenseRoutes {
             is NotFoundException -> PharmacyRoutes.respond(ctx, 404, err.message)
             is ConflictException -> PharmacyRoutes.respond(ctx, 409, err.message)
             is IllegalArgumentException -> PharmacyRoutes.respond(ctx, 400, err.message)
+            // 025 补绑路径缺少可信身份：与 Requisition/PurchaseOrder 的 401 形状一致
+            is UnauthorizedException -> PharmacyRoutes.respond(ctx, 401, err.message)
+            // 025 药品目录端口未接线：fail-closed，不降级为跳过校验/补绑
+            is DrugCatalogUnavailableException -> PharmacyRoutes.respond(ctx, 503, err.message)
             else -> {
                 val msg = err?.message?.lowercase() ?: ""
                 if (msg.contains("unique") || msg.contains("duplicate")) {

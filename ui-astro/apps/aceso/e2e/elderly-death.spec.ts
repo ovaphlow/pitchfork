@@ -313,6 +313,34 @@ async function createActiveAdmission(page: Page, suffix: string, admitDate = "20
   });
 }
 
+/**
+ * 025 药品目录物资（`materials` 中 `category='药品'` 且 `status='ACTIVE'`）。
+ * 用药医嘱必须携带 `material_id`，`drug_name` 必须等于目录名。
+ */
+interface DrugCatalogMaterial {
+  id: string;
+  code: string;
+  name: string;
+}
+
+/** V204 迁移预置的演示药品编码（迁移注释声明其可稳定引用） */
+const DEMO_DRUG_ACTIVE_CODE = "DEMO-DRUG-001";
+
+/** 按冻结契约检索目录并取 V204 预置演示药品；缺失即失败，避免静默降级为自由文本开药。 */
+async function demoDrug(page: Page, code = DEMO_DRUG_ACTIVE_CODE): Promise<DrugCatalogMaterial> {
+  const response = await api<{ records: DrugCatalogMaterial[] }>(
+    page,
+    "/crate-api/inventories/v1/materials?category=%E8%8D%AF%E5%93%81&status=ACTIVE&limit=200",
+  );
+  const material = (response.records ?? []).find((item) => item.code === code);
+  if (!material) {
+    throw new Error(
+      `药品目录中找不到 ${code}（V204 预置演示药品）；请确认迁移已执行且 category='药品'、status='ACTIVE'`,
+    );
+  }
+  return material;
+}
+
 /** 创建含进行中执行的入住（通过既有 nursing API 构造阻断路径） */
 async function createBusyAdmission(page: Page, suffix: string): Promise<Encounter> {
   const patientId = await createPatient(page, `${suffix}-busy-patient`);
@@ -407,6 +435,8 @@ class AdmissionsPage {
 
 test("办理去世成功后活动清单刷新且服务端终局正确", async ({ page }) => {
   const admission = await createActiveAdmission(page, "DEATH");
+  // 025：用药医嘱必须绑定目录药品
+  const drug = await demoDrug(page);
   // 一条医嘱随去世收束
   await api<MedicalOrder>(page, `/crate-api/healthcare/v1/encounters/${admission.encounter.id}/orders`, {
     method: "POST",
@@ -416,7 +446,7 @@ test("办理去世成功后活动清单刷新且服务端终局正确", async ({
       order_content: "去世收束医嘱",
       doctor: "赵医生",
       start_time: "2026-08-01T10:00:00+08:00",
-      order_details: { drug_name: "阿莫西林" },
+      order_details: { material_id: drug.id, drug_name: drug.name },
     },
   });
   const admissionsPage = new AdmissionsPage(page);

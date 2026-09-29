@@ -42,12 +42,17 @@ import java.time.ZoneId
 class HealthcareService(
     private val pool: Pool,
     private val ctx: org.jooq.DSLContext = DatabaseConfig.createDSL(),
+    /**
+     * 025 药品目录端口：由 Aceso `Main.kt` 注入 `MaterialService` 适配器。
+     * 为 null 时 `MEDICATION` 医嘱一律 fail-closed（503），不跳过目录校验。
+     */
+    private val drugCatalogPort: DrugCatalogPort? = null,
 ) {
     private val servicePeriodService = ServicePeriodService(pool)
     private val dischargeHandoverSnapshotService = ElderlyDischargeHandoverSnapshotService()
     private val taskService = TaskService(pool)
     private val planService = PlanService(pool)
-    private val medicalOrderService = MedicalOrderService(pool, taskService)
+    private val medicalOrderService = MedicalOrderService(pool, taskService, drugCatalogPort = drugCatalogPort)
     private val carePlanRevisionService = CarePlanRevisionService(pool)
     private val nursingIncidentService = NursingIncidentService(pool)
     private val shiftHandoverService = ShiftHandoverService(
@@ -412,6 +417,27 @@ class HealthcareService(
 
     fun lockMedicationOrderForPharmacy(client: SqlClient, medicalOrderId: String): Future<MedicationOrderLockSnapshot> =
         medicalOrderService.lockMedicationOrderForPharmacy(client, medicalOrderId)
+
+    /**
+     * 025 存量自由文本医嘱一次性补绑目录药品（同连接写，供药房外层事务编排）。
+     * 只写 `order_details` 与 `updated_at`；发药单、库存出库与补绑同事务提交或回滚。
+     */
+    fun bindDrugMaterial(
+        client: SqlClient,
+        medicalOrderId: String,
+        materialId: String,
+        materialCode: String?,
+        materialName: String?,
+        operator: String,
+    ): Future<Void?> =
+        medicalOrderService.bindDrugMaterial(
+            client,
+            medicalOrderId,
+            materialId,
+            materialCode,
+            materialName,
+            operator,
+        )
 
     // ========================================================================
     //  医生病程记录 (progress_notes)

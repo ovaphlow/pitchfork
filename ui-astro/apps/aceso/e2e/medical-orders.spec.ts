@@ -36,6 +36,20 @@ interface MedicalOrder {
   execution_summary?: Record<string, number>;
 }
 
+/**
+ * 025 药品目录物资（`materials` 中 `category='药品'` 且 `status='ACTIVE'`）。
+ */
+interface DrugCatalogMaterial {
+  id: string;
+  code: string;
+  name: string;
+  category: string;
+  status: string;
+}
+
+/** V204 迁移预置的演示药品编码（迁移注释声明其可稳定引用） */
+const DEMO_DRUG_ACTIVE_CODE = "DEMO-DRUG-001";
+
 let databasePool: Pool;
 
 function requiredEnvironment(name: string, value: string | undefined): string {
@@ -316,6 +330,34 @@ async function createActiveAdmission(page: Page, suffix: string, admitDate = "20
   });
 }
 
+/**
+ * 025 药品目录检索：走冻结契约 `GET /inventories/v1/materials?category=药品&status=ACTIVE`。
+ * 顺带验证「目录药品可被该契约检索到」（计划 §7.2 断言 1）。
+ */
+async function listActiveDrugs(page: Page): Promise<DrugCatalogMaterial[]> {
+  const response = await api<{ records: DrugCatalogMaterial[] }>(
+    page,
+    "/crate-api/inventories/v1/materials?category=%E8%8D%AF%E5%93%81&status=ACTIVE&limit=200",
+  );
+  return response.records ?? [];
+}
+
+/** 取 V204 预置演示药品；缺失即说明药品目录未迁移，直接失败而不是静默降级。 */
+async function demoDrug(page: Page, code = DEMO_DRUG_ACTIVE_CODE): Promise<DrugCatalogMaterial> {
+  const material = (await listActiveDrugs(page)).find((item) => item.code === code);
+  if (!material) {
+    throw new Error(
+      `药品目录中找不到 ${code}（V204 预置演示药品）；请确认迁移已执行且 category='药品'、status='ACTIVE'`,
+    );
+  }
+  return material;
+}
+
+/** 025 用药医嘱明细：`material_id` 必填，`drug_name` 必须等于目录名，否则服务端 400。 */
+function medicationDetails(material: DrugCatalogMaterial, extra: Record<string, unknown> = {}) {
+  return { material_id: material.id, drug_name: material.name, ...extra };
+}
+
 test.describe.configure({ mode: "serial" });
 
 test.beforeAll(async () => {
@@ -347,6 +389,8 @@ test.afterEach(async () => {
 
 test("选择活动入住并开立用药医嘱后列表详情与结构化输入一致", async ({ page }) => {
   const admission = await createActiveAdmission(page, "CREATE");
+  // 025：用药医嘱只能从药品目录选择，先按冻结契约取一条 ACTIVE 目录药品
+  const drug = await demoDrug(page);
   await page.goto(`/dashboard/orders?encounter_id=${admission.encounter.id}`);
   await page.waitForLoadState("networkidle");
 
@@ -359,7 +403,9 @@ test("选择活动入住并开立用药医嘱后列表详情与结构化输入�
   await modal.locator("#order-content").fill("阿莫西林 0.5g 每日两次");
   await modal.getByLabel("医生（必填）").fill("赵医生");
   await modal.getByLabel("开始时间（必填）").fill("2026-08-01T10:00");
-  await modal.getByLabel("药名（必填）").fill("阿莫西林");
+  // 025：药名从自由文本输入改为药品目录选择器（#order-drug-material），不再有「药名（必填）」输入框
+  await expect(modal.getByLabel("药名（必填）")).toHaveCount(0);
+  await modal.locator("#order-drug-material").selectOption(drug.id);
   await modal.getByLabel("剂量").fill("0.5g");
   await modal.getByLabel("单位").fill("片/次");
   await modal.getByLabel("途径").fill("口服");
@@ -375,22 +421,34 @@ test("选择活动入住并开立用药医嘱后列表详情与结构化输入�
   await expect(row).toContainText("赵医生");
   await expect(row).toContainText("进行中");
 
-  // 详情与结构化明细一致
+  // 详情与结构化明细一致：药名由服务端以目录物资名覆写，不再是自由文本
   await row.getByRole("button", { name: "详情" }).click();
   const detail = modalByTitle(page, "医嘱详情");
   await expect(detail).toBeVisible();
   await expect(detail).toContainText("医嘱正文：阿莫西林 0.5g 每日两次");
   await expect(detail).toContainText("医生：赵医生");
-  await expect(detail).toContainText("药名：阿莫西林");
+  await expect(detail).toContainText(`药名：${drug.name}`);
   await expect(detail).toContainText("剂量：0.5g");
   await expect(detail).toContainText("途径：口服");
   await expect(detail).toContainText("频次编码：QD");
   await expect(detail).toContainText("天数：2");
   await detail.getByRole("button", { name: "关闭" }).click();
+
+  // API 层核对：服务端写入的绑定快照与目录一致（material_id/material_code/material_name）
+  const orders = await api<{
+    records: Array<MedicalOrder & { order_details?: Record<string, unknown> }>;
+  }>(page, `/crate-api/healthcare/v1/encounters/${admission.encounter.id}/orders`);
+  const created = orders.records.find((record) => record.order_content === "阿莫西林 0.5g 每日两次");
+  expect(created).toBeTruthy();
+  expect(created!.order_details?.material_id).toBe(drug.id);
+  expect(created!.order_details?.material_code).toBe(drug.code);
+  expect(created!.order_details?.material_name).toBe(drug.name);
+  expect(created!.order_details?.drug_name).toBe(drug.name);
 });
 
 test("护士核对前药房不可见，核对后药房可见", async ({ page }) => {
   const admission = await createActiveAdmission(page, "NURSE");
+  const drug = await demoDrug(page);
   const order = await api<MedicalOrder>(page, `/crate-api/healthcare/v1/encounters/${admission.encounter.id}/orders`, {
     method: "POST",
     body: {
@@ -399,7 +457,8 @@ test("护士核对前药房不可见，核对后药房可见", async ({ page }) 
       order_content: "护士核对测试医嘱",
       doctor: "王医生",
       start_time: "2026-08-06T08:00:00+08:00",
-      order_details: { drug_name: "阿莫西林" },
+      // 025：MEDICATION 必须携带 material_id，drug_name 必须等于目录名
+      order_details: medicationDetails(drug),
     },
   });
 
@@ -408,9 +467,10 @@ test("护士核对前药房不可见，核对后药房可见", async ({ page }) 
   await page.waitForLoadState("networkidle");
   await expect(page.getByRole("row").filter({ hasText: "护士核对测试医嘱" })).not.toBeVisible();
 
-  // 绕过 UI 直接调用发药接口也必须被门禁拒绝
-  const beforeStatus = await page.evaluate(
-    async ({ baseUrl, orderId }) => {
+  // 绕过 UI 直接调用发药接口也必须被门禁拒绝（该医嘱已绑定目录药品、material_id 一致，
+  // 因此这里唯一的拒绝原因只能是「未护士核对」）
+  const before = await page.evaluate(
+    async ({ baseUrl, orderId, materialId, lotId }) => {
       const response = await fetch(`${baseUrl}/crate-api/pharmacy/v1/dispenses/from-medical-order`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -418,16 +478,22 @@ test("护士核对前药房不可见，核对后药房可见", async ({ page }) 
         body: JSON.stringify({
           medical_order_id: orderId,
           warehouse: "主库",
-          material_id: "dummy-material",
-          lot_id: "dummy-lot",
+          material_id: materialId,
+          lot_id: lotId,
           dispensed_quantity: "1",
         }),
       });
-      return response.status;
+      return { status: response.status, body: await response.json().catch(() => ({})) };
     },
-    { baseUrl: requiredEnvironment("PLAYWRIGHT_API_BASE_URL", API_BASE_URL), orderId: order.id },
+    {
+      baseUrl: requiredEnvironment("PLAYWRIGHT_API_BASE_URL", API_BASE_URL),
+      orderId: order.id,
+      materialId: drug.id,
+      lotId: "dummy-lot",
+    },
   );
-  expect(beforeStatus).toBe(409);
+  expect(before.status).toBe(409);
+  expect(String((before.body as { error?: string }).error)).toContain("nurse-checked");
 
   // 护理工作台进入“医嘱核对”并确认核对
   await page.goto("/dashboard/inpatient");
@@ -499,6 +565,7 @@ test("开立诊疗医嘱后列表筛选与刷新保持一致", async ({ page }) 
 
 test("停嘱后显示服务端终态且重复点击不重发请求", async ({ page }) => {
   const admission = await createActiveAdmission(page, "STATUS");
+  const drug = await demoDrug(page);
   const created = await api<MedicalOrder>(page, `/crate-api/healthcare/v1/encounters/${admission.encounter.id}/orders`, {
     method: "POST",
     body: {
@@ -507,7 +574,7 @@ test("停嘱后显示服务端终态且重复点击不重发请求", async ({ pa
       order_content: "降压药 1 片",
       doctor: "周医生",
       start_time: "2026-08-03T08:00:00+08:00",
-      order_details: { drug_name: "氨氯地平" },
+      order_details: medicationDetails(drug),
     },
   });
   await page.goto(`/dashboard/orders?encounter_id=${admission.encounter.id}`);
@@ -592,6 +659,7 @@ test("作废与完成显示服务端终态", async ({ page }) => {
 
 test("服务端校验错误可见且开立表单输入保留", async ({ page }) => {
   const admission = await createActiveAdmission(page, "ERR");
+  const drug = await demoDrug(page);
   await page.goto(`/dashboard/orders?encounter_id=${admission.encounter.id}`);
   await page.waitForLoadState("networkidle");
 
@@ -610,7 +678,13 @@ test("服务端校验错误可见且开立表单输入保留", async ({ page }) 
   await modal.getByLabel("医生（必填）").fill("保留医生");
   await modal.getByLabel("开始时间（必填）").fill("2026-08-03T10:00");
 
-  // 非法医嘱类型 → 服务端 400，错误可见且表单保留
+  // 025：用药医嘱必须先选目录药品，否则前端会先行拦截（不发出请求，见 handleSave）；
+  // 因此这里选合法目录药品，再用「临时医嘱结束时间早于开始时间」触发服务端 400。
+  await modal.locator("#order-drug-material").selectOption(drug.id);
+  await modal.getByRole("radio", { name: "临时医嘱" }).check();
+  await modal.locator("#order-end-time").fill("2026-08-03T09:00");
+
+  // 服务端 400，错误可见且表单保留
   const responsePromise = page.waitForResponse(
     (response) => response.url().includes("/orders") && response.request().method() === "POST",
   );
@@ -620,12 +694,16 @@ test("服务端校验错误可见且开立表单输入保留", async ({ page }) 
   await expect(modal.getByRole("alert")).toBeVisible();
   await expect(modal.locator("#order-content")).toHaveValue("会被保留的医嘱正文");
   await expect(modal.getByLabel("医生（必填）")).toHaveValue("保留医生");
+  // 025：目录药品选择与结束时间也必须保留
+  await expect(modal.locator("#order-drug-material")).toHaveValue(drug.id);
+  await expect(modal.locator("#order-end-time")).toHaveValue("2026-08-03T09:00");
 });
 
 // ——— 用例 4：执行汇总只读且为 0 ———
 
 test("详情执行汇总只读展示且无执行入口", async ({ page }) => {
   const admission = await createActiveAdmission(page, "SUMMARY");
+  const drug = await demoDrug(page);
   const order = await api<MedicalOrder>(page, `/crate-api/healthcare/v1/encounters/${admission.encounter.id}/orders`, {
     method: "POST",
     body: {
@@ -634,7 +712,7 @@ test("详情执行汇总只读展示且无执行入口", async ({ page }) => {
       order_content: "汇总测试医嘱",
       doctor: "吴医生",
       start_time: "2026-08-04T08:00:00+08:00",
-      order_details: { drug_name: "维生素C" },
+      order_details: medicationDetails(drug),
     },
   });
   await page.goto(`/dashboard/orders?encounter_id=${admission.encounter.id}`);
@@ -662,6 +740,7 @@ test("详情执行汇总只读展示且无执行入口", async ({ page }) => {
 
 test("医生诊疗工作台新增病程诊断与四类医嘱且刷新保留并跨入住隔离", async ({ page }) => {
   const admission = await createActiveAdmission(page, "CLINIC");
+  const drug = await demoDrug(page);
   await page.goto(`/dashboard/orders?encounter_id=${admission.encounter.id}`);
   await page.waitForLoadState("networkidle");
 
@@ -711,7 +790,8 @@ test("医生诊疗工作台新增病程诊断与四类医嘱且刷新保留并�
     await orderModal.getByLabel("医生（必填）").fill("张医生");
     await orderModal.getByLabel("开始时间（必填）").fill("2026-08-08T09:00");
     if (orderType === "MEDICATION") {
-      await orderModal.getByLabel("药名（必填）").fill("降压药");
+      // 025：药名改为药品目录选择器，选中目录物资即写入 material_id 与目录药名
+      await orderModal.locator("#order-drug-material").selectOption(drug.id);
     } else if (orderType === "THERAPY") {
       await orderModal.getByLabel("诊疗项目（必填）").fill("康复理疗");
     } else {
@@ -766,6 +846,7 @@ test("已离院医生诊疗只读且无新增入口", async ({ page }) => {
 test("窄屏下列表筛选开立与详情均可操作且文字不重叠", async ({ page }) => {
   await page.setViewportSize({ width: 375, height: 812 });
   const admission = await createActiveAdmission(page, "MOBILE");
+  const drug = await demoDrug(page);
   await api<MedicalOrder>(page, `/crate-api/healthcare/v1/encounters/${admission.encounter.id}/orders`, {
     method: "POST",
     body: {
@@ -774,7 +855,7 @@ test("窄屏下列表筛选开立与详情均可操作且文字不重叠", async
       order_content: "窄屏用药医嘱",
       doctor: "郑医生",
       start_time: "2026-08-05T08:00:00+08:00",
-      order_details: { drug_name: "布洛芬" },
+      order_details: medicationDetails(drug),
     },
   });
   await page.goto(`/dashboard/orders?encounter_id=${admission.encounter.id}`);
@@ -789,7 +870,7 @@ test("窄屏下列表筛选开立与详情均可操作且文字不重叠", async
   await modal.locator("#order-content").fill("窄屏新增医嘱");
   await modal.getByLabel("医生（必填）").fill("郑医生");
   await modal.getByLabel("开始时间（必填）").fill("2026-08-05T10:00");
-  await modal.getByLabel("药名（必填）").fill("对乙酰氨基酚");
+  await modal.locator("#order-drug-material").selectOption(drug.id);
   await modal.getByRole("button", { name: "保存医嘱" }).click();
   await page.waitForLoadState("networkidle");
   await expect(page.getByRole("row").filter({ hasText: "窄屏新增医嘱" })).toBeVisible();

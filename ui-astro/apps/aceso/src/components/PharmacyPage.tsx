@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Badge, Button, Card, EmptyState, Input, Modal, Table, type Column } from "@pitchfork/ui";
 import PurchaseOrdersSection from "./PurchaseOrdersSection";
 import RequisitionsSection from "./RequisitionsSection";
@@ -12,6 +12,7 @@ import {
   getPharmacyDispense,
   listActiveElderlyAdmissions,
   listIdentitySubjects,
+  listInventoryMaterials,
   listInventoryStocks,
   listPatients,
   listPharmacyDispenses,
@@ -22,6 +23,7 @@ import {
   startPharmacyDispense,
   type Encounter,
   type IdentitySubject,
+  type InventoryMaterial,
   type InventoryStockAvailability,
   type Patient,
   type PharmacyDispense,
@@ -143,6 +145,15 @@ export default function PharmacyPage() {
   const [warehouses, setWarehouses] = useState<WarehouseOption[]>([]);
   const [stocks, setStocks] = useState<InventoryStockAvailability[]>([]);
   const [stocksLoading, setStocksLoading] = useState(false);
+  /** 库存请求序号：用于丢弃过期的库存响应 */
+  const stockRequestRef = useRef(0);
+  /** 发药明细需要展示基础单位：按物资累计已加载库存的单位（按物资过滤加载时只补不删） */
+  const [materialUnits, setMaterialUnits] = useState<Record<string, string>>({});
+
+  // ── 药品目录（025：历史文本医嘱需在发药时补绑目录药品）────────────
+  const [drugCatalog, setDrugCatalog] = useState<InventoryMaterial[]>([]);
+  const [drugCatalogLoading, setDrugCatalogLoading] = useState(false);
+  const [drugCatalogError, setDrugCatalogError] = useState("");
 
   // ── 操作弹窗（审方/调配/确认/取消） ───────────────────────────────
   const [actionTarget, setActionTarget] = useState<PharmacyDispense | null>(null);
@@ -181,11 +192,7 @@ export default function PharmacyPage() {
     return map;
   }, [admissions]);
 
-  const materialUnit = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const stock of stocks) map.set(stock.material_id, stock.unit);
-    return map;
-  }, [stocks]);
+  const materialUnit = useMemo(() => new Map(Object.entries(materialUnits)), [materialUnits]);
 
   const loadSubjects = useCallback(async () => {
     try {
@@ -293,9 +300,19 @@ export default function PharmacyPage() {
 
   const openCreate = (order: PharmacyMedicationOrder) => {
     setCreateTarget(order);
-    setCreateForm({ warehouse: "", stockId: "", materialId: "", lotId: "", quantity: "1", operator: "" });
+    // 医嘱已绑定目录药品时自动预选该物资；历史文本医嘱留空，由药房在弹窗内补选
+    setCreateForm({
+      warehouse: "",
+      stockId: "",
+      materialId: order.material_id ?? "",
+      lotId: "",
+      quantity: "1",
+      operator: "",
+    });
+    setStocks([]);
     setCreateError("");
     void loadWarehouses();
+    if (!order.material_id) void loadDrugCatalog();
   };
 
   const loadWarehouses = useCallback(async () => {
@@ -306,20 +323,47 @@ export default function PharmacyPage() {
     }
   }, []);
 
-  const loadStocks = useCallback(async (warehouse: string) => {
-    if (!warehouse) {
+  /** 药品目录（025）：药品 = materials 中 category='药品' 且 status='ACTIVE' */
+  const loadDrugCatalog = useCallback(async () => {
+    setDrugCatalogLoading(true);
+    setDrugCatalogError("");
+    try {
+      const response = await listInventoryMaterials({ category: "药品", status: "ACTIVE", limit: 200 });
+      setDrugCatalog(response.records);
+    } catch (error) {
+      setDrugCatalog([]);
+      setDrugCatalogError(errorMessage(error, "无法加载药品目录"));
+    } finally {
+      setDrugCatalogLoading(false);
+    }
+  }, []);
+
+  /** 只加载指定药品在当前仓库的可用库存行；未选药品时不请求，避免给出与医嘱无关的物资 */
+  const loadStocks = useCallback(async (warehouse: string, materialId: string) => {
+    // 仓库/药品连续切换时只接受最后一次请求的结果，避免旧响应覆盖当前选择
+    const requestId = ++stockRequestRef.current;
+    if (!warehouse || !materialId) {
       setStocks([]);
+      setStocksLoading(false);
       return;
     }
     setStocksLoading(true);
     try {
-      const response = await listInventoryStocks({ warehouse, limit: 200 });
-      setStocks(response.records.filter((stock) => Number(stock.available_quantity) > 0));
+      const response = await listInventoryStocks({ warehouse, material_id: materialId, limit: 200 });
+      if (requestId !== stockRequestRef.current) return;
+      const available = response.records.filter((stock) => Number(stock.available_quantity) > 0);
+      setStocks(available);
+      setMaterialUnits((current) => {
+        const next = { ...current };
+        for (const stock of available) next[stock.material_id] = stock.unit;
+        return next;
+      });
     } catch (error) {
+      if (requestId !== stockRequestRef.current) return;
       setStocks([]);
       setCreateError(errorMessage(error, "无法加载可用库存"));
     } finally {
-      setStocksLoading(false);
+      if (requestId === stockRequestRef.current) setStocksLoading(false);
     }
   }, []);
 
@@ -330,6 +374,14 @@ export default function PharmacyPage() {
 
   const createAvailableQuantity = Number(selectedStock?.available_quantity ?? "0");
 
+  /** 已绑定药品的医嘱展示医嘱快照名；历史文本医嘱展示药房补选的目录药品名 */
+  const createMaterialName = createTarget?.material_id
+    ? createTarget.material_name || createTarget.drug_name || "已绑定药品"
+    : drugCatalog.find((material) => material.id === createForm.materialId)?.name ?? "";
+
+  const createWarehouseName =
+    warehouses.find((warehouse) => warehouse.code === createForm.warehouse)?.name ?? createForm.warehouse;
+
   const handleCreateDispense = async () => {
     if (!createTarget) return;
     const quantity = Number(createForm.quantity);
@@ -338,7 +390,11 @@ export default function PharmacyPage() {
       return;
     }
     if (!createForm.materialId) {
-      setCreateError("请选择药品物资");
+      setCreateError(createTarget.material_id ? "医嘱绑定的药品缺失，请关闭后重新创建发药单" : "请选择药品目录物资");
+      return;
+    }
+    if (!createForm.stockId) {
+      setCreateError("请选择可用库存批次");
       return;
     }
     if (!quantity || quantity <= 0 || quantity > createAvailableQuantity) {
@@ -511,8 +567,14 @@ export default function PharmacyPage() {
       header: "药品",
       render: (row) => (
         <div>
-          <div className="font-medium text-fg-emphasis">{row.drug_name || "—"}</div>
-          <div className="text-xs text-fg-dimmed">{row.order_content}</div>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-medium text-fg-emphasis">{row.drug_name || "—"}</span>
+            {!row.material_id && <Badge variant="warning">未绑定目录</Badge>}
+          </div>
+          <div className="text-xs text-fg-dimmed">
+            {row.material_code ? `${row.material_code} · ` : ""}
+            {row.order_content}
+          </div>
         </div>
       ),
     },
@@ -928,8 +990,8 @@ export default function PharmacyPage() {
                 value={createForm.warehouse}
                 onChange={(event) => {
                   const warehouse = event.target.value;
-                  setCreateForm((current) => ({ ...current, warehouse, stockId: "", materialId: "", lotId: "" }));
-                  void loadStocks(warehouse);
+                  setCreateForm((current) => ({ ...current, warehouse, stockId: "", lotId: "" }));
+                  void loadStocks(warehouse, createForm.materialId);
                 }}
               >
                 <option value="">请选择仓库</option>
@@ -941,25 +1003,94 @@ export default function PharmacyPage() {
               </select>
             </div>
 
+            {createTarget.material_id ? (
+              <div className="flex flex-col gap-1.5">
+                <label className="text-sm font-medium text-fg-muted" htmlFor="dispense-material">
+                  药品物资（医嘱已绑定目录药品）
+                </label>
+                <select id="dispense-material" className={selectClass} value={createForm.materialId} disabled>
+                  <option value={createForm.materialId}>
+                    {createMaterialName}
+                    {createTarget.material_code ? `（${createTarget.material_code}）` : ""}
+                  </option>
+                </select>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-1.5">
+                <div className="rounded-md border border-info/30 bg-info-bg px-3 py-2 text-xs text-info">
+                  该医嘱为历史文本医嘱（药名：{createTarget.drug_name || createTarget.order_content}），尚未绑定药品目录。
+                  请先指定目录药品，提交发药单时将一并把该药品补绑到医嘱。
+                </div>
+                <label className="text-sm font-medium text-fg-muted" htmlFor="dispense-material">
+                  药品物资（必选，用于补绑医嘱）
+                </label>
+                <select
+                  id="dispense-material"
+                  className={selectClass}
+                  value={createForm.materialId}
+                  disabled={drugCatalogLoading || drugCatalogError !== ""}
+                  onChange={(event) => {
+                    const materialId = event.target.value;
+                    setCreateForm((current) => ({ ...current, materialId, stockId: "", lotId: "" }));
+                    void loadStocks(createForm.warehouse, materialId);
+                  }}
+                >
+                  <option value="">{drugCatalogLoading ? "正在加载药品目录…" : "请选择药品目录物资"}</option>
+                  {drugCatalog.map((material) => (
+                    <option key={material.id} value={material.id}>
+                      {material.name}（{material.code}
+                      {material.spec ? ` · ${material.spec}` : ""}）
+                    </option>
+                  ))}
+                </select>
+                {drugCatalogError && (
+                  <p role="alert" className="flex flex-wrap items-center gap-2 text-xs text-danger">
+                    药品目录加载失败：{drugCatalogError}
+                    <Button type="button" variant="link" size="sm" onClick={() => void loadDrugCatalog()}>
+                      重试
+                    </Button>
+                  </p>
+                )}
+                {!drugCatalogLoading && !drugCatalogError && drugCatalog.length === 0 && (
+                  <p className="text-xs text-warning">
+                    药品目录为空：请先在「库存计量 → 物资」中新建类别为「药品」且状态为「启用」的物资，再回到此处发药。
+                    <a href="/dashboard/materials" className="ml-1 text-accent hover:underline">
+                      前往物资
+                    </a>
+                  </p>
+                )}
+              </div>
+            )}
+
             <div className="flex flex-col gap-1.5">
-              <label className="text-sm font-medium text-fg-muted" htmlFor="dispense-material">药品物资</label>
+              <label className="text-sm font-medium text-fg-muted" htmlFor="dispense-stock">
+                库存批次（可用库存）
+              </label>
               <select
-                id="dispense-material"
+                id="dispense-stock"
                 className={selectClass}
                 value={createForm.stockId}
-                disabled={!createForm.warehouse || stocksLoading}
+                disabled={!createForm.warehouse || !createForm.materialId || stocksLoading || stocks.length === 0}
                 onChange={(event) => {
                   const stock = stocks.find((item) => item.id === event.target.value);
                   setCreateForm((current) => ({
                     ...current,
                     stockId: stock?.id ?? "",
-                    materialId: stock?.material_id ?? "",
+                    materialId: stock?.material_id ?? current.materialId,
                     lotId: stock?.lot_id ?? "",
                   }));
                 }}
               >
                 <option value="">
-                  {stocksLoading ? "加载中…" : createForm.warehouse ? "请选择药品物资" : "请先选择仓库"}
+                  {!createForm.warehouse
+                    ? "请先选择仓库"
+                    : !createForm.materialId
+                      ? "请先选择药品物资"
+                      : stocksLoading
+                        ? "加载中…"
+                        : stocks.length === 0
+                          ? "暂无可用库存"
+                          : "请选择库存批次"}
                 </option>
                 {stocks.map((stock) => (
                   <option key={stock.id} value={stock.id}>
@@ -970,6 +1101,14 @@ export default function PharmacyPage() {
                   </option>
                 ))}
               </select>
+              {createForm.warehouse && createForm.materialId && !stocksLoading && stocks.length === 0 && (
+                <p className="text-xs text-warning">
+                  该药品在「{createWarehouseName}」暂无可用库存，请先通过 库存计量 → 手工入库 补货。
+                  <a href="/dashboard/inventory" className="ml-1 text-accent hover:underline">
+                    前往手工入库
+                  </a>
+                </p>
+              )}
             </div>
 
             {selectedStock && selectedStock.lot_id && (

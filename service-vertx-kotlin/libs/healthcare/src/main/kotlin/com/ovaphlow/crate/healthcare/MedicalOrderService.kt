@@ -31,6 +31,11 @@ class MedicalOrderService(
     private val pool: Pool,
     private val taskService: TaskService,
     private val ctx: DSLContext = DatabaseConfig.createDSL(),
+    /**
+     * 025 药品目录端口：由 Aceso `Main.kt` 注入 `MaterialService` 适配器。
+     * 为空表示部署未接线；`MEDICATION` 医嘱一律 fail-closed（503），绝不跳过校验。
+     */
+    private val drugCatalogPort: DrugCatalogPort? = null,
 ) {
     companion object {
         val VALID_ORDER_TYPES = setOf("MEDICATION", "THERAPY", "EXAMINATION", "LAB_TEST")
@@ -60,17 +65,38 @@ class MedicalOrderService(
             "TEMPORARY" to "临时医嘱",
         )
         val DETAIL_WHITELIST = mapOf(
-            "MEDICATION" to setOf("drug_name", "dose", "unit", "route", "frequency_code", "frequency_name", "duration_days", "remark"),
+            "MEDICATION" to setOf(
+                "material_id", "material_code", "material_name", "material_bound_by", "material_bound_at",
+                "drug_name", "dose", "unit", "route", "frequency_code", "frequency_name", "duration_days", "remark",
+            ),
             "THERAPY" to setOf("treatment_item", "frequency_code", "frequency_name", "duration_days", "remark"),
             "EXAMINATION" to setOf("item_name", "body_part", "priority", "clinical_note", "frequency_code", "frequency_name", "duration_days", "remark"),
             "LAB_TEST" to setOf("item_name", "specimen_type", "priority", "fasting", "clinical_note", "frequency_code", "frequency_name", "duration_days", "remark"),
         )
+
+        /**
+         * 025 客户端提交明细里由服务端独占写入的键：接受客户端传入（白名单内）但一律丢弃，
+         * 防止伪造目录编码/药品名或补绑审计。
+         */
+        val SERVER_MANAGED_DETAIL_KEYS = setOf(
+            "material_code", "material_name", "material_bound_by", "material_bound_at",
+        )
+
+        /**
+         * 025 `MEDICATION` 的必填明细键由 `drug_name`（自由文本）改为 `material_id`：
+         * 服务端取目录物资名写入 `drug_name`，避免医生开立药房里不存在的药。
+         */
         val REQUIRED_DETAIL_KEY = mapOf(
-            "MEDICATION" to "drug_name",
+            "MEDICATION" to "material_id",
             "THERAPY" to "treatment_item",
             "EXAMINATION" to "item_name",
             "LAB_TEST" to "item_name",
         )
+
+        /** 目录药品判定：药品 = 启用状态的 `category = '药品'` 物资 */
+        const val DRUG_CATEGORY = "药品"
+        const val ACTIVE_STATUS = "ACTIVE"
+
         private val businessZone = ZoneId.of("Asia/Shanghai")
         private val OPEN_PERIOD_STATUSES = setOf("ACTIVE", "SUSPENDED")
     }
@@ -101,56 +127,130 @@ class MedicalOrderService(
                         )
                     }
 
-                    val orderId = Ulid.generate()
-                    val now = OffsetDateTime.now()
-                    var insertQuery = ctx.insertInto(MEDICAL_ORDERS)
-                        .set(MEDICAL_ORDERS.ID, orderId)
-                        .set(MEDICAL_ORDERS.ENCOUNTER_ID, encounterId)
-                        .set(MEDICAL_ORDERS.ORDER_TYPE, input.orderType)
-                        .set(MEDICAL_ORDERS.ORDER_CLASS, input.orderClass)
-                        .set(MEDICAL_ORDERS.ORDER_CONTENT, input.orderContent)
-                        .set(MEDICAL_ORDERS.ORDER_DETAILS, JSONB.valueOf(input.orderDetails.encode()))
-                        .set(MEDICAL_ORDERS.START_TIME, input.startTime)
-                        .set(MEDICAL_ORDERS.DOCTOR, input.doctor)
-                        .set(MEDICAL_ORDERS.STATUS, "ACTIVE")
-                        .set(MEDICAL_ORDERS.CREATED_AT, now)
-                        .set(MEDICAL_ORDERS.UPDATED_AT, now)
-                    input.endTime?.let { insertQuery = insertQuery.set(MEDICAL_ORDERS.END_TIME, it) }
-
-                    execute(connection, insertQuery).compose {
-                        val startDate = businessDate(input.startTime)
-                        val endDate = input.endTime?.let(::businessDate) ?: if (input.orderDetails.containsKey("duration_days")) {
-                            startDate.plusDays(
-                                (input.orderDetails.getValue("duration_days") as Number).toLong()
-                            )
-                        } else if (input.orderDetails.getString("frequency_code") == "STAT") {
-                            startDate
-                        } else {
-                            null
-                        }
-                        taskService.createOrderTask(
-                            connection,
-                            OrderTaskInput(
-                                periodId = requireNotNull(period.getString("id")),
-                                encounterId = encounterId,
-                                orderItemId = orderId,
-                                taskType = ORDER_TASK_TYPE.getValue(input.orderType),
-                                description = input.orderContent,
-                                frequencyCode = input.orderDetails.getString("frequency_code")
-                                    ?.trim()?.takeIf { it.isNotBlank() },
-                                frequencyName = input.orderDetails.getString("frequency_name")
-                                    ?.trim()?.takeIf { it.isNotBlank() },
-                                startDate = startDate,
-                                endDate = endDate,
-                            ),
-                        )
-                    }.compose {
-                        readOrderWithTask(connection, orderId).map { row ->
-                            orderJson(row, row.getString("task_id"))
-                        }
-                    }
+                    // 025 目录校验与 drug_name/material_code/material_name 覆写必须先于写医嘱：
+                    // 任何一步失败（404/409/400/503）都由外层事务整体回滚，不产生医嘱与护理任务。
+                    resolveDrugMaterialDetails(connection, input.orderType, input.orderDetails)
+                        .compose { insertOrderWithTask(connection, encounterId, period, input) }
                 }
             }
+        }
+    }
+
+    /**
+     * 025 落库医嘱 + 派生护理任务 + 回读，全部复用外层事务连接。
+     * `input.orderDetails` 已由 [resolveDrugMaterialDetails] 完成目录覆写。
+     */
+    private fun insertOrderWithTask(
+        connection: SqlClient,
+        encounterId: String,
+        period: JsonObject,
+        input: CreateOrderInput,
+    ): Future<JsonObject> {
+        val orderId = Ulid.generate()
+        val now = OffsetDateTime.now()
+        var insertQuery = ctx.insertInto(MEDICAL_ORDERS)
+            .set(MEDICAL_ORDERS.ID, orderId)
+            .set(MEDICAL_ORDERS.ENCOUNTER_ID, encounterId)
+            .set(MEDICAL_ORDERS.ORDER_TYPE, input.orderType)
+            .set(MEDICAL_ORDERS.ORDER_CLASS, input.orderClass)
+            .set(MEDICAL_ORDERS.ORDER_CONTENT, input.orderContent)
+            .set(MEDICAL_ORDERS.ORDER_DETAILS, JSONB.valueOf(input.orderDetails.encode()))
+            .set(MEDICAL_ORDERS.START_TIME, input.startTime)
+            .set(MEDICAL_ORDERS.DOCTOR, input.doctor)
+            .set(MEDICAL_ORDERS.STATUS, "ACTIVE")
+            .set(MEDICAL_ORDERS.CREATED_AT, now)
+            .set(MEDICAL_ORDERS.UPDATED_AT, now)
+        input.endTime?.let { insertQuery = insertQuery.set(MEDICAL_ORDERS.END_TIME, it) }
+
+        return execute(connection, insertQuery).compose {
+            val startDate = businessDate(input.startTime)
+            val endDate = input.endTime?.let(::businessDate) ?: if (input.orderDetails.containsKey("duration_days")) {
+                startDate.plusDays(
+                    (input.orderDetails.getValue("duration_days") as Number).toLong()
+                )
+            } else if (input.orderDetails.getString("frequency_code") == "STAT") {
+                startDate
+            } else {
+                null
+            }
+            taskService.createOrderTask(
+                connection,
+                OrderTaskInput(
+                    periodId = requireNotNull(period.getString("id")),
+                    encounterId = encounterId,
+                    orderItemId = orderId,
+                    taskType = ORDER_TASK_TYPE.getValue(input.orderType),
+                    description = input.orderContent,
+                    frequencyCode = input.orderDetails.getString("frequency_code")
+                        ?.trim()?.takeIf { it.isNotBlank() },
+                    frequencyName = input.orderDetails.getString("frequency_name")
+                        ?.trim()?.takeIf { it.isNotBlank() },
+                    startDate = startDate,
+                    endDate = endDate,
+                ),
+            )
+        }.compose {
+            readOrderWithTask(connection, orderId).map { row ->
+                orderJson(row, row.getString("task_id"))
+            }
+        }
+    }
+
+    /**
+     * 025 `MEDICATION` 医嘱的药品目录校验与覆写（同连接只读，不写医嘱）：
+     *
+     * 1. 端口未注入 → [DrugCatalogUnavailableException]（路由 503，fail-closed）；
+     * 2. 物资不存在 → 404；`category != '药品'` 或 `status != 'ACTIVE'` → 409；
+     * 3. `drug_name` 显式提供且与目录药名不一致 → 400，避免前端与目录静默漂移；
+     * 4. 覆写 `drug_name` / `material_code` / `material_name`（忽略客户端同名入参）。
+     *
+     * 其余医嘱类型直接放行，不做任何目录读取。
+     */
+    private fun resolveDrugMaterialDetails(
+        client: SqlClient,
+        orderType: String,
+        orderDetails: JsonObject,
+    ): Future<Void?> {
+        if (orderType != "MEDICATION") {
+            return Future.succeededFuture(null)
+        }
+        val materialId = orderDetails.getString("material_id")?.trim()?.takeIf(String::isNotBlank)
+            ?: return Future.failedFuture(IllegalArgumentException("material_id is required for MEDICATION order"))
+        val port = drugCatalogPort
+            ?: return Future.failedFuture(
+                DrugCatalogUnavailableException("drug catalog port is not configured"),
+            )
+        return port.findDrugMaterial(client, materialId).compose { material ->
+            if (material == null) {
+                return@compose Future.failedFuture(
+                    HealthcareNotFoundException("material not found: $materialId"),
+                )
+            }
+            if (material.category != DRUG_CATEGORY) {
+                return@compose Future.failedFuture(
+                    ConflictException("material is not a drug: $materialId"),
+                )
+            }
+            if (material.status != ACTIVE_STATUS) {
+                return@compose Future.failedFuture(
+                    ConflictException("material is not active: $materialId"),
+                )
+            }
+            val requestedName = orderDetails.getString("drug_name")?.trim()?.takeIf(String::isNotBlank)
+            if (requestedName != null && requestedName != material.name) {
+                return@compose Future.failedFuture(
+                    IllegalArgumentException("drug_name must match catalog material name"),
+                )
+            }
+            val catalogName = requireNotNull(material.name) { "catalog material has no name: $materialId" }
+            orderDetails.put("drug_name", catalogName)
+            orderDetails.put("material_name", catalogName)
+            if (material.code.isNullOrBlank()) {
+                orderDetails.remove("material_code")
+            } else {
+                orderDetails.put("material_code", material.code)
+            }
+            Future.succeededFuture(null)
         }
     }
 
@@ -693,6 +793,7 @@ class MedicalOrderService(
             if (row == null) {
                 Future.failedFuture(HealthcareNotFoundException("order not found: $medicalOrderId"))
             } else {
+                val details = (row.getValue("order_details") as? JsonObject) ?: JsonObject()
                 Future.succeededFuture(
                     MedicationOrderLockSnapshot(
                         orderId = row.getString("order_id"),
@@ -709,7 +810,11 @@ class MedicalOrderService(
                         doctor = row.getString("doctor") ?: "",
                         startTime = row.getOffsetDateTime("start_time"),
                         endTime = row.getOffsetDateTime("end_time"),
-                        orderDetails = (row.getValue("order_details") as? JsonObject) ?: JsonObject(),
+                        orderDetails = details,
+                        materialId = details.trimmedText("material_id"),
+                        materialCode = details.trimmedText("material_code"),
+                        materialName = details.trimmedText("material_name"),
+
                         nurseCheckedBy = row.getString("nurse_checked_by"),
                         nurseCheckedAt = row.getOffsetDateTime("nurse_checked_at"),
                     ),
@@ -721,6 +826,7 @@ class MedicalOrderService(
     private fun medicationOrderRowJson(row: Row): JsonObject {
         val orderType = row.getString("order_type")
         val orderClass = row.getString("order_class")
+        val details = row.getValue("order_details") as? JsonObject
         return JsonObject()
             .put("order_id", row.getString("order_id"))
             .put("encounter_id", row.getString("encounter_id"))
@@ -731,18 +837,82 @@ class MedicalOrderService(
             .put("order_type_label", ORDER_TYPE_LABELS[orderType])
             .put("order_class", orderClass)
             .put("order_class_label", orderClass?.let { ORDER_CLASS_LABELS[it] })
-            .put("drug_name", (row.getValue("order_details") as? JsonObject)?.getString("drug_name"))
+            .put("drug_name", details?.getString("drug_name"))
+            // 025 待接方列表暴露医嘱绑定：历史自由文本医嘱为 null，前端据此走补绑
+            .put("material_id", details?.trimmedText("material_id"))
+            .put("material_code", details?.trimmedText("material_code"))
+            .put("material_name", details?.trimmedText("material_name"))
             .put("order_content", row.getString("order_content"))
-            .put("dose", (row.getValue("order_details") as? JsonObject)?.getString("dose"))
-            .put("unit", (row.getValue("order_details") as? JsonObject)?.getString("unit"))
-            .put("route", (row.getValue("order_details") as? JsonObject)?.getString("route"))
-            .put("frequency_code", (row.getValue("order_details") as? JsonObject)?.getString("frequency_code"))
-            .put("frequency_name", (row.getValue("order_details") as? JsonObject)?.getString("frequency_name"))
+            .put("dose", details?.getString("dose"))
+            .put("unit", details?.getString("unit"))
+            .put("route", details?.getString("route"))
+            .put("frequency_code", details?.getString("frequency_code"))
+            .put("frequency_name", details?.getString("frequency_name"))
             .put("start_time", row.getOffsetDateTime("start_time")?.toString())
             .put("end_time", row.getOffsetDateTime("end_time")?.toString())
             .put("doctor", row.getString("doctor"))
             .put("nurse_checked_by", row.getString("nurse_checked_by"))
             .put("nurse_checked_at", row.getOffsetDateTime("nurse_checked_at")?.toString())
+    }
+
+    /**
+     * 025 存量自由文本医嘱一次性补绑目录药品（同连接写，必须在药房外层事务内执行）：
+     *
+     * - 锁读医嘱（`FOR UPDATE`）后校验尚未绑定，重复补绑返回 [ConflictException]（409）；
+     * - 合并写入 `material_id`/`material_code`/`material_name` 与审计
+     *   `material_bound_by`/`material_bound_at`（成对，操作人必须非空）；
+     * - 只更新 `order_details` 与 `updated_at`，不改临床 status/end_time，不动护理任务；
+     * - 任意失败由外层事务整体回滚，发药单与库存出库一并撤销。
+     */
+    fun bindDrugMaterial(
+        client: SqlClient,
+        medicalOrderId: String,
+        materialId: String,
+        materialCode: String?,
+        materialName: String?,
+        operator: String,
+    ): Future<Void?> {
+        val operatorText = operator.trim()
+        if (operatorText.isBlank()) {
+            return Future.failedFuture(IllegalArgumentException("material_bound_by operator must not be blank"))
+        }
+        val lockQuery = ctx.select(MEDICAL_ORDERS.ID, MEDICAL_ORDERS.ORDER_DETAILS)
+            .from(MEDICAL_ORDERS)
+            .where(MEDICAL_ORDERS.ID.eq(medicalOrderId))
+            .forUpdate()
+        return execute(client, lockQuery).compose { rows ->
+            val row = rows.iterator().asSequence().firstOrNull()
+                ?: return@compose Future.failedFuture(
+                    HealthcareNotFoundException("order not found: $medicalOrderId"),
+                )
+            val details = (row.getValue("order_details") as? JsonObject) ?: JsonObject()
+            val existing = details.trimmedText("material_id")
+            if (existing != null) {
+                return@compose Future.failedFuture(
+                    ConflictException("order already bound to a drug material: $existing"),
+                )
+            }
+            val now = OffsetDateTime.now()
+            val merged = details.copy()
+            merged.put("material_id", materialId)
+            if (materialCode.isNullOrBlank()) {
+                merged.remove("material_code")
+            } else {
+                merged.put("material_code", materialCode)
+            }
+            if (materialName.isNullOrBlank()) {
+                merged.remove("material_name")
+            } else {
+                merged.put("material_name", materialName)
+            }
+            merged.put("material_bound_by", operatorText)
+            merged.put("material_bound_at", now.toString())
+            val updateQuery = ctx.update(MEDICAL_ORDERS)
+                .set(MEDICAL_ORDERS.ORDER_DETAILS, JSONB.valueOf(merged.encode()))
+                .set(MEDICAL_ORDERS.UPDATED_AT, now)
+                .where(MEDICAL_ORDERS.ID.eq(medicalOrderId))
+            execute(client, updateQuery).map { null as Void? }
+        }
     }
 
     /**
@@ -961,6 +1131,10 @@ class MedicalOrderService(
         if (normalized.getString(requiredKey).isNullOrBlank()) {
             throw IllegalArgumentException("$requiredKey is required for $orderType order")
         }
+        // 025 服务端独占键：接受客户端传入（白名单内）但一律丢弃，防止伪造目录快照或补绑审计。
+        for (key in SERVER_MANAGED_DETAIL_KEYS) {
+            normalized.remove(key)
+        }
 
         val hasFrequencyCode = normalized.containsKey("frequency_code")
         val hasFrequencyName = normalized.containsKey("frequency_name")
@@ -1015,3 +1189,7 @@ class MedicalOrderService(
             throw IllegalArgumentException("$field must be an ISO-8601 offset date-time")
         }
 }
+
+/** JSONB 明细字段的规范化读取：缺失或纯空白一律视为未设置 */
+private fun JsonObject.trimmedText(key: String): String? =
+    getString(key)?.trim()?.takeIf(String::isNotBlank)

@@ -2,15 +2,19 @@ package com.ovaphlow.crate.aceso
 
 import com.ovaphlow.crate.database.DatabaseConfig
 import com.ovaphlow.crate.dining.DiningRoutes
+import com.ovaphlow.crate.healthcare.DrugCatalogMaterial
+import com.ovaphlow.crate.healthcare.DrugCatalogPort
 import com.ovaphlow.crate.healthcare.HealthcareRoutes
 import com.ovaphlow.crate.healthcare.HealthcareService
 import com.ovaphlow.crate.healthcare.HealthcareNotFoundException
 import com.ovaphlow.crate.healthcare.MedicationOrderLockSnapshot
 import com.ovaphlow.crate.inventories.ConflictException as InventoryConflictException
 import com.ovaphlow.crate.inventories.InventoriesRoutes
+import com.ovaphlow.crate.inventories.MaterialService
 import com.ovaphlow.crate.inventories.NotFoundException as InventoryNotFoundException
 import com.ovaphlow.crate.inventories.StockService
 import com.ovaphlow.crate.log.Log
+import com.ovaphlow.crate.nursing.ConflictException as NursingConflictException
 import com.ovaphlow.crate.nursing.NursingRoutes
 import com.ovaphlow.crate.pharmacy.InventoryOutboundPort
 import com.ovaphlow.crate.pharmacy.InventoryInboundPort
@@ -36,6 +40,8 @@ import com.ovaphlow.crate.pharmacy.RequisitionTransferItem
 import com.ovaphlow.crate.pharmacy.RequisitionTransferItemResult
 import com.ovaphlow.crate.pharmacy.RequisitionTransferResult
 import com.ovaphlow.crate.pharmacy.ConflictException as PharmacyConflictException
+import com.ovaphlow.crate.pharmacy.DrugCatalogMaterial as PharmacyDrugCatalogMaterial
+import com.ovaphlow.crate.pharmacy.DrugCatalogPort as PharmacyDrugCatalogPort
 import com.ovaphlow.crate.pharmacy.NotFoundException as PharmacyNotFoundException
 import io.vertx.config.ConfigRetriever
 import io.vertx.config.ConfigRetrieverOptions
@@ -92,6 +98,7 @@ fun main() {
 
     val healthcareService = HealthcareService(pool)
     val stockService = StockService(pool)
+    val materialService = MaterialService(pool)
 
     val mainRouter = Router.router(vertx)
 
@@ -161,6 +168,7 @@ fun main() {
             idpSessionAuthHandler(vertx, idpBaseUrl),
             idpSessionAuthHandler(vertx, idpBaseUrl),
             idpSessionAuthHandler(vertx, idpBaseUrl),
+            drugCatalogPort = healthcareDrugCatalogPort(materialService),
         ),
     )
     apiRouter.route("/nursing/v1/*").subRouter(
@@ -187,6 +195,7 @@ fun main() {
             inventoryRequisitionTransferPort(stockService),
             inventoryPurchaseReceiptPort(stockService),
             idpSessionAuthHandler(vertx, idpBaseUrl),
+            drugCatalogPort = pharmacyDrugCatalogPort(materialService),
         ),
     )
     mainRouter.route("/crate-api/*").subRouter(apiRouter)
@@ -228,6 +237,55 @@ fun main() {
 }
 
 // ========================================================================
+//  025 药品目录同连接端口适配器
+//  药品目录即 inventories.materials 中 category='药品' 的记录（方案 A）；
+//  两个适配器都复用调用方传入的 client（外层事务连接），
+//  禁止在端口内部重新取 Pool 或开启新事务。
+// ========================================================================
+
+private fun healthcareDrugCatalogPort(materialService: MaterialService): DrugCatalogPort =
+    object : DrugCatalogPort {
+        override fun findDrugMaterial(
+            client: SqlClient,
+            materialId: String,
+        ): Future<DrugCatalogMaterial?> =
+            materialService.findMaterialById(client, materialId).map { material ->
+                material?.let {
+                    DrugCatalogMaterial(
+                        id = it.id,
+                        code = it.code,
+                        name = it.name,
+                        spec = it.spec,
+                        baseUnit = it.baseUnit,
+                        status = it.status,
+                        category = it.category,
+                    )
+                }
+            }
+    }
+
+private fun pharmacyDrugCatalogPort(materialService: MaterialService): PharmacyDrugCatalogPort =
+    object : PharmacyDrugCatalogPort {
+        override fun findDrugMaterial(
+            client: SqlClient,
+            materialId: String,
+        ): Future<PharmacyDrugCatalogMaterial?> =
+            materialService.findMaterialById(client, materialId).map { material ->
+                material?.let {
+                    PharmacyDrugCatalogMaterial(
+                        id = it.id,
+                        code = it.code,
+                        name = it.name,
+                        spec = it.spec,
+                        baseUnit = it.baseUnit,
+                        status = it.status,
+                        category = it.category,
+                    )
+                }
+            }
+    }
+
+// ========================================================================
 //  011 药房同连接内部端口适配器
 //  Pharmacy 不直接读写 Healthcare/Inventory 表；所有端口调用复用 Pharmacy
 //  外层事务连接，禁止在端口内部重新从 Pool 开启新事务。
@@ -249,6 +307,32 @@ private fun medicalOrderReader(healthcareService: HealthcareService): MedicalOrd
                 healthcareService.lockMedicationOrderForPharmacy(client, medicalOrderId)
                     .map(::toMedicationOrderSnapshot),
             )
+
+        override fun bindDrugMaterial(
+            client: SqlClient,
+            medicalOrderId: String,
+            materialId: String,
+            materialCode: String?,
+            materialName: String?,
+            operator: String,
+        ): Future<Void?> =
+            healthcareService.bindDrugMaterial(
+                client,
+                medicalOrderId,
+                materialId,
+                materialCode,
+                materialName,
+                operator,
+            ).recover { error ->
+                when (error) {
+                    // 医嘱已绑定（重复补绑）由 Healthcare 侧以 nursing ConflictException 抛出，
+                    // 在药房边界映射为 409，避免退化为 500
+                    is NursingConflictException -> Future.failedFuture(
+                        PharmacyConflictException(error.message ?: "medical order conflict"),
+                    )
+                    else -> mapPharmacyPortFailure(Future.failedFuture(error))
+                }
+            }
     }
 
 private fun toMedicationOrderSnapshot(snapshot: MedicationOrderLockSnapshot): MedicationOrderSnapshot =
@@ -270,6 +354,9 @@ private fun toMedicationOrderSnapshot(snapshot: MedicationOrderLockSnapshot): Me
         orderDetails = snapshot.orderDetails,
         nurseCheckedBy = snapshot.nurseCheckedBy,
         nurseCheckedAt = snapshot.nurseCheckedAt,
+        materialId = snapshot.materialId,
+        materialCode = snapshot.materialCode,
+        materialName = snapshot.materialName,
     )
 
 private fun inventoryOutboundPort(stockService: StockService): InventoryOutboundPort =

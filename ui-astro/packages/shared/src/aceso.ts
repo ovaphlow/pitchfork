@@ -2215,6 +2215,12 @@ export interface PharmacyMedicationOrder {
   start_time: string | null;
   end_time: string | null;
   doctor: string;
+  /** 医嘱绑定的药品目录物资（025）：历史自由文本医嘱为 null */
+  material_id: string | null;
+  /** 药品目录编码快照：与 material_id 成对出现 */
+  material_code: string | null;
+  /** 药品目录名称快照：与 material_id 成对出现 */
+  material_name: string | null;
   /** 护士核对审计：药房待接方只返回已核对医嘱，两字段均非空 */
   nurse_checked_by: string | null;
   nurse_checked_at: string | null;

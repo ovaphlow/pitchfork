@@ -1,15 +1,21 @@
 package com.ovaphlow.crate.aceso
 
 import com.ovaphlow.crate.database.DatabaseConfig
+import com.ovaphlow.crate.healthcare.DrugCatalogMaterial as HealthcareDrugCatalogMaterial
+import com.ovaphlow.crate.healthcare.DrugCatalogPort as HealthcareDrugCatalogPort
 import com.ovaphlow.crate.healthcare.HealthcareRoutes
 import com.ovaphlow.crate.healthcare.HealthcareService
 import com.ovaphlow.crate.healthcare.HealthcareNotFoundException
 import com.ovaphlow.crate.healthcare.MedicationOrderLockSnapshot
 import com.ovaphlow.crate.inventories.ConflictException as InventoryConflictException
 import com.ovaphlow.crate.inventories.InventoriesRoutes
+import com.ovaphlow.crate.inventories.MaterialService
 import com.ovaphlow.crate.inventories.NotFoundException as InventoryNotFoundException
 import com.ovaphlow.crate.inventories.StockService
+import com.ovaphlow.crate.nursing.ConflictException as NursingConflictException
 import com.ovaphlow.crate.nursing.NursingRoutes
+import com.ovaphlow.crate.pharmacy.DrugCatalogMaterial as PharmacyDrugCatalogMaterial
+import com.ovaphlow.crate.pharmacy.DrugCatalogPort as PharmacyDrugCatalogPort
 import com.ovaphlow.crate.pharmacy.InboundCommand
 import com.ovaphlow.crate.pharmacy.InboundResult
 import com.ovaphlow.crate.pharmacy.InventoryInboundPort
@@ -60,9 +66,24 @@ object AcesoIntegrationTestSupport {
     fun createRouter(vertx: Vertx, pool: Pool): Router {
         val healthcareService = HealthcareService(pool)
         val stockService = StockService(pool)
+        // 025 药品目录适配器：与 apps/aceso/Main.kt 相同，两个端口都复用调用方连接
+        // 走 MaterialService.findMaterialById，禁止端口内部重新取 Pool。
+        val materialService = MaterialService(pool)
         val auth = fakeAuth()
 
         val router = Router.router(vertx)
+
+        // ── 025 §4.5 fail-closed 负向挂载（必须在全局身份门之前注册）──────────
+        // 路由按注册顺序匹配，且匹配到的 handler 不调用 next() 时不再继续；
+        // `/pharmacy-noauth/v1/*` 用来证明「补绑路径缺可信身份 → 401」而不是伪造 null 审计。
+        router.route("/pharmacy-noauth/v1/*").subRouter(
+            pharmacyRouter(vertx, pool, healthcareService, stockService, materialService, drugCatalogConfigured = true),
+        )
+
+        // 与生产 Main.kt 的 `apiRouter.route().handler(apiAuthenticationGate(sessionAuth))` 等价：
+        // 生产端在该门里 ctx.put("userId", subjectId)，补绑路径的 material_bound_by 依赖它。
+        // 测试端必须同样先注入身份，否则补绑路径会因缺身份返回 401（fail-closed 生效）。
+        router.route().handler(auth)
         router.route("/inventories/v1/*").subRouter(InventoriesRoutes.create(vertx, pool))
         router.route("/healthcare/v1/*").subRouter(
             HealthcareRoutes.create(
@@ -78,23 +99,45 @@ object AcesoIntegrationTestSupport {
                 auth,
                 auth,
                 auth,
+                auth,
+                drugCatalogPort = healthcareDrugCatalogPort(materialService),
             ),
         )
         router.route("/nursing/v1/*").subRouter(NursingRoutes.create(vertx, pool, auth))
         router.route("/pharmacy/v1/*").subRouter(
-            PharmacyRoutes.create(
-                vertx,
-                pool,
-                medicalOrderReader(healthcareService),
-                inventoryOutboundPort(stockService),
-                inventoryInboundPort(stockService),
-                inventoryRequisitionTransferPort(stockService),
-                inventoryPurchaseReceiptPort(stockService),
-                auth,
-            ),
+            pharmacyRouter(vertx, pool, healthcareService, stockService, materialService, drugCatalogConfigured = true),
+        )
+        // `/pharmacy-noport/v1/*` 放在身份门之后：有可信身份、但缺药品目录端口，
+        // 用来证明「端口漏注入 → 503」而不是 401，也不是静默跳过补绑。
+        router.route("/pharmacy-noport/v1/*").subRouter(
+            pharmacyRouter(vertx, pool, healthcareService, stockService, materialService, drugCatalogConfigured = false),
         )
         return router
     }
+
+    /**
+     * 025 药房子路由装配（与 Main.kt 相同）：`drugCatalogConfigured = false` 模拟
+     * 部署漏注入药品目录端口，用于验证补绑路径 fail-closed 而不是静默跳过。
+     */
+    private fun pharmacyRouter(
+        vertx: Vertx,
+        pool: Pool,
+        healthcareService: HealthcareService,
+        stockService: StockService,
+        materialService: MaterialService,
+        drugCatalogConfigured: Boolean,
+    ): Router =
+        PharmacyRoutes.create(
+            vertx,
+            pool,
+            medicalOrderReader(healthcareService),
+            inventoryOutboundPort(stockService),
+            inventoryInboundPort(stockService),
+            inventoryRequisitionTransferPort(stockService),
+            inventoryPurchaseReceiptPort(stockService),
+            fakeAuth(),
+            drugCatalogPort = if (drugCatalogConfigured) pharmacyDrugCatalogPort(materialService) else null,
+        )
 
     fun migrate(poolConfig: JsonObject) {
         DatabaseConfig.migrate(poolConfig)
@@ -116,6 +159,31 @@ object AcesoIntegrationTestSupport {
                     healthcareService.lockMedicationOrderForPharmacy(client, medicalOrderId)
                         .map(::toMedicationOrderSnapshot),
                 )
+
+            /** 025 与 Main.kt 相同：把 Healthcare 侧绑定的 nursing ConflictException 映射为药房 409。 */
+            override fun bindDrugMaterial(
+                client: SqlClient,
+                medicalOrderId: String,
+                materialId: String,
+                materialCode: String?,
+                materialName: String?,
+                operator: String,
+            ): Future<Void?> =
+                healthcareService.bindDrugMaterial(
+                    client,
+                    medicalOrderId,
+                    materialId,
+                    materialCode,
+                    materialName,
+                    operator,
+                ).recover { error ->
+                    when (error) {
+                        is NursingConflictException -> Future.failedFuture(
+                            PharmacyConflictException(error.message ?: "medical order conflict"),
+                        )
+                        else -> mapPharmacyPortFailure(Future.failedFuture(error))
+                    }
+                }
         }
 
     private fun toMedicationOrderSnapshot(snapshot: MedicationOrderLockSnapshot): MedicationOrderSnapshot =
@@ -137,7 +205,55 @@ object AcesoIntegrationTestSupport {
             orderDetails = snapshot.orderDetails,
             nurseCheckedBy = snapshot.nurseCheckedBy,
             nurseCheckedAt = snapshot.nurseCheckedAt,
+            // 025 绑定投影必须一起映射：漏掉会让已绑定医嘱被误判为存量自由文本医嘱
+            materialId = snapshot.materialId,
+            materialCode = snapshot.materialCode,
+            materialName = snapshot.materialName,
         )
+
+    /** 025 Healthcare 侧药品目录端口：适配 MaterialService.findMaterialById（同连接只读）。 */
+    private fun healthcareDrugCatalogPort(materialService: MaterialService): HealthcareDrugCatalogPort =
+        object : HealthcareDrugCatalogPort {
+            override fun findDrugMaterial(
+                client: SqlClient,
+                materialId: String,
+            ): Future<HealthcareDrugCatalogMaterial?> =
+                materialService.findMaterialById(client, materialId).map { material ->
+                    material?.let {
+                        HealthcareDrugCatalogMaterial(
+                            id = it.id,
+                            code = it.code,
+                            name = it.name,
+                            spec = it.spec,
+                            baseUnit = it.baseUnit,
+                            status = it.status,
+                            category = it.category,
+                        )
+                    }
+                }
+        }
+
+    /** 025 Pharmacy 侧药品目录端口：与 Healthcare 侧同一适配，保持两侧判定一致。 */
+    private fun pharmacyDrugCatalogPort(materialService: MaterialService): PharmacyDrugCatalogPort =
+        object : PharmacyDrugCatalogPort {
+            override fun findDrugMaterial(
+                client: SqlClient,
+                materialId: String,
+            ): Future<PharmacyDrugCatalogMaterial?> =
+                materialService.findMaterialById(client, materialId).map { material ->
+                    material?.let {
+                        PharmacyDrugCatalogMaterial(
+                            id = it.id,
+                            code = it.code,
+                            name = it.name,
+                            spec = it.spec,
+                            baseUnit = it.baseUnit,
+                            status = it.status,
+                            category = it.category,
+                        )
+                    }
+                }
+        }
 
     private fun inventoryOutboundPort(stockService: StockService): InventoryOutboundPort =
         object : InventoryOutboundPort {

@@ -1,13 +1,16 @@
 package com.ovaphlow.crate.healthcare
 
 import com.ovaphlow.crate.database.DatabaseConfig
+import com.ovaphlow.crate.inventories.MaterialService
 import com.ovaphlow.crate.nursing.NursingRoutes
+import io.vertx.core.Future
 import io.vertx.core.Vertx
 import io.vertx.core.http.HttpMethod
 import io.vertx.core.json.JsonObject
 import io.vertx.ext.web.Router
 import io.vertx.junit5.VertxExtension
 import io.vertx.junit5.VertxTestContext
+import io.vertx.sqlclient.SqlClient
 import org.junit.jupiter.api.*
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty
@@ -45,6 +48,14 @@ class ElderlyDeathIntegrationTest {
         private const val FIXTURE_PREFIX = "ed-"
         private const val HEALTHCARE_BASE = "/healthcare/v1"
         private const val NURSING_BASE = "/nursing/v1"
+
+        /**
+         * 025 起 `MEDICATION` 医嘱必须绑定目录药品（`material_id`）。这里直接引用
+         * V204 迁移预置的演示药品常量 ULID（迁移注释明确其可稳定引用），
+         * 不新增 `ed-` 前缀物资 fixture，保持本文件残差口径不变。
+         */
+        private const val DEMO_DRUG_001_ID = "01J5D3M000000000000000A001"
+        private const val DEMO_DRUG_001_NAME = "降压药A"
     }
 
     private lateinit var host: String
@@ -64,9 +75,10 @@ class ElderlyDeathIntegrationTest {
         port = System.getProperty("integration.db.port", "5432")
         user = System.getProperty("integration.db.user", "ovaphlow")
         password = System.getenv("PITCHFORK_DB_PASSWORD") ?: ""
+        // 兜底门控：只给了 -Dintegration.db.host 而缺密码时，按 JUnit 假设失败 skip 整个类，不让模块变红。
+        Assumptions.assumeTrue(password.isNotBlank(), "integration test skipped: 需要 PITCHFORK_DB_PASSWORD 才会运行")
 
         try {
-            if (password.isBlank()) throw IllegalStateException("PITCHFORK_DB_PASSWORD must be set")
             check(port == "55432" || port == "5432") { "integration test must target the authorized aceso_test port" }
 
             val dbConfig = JsonObject()
@@ -78,7 +90,14 @@ class ElderlyDeathIntegrationTest {
             pool = DatabaseConfig.createPool(vertx, dbConfig)
 
             val rootRouter = Router.router(vertx)
-            rootRouter.route("/healthcare/v1/*").subRouter(HealthcareRoutes.create(vertx, pool))
+            // 025：药品目录端口必须注入，否则本文件的 MEDICATION 医嘱会 fail-closed 503
+            rootRouter.route("/healthcare/v1/*").subRouter(
+                HealthcareRoutes.create(
+                    vertx,
+                    pool,
+                    drugCatalogPort = drugCatalogPort(MaterialService(pool)),
+                ),
+            )
             rootRouter.route("/nursing/v1/*").subRouter(NursingRoutes.create(vertx, pool))
             vertx.createHttpServer()
                 .requestHandler(rootRouter)
@@ -111,9 +130,15 @@ class ElderlyDeathIntegrationTest {
 
     @AfterAll
     fun teardown(ctx: VertxTestContext) {
+        // @BeforeAll 被 Assumptions 跳过（缺密码）时 JUnit 仍会调用 @AfterAll：
+        // 此时没有连接池与 fixture，直接结束，避免把 skip 变成失败。
+        if (!::pool.isInitialized) {
+            ctx.completeNow()
+            return
+        }
         cleanupFixtures()
         assertResidualZero()
-        if (::pool.isInitialized) pool.close()
+        pool.close()
         server?.close { ar ->
             if (ar.succeeded()) ctx.completeNow()
             else ctx.failNow(ar.cause())
@@ -252,6 +277,25 @@ class ElderlyDeathIntegrationTest {
         }.onComplete { client.close() }
     }
 
+    /** 025 药品目录端口适配器（测试侧），与 `apps/aceso/Main.kt` 逐字段一致。 */
+    private fun drugCatalogPort(materialService: MaterialService): DrugCatalogPort =
+        object : DrugCatalogPort {
+            override fun findDrugMaterial(client: SqlClient, materialId: String): Future<DrugCatalogMaterial?> =
+                materialService.findMaterialById(client, materialId).map { material ->
+                    material?.let {
+                        DrugCatalogMaterial(
+                            id = it.id,
+                            code = it.code,
+                            name = it.name,
+                            spec = it.spec,
+                            baseUnit = it.baseUnit,
+                            status = it.status,
+                            category = it.category,
+                        )
+                    }
+                }
+        }
+
     private fun deathBody(cause: String = "心力衰竭"): JsonObject =
         JsonObject().put("death_date", "2026-08-05T14:00:00+08:00").put("death_cause", cause)
 
@@ -272,7 +316,11 @@ class ElderlyDeathIntegrationTest {
                 .put("start_time", "2026-08-01T10:00:00+08:00")
                 .put(
                     "order_details",
-                    JsonObject().put("drug_name", "阿莫西林").put("frequency_code", "QD").put("frequency_name", "每日一次"),
+                    JsonObject()
+                        .put("material_id", DEMO_DRUG_001_ID)
+                        .put("drug_name", DEMO_DRUG_001_NAME)
+                        .put("frequency_code", "QD")
+                        .put("frequency_name", "每日一次"),
                 ),
         )
             .compose { (status, _) ->

@@ -504,6 +504,7 @@ async function createMedicationOrder(
   page: Page,
   admission: AdmissionResponse,
   suffix: string,
+  material: { materialId: string; materialName: string },
 ): Promise<MedicalOrder> {
   const order = await api<MedicalOrder>(
     page,
@@ -517,7 +518,9 @@ async function createMedicationOrder(
         doctor: "测试医生",
         start_time: "2026-08-06T08:00:00+08:00",
         order_details: {
-          drug_name: "氨氯地平片",
+          // 025：用药医嘱必须从目录选药，material_id 必填且 drug_name 必须等于目录名
+          material_id: material.materialId,
+          drug_name: material.materialName,
           dose: "1",
           unit: "片",
           route: "口服",
@@ -534,12 +537,13 @@ async function createMedicationOrder(
   return order;
 }
 
-/** 构建完整测试前置：入住 + 护士核对医嘱 + 真实仓库 + 批次库存。 */
+/** 构建完整测试前置：入住 + 真实仓库 + 批次库存 + 绑定该目录药品的已核对医嘱。 */
 async function createInlineFixture(page: Page, suffix: string): Promise<InlineFixture> {
   const admission = await createActiveAdmission(page, suffix);
-  const order = await createMedicationOrder(page, admission, suffix);
   const warehouse = await getWarehouseCode(page);
+  // 025：药品目录物资必须先建好（含批次与入库），医嘱才能绑定它
   const inventory = await createInventoryFixture(page, suffix, warehouse);
+  const order = await createMedicationOrder(page, admission, suffix, inventory);
   return {
     patientId: admission.encounter.patient_id,
     admission,
@@ -559,6 +563,16 @@ async function selectFirstOption(page: Page, selectLocator: Locator) {
   await selectLocator.selectOption(value);
 }
 
+/**
+ * 选择第一个可用库存批次。025 起 `#dispense-stock` 是必选步骤，
+ * 否则前端会以「请选择可用库存批次」拦下提交。
+ */
+async function selectFirstStock(page: Page, modal: Locator) {
+  const stockSelect = modal.locator("#dispense-stock");
+  await expect(stockSelect).toBeEnabled({ timeout: 10_000 });
+  await selectFirstOption(page, stockSelect);
+}
+
 /** UI：从待接方用药医嘱创建发药单（接方）。 */
 async function createDispenseViaUi(
   page: Page,
@@ -573,7 +587,17 @@ async function createDispenseViaUi(
   const modal = modalByTitle(page, "创建发药单");
   await expect(modal).toBeVisible();
   await modal.locator("#dispense-warehouse").selectOption(warehouse);
-  await selectFirstOption(page, modal.locator("#dispense-material"));
+
+  // 025：医嘱已绑定目录药品时 #dispense-material 禁用且只有一个预选项；
+  // 仅历史自由文本医嘱需要药房在此补选目录药品。
+  const materialSelect = modal.locator("#dispense-material");
+  if (!(await materialSelect.isDisabled())) {
+    await selectFirstOption(page, materialSelect);
+  } else {
+    await expect(materialSelect.locator("option")).toHaveCount(1);
+  }
+
+  await selectFirstStock(page, modal);
   await modal.locator("#dispense-operator").waitFor({ state: "visible" });
   await selectFirstOption(page, modal.locator("#dispense-operator"));
   await modal.getByRole("button", { name: "创建发药单" }).click();

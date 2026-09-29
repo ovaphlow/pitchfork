@@ -21,6 +21,11 @@ object PharmacyRoutes {
         inventoryRequisitionTransferPort: InventoryRequisitionTransferPort,
         inventoryPurchaseReceiptPort: InventoryPurchaseReceiptPort,
         authHandler: io.vertx.core.Handler<RoutingContext>,
+        /**
+         * 025 药品目录端口（Pharmacy 侧）：由 Aceso `Main.kt` 注入。为 null 时
+         * 存量医嘱补绑路径 fail-closed 返回 503；附加在末尾以保持既有调用点可编译。
+         */
+        drugCatalogPort: DrugCatalogPort? = null,
     ): Router {
         val router = Router.router(vertx)
         val mPool = pool
@@ -33,7 +38,7 @@ object PharmacyRoutes {
 
         // 同时匹配 /dispenses 和 /dispenses/...：列表契约是无尾斜杠的 /dispenses
         router.route("/dispenses*").subRouter(
-            DispenseRoutes.create(vertx, mPool, medicalOrderReader, inventoryOutboundPort),
+            DispenseRoutes.create(vertx, mPool, medicalOrderReader, inventoryOutboundPort, drugCatalogPort),
         )
         router.route("/returns*").subRouter(ReturnRoutes.create(vertx, mPool, inventoryInboundPort))
         router.route("/requisitions*").subRouter(

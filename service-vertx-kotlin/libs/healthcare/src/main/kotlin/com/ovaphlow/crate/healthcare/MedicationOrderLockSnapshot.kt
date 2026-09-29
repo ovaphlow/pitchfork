@@ -24,4 +24,13 @@ data class MedicationOrderLockSnapshot(
     val nurseCheckedBy: String?,
     /** 护士核对时间：与 nurseCheckedBy 成对出现 */
     val nurseCheckedAt: OffsetDateTime?,
+    /**
+     * 025 医嘱-药品目录绑定快照（`order_details.material_id` 的受控投影）：
+     * 存量自由文本医嘱为 null，由药房创建发药单时一次性补绑。
+     */
+    val materialId: String? = null,
+    /** 目录药品编码快照（`order_details.material_code`），未绑定为 null */
+    val materialCode: String? = null,
+    /** 目录药品名快照（`order_details.material_name`），未绑定为 null */
+    val materialName: String? = null,
 )

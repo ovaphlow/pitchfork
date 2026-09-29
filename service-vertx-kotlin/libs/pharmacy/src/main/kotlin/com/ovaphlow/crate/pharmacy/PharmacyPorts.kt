@@ -32,7 +32,62 @@ interface MedicalOrderReader {
      * 患者、入住、医生和医嘱内容全部来自该快照，不接受客户端覆盖。
      */
     fun lockMedicationOrder(client: SqlClient, medicalOrderId: String): Future<MedicationOrderSnapshot>
+
+    /**
+     * 025 存量自由文本医嘱一次性补绑目录药品：在调用方已锁定的医嘱上合并写入
+     * `order_details.material_id/material_code/material_name` 与审计
+     * `material_bound_by/material_bound_at`（成对，操作人必须非空）。
+     *
+     * 必须复用 Pharmacy 外层事务连接；医嘱不存在返回 404，已绑定返回 409，
+     * 任何失败由外层事务整体回滚（发药单与库存出库一并撤销）。
+     *
+     * 默认实现 fail-closed：未接线（例如未改造的集成测试装配）时显式失败，
+     * 绝不静默跳过补绑——否则会产出无绑定发药单，重回本计划要修的根因。
+     */
+    fun bindDrugMaterial(
+        client: SqlClient,
+        medicalOrderId: String,
+        materialId: String,
+        materialCode: String?,
+        materialName: String?,
+        operator: String,
+    ): Future<Void?> =
+        Future.failedFuture(
+            DrugCatalogUnavailableException("MedicalOrderReader.bindDrugMaterial is not configured"),
+        )
 }
+
+/**
+ * 025 药品目录同连接只读端口（Pharmacy 侧）。
+ *
+ * Pharmacy 不依赖 healthcare/inventories 库：端口在本库内定义、由 Aceso `Main.kt`
+ * 注入适配器，校验用法与 healthcare 侧一致（药品 = `category = '药品'` 且 ACTIVE）。
+ */
+interface DrugCatalogPort {
+
+    /** 按 id 读取目录物资快照；不存在返回 null，由调用方映射 404。必须复用外层事务连接。 */
+    fun findDrugMaterial(client: SqlClient, materialId: String): Future<DrugCatalogMaterial?>
+}
+
+/** 025 目录药品快照（Pharmacy 侧） */
+data class DrugCatalogMaterial(
+    val id: String,
+    val code: String?,
+    val name: String?,
+    val spec: String?,
+    val baseUnit: String?,
+    val status: String?,
+    val category: String?,
+)
+
+/**
+ * 药品目录端口未注入 / 未实现：部署或装配错误，必须 fail-closed。
+ * 路由映射为 **503**，不得降级为「跳过目录校验 / 跳过补绑」。
+ */
+class DrugCatalogUnavailableException(message: String) : Exception(message)
+
+/** 025 补绑路径缺少可信操作人身份：路由映射为 **401**，不得写 null 审计 */
+class UnauthorizedException(message: String) : Exception(message)
 
 /** 011 接方/发药所需的医嘱受控快照（由 Healthcare 侧生成，字段固定，不含 SQL/堆栈细节） */
 data class MedicationOrderSnapshot(
@@ -55,6 +110,15 @@ data class MedicationOrderSnapshot(
     val nurseCheckedBy: String?,
     /** 护士核对时间：与 nurseCheckedBy 成对出现 */
     val nurseCheckedAt: OffsetDateTime?,
+    /**
+     * 025 医嘱绑定的目录药品（`order_details.material_id` 的受控投影）：
+     * 存量自由文本医嘱为 null，表示需要药房在创建发药单时一次性补绑。
+     */
+    val materialId: String? = null,
+    /** 目录药品编码快照（`order_details.material_code`），未绑定为 null */
+    val materialCode: String? = null,
+    /** 目录药品名快照（`order_details.material_name`），未绑定为 null */
+    val materialName: String? = null,
 )
 
 /** 016 基础数量出库命令：quantity 是物资基础数量，单位由服务端写入库存明细快照。 */

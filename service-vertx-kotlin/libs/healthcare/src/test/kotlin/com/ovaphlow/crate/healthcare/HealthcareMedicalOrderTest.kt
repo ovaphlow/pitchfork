@@ -234,12 +234,43 @@ class HealthcareMedicalOrderTest {
 
     private fun medDetails(duration: Any? = null): JsonObject {
         val details = JsonObject()
+            // 025 MEDICATION 必须绑定目录药品：material_id 必填，drug_name 由服务端按目录覆写
+            .put("material_id", "mat-1")
             .put("drug_name", "阿司匹林")
             .put("dose", "100mg")
             .put("frequency_code", "QD")
             .put("frequency_name", "每日一次")
         if (duration != null) details.put("duration_days", duration)
         return details
+    }
+
+    /**
+     * 025 目录药品端口桩：默认返回与 `drug_name` 一致的 ACTIVE 药品；
+     * `materialId` 不匹配时返回 null（模拟目录中不存在）。
+     */
+    private fun drugCatalogPort(
+        name: String? = "阿司匹林",
+        category: String? = "药品",
+        status: String? = "ACTIVE",
+        code: String? = "DEMO-DRUG-001",
+        materialId: String = "mat-1",
+    ): DrugCatalogPort = object : DrugCatalogPort {
+        override fun findDrugMaterial(client: io.vertx.sqlclient.SqlClient, materialId2: String) =
+            Future.succeededFuture(
+                if (materialId2 != materialId) {
+                    null
+                } else {
+                    DrugCatalogMaterial(
+                        id = materialId,
+                        code = code,
+                        name = name,
+                        spec = "100mg/片",
+                        baseUnit = "片",
+                        status = status,
+                        category = category,
+                    )
+                },
+            )
     }
 
     private fun validOrderBody(overrides: Map<String, Any?> = emptyMap()): JsonObject {
@@ -322,7 +353,7 @@ class HealthcareMedicalOrderTest {
         )
         expectInvalid(
             validOrderBody(mapOf("order_details" to JsonObject().put("dose", "100mg"))),
-            "drug_name is required",
+            "material_id is required for MEDICATION order",
         )
         expectInvalid(
             validOrderBody(
@@ -363,6 +394,7 @@ class HealthcareMedicalOrderTest {
             validOrderBody(
                 mapOf(
                     "order_details" to JsonObject()
+                        .put("material_id", "mat-1")
                         .put("drug_name", "阿司匹林")
                         .put("frequency_code", "QD"),
                 ),
@@ -373,6 +405,7 @@ class HealthcareMedicalOrderTest {
             validOrderBody(
                 mapOf(
                     "order_details" to JsonObject()
+                        .put("material_id", "mat-1")
                         .put("drug_name", "阿司匹林")
                         .put("dose", 100),
                 ),
@@ -445,11 +478,12 @@ class HealthcareMedicalOrderTest {
             periods = rows(periodRow()),
             orders = rows(orderRow()),
         )
-        val service = HealthcareService(stub.pool)
+        val service = HealthcareService(stub.pool, drugCatalogPort = drugCatalogPort())
 
         val body = validOrderBody(
             mapOf(
                 "order_details" to JsonObject()
+                    .put("material_id", "mat-1")
                     .put("drug_name", "阿司匹林")
                     .put("dose", "100mg")
                     .put("unit", "片")
@@ -490,6 +524,10 @@ class HealthcareMedicalOrderTest {
         assertTrue(taskInsert.second.contains("ACTIVE"))
         val details = orderInsert.second.filterIsInstance<JsonObject>().first { it.containsKey("drug_name") }
         assertEquals("阿司匹林", details.getString("drug_name"))
+        // 025 目录覆写：material_id 来自客户端，code/name 一律取目录快照
+        assertEquals("mat-1", details.getString("material_id"))
+        assertEquals("阿司匹林", details.getString("material_name"))
+        assertEquals("DEMO-DRUG-001", details.getString("material_code"))
 
         // 读取无副作用：不执行任何执行生成/写入
         assertTrue(stub.queries.none { it.contains("nursing_task_executions") })
@@ -503,7 +541,7 @@ class HealthcareMedicalOrderTest {
             periods = rows(periodRow()),
             orders = rows(orderRow()),
         )
-        HealthcareService(stub.pool).createOrder("enc-1", validOrderBody())
+        HealthcareService(stub.pool, drugCatalogPort = drugCatalogPort()).createOrder("enc-1", validOrderBody())
             .toCompletionStage().toCompletableFuture().get()
 
         val taskInsert = stub.tuples.first { it.first.contains("insert into nursing.nursing_tasks") }
@@ -541,7 +579,7 @@ class HealthcareMedicalOrderTest {
             orders = rows(orderRow()),
             failTaskInsert = true,
         )
-        val service = HealthcareService(stub.pool)
+        val service = HealthcareService(stub.pool, drugCatalogPort = drugCatalogPort())
 
         val cause = causeOf(service.createOrder("enc-1", validOrderBody()))
         assertInstanceOf(IllegalStateException::class.java, cause)
@@ -768,6 +806,44 @@ class HealthcareMedicalOrderTest {
             .toCompletionStage().toCompletableFuture().get()
         assertEquals(0, list.getJsonArray("records").size())
         assertEquals(0L, list.getJsonObject("meta").getLong("total"))
+    }
+
+    @Test
+    fun `待接方列表返回医嘱药品绑定字段历史医嘱为null`() {
+        val bound = orderRow(
+            mapOf(
+                "order_id" to "ord-1",
+                "order_details" to JsonObject()
+                    .put("drug_name", "阿司匹林")
+                    .put("material_id", "mat-1")
+                    .put("material_code", "DEMO-DRUG-001")
+                    .put("material_name", "阿司匹林"),
+            ),
+        )
+        // 存量自由文本医嘱：只有 drug_name，绑定字段必须为 null（前端据此走补绑）
+        val legacy = orderRow(
+            mapOf(
+                "id" to "ord-2",
+                "order_id" to "ord-2",
+                "order_details" to JsonObject().put("drug_name", "降压药A"),
+            ),
+        )
+        val stub = DatabaseStub(orders = rows(bound, legacy), countRows = rows(mapOf("total" to 2L)))
+        val result = HealthcareService(stub.pool)
+            .listMedicationOrdersForPharmacy(stub.pool, null, null, 50, 0)
+            .toCompletionStage().toCompletableFuture().get()
+
+        assertEquals(2L, result.getJsonObject("meta").getLong("total"))
+        val records = result.getJsonArray("records")
+        val boundRecord = records.getJsonObject(0)
+        assertEquals("mat-1", boundRecord.getString("material_id"))
+        assertEquals("DEMO-DRUG-001", boundRecord.getString("material_code"))
+        assertEquals("阿司匹林", boundRecord.getString("material_name"))
+        val legacyRecord = records.getJsonObject(1)
+        assertNull(legacyRecord.getString("material_id"), "历史医嘱 material_id 必须为 null")
+        assertNull(legacyRecord.getString("material_code"), "历史医嘱 material_code 必须为 null")
+        assertNull(legacyRecord.getString("material_name"), "历史医嘱 material_name 必须为 null")
+        assertEquals("降压药A", legacyRecord.getString("drug_name"), "历史自由文本药名仍原样返回")
     }
 
     // ——— 6. 终局编排 ———
@@ -1049,6 +1125,7 @@ class HealthcareMedicalOrderTest {
         vertx: Vertx,
         stub: DatabaseStub,
         userId: String? = null,
+        drugCatalog: DrugCatalogPort? = drugCatalogPort(),
         block: (Int) -> Future<T>,
     ): Future<Unit> {
         val router = Router.router(vertx)
@@ -1056,7 +1133,9 @@ class HealthcareMedicalOrderTest {
         if (userId != null) {
             router.route("/healthcare/v1/*").handler { ctx -> ctx.put("userId", userId); ctx.next() }
         }
-        router.route("/healthcare/v1/*").subRouter(HealthcareRoutes.create(vertx, stub.pool))
+        router.route("/healthcare/v1/*").subRouter(
+            HealthcareRoutes.create(vertx, stub.pool, drugCatalogPort = drugCatalog),
+        )
         return vertx.createHttpServer().requestHandler(router).listen(0).compose { server ->
             block(server.actualPort()).compose {
                 server.close().map { Unit }
@@ -1199,9 +1278,113 @@ class HealthcareMedicalOrderTest {
         }
     }
 
+    // ——— 7b. 025 药品目录绑定路由错误码 ———
+
     @Test
-    fun `静态与具体路由不被泛型encounter路由吞掉`(vertx: Vertx, ctx: VertxTestContext) {
-        val stub = DatabaseStub(
+    fun `POST用药医嘱目录校验错误码400_404_409_503`(vertx: Vertx, ctx: VertxTestContext) {
+        val validStub = DatabaseStub(
+            encounters = rows(encounterRow()),
+            periods = rows(periodRow()),
+            orders = rows(orderRow()),
+            countRows = rows(mapOf("total" to 1L)),
+            executions = rowSet(),
+        )
+        val path = "/healthcare/v1/encounters/enc-1/orders"
+        withServer(vertx, validStub) { port ->
+            // 缺 material_id：纯输入校验，400
+            httpRequest(
+                vertx, port, HttpMethod.POST, path,
+                validOrderBody(mapOf("order_details" to JsonObject().put("drug_name", "阿司匹林"))),
+            ).compose { (status, body) ->
+                ctx.verify {
+                    assertEquals(400, status)
+                    assertTrue(
+                        body.getString("error")?.contains("material_id is required for MEDICATION order") == true,
+                        "got: ${body.encode()}",
+                    )
+                }
+                // 目录中不存在：404
+                httpRequest(
+                    vertx, port, HttpMethod.POST, path,
+                    validOrderBody(mapOf("order_details" to JsonObject().put("material_id", "mat-missing"))),
+                )
+            }.compose { (status, body) ->
+                ctx.verify {
+                    assertEquals(404, status)
+                    assertTrue(body.getString("error")?.contains("material not found") == true, "got: ${body.encode()}")
+                }
+                // 合法目录药品：201
+                httpRequest(vertx, port, HttpMethod.POST, path, validOrderBody())
+                    .map { (okStatus, okBody) ->
+                        ctx.verify {
+                            assertEquals(201, okStatus, "合法目录药品必须 201: ${okBody.encode()}")
+                        }
+                    }
+            }
+        }.compose {
+            // 端口未接线：503（fail-closed，不得退化为 200）
+            withServer(vertx, validStub, drugCatalog = null) { port ->
+                httpRequest(vertx, port, HttpMethod.POST, path, validOrderBody())
+                    .map { (status, body) ->
+                        ctx.verify {
+                            assertEquals(503, status, "缺端口必须 503: ${body.encode()}")
+                        }
+                    }
+            }
+        }.compose {
+            // 非药品 / 未启用：409
+            val nonDrugStub = DatabaseStub(
+                encounters = rows(encounterRow()),
+                periods = rows(periodRow()),
+                orders = rows(orderRow()),
+            )
+            withServer(vertx, nonDrugStub, drugCatalog = drugCatalogPort(category = "耗材")) { port ->
+                httpRequest(vertx, port, HttpMethod.POST, path, validOrderBody())
+                    .map { (status, body) ->
+                        ctx.verify {
+                            assertEquals(409, status, "非药品须 409: ${body.encode()}")
+                        }
+                    }
+            }
+        }.compose {
+            val inactiveStub = DatabaseStub(
+                encounters = rows(encounterRow()),
+                periods = rows(periodRow()),
+                orders = rows(orderRow()),
+            )
+            withServer(vertx, inactiveStub, drugCatalog = drugCatalogPort(status = "INACTIVE")) { port ->
+                httpRequest(vertx, port, HttpMethod.POST, path, validOrderBody())
+                    .map { (status, body) ->
+                        ctx.verify {
+                            assertEquals(409, status, "未启用药品须 409: ${body.encode()}")
+                        }
+                    }
+            }
+        }.compose {
+            val mismatchStub = DatabaseStub(
+                encounters = rows(encounterRow()),
+                periods = rows(periodRow()),
+                orders = rows(orderRow()),
+            )
+            withServer(vertx, mismatchStub, drugCatalog = drugCatalogPort(name = "阿司匹林肠溶片")) { port ->
+                httpRequest(vertx, port, HttpMethod.POST, path, validOrderBody())
+                    .map { (status, body) ->
+                        ctx.verify {
+                            assertEquals(400, status, "drug_name 与目录名不一致须 400: ${body.encode()}")
+                            assertTrue(
+                                body.getString("error")?.contains("drug_name must match catalog material name") == true,
+                                "got: ${body.encode()}",
+                            )
+                        }
+                    }
+            }
+        }.onComplete { ar ->
+            if (ar.succeeded()) ctx.completeNow() else ctx.failNow(ar.cause())
+        }
+    }
+
+    @Test
+    fun `静态与具体路由不被泛型encounter路由吞掉`(vertx: Vertx, ctx: VertxTestContext) {        val stub = DatabaseStub(
             encounters = rows(encounterRow()),
             orders = rows(orderRow()),
             executions = rowSet(),

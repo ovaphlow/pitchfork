@@ -10,6 +10,7 @@ import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
 import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
+import io.vertx.sqlclient.SqlClient
 import org.jooq.Condition
 import org.jooq.DSLContext
 import org.jooq.JSONB
@@ -17,6 +18,23 @@ import org.jooq.UpdateSetMoreStep
 import org.jooq.impl.DSL.count
 import java.math.BigDecimal
 import java.time.OffsetDateTime
+
+/**
+ * 025 药品目录快照（只读）：供医嘱/发药在同连接内按 id 判定目录药品。
+ *
+ * 只含目录判定与快照回填所需字段，不含库存、批次或包装换算；`category = '药品'`
+ * 与 `status = 'ACTIVE'` 由调用方判定。`code`/`name` 在目录中为 NOT NULL，
+ * 这里保留可空以表达“读取失败/字段缺失”而非抛异常。
+ */
+data class MaterialSnapshot(
+    val id: String,
+    val code: String?,
+    val name: String?,
+    val spec: String?,
+    val baseUnit: String?,
+    val status: String?,
+    val category: String?,
+)
 
 /**
  * 016 单一基础单位物资服务。
@@ -141,6 +159,33 @@ class MaterialService(
             .flatMap { rows ->
                 if (rows.size() == 0) Future.failedFuture(NotFoundException("material not found"))
                 else Future.succeededFuture(toJson(rows.iterator().next()))
+            }
+    }
+
+    /**
+     * 025 药品目录同连接只读快照：按 id 读取目录物资。
+     *
+     * 必须复用调用方外层事务连接（禁止内部重新取 Pool 或开启新事务），
+     * 只读不锁行、不写任何表；物资不存在返回 null，由调用方映射 404。
+     */
+    fun findMaterialById(client: SqlClient, id: String): Future<MaterialSnapshot?> {
+        val query = ctx.select(t.ID, t.CODE, t.NAME, t.SPEC, t.BASE_UNIT, t.STATUS, t.CATEGORY)
+            .from(t)
+            .where(t.ID.eq(id))
+        return client.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
+            .map { rows ->
+                rows.iterator().asSequence().firstOrNull()?.let { row ->
+                    MaterialSnapshot(
+                        id = row.getString("id"),
+                        code = row.getString("code"),
+                        name = row.getString("name"),
+                        spec = row.getString("spec"),
+                        baseUnit = row.getString("base_unit"),
+                        status = row.getString("status"),
+                        category = row.getString("category"),
+                    )
+                }
             }
     }
 

@@ -7,6 +7,7 @@ import {
   getMedicalOrder,
   listDiagnoses,
   listElderlyAdmissions,
+  listInventoryMaterials,
   listMedicalOrders,
   listOrderAdministrations,
   listPatients,
@@ -14,6 +15,7 @@ import {
   updateMedicalOrderStatus,
   type Diagnosis,
   type Encounter,
+  type InventoryMaterial,
   type MedicalOrder,
   type MedicalOrderAdministration,
   type MedicalOrderAdministrationSummary,
@@ -33,6 +35,9 @@ interface OrderForm {
   doctor: string;
   startTime: string;
   endTime: string;
+  /** 药品目录物资 ID（仅 MEDICATION 必填，025 起取代自由文本药名） */
+  materialId: string;
+  /** 目录物资名，选中目录药品后由目录覆写，随 drug_name 提交 */
   drugName: string;
   dose: string;
   unit: string;
@@ -67,6 +72,7 @@ const orderFormDefaults: OrderForm = {
   doctor: "",
   startTime: "",
   endTime: "",
+  materialId: "",
   drugName: "",
   dose: "",
   unit: "",
@@ -87,8 +93,9 @@ function hasOrderFieldError(form: OrderForm, field: string): boolean {
       return !form.doctor.trim();
     case "startTime":
       return !form.startTime.trim();
-    case "drugName":
-      return form.orderType === "MEDICATION" && !form.drugName.trim();
+    case "materialId":
+      // 用药医嘱只能从药品目录选择：必须有目录物资 ID，服务端同样以 material_id 强校验
+      return form.orderType === "MEDICATION" && !form.materialId.trim();
     case "treatmentItem":
       return form.orderType === "THERAPY" && !form.treatmentItem.trim();
     case "itemName":
@@ -194,6 +201,11 @@ function isConsumingResult(result: string): boolean {
 
 const ORDER_DETAIL_LABELS: Record<string, string> = {
   drug_name: "药名",
+  material_id: "药品物资 ID",
+  material_code: "药品目录编码",
+  material_name: "药品目录名称",
+  material_bound_by: "补绑操作人",
+  material_bound_at: "补绑时间",
   dose: "剂量",
   unit: "单位",
   route: "途径",
@@ -287,6 +299,11 @@ export default function OrdersPage() {
   const [orderTypeFilter, setOrderTypeFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
 
+  // —— 药品目录（025：药品 = materials 中 category='药品' 且 status='ACTIVE'）——
+  const [drugCatalog, setDrugCatalog] = useState<InventoryMaterial[]>([]);
+  const [drugCatalogLoading, setDrugCatalogLoading] = useState(true);
+  const [drugCatalogError, setDrugCatalogError] = useState("");
+
   const [editorOpen, setEditorOpen] = useState(false);
   const [form, setForm] = useState<OrderForm>(orderFormDefaults);
   const [formError, setFormError] = useState("");
@@ -302,6 +319,21 @@ export default function OrdersPage() {
   const [detailError, setDetailError] = useState("");
   const [statusAction, setStatusAction] = useState("");
   const [statusError, setStatusError] = useState("");
+
+  /** 加载药品目录：药品 = materials 中 category='药品' 且 status='ACTIVE'（025 冻结契约） */
+  const loadDrugCatalog = useCallback(async () => {
+    setDrugCatalogLoading(true);
+    setDrugCatalogError("");
+    try {
+      const response = await listInventoryMaterials({ category: "药品", status: "ACTIVE", limit: 200 });
+      setDrugCatalog(response.records);
+    } catch (error) {
+      setDrugCatalog([]);
+      setDrugCatalogError(errorMessage(error, "无法加载药品目录"));
+    } finally {
+      setDrugCatalogLoading(false);
+    }
+  }, []);
 
   const loadAdmissions = useCallback(async () => {
     setAdmissionsLoading(true);
@@ -389,6 +421,10 @@ export default function OrdersPage() {
   }, [loadAdmissions]);
 
   useEffect(() => {
+    void loadDrugCatalog();
+  }, [loadDrugCatalog]);
+
+  useEffect(() => {
     void loadNotes();
   }, [loadNotes]);
 
@@ -403,6 +439,8 @@ export default function OrdersPage() {
   const selectedAdmission = admissions.find((admission) => admission.id === selectedEncounterId) ?? null;
   // 已离院/已去世等非活动入住只读历史
   const isReadOnly = selectedAdmission !== null && selectedAdmission.status !== "ACTIVE";
+
+  const selectedDrugMaterial = drugCatalog.find((material) => material.id === form.materialId) ?? null;
 
   // —— 病程记录 ——
 
@@ -492,6 +530,17 @@ export default function OrdersPage() {
     }));
   }
 
+  /** 选中目录药品：写入 material_id，用目录物资名填充药名，并在「单位」为空时预填基础单位 */
+  function handleDrugMaterialChange(materialId: string) {
+    const material = drugCatalog.find((item) => item.id === materialId);
+    setForm((current) => ({
+      ...current,
+      materialId,
+      drugName: material?.name ?? "",
+      unit: current.unit.trim() || material?.base_unit || "",
+    }));
+  }
+
   function buildOrderInput(): MedicalOrderInput | null {
     const orderContent = form.orderContent.trim();
     const doctor = form.doctor.trim();
@@ -500,7 +549,12 @@ export default function OrdersPage() {
 
     const details: Record<string, unknown> = {};
     if (form.orderType === "MEDICATION") {
-      details.drug_name = form.drugName.trim();
+      // 服务端要求 material_id 必填，并以目录物资名覆写 drug_name；
+      // 这里始终提交目录物资名，避免与目录漂移触发 400（drug_name must match catalog material name）
+      const materialId = form.materialId.trim();
+      if (!materialId) return null;
+      details.material_id = materialId;
+      details.drug_name = drugCatalog.find((item) => item.id === materialId)?.name ?? form.drugName.trim();
       if (form.dose.trim()) details.dose = form.dose.trim();
       if (form.unit.trim()) details.unit = form.unit.trim();
       if (form.route.trim()) details.route = form.route.trim();
@@ -545,8 +599,8 @@ export default function OrdersPage() {
     if (!input) {
       if (!form.orderContent.trim() || !form.doctor.trim() || !form.startTime.trim()) {
         setFormError("医嘱正文、医生和开始时间不能为空");
-      } else if (form.orderType === "MEDICATION" && !form.drugName.trim()) {
-        setFormError("用药医嘱必须填写药名");
+      } else if (form.orderType === "MEDICATION" && !form.materialId.trim()) {
+        setFormError("用药医嘱必须从药品目录选择药品");
       } else if (form.orderType === "THERAPY" && !form.treatmentItem.trim()) {
         setFormError("治疗医嘱必须填写治疗项目");
       } else if ((form.orderType === "EXAMINATION" || form.orderType === "LAB_TEST") && !form.itemName.trim()) {
@@ -1235,16 +1289,52 @@ export default function OrdersPage() {
 
             {form.orderType === "MEDICATION" && (
               <>
-                <Input
-                  id="order-drug-name"
-                  label="药名（必填）"
-                  value={form.drugName}
-                  onChange={(event) => setForm((current) => ({ ...current, drugName: event.target.value }))}
-                  placeholder="请输入药名"
-                  required
-                  aria-invalid={formError && hasOrderFieldError(form, "drugName") ? true : undefined}
-                  aria-describedby={formError && hasOrderFieldError(form, "drugName") ? "order-form-error" : undefined}
-                />
+                <div className="flex flex-col gap-1.5 sm:col-span-2">
+                  <label className="text-sm font-medium text-fg-muted" htmlFor="order-drug-material">
+                    药名（必填，取自药品目录）
+                  </label>
+                  <select
+                    id="order-drug-material"
+                    className={selectClass}
+                    value={form.materialId}
+                    disabled={drugCatalogLoading || drugCatalogError !== ""}
+                    onChange={(event) => handleDrugMaterialChange(event.target.value)}
+                    required
+                    aria-invalid={formError && hasOrderFieldError(form, "materialId") ? true : undefined}
+                    aria-describedby={formError && hasOrderFieldError(form, "materialId") ? "order-form-error" : undefined}
+                  >
+                    <option value="">{drugCatalogLoading ? "正在加载药品目录…" : "请选择药品"}</option>
+                    {drugCatalog.map((material) => (
+                      <option key={material.id} value={material.id}>
+                        {material.name}（{material.code}
+                        {material.spec ? ` · ${material.spec}` : ""}）
+                      </option>
+                    ))}
+                  </select>
+                  {selectedDrugMaterial && (
+                    <p className="text-xs text-fg-dimmed">
+                      目录编码 {selectedDrugMaterial.code} · 基础单位 {selectedDrugMaterial.base_unit}
+                      {selectedDrugMaterial.spec ? ` · 规格 ${selectedDrugMaterial.spec}` : ""}
+                      {selectedDrugMaterial.enable_batch_control ? " · 批次管控" : ""}
+                    </p>
+                  )}
+                  {drugCatalogError && (
+                    <p role="alert" className="flex flex-wrap items-center gap-2 text-xs text-danger">
+                      药品目录加载失败：{drugCatalogError}
+                      <Button type="button" variant="link" size="sm" onClick={() => void loadDrugCatalog()}>
+                        重试
+                      </Button>
+                    </p>
+                  )}
+                  {!drugCatalogLoading && !drugCatalogError && drugCatalog.length === 0 && (
+                    <p className="text-xs text-warning">
+                      药品目录为空：请先在「库存计量 → 物资」中新建类别为「药品」且状态为「启用」的物资，再回到此处开药。
+                      <a href="/dashboard/materials" className="ml-1 text-accent hover:underline">
+                        前往物资
+                      </a>
+                    </p>
+                  )}
+                </div>
                 <Input
                   label="剂量"
                   value={form.dose}

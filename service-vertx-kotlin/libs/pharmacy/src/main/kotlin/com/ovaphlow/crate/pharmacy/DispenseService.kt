@@ -29,6 +29,11 @@ class DispenseService(
     private val pool: Pool,
     private val medicalOrderReader: MedicalOrderReader,
     private val inventoryOutboundPort: InventoryOutboundPort,
+    /**
+     * 025 药品目录端口：由 Aceso `Main.kt` 注入 `MaterialService` 适配器。
+     * 为 null 时补绑路径 fail-closed（503），不静默跳过目录校验与补绑。
+     */
+    private val drugCatalogPort: DrugCatalogPort? = null,
     private val ctx: DSLContext = DatabaseConfig.createDSL(),
 ) {
     companion object {
@@ -45,6 +50,10 @@ class DispenseService(
         )
 
         private const val ELDERLY_ROUTINE = "ELDERLY_ROUTINE"
+
+        /** 025 目录药品判定：药品 = 启用状态的 `category = '药品'` 物资 */
+        private const val DRUG_CATEGORY = "药品"
+        private const val ACTIVE_STATUS = "ACTIVE"
 
         fun toJson(row: Row): JsonObject {
             return JsonObject()
@@ -140,7 +149,7 @@ class DispenseService(
     //  4.2 从医嘱创建发药单
     // ========================================================================
 
-    fun createFromMedicalOrder(body: JsonObject): Future<JsonObject> {
+    fun createFromMedicalOrder(body: JsonObject, operator: String? = null): Future<JsonObject> {
         rejectUnknown(body, setOf("medical_order_id", "warehouse", "material_id", "lot_id", "dispensed_quantity"))?.let {
             return Future.failedFuture(it)
         }
@@ -175,6 +184,8 @@ class DispenseService(
             medicalOrderReader.lockMedicationOrder(connection, medicalOrderId)
                 .compose { snapshot ->
                     validateOrderForDispensing(snapshot)
+                        // 025 绑定一致性校验 / 存量医嘱一次性补绑，失败整体回滚
+                        .compose { resolvePrescribedMaterial(connection, snapshot, materialId, operator) }
                         .compose {
                             inventoryOutboundPort.validateOutbound(
                                 connection,
@@ -190,6 +201,67 @@ class DispenseService(
                         .compose { rejectDuplicate(connection, medicalOrderId) }
                         .compose { insertDispenseAndItem(connection, snapshot, warehouse, materialId, lotId, dispensedQuantity) }
                 }
+        }
+    }
+
+    /**
+     * 025 医嘱-物资绑定校验与补绑（顺序固定，全部复用外层事务连接）：
+     *
+     * 1. 医嘱已绑定 `material_id`：与请求 `material_id` 不一致 → 409
+     *    （`material_id does not match the prescribed drug`），一致则放行；
+     * 2. 医嘱未绑定（存量自由文本医嘱）：缺少可信操作人身份 → 401；
+     *    端口未注入 → 503；物资不存在 → 404；非 `药品` / 非 `ACTIVE` → 409；
+     *    校验通过后经 [MedicalOrderReader.bindDrugMaterial] 回填绑定与审计字段；
+     * 3. 任一步失败由外层事务整体回滚：无发药单、无库存出库、医嘱 `order_details` 保持原样。
+     */
+    private fun resolvePrescribedMaterial(
+        connection: SqlConnection,
+        snapshot: MedicationOrderSnapshot,
+        requestedMaterialId: String,
+        operator: String?,
+    ): Future<Void?> {
+        val boundMaterialId = snapshot.materialId?.takeIf { it.isNotBlank() }
+            ?: snapshot.orderDetails.getString("material_id")?.trim()?.takeIf { it.isNotBlank() }
+        if (boundMaterialId != null) {
+            if (boundMaterialId != requestedMaterialId) {
+                return Future.failedFuture(
+                    ConflictException("material_id does not match the prescribed drug"),
+                )
+            }
+            return Future.succeededFuture(null)
+        }
+        val boundBy = operator?.trim()?.takeIf { it.isNotBlank() }
+            ?: return Future.failedFuture(
+                UnauthorizedException("authentication required to bind drug material"),
+            )
+        val port = drugCatalogPort
+            ?: return Future.failedFuture(
+                DrugCatalogUnavailableException("drug catalog port is not configured"),
+            )
+        return port.findDrugMaterial(connection, requestedMaterialId).compose { material ->
+            if (material == null) {
+                return@compose Future.failedFuture(
+                    NotFoundException("material not found: $requestedMaterialId"),
+                )
+            }
+            if (material.category != DRUG_CATEGORY) {
+                return@compose Future.failedFuture(
+                    ConflictException("material is not a drug: $requestedMaterialId"),
+                )
+            }
+            if (material.status != ACTIVE_STATUS) {
+                return@compose Future.failedFuture(
+                    ConflictException("material is not active: $requestedMaterialId"),
+                )
+            }
+            medicalOrderReader.bindDrugMaterial(
+                connection,
+                snapshot.orderId,
+                requestedMaterialId,
+                material.code,
+                material.name,
+                boundBy,
+            )
         }
     }
 
