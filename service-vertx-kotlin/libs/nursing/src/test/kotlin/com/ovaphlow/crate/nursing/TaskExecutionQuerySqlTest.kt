@@ -155,10 +155,29 @@ class TaskExecutionQuerySqlTest {
         assertEquals(shared, fromJoin(todayData), "/today 列表必须与计数共用同一 from/join")
         assertEquals(shared, fromJoin(overdueCount), "/overdue 计数必须与 /today 共用同一 from/join")
         assertEquals(shared, fromJoin(overdueData), "/overdue 列表必须与 /today 共用同一 from/join")
+        // 028：绑定医嘱的 JOIN 必须落在共用 from/join 片段里（不是只加在列表查询上）
+        assertTrue(
+            Regex("left( outer)? join\\s+\"?healthcare\"?\\.\"?medical_orders\"?\\s+as\\s+\"?mo\"?")
+                .containsMatchIn(shared),
+            "共用 from/join 必须包含绑定医嘱的 LEFT JOIN：$shared",
+        )
 
         // 投影列共用：两条列表 SQL 的 select 列完全一致
         fun projection(sql: String) = sql.substringAfter("select ", "").substringBefore(" from ", "")
         assertEquals(projection(todayData), projection(overdueData), "/today 与 /overdue 必须共用同一投影列")
         assertTrue(projection(overdueData).contains("patient_name"), "投影必须包含 patient_name：$overdueData")
+        // 028：药品 / 项目 依赖的两个字段必须在共用投影里（/today 与 /overdue 都生效；
+        // jOOQ 会给别名加引号，因此按「列引用 + as + 别名」宽松匹配）
+        for ((column, alias) in listOf("mo.order_details" to "order_details", "mo.order_type" to "order_type")) {
+            val projected = Regex("${Regex.escape(column)}\\s+as\\s+\"?${alias}\"?", RegexOption.IGNORE_CASE)
+            assertTrue(
+                projected.containsMatchIn(projection(todayData)),
+                "/today 投影必须包含 $column as $alias：$todayData",
+            )
+            assertTrue(
+                projected.containsMatchIn(projection(overdueData)),
+                "/overdue 投影必须包含 $column as $alias：$overdueData",
+            )
+        }
     }
 }

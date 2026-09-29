@@ -24,6 +24,16 @@ class TaskService(
 ) {
     private val t = DSL.table(DSL.name("nursing", "nursing_tasks"))
 
+    // 读路径（list/get）需要 LEFT JOIN 绑定医嘱，取出医嘱类型与结构化明细。
+    // nursing_tasks 加别名 nt、medical_orders 加别名 mo，避免与 medical_orders 的
+    // encounter_id / status / created_at 等同名列歧义（未限定列名在 PG 直接报错）。
+    // 限定列一律用 `DSL.field("nt.列名", ...)`：别名表的 Table.field(String) 允许返回
+    // null（原始表没有已知 RowType），不能用来做非空限定引用。
+    private val ntAlias = t.`as`("nt")
+    private val moTable = DSL.table(DSL.name("healthcare", "medical_orders")).`as`("mo")
+    private val joinOrderOn =
+        DSL.field("nt.order_item_id", String::class.java).eq(DSL.field("mo.id", String::class.java))
+
     private val cId = DSL.field("id", String::class.java)
     private val cPeriodId = DSL.field("period_id", String::class.java)
     private val cEncounterId = DSL.field("encounter_id", String::class.java)
@@ -50,7 +60,18 @@ class TaskService(
             "CANCELLED" to emptyList()
         )
 
-        fun toJson(row: Row): JsonObject {
+        fun toJson(row: Row): JsonObject = toJson(row, withBoundOrder = false)
+
+        /**
+         * 任务行 → 响应 JSON。
+         *
+         * `withBoundOrder = true` 只用于带 `LEFT JOIN healthcare.medical_orders` 的读路径
+         * （`list`/`get`）。其余路径（`lockOrderTask` / `lockActivePlanTasks` /
+         * `CarePlanRevisionService.readPlanTasks` / create 系列）的行里没有这两列，按显式
+         * 开关直接返回 null——**不去探测行里有没有该列**：`Row.getColumnIndex` 是驱动实现
+         * 细节，靠它探测会让所有 mock 行与其它驱动的行都变脆。
+         */
+        fun toJson(row: Row, withBoundOrder: Boolean): JsonObject {
             return JsonObject()
                 .put("id", row.getValue("id")?.toString())
                 .put("period_id", row.getValue("period_id")?.toString())
@@ -67,6 +88,16 @@ class TaskService(
                 .put("metadata", row.getValue("metadata") as? JsonObject)
                 .put("created_at", row.getValue("created_at")?.toString())
                 .put("updated_at", row.getValue("updated_at")?.toString())
+                // 绑定医嘱的结构化明细与类型：只有 JOIN 读路径才取值，其它路径恒 null，
+                // 两种情况都保留这两个键以维持同一返回形状。
+                .put(
+                    "order_details",
+                    if (withBoundOrder) row.getValue("order_details") as? JsonObject else null,
+                )
+                .put(
+                    "order_type",
+                    if (withBoundOrder) row.getValue("order_type")?.toString() else null,
+                )
         }
     }
 
@@ -119,6 +150,8 @@ class TaskService(
                     .put("metadata", body.getJsonObject("metadata"))
                     .put("created_at", now.toString())
                     .put("updated_at", now.toString())
+                    .put("order_details", null)
+                    .put("order_type", null)
             }
     }
 
@@ -131,17 +164,28 @@ class TaskService(
         limit: Int = 50,
         offset: Int = 0
     ): Future<JsonObject> {
-        val conditions = mutableListOf<org.jooq.Condition>()
-        periodId?.let { conditions.add(cPeriodId.eq(it)) }
-        encounterId?.let { conditions.add(cEncounterId.eq(it)) }
-        taskType?.let { conditions.add(cTaskType.eq(it)) }
-        status?.let { conditions.add(cStatus.eq(it)) }
-        planItemId?.let { conditions.add(cPlanItemId.eq(it)) }
+        // 过滤条件按「列名 → 值」收集：计数查询沿用未限定的 nursing_tasks 列（SQL 与
+        // 行数语义不变），明细查询带 LEFT JOIN，必须用别名 nt 限定列名。
+        val filters = linkedMapOf<String, String>()
+        periodId?.let { filters["period_id"] = it }
+        encounterId?.let { filters["encounter_id"] = it }
+        taskType?.let { filters["task_type"] = it }
+        status?.let { filters["status"] = it }
+        planItemId?.let { filters["plan_item_id"] = it }
+
+        val conditions = filters.map { (column, value) -> DSL.field(column, String::class.java).eq(value) }
+        val joinedConditions = filters.map { (column, value) -> DSL.field("nt.$column", String::class.java).eq(value) }
 
         val countQuery = ctx.select(count().`as`("total")).from(t).where(conditions)
-        val dataQuery = ctx.selectFrom(t)
-            .where(conditions)
-            .orderBy(cCreatedAt.desc())
+        val dataQuery = ctx
+            .select(
+                ntAlias.asterisk(),
+                DSL.field("mo.order_details").`as`("order_details"),
+                DSL.field("mo.order_type").`as`("order_type"),
+            )
+            .from(ntAlias.leftJoin(moTable).on(joinOrderOn))
+            .where(joinedConditions)
+            .orderBy(DSL.field("nt.created_at", OffsetDateTime::class.java).desc())
             .limit(limit)
             .offset(offset)
 
@@ -153,7 +197,8 @@ class TaskService(
                     .execute(DatabaseConfig.tuple(dataQuery))
                     .map { dataRows ->
                         val records = JsonArray()
-                        for (row in dataRows) records.add(toJson(row))
+                        // 该查询带 LEFT JOIN healthcare.medical_orders，行里确有这两列
+                        for (row in dataRows) records.add(toJson(row, withBoundOrder = true))
                         JsonObject().put("records", records)
                             .put("meta", JsonObject().put("total", total))
                     }
@@ -161,13 +206,21 @@ class TaskService(
     }
 
     fun get(id: String): Future<JsonObject> {
-        val query = ctx.selectFrom(t).where(cId.eq(id))
+        val query = ctx
+            .select(
+                ntAlias.asterisk(),
+                DSL.field("mo.order_details").`as`("order_details"),
+                DSL.field("mo.order_type").`as`("order_type"),
+            )
+            .from(ntAlias.leftJoin(moTable).on(joinOrderOn))
+            .where(DSL.field("nt.id", String::class.java).eq(id))
         return pool.preparedQuery(DatabaseConfig.sql(query))
             .execute(DatabaseConfig.tuple(query))
             .flatMap { rows ->
                 if (rows.size() == 0)
                     Future.failedFuture(NotFoundException("task not found: $id"))
-                else Future.succeededFuture(toJson(rows.iterator().next()))
+                // 该查询带 LEFT JOIN healthcare.medical_orders，行里确有这两列
+                else Future.succeededFuture(toJson(rows.iterator().next(), withBoundOrder = true))
             }
     }
 
@@ -257,6 +310,8 @@ class TaskService(
                 .put("status", "ACTIVE")
                 .put("created_at", now.toString())
                 .put("updated_at", now.toString())
+                .put("order_details", null)
+                .put("order_type", null)
         }
     }
 
@@ -355,6 +410,8 @@ class TaskService(
                 .put("metadata", null)
                 .put("created_at", now.toString())
                 .put("updated_at", now.toString())
+                .put("order_details", null)
+                .put("order_type", null)
         }
     }
 

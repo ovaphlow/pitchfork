@@ -81,6 +81,7 @@ import {
   toOffsetDateTime,
   todayLocal,
 } from "../lib/datetime";
+import { formatOrderItemLabel } from "../lib/orderDetailDisplay";
 import NursingExecutionStatisticsPanel from "./NursingExecutionStatisticsPanel";
 
 type Tab = "overview" | "assessments" | "plans" | "tasks" | "orders" | "incidents" | "handovers" | "timeline";
@@ -1225,6 +1226,22 @@ export default function NursingPage() {
       { key: "planned_time", header: "计划时间", className: "min-w-[140px]", render: (row) => formatDateTime(row.planned_time) },
       { key: "patient_name", header: "长者", className: "min-w-[80px]", render: (row) => row.patient_name ?? row.patient_id ?? "-" },
       { key: "task_description", header: "任务", className: "min-w-[180px]", render: (row) => row.task_description ?? "-" },
+      {
+        // 医嘱任务只显示自由文本的正文时，护士看不出是什么药。这里按护理页与医生页
+        // 共用的推导规则补出绑定医嘱的「药品 / 项目」（剂量 + 单位 + 途径）。
+        key: "order_detail",
+        header: "药品 / 项目",
+        className: "min-w-[170px] max-w-[240px]",
+        render: (row) => {
+          const text = formatOrderItemLabel(row.order_type, row.order_details);
+          if (text === null) return <span className="text-fg-dimmed">-</span>;
+          return (
+            <span className="block truncate" title={text}>
+              {text}
+            </span>
+          );
+        },
+      },
       { key: "task_type", header: "类型", className: "min-w-[100px]", render: (row) => taskTypeLabel(row.task_type ?? "") },
       { key: "executor", header: "执行人", className: "min-w-[90px]", render: (row) => row.executor ? (subjectMap.get(row.executor) ?? row.executor) : "-" },
       { key: "status", header: "状态", className: "min-w-[90px]", render: (row) => (
@@ -1591,6 +1608,21 @@ export default function NursingPage() {
   const taskColumns: Column<NursingTask>[] = [
     { key: "task_type", header: "类型", className: "min-w-[110px]", render: (row) => taskTypeLabel(row.task_type) },
     { key: "description", header: "任务", className: "min-w-[220px]" },
+    {
+      // 与今日执行同一推导规则：医嘱派生任务的描述是医生手写正文，需补出结构化明细。
+      key: "order_detail",
+      header: "药品 / 项目",
+      className: "min-w-[170px] max-w-[240px]",
+      render: (row) => {
+        const text = formatOrderItemLabel(row.order_type, row.order_details);
+        if (text === null) return <span className="text-fg-dimmed">-</span>;
+        return (
+          <span className="block truncate" title={text}>
+            {text}
+          </span>
+        );
+      },
+    },
     { key: "frequency_name", header: "频次", className: "min-w-[100px]", render: (row) => row.frequency_name || row.frequency_code || "-" },
     { key: "status", header: "状态", className: "min-w-[100px]", render: (row) => <Badge variant={row.status === "ACTIVE" ? "info" : row.status === "COMPLETED" ? "success" : "default"}>{taskStatusLabel(row.status)}</Badge> },
     {
@@ -1614,6 +1646,11 @@ export default function NursingPage() {
       ),
     },
   ];
+
+  // ——— 弹窗里的「药品 / 项目」：任务描述是自由文本，用药任务必须同时显示结构化明细 ———
+  const actionOrderLabel = formatOrderItemLabel(actionTarget?.order_type, actionTarget?.order_details);
+  const adminOrderLabel = formatOrderItemLabel(adminTarget?.order_type, adminTarget?.order_details);
+  const adminViewOrderLabel = formatOrderItemLabel(adminViewRecord?.order_type, adminViewRecord?.order_details);
 
   // ——— 今日执行计数与逾期入口（§4.2/§4.6） ———
   /** 顶部状态计数优先取服务端 status_totals（不再只数当前页），字段缺失时回退页内计数 */
@@ -2104,6 +2141,7 @@ export default function NursingPage() {
                       <div className="space-y-4">
                         {medicationOrders.map((order) => {
                           const details = order.order_details ?? {};
+                          const drugName = details.drug_name ?? details.material_name;
                           const checked = order.nurse_checked_by != null && order.nurse_checked_at != null;
                           return (
                             <div key={order.id} className="rounded-lg border border-border p-4">
@@ -2120,7 +2158,10 @@ export default function NursingPage() {
                                     )}
                                   </div>
                                   <div className="mt-2 grid gap-x-6 gap-y-1 text-sm sm:grid-cols-2">
-                                    {details.dosage != null && details.dosage !== "" && <p><span className="text-fg-dimmed">剂量：</span>{String(details.dosage)}{details.unit != null && details.unit !== "" ? ` ${String(details.unit)}` : ""}</p>}
+                                    {/* 药名优先 drug_name；025 绑定目录药品前的历史医嘱只有 material_name */}
+                                    {drugName != null && drugName !== "" && <p className="sm:col-span-2"><span className="text-fg-dimmed">药品：</span>{String(drugName)}</p>}
+                                    {/* 明细白名单键是 dose（MedicalOrderService.DETAIL_WHITELIST）；此处曾误写 dosage，剂量因此从未渲染 */}
+                                    {details.dose != null && details.dose !== "" && <p><span className="text-fg-dimmed">剂量：</span>{String(details.dose)}{details.unit != null && details.unit !== "" ? ` ${String(details.unit)}` : ""}</p>}
                                     {details.route != null && details.route !== "" && <p><span className="text-fg-dimmed">给药途径：</span>{String(details.route)}</p>}
                                     <p><span className="text-fg-dimmed">频次：</span>{details.frequency_name != null && details.frequency_name !== "" ? String(details.frequency_name) : details.frequency_code != null && details.frequency_code !== "" ? String(details.frequency_code) : "按需"}</p>
                                     <p><span className="text-fg-dimmed">医生：</span>{order.doctor || "-"}</p>
@@ -2154,6 +2195,7 @@ export default function NursingPage() {
           <div className="rounded-md bg-surface-alt px-3 py-2 text-sm text-fg-muted">
             {actionTarget?.task_description ?? "-"}
             {actionTarget?.patient_name && <span className="ml-2 text-fg-dimmed">— {actionTarget.patient_name}</span>}
+            {actionOrderLabel && <div className="mt-0.5 text-fg-dimmed">药品 / 项目：{actionOrderLabel}</div>}
           </div>
           {(actionModal === "skip" || actionModal === "cancel") && (
             <div className="flex flex-col gap-1.5">
@@ -2256,6 +2298,7 @@ export default function NursingPage() {
           <div className="rounded-md bg-surface-alt px-3 py-2 text-sm text-fg-muted">
             {adminTarget?.task_description ?? "-"}
             {adminTarget?.patient_name && <span className="ml-2 text-fg-dimmed">— {adminTarget.patient_name}</span>}
+            {adminOrderLabel && <div className="mt-0.5 text-fg-dimmed">药品 / 项目：{adminOrderLabel}</div>}
           </div>
 
           <div className="flex flex-col gap-1.5">
@@ -2382,6 +2425,7 @@ export default function NursingPage() {
             <div className="rounded-md bg-surface-alt px-3 py-2 text-sm text-fg-muted">
               {adminViewRecord.task_description ?? "-"}
               {adminViewRecord.patient_name && <span className="ml-2 text-fg-dimmed">— {adminViewRecord.patient_name}</span>}
+              {adminViewOrderLabel && <div className="mt-0.5 text-fg-dimmed">药品 / 项目：{adminViewOrderLabel}</div>}
             </div>
             <div className="grid gap-x-6 gap-y-1.5 sm:grid-cols-2">
               <p>
