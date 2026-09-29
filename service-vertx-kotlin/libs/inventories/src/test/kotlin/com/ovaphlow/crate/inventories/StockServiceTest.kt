@@ -147,7 +147,8 @@ class StockServiceTest {
         assertEquals("5", json.getString("locked_quantity"))
         assertEquals("43", json.getString("available_quantity"))
         assertEquals("片", json.getString("unit"))
-        assertEquals("5.00000000", json.getString("unit_cost"))
+        // 240/48 = 5：响应层去尾零，只断言数值相等，不把「定长 8 位小数文本」当契约
+        assertEquals(0, BigDecimal(json.getString("unit_cost")).compareTo(BigDecimal("5")))
         assertNull(json.getValue("package_unit"))
         assertNull(json.getValue("base_quantity"))
         assertNull(json.getValue("split_ratio"))
@@ -195,7 +196,39 @@ class StockServiceTest {
             every { getValue("expiry_date") } returns null
         }
 
-        assertEquals(quantity.toPlainString(), StockService.availableStockToJson(mockRow).getString("quantity"))
+        // 响应层去尾零后仍须是完整精度的数值：断言数值相等而非小数位文本；
+        // 若经 Double 截断，99999999999999.123456 会丢位，compareTo 立即失败。
+        assertEquals(
+            0,
+            BigDecimal(StockService.availableStockToJson(mockRow).getString("quantity")).compareTo(quantity),
+        )
+    }
+
+    @Test
+    fun `availableStockToJson 去尾零但不丢精度`() {
+        val mockRow = mockk<Row>(relaxed = true) {
+            every { getValue("id") } returns "stock-tz"
+            every { getValue("warehouse") } returns "一号护理站"
+            every { getValue("material_id") } returns "mat-tz"
+            every { getValue("material_code") } returns "NC-TZ"
+            every { getValue("material_name") } returns "尾零测试物资"
+            every { getValue("material_category") } returns "耗材"
+            every { getValue("unit") } returns "卷"
+            every { getValue("quantity") } returns BigDecimal("1100.000000")
+            every { getValue("locked_quantity") } returns BigDecimal("0.000000")
+            every { getValue("total_cost") } returns BigDecimal("12.50000000")
+            every { getValue("lot_id") } returns null
+            every { getValue("batch_no") } returns null
+            every { getValue("expiry_date") } returns null
+        }
+
+        val json = StockService.availableStockToJson(mockRow)
+        assertEquals("1100", json.getString("quantity"), "1100.000000 不得显示 6 位尾零")
+        assertEquals("0", json.getString("locked_quantity"), "0.000000 应为 0")
+        assertEquals("1100", json.getString("available_quantity"))
+        // 12.5 / 1100 保 8 位后去尾零 → 0.01136364（仍为十进制文本，不含科学计数法）
+        assertEquals(0, BigDecimal(json.getString("unit_cost")).compareTo(BigDecimal("0.01136364")))
+        assertFalse(json.getString("quantity").contains("E"), "不得出现科学计数法")
     }
 
     // ========================================================================

@@ -28,6 +28,15 @@ import java.time.LocalDate
 import java.time.OffsetDateTime
 import java.time.ZoneId
 
+/**
+ * 数量响应文本（D5）：去尾零后以十进制文本输出，前端不再格式化。
+ *
+ * `NUMERIC(20,6)` 的 `1100.000000` → `"1100"`；`toPlainString()` 避免 `stripTrailingZeros()`
+ * 后的科学计数法；全程不经 Double。仅本文件响应构造使用，与请求解析/校验口径无关。
+ */
+private fun medicalOrderDecimalText(value: java.math.BigDecimal?): String? =
+    value?.stripTrailingZeros()?.toPlainString()
+
 class MedicalOrderService(
     private val pool: Pool,
     private val taskService: TaskService,
@@ -393,13 +402,13 @@ class MedicalOrderService(
                 val remaining = dispensedQty?.subtract(administeredQty)
                 JsonObject()
                     .put("administered_count", administeredCount)
-                    .put("administered_quantity", administeredQty.toPlainString())
+                    .put("administered_quantity", medicalOrderDecimalText(administeredQty))
                     .put("partial_count", partialCount)
                     .put("refused_count", refusedCount)
                     .put("missed_count", missedCount)
                     .put("deferred_count", deferredCount)
-                    .put("dispensed_quantity", dispensedQty?.toPlainString())
-                    .put("remaining_quantity", remaining?.toPlainString())
+                    .put("dispensed_quantity", medicalOrderDecimalText(dispensedQty))
+                    .put("remaining_quantity", medicalOrderDecimalText(remaining))
             }
         }
     }
@@ -513,7 +522,7 @@ class MedicalOrderService(
             .put("id", row.getString("id"))
             .put("task_execution_id", row.getString("task_execution_id"))
             .put("result", row.getString("result"))
-            .put("administered_quantity", (row.getValue("administered_quantity") as? java.math.BigDecimal)?.toPlainString())
+            .put("administered_quantity", medicalOrderDecimalText(row.getValue("administered_quantity") as? java.math.BigDecimal))
             .put("unit", row.getString("unit"))
             .put("dispense_item_id", row.getString("dispense_item_id"))
             .put("lot_id", row.getString("lot_id"))

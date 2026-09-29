@@ -728,9 +728,9 @@ class PurchaseOrderService(
                         JsonObject()
                             .put("id", row.getValue("id")?.toString())
                             .put("material_id", row.getValue("material_id")?.toString())
-                            .put("ordered_quantity", ordered.toPlainString())
-                            .put("received_quantity", received.toPlainString())
-                            .put("remaining_quantity", ordered.subtract(received).toPlainString()),
+                            .put("ordered_quantity", decimalApi(ordered))
+                            .put("received_quantity", decimalApi(received))
+                            .put("remaining_quantity", decimalApi(ordered.subtract(received))),
                     )
                 }
                 byOrder
@@ -890,9 +890,9 @@ class PurchaseOrderService(
                 .put("id", row.getValue("id")?.toString())
                 .put("purchase_order_id", row.getValue("purchase_order_id")?.toString())
                 .put("material_id", row.getValue("material_id")?.toString())
-                .put("ordered_quantity", ordered.toPlainString())
-                .put("received_quantity", received.toPlainString())
-                .put("remaining_quantity", ordered.subtract(received).toPlainString())
+                .put("ordered_quantity", decimalApi(ordered))
+                .put("received_quantity", decimalApi(received))
+                .put("remaining_quantity", decimalApi(ordered.subtract(received)))
         }
 
         fun receiptToJson(row: Row): JsonObject =

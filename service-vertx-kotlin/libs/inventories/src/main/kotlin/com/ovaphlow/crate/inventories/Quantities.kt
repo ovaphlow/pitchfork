@@ -34,6 +34,15 @@ const val QUANTITY_DB_SCALE = 6
 const val COST_DB_SCALE = 8
 
 /**
+ * 响应构造层的数量/成本文本（D5）：去掉无意义尾零后以十进制文本输出。
+ *
+ * `NUMERIC(20,6)` 的 `1100.000000` → `"1100"`、`12.50` → `"12.5"`、`0.000000` → `"0"`。
+ * 用 `toPlainString()` 而非 `toString()`：后者在 `stripTrailingZeros()` 后可能产出科学
+ * 计数法（如 `6E+2`），前端无法直接展示。全程不经 Double，精度无损。
+ */
+fun decimalText(value: BigDecimal?): String? = value?.stripTrailingZeros()?.toPlainString()
+
+/**
  * 基础数量精度校验：等价于 RoundingMode.UNNECESSARY —— 结果小数位不得超过物资
  * quantity_scale 允许的精度，绝不静默四舍五入或进位。片/粒类（scale=0）提交 0.5 即拒绝。
  */

@@ -25,6 +25,11 @@ class PlanService(
     private val t = DSL.table(DSL.name("nursing", "nursing_plans"))
     private val ti = DSL.table(DSL.name("nursing", "nursing_plan_items"))
 
+    /** 前置校验只读：护理评估（`period_id` 或 `encounter_id` 任一命中即可） */
+    private val ta = DSL.table(DSL.name("nursing", "nursing_assessments"))
+    private val caPeriodId = DSL.field("period_id", String::class.java)
+    private val caEncounterId = DSL.field("encounter_id", String::class.java)
+
     // plan columns
     private val cId = DSL.field("id", String::class.java)
     private val cPeriodId = DSL.field("period_id", String::class.java)
@@ -97,6 +102,8 @@ class PlanService(
         if (planName.isNullOrBlank())
             return Future.failedFuture(IllegalArgumentException("plan_name is required"))
 
+        val encounterId = body.getString("encounter_id")?.takeIf { it.isNotBlank() }
+
         // 通用入口只允许初次计划：该 period 已有活动计划时必须走 Healthcare 复评修订接口
         val activeCheckQuery = ctx.select(DSL.field("id"))
             .from(t)
@@ -110,7 +117,37 @@ class PlanService(
                         ConflictException("period already has an active plan; create a new plan version via care plan revision")
                     )
                 }
-                doCreate(body, periodId, planName)
+                requireAssessment(periodId, encounterId)
+                    .compose { doCreate(body, periodId, planName) }
+            }
+    }
+
+    /**
+     * 照护计划前置校验（D10）：该服务周期/入住必须至少有一条护理评估，否则以
+     * [ConflictException] 拒绝（路由映射 409，消息可直接展示给用户）。
+     *
+     * `AssessmentService.create` 允许评估只带 `period_id` 或只带 `encounter_id`
+     * （V400 `chk_assess_ref`），只按 `period_id` 计数会漏掉只带 `encounter_id` 的评估，
+     * 因此请求体提供了 `encounter_id` 时按 `period_id = ? OR encounter_id = ?` 计数。
+     */
+    private fun requireAssessment(periodId: String, encounterId: String?): Future<Void> {
+        val condition = if (encounterId != null) {
+            caPeriodId.eq(periodId).or(caEncounterId.eq(encounterId))
+        } else {
+            caPeriodId.eq(periodId)
+        }
+        val query = ctx.select(count().`as`("total")).from(ta).where(condition)
+        return pool.preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
+            .compose { rows ->
+                val total = rows.iterator().next().getLong("total") ?: 0L
+                if (total <= 0L) {
+                    Future.failedFuture(
+                        ConflictException("照护计划必须先有护理评估：该服务周期/入住暂无任何评估记录")
+                    )
+                } else {
+                    Future.succeededFuture<Void>(null)
+                }
             }
     }
 

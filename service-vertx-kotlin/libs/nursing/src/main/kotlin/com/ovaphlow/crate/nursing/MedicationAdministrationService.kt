@@ -412,9 +412,9 @@ class MedicationAdministrationService(
                                     .put("batch_no", row.getValue("batch_no")?.toString())
                                     .put("warehouse", row.getValue("warehouse")?.toString())
                                     .put("unit", row.getValue("unit")?.toString())
-                                    .put("dispensed_quantity", dispensed.toPlainString())
-                                    .put("administered_quantity", administered.toPlainString())
-                                    .put("remaining_quantity", remaining.toPlainString()),
+                                    .put("dispensed_quantity", decimalApi(dispensed))
+                                    .put("administered_quantity", decimalApi(administered))
+                                    .put("remaining_quantity", decimalApi(remaining)),
                             )
                         }
                         JsonObject()
@@ -714,12 +714,16 @@ class MedicationAdministrationService(
             .put("created_at", row.getValue("created_at")?.toString())
             .put("updated_at", row.getValue("updated_at")?.toString())
 
+    /**
+     * 数量响应文本（D5）：去尾零后以十进制文本输出（`1100.000000` → `"1100"`）。
+     * 用 `toPlainString()` 避免 `stripTrailingZeros()` 后的科学计数法；全程不经 Double。
+     */
     private fun decimalApi(value: Any?): String? =
         value?.let {
             when (it) {
                 is BigDecimal -> it
                 else -> it.toString().toBigDecimalOrNull()
-            }?.toPlainString()
+            }?.stripTrailingZeros()?.toPlainString()
         }
 
     private fun isUniqueViolation(error: Throwable): Boolean =

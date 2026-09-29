@@ -131,7 +131,9 @@ class MaterialServiceTest {
                 .put("package_size", "24.000000"),
         ).toCompletionStage().toCompletableFuture().get()
 
-        assertEquals("24.000000", json.getString("package_size"), "package_size 必须以十进制文本原样往返")
+        // 响应层统一去尾零：不再断言 `24.000000` 这种定长文本，改为数值相等，
+        // 保留「NUMERIC(20,6) 经十进制文本、不经 Double 截断」的原意。
+        assertEquals(0, BigDecimal(json.getString("package_size")).compareTo(BigDecimal("24")))
         assertEquals("盒", json.getString("package_unit"))
         assertEquals("片", json.getString("base_unit"))
         assertEquals(0, json.getInteger("quantity_scale"))
@@ -238,9 +240,27 @@ class MaterialServiceTest {
             every { getValue("created_at") } returns "2026-08-07T10:00:00Z"
         }
         val json = MaterialService.toJson(row)
-        assertEquals("24.000000", json.getString("package_size"), "NUMERIC(20,6) 不得经 Double 截断")
+        // 去尾零后 `24.000000` → `"24"`：断言数值相等，保留「NUMERIC(20,6) 不得经 Double 截断」的原意
+        // （若经 Double，仍是 24，故此断言不覆盖截断；截断由 StockServiceTest 的 99999999999999.123456 覆盖）
+        assertEquals(0, BigDecimal(json.getString("package_size")).compareTo(BigDecimal("24")))
+        assertEquals("24", json.getString("package_size"), "去尾零后不带无意义小数位")
         assertNull(json.getValue("split_ratio"))
         assertNull(json.getValue("split_unit"))
+    }
+
+    @Test
+    fun `toJson 保留 package_size 的真实小数（去尾零不丢精度）`() {
+        val row = mockk<Row>(relaxed = true) {
+            every { getValue("id") } returns "mat-2"
+            every { getValue("base_unit") } returns "片"
+            every { getValue("quantity_scale") } returns 6
+            every { getValue("package_unit") } returns "盒"
+            every { getValue("package_size") } returns BigDecimal("24.500000")
+            every { getValue("created_at") } returns "2026-08-07T10:00:00Z"
+        }
+        val json = MaterialService.toJson(row)
+        assertEquals("24.5", json.getString("package_size"))
+        assertEquals(0, BigDecimal(json.getString("package_size")).compareTo(BigDecimal("24.5")))
     }
 
     // ========================================================================

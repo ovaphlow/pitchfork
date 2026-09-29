@@ -1421,10 +1421,10 @@ class StockService(
                 .put("lot_id", row.getValue("lot_id")?.toString())
                 .put("batch_no", row.getValue("batch_no")?.toString())
                 .put("expiry_date", row.getValue("expiry_date")?.toString())
-                .put("quantity", qty.toPlainString())
-                .put("locked_quantity", locked.toPlainString())
-                .put("available_quantity", available.toPlainString())
-                .put("unit_cost", unitCost.toPlainString())
+                .put("quantity", decimalText(qty))
+                .put("locked_quantity", decimalText(locked))
+                .put("available_quantity", decimalText(available))
+                .put("unit_cost", decimalText(unitCost))
         }
 
         fun operationToJson(row: Row): JsonObject =
@@ -1444,10 +1444,10 @@ class StockService(
                 .put("operation_id", row.getValue("operation_id")?.toString())
                 .put("material_id", row.getValue("material_id")?.toString())
                 .put("lot_id", row.getValue("lot_id")?.toString())
-                .put("quantity", stockDecimalValueOrNull(row.getValue("quantity"))?.toPlainString())
+                .put("quantity", decimalText(stockDecimalValueOrNull(row.getValue("quantity"))))
                 .put("unit", row.getValue("unit")?.toString())
-                .put("unit_cost", stockDecimalValueOrNull(row.getValue("unit_cost"))?.toPlainString())
-                .put("total_cost", stockDecimalValueOrNull(row.getValue("total_cost"))?.toPlainString())
+                .put("unit_cost", decimalText(stockDecimalValueOrNull(row.getValue("unit_cost"))))
+                .put("total_cost", decimalText(stockDecimalValueOrNull(row.getValue("total_cost"))))
                 .put("created_at", row.getValue("created_at")?.toString())
     }
 }

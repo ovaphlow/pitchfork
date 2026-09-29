@@ -52,6 +52,16 @@ class QuantitiesTest {
     }
 
     @Test
+    fun `decimalApi 去尾零且不产生科学计数法`() {
+        assertEquals("1100", decimalApi(BigDecimal("1100.000000")))
+        assertEquals("12.5", decimalApi(BigDecimal("12.500000")))
+        assertEquals("0", decimalApi(BigDecimal("0.000000")))
+        assertEquals("0", decimalApi(BigDecimal.ZERO))
+        assertEquals("600", decimalApi(BigDecimal("600.0")))
+        assertNull(decimalApi(null))
+    }
+
+    @Test
     fun `数量精度校验拒绝超过6位小数`() {
         validateQuantityPrecision(BigDecimal("123.123456"), "quantity")
         validateQuantityPrecision(BigDecimal("0.100000"), "quantity")

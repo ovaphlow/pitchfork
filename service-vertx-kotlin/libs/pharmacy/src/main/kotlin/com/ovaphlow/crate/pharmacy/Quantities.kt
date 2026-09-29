@@ -20,7 +20,14 @@ fun decimalText(value: Any?): BigDecimal? = when (value) {
 fun requestDecimalText(value: Any?): BigDecimal? =
     (value as? String)?.toBigDecimalOrNull()
 
-fun decimalApi(value: BigDecimal?): String? = value?.toPlainString()
+/**
+ * 响应构造层的数量/成本文本（D5）：去尾零后以十进制文本输出，前端不再做格式化。
+ *
+ * `NUMERIC(20,6)` 的 `1100.000000` → `"1100"`、`12.50` → `"12.5"`、`0.000000` → `"0"`。
+ * 用 `toPlainString()` 而非 `toString()`：`stripTrailingZeros()` 后后者可能产出科学计数法
+ * （如 `6E+2`）。全程不经 Double，精度无损；数值本身不变。
+ */
+fun decimalApi(value: BigDecimal?): String? = value?.stripTrailingZeros()?.toPlainString()
 
 /** 数量列 NUMERIC(20,6)：等价 RoundingMode.UNNECESSARY —— 超 6 位小数直接拒绝，不静默进位。 */
 fun validateQuantityPrecision(quantity: BigDecimal, label: String) {
