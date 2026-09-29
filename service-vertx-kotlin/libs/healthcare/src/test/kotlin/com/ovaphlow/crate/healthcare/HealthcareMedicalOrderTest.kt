@@ -105,7 +105,10 @@ class HealthcareMedicalOrderTest {
                         sql.contains("update nursing.nursing_tasks") ||
                             sql.contains("update nursing.nursing_service_periods") -> "update_tasks_or_periods"
                         sql.contains("nursing_task_executions") -> "executions"
-                        sql.contains("select 1") && sql.contains("from healthcare.encounters") -> "select_one_encounters"
+                        // 028：活动养老入住存在性查询由 `select 1` 改为 `select encounter_no`
+                        // （409 消息需带既有住院号），故按 status 过滤识别，而不是 `select 1`。
+                        sql.contains("from healthcare.encounters") &&
+                            sql.contains("encounters.status = ") -> "select_one_encounters"
                         sql.contains("count(*)") && sql.contains("from healthcare.medical_orders") -> "count_rows"
                         sql.contains("from healthcare.medical_orders") -> "orders"
                         sql.contains("from healthcare.patients") -> "patients"
@@ -1011,7 +1014,8 @@ class HealthcareMedicalOrderTest {
         )
         val cause3 = causeOf(HealthcareService(otherAdmission.pool).deathEncounter("enc-1", deathBody()))
         assertInstanceOf(ConflictException::class.java, cause3)
-        assertTrue(cause3.message?.contains("another active elderly admission") == true, "got: ${cause3.message}")
+        // 028 §4.2：互斥冲突统一为冻结文案（不再区分 "another"，以便前端 admissionMessages 映射）
+        assertTrue(cause3.message?.contains("active elderly admission") == true, "got: ${cause3.message}")
         assertTrue(otherAdmission.queries.none { it.startsWith("update") }, "互斥失败时不得发出任何 update")
     }
 

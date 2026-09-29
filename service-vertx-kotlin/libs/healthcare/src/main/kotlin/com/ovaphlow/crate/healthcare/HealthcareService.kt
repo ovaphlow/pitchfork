@@ -29,6 +29,7 @@ import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.RowSet
 import io.vertx.sqlclient.SqlClient
+import io.vertx.sqlclient.Tuple
 import org.jooq.Condition
 import org.jooq.InsertSetMoreStep
 import org.jooq.JSONB
@@ -159,8 +160,11 @@ class HealthcareService(
         } catch (error: IllegalArgumentException) {
             return Future.failedFuture(error)
         }
-        return getPatient(patientId).compose {
-            createEncounter(pool, body, patientId, attendingPhysician)
+        // 028：入住区间/床位校验与插入必须原子（`admitElderly` 已是事务内，不重复嵌套）
+        return pool.withTransaction<JsonObject> { connection ->
+            getPatient(connection, patientId).compose {
+                createEncounter(connection, body, patientId, attendingPhysician)
+            }
         }
     }
 
@@ -206,11 +210,116 @@ class HealthcareService(
 
     fun getEncounter(id: String): Future<JsonObject> = getEncounter(pool, id)
 
+    /**
+     * 床位占用只读查询（028 §4.1）：当前仍占用中的养老入住
+     * （`encounter_type = 'ELDERLY_CARE'` 且 `discharge_date IS NULL OR discharge_date > now`），
+     * 按 `department, ward, admit_date` 升序。`department`/`ward` 传入时按 `trim` 后精确过滤
+     * （大小写敏感、不做全角归一，见 028 残余 R1）。空结果仍返回 `records: []` 与 `total: 0`。
+     */
+    fun listBedOccupancy(
+        department: String?,
+        ward: String?,
+        limit: Int,
+        offset: Int,
+    ): Future<JsonObject> {
+        val now = OffsetDateTime.now()
+        val conditions = mutableListOf<Condition>(
+            ENCOUNTERS.ENCOUNTER_TYPE.eq("ELDERLY_CARE"),
+            ENCOUNTERS.DISCHARGE_DATE.isNull.or(ENCOUNTERS.DISCHARGE_DATE.gt(now)),
+        )
+        department?.trim()?.takeIf(String::isNotBlank)?.let { conditions += ENCOUNTERS.DEPARTMENT.eq(it) }
+        ward?.trim()?.takeIf(String::isNotBlank)?.let { conditions += ENCOUNTERS.WARD.eq(it) }
+
+        val countQuery = ctx.select(DSL.count().`as`("total"))
+            .from(ENCOUNTERS)
+            .where(conditions)
+        val dataQuery = ctx.select(
+            ENCOUNTERS.ID.`as`("encounter_id"),
+            ENCOUNTERS.ENCOUNTER_NO,
+            ENCOUNTERS.PATIENT_ID,
+            PATIENTS.NAME.`as`("patient_name"),
+            ENCOUNTERS.DEPARTMENT,
+            ENCOUNTERS.WARD,
+            ENCOUNTERS.ADMIT_DATE,
+            ENCOUNTERS.DISCHARGE_DATE,
+            ENCOUNTERS.STATUS,
+        )
+            .from(ENCOUNTERS)
+            .join(PATIENTS).on(ENCOUNTERS.PATIENT_ID.eq(PATIENTS.ID))
+            .where(conditions)
+            .orderBy(ENCOUNTERS.DEPARTMENT.asc(), ENCOUNTERS.WARD.asc(), ENCOUNTERS.ADMIT_DATE.asc())
+            .limit(limit)
+            .offset(offset)
+
+        return execute(pool, countQuery).compose { countRows ->
+            val total = countRows.iterator().next().getLong("total") ?: 0L
+            execute(pool, dataQuery).map { rows ->
+                JsonObject()
+                    .put(
+                        "records",
+                        JsonArray(
+                            rows.map { row ->
+                                JsonObject()
+                                    .put("encounter_id", row.getString("encounter_id"))
+                                    .put("encounter_no", row.getString("encounter_no"))
+                                    .put("patient_id", row.getString("patient_id"))
+                                    .put("patient_name", row.getString("patient_name"))
+                                    .put("department", row.getString("department"))
+                                    .put("ward", row.getString("ward"))
+                                    .put("admit_date", row.getOffsetDateTime("admit_date")?.toString())
+                                    .put("discharge_date", row.getOffsetDateTime("discharge_date")?.toString())
+                                    .put("status", row.getString("status"))
+                            },
+                        ),
+                    )
+                    .put("meta", JsonObject().put("total", total))
+            }
+        }
+    }
+
     fun updateEncounter(id: String, body: JsonObject): Future<JsonObject> {
         validateEncounterUpdate(body)
-        return getEncounter(id).compose {
-            execute(pool, encounterUpdate(body, id, OffsetDateTime.now()))
-                .compose { getEncounter(id) }
+        // 028 §2.1-2：改 department/ward/status 时必须在同一事务内先 `FOR UPDATE` 锁定，
+        // 再按同一套区间/床位口径复检，否则「已离院记录改回 ACTIVE」会绕过全部入住门禁。
+        return pool.withTransaction<JsonObject> { connection ->
+            lockEncounter(connection, id).compose { encounter ->
+                val now = OffsetDateTime.now()
+                val patientId = requireNotNull(encounter.getString("patient_id"))
+                val isElderly = encounter.getString("encounter_type") == "ELDERLY_CARE"
+                val touchSlot =
+                    body.containsKey("department") || body.containsKey("ward") || body.containsKey("status")
+
+                val slotCheck: Future<Void> = if (isElderly && touchSlot) {
+                    val admitDate = encounter.getString("admit_date")
+                        ?: return@compose Future.failedFuture(
+                            IllegalArgumentException("admit_date is required to validate admission interval"),
+                        )
+                    ensureAdmissionSlotAvailable(
+                        connection,
+                        patientId,
+                        if (body.containsKey("department")) body.getString("department") else encounter.getString("department"),
+                        if (body.containsKey("ward")) body.getString("ward") else encounter.getString("ward"),
+                        offsetDateTime(admitDate, "admit_date"),
+                        encounter.getString("discharge_date")?.let { offsetDateTime(it, "discharge_date") },
+                        id,
+                    )
+                } else {
+                    Future.succeededFuture()
+                }
+
+                // 惰性构造：Vert.x 的 execute() 立即发查询，若在此处直接调用会把 activeCheck 的
+                // SELECT 发到咨询锁外面（评审 P2-2），故包成 () -> Future 在取锁后调用。
+                val activeCheck: () -> Future<Void> =
+                    if (isElderly && body.getString("status") == "ACTIVE") {
+                        { ensureNoOtherActiveElderlyAdmission(connection, patientId, id) }
+                    } else {
+                        { Future.succeededFuture() }
+                    }
+
+                slotCheck.compose { activeCheck() }
+                    .compose { execute(connection, encounterUpdate(body, id, now)) }
+                    .compose { getEncounter(connection, id) }
+            }
         }
     }
 
@@ -1003,7 +1112,7 @@ class HealthcareService(
         }
 
     private fun ensureNoActiveElderlyAdmission(client: SqlClient, patientId: String): Future<Void> {
-        val query = ctx.selectOne()
+        val query = ctx.select(ENCOUNTERS.ENCOUNTER_NO)
             .from(ENCOUNTERS)
             .where(
                 ENCOUNTERS.PATIENT_ID.eq(patientId)
@@ -1011,8 +1120,19 @@ class HealthcareService(
                     .and(ENCOUNTERS.STATUS.eq("ACTIVE")),
             )
         return execute(client, query).compose { rows ->
-            if (rows.size() == 0) Future.succeededFuture()
-            else Future.failedFuture(IllegalArgumentException("patient already has an active elderly admission"))
+            // 存在性以「是否命中行」判定；住院号只用于消息（无号时省略该段）
+            val row = rows.iterator().asSequence().firstOrNull()
+            if (row == null) {
+                Future.succeededFuture()
+            } else {
+                // 028 §4.2：已有活动入住是冲突（409），消息带上既有住院号便于前端提示
+                Future.failedFuture(
+                    ConflictException(
+                        "patient already has an active elderly admission" +
+                            encounterNoSuffix(row.getString("encounter_no")),
+                    ),
+                )
+            }
         }
     }
 
@@ -1021,7 +1141,7 @@ class HealthcareService(
         patientId: String,
         excludeEncounterId: String,
     ): Future<Void> {
-        val query = ctx.selectOne()
+        val query = ctx.select(ENCOUNTERS.ENCOUNTER_NO)
             .from(ENCOUNTERS)
             .where(
                 ENCOUNTERS.PATIENT_ID.eq(patientId)
@@ -1030,10 +1150,134 @@ class HealthcareService(
                     .and(ENCOUNTERS.ID.ne(excludeEncounterId)),
             )
         return execute(client, query).compose { rows ->
-            if (rows.size() == 0) Future.succeededFuture()
-            else Future.failedFuture(ConflictException("patient already has another active elderly admission"))
+            // 存在性以「是否命中行」判定；住院号只用于消息（无号时省略该段）
+            val row = rows.iterator().asSequence().firstOrNull()
+            if (row == null) {
+                Future.succeededFuture()
+            } else {
+                // 028 §4.2 冻结文案：与 ensureNoActiveElderlyAdmission 同串，前端 admissionMessages 才能命中
+                Future.failedFuture(
+                    ConflictException(
+                        "patient already has an active elderly admission" +
+                            encounterNoSuffix(row.getString("encounter_no")),
+                    ),
+                )
+            }
         }
     }
+
+    private fun encounterNoSuffix(encounterNo: String?): String =
+        encounterNo?.takeIf(String::isNotBlank)?.let { ": encounter_no=$it" } ?: ""
+
+    /**
+     * 028 D1–D3 入住区间/床位占用校验（仅 `ELDERLY_CARE`）：
+     * 存在另一条养老入住 `O`（`O.id <> excludeEncounterId`）满足
+     * `(O.admit_date IS NULL OR O.admit_date < X)` 且 `(O.discharge_date IS NULL OR O.discharge_date > S)` 即冲突，
+     * 其中 `S = admitDate`、`X = dischargeDate`（`X = null` 表示未定离院 → 第一条条件恒真，不加 `admit_date` 过滤）。
+     * 半开区间 `[admit_date, discharge_date)`：首尾相接（`O.discharge_date = S`）不算冲突。
+     * 床位检查优先于「同长者区间重叠」，两者命中都返回 409；`department`/`ward` 都非空白时按 `trim` 后精确比较。
+     *
+     * 并发：SELECT-then-INSERT 存在 TOCTOU，故在同一事务内先按归一化床位键与 `patient_id`
+     * 取事务级咨询锁（顺序固定：先床位、后长者），与 inventories `InventoryConsumptionService.lockExecutionKey`
+     * 同一写法；仅覆盖 mock/嵌入式路由测试无法证明的真库并发窗口。
+     */
+    private fun ensureAdmissionSlotAvailable(
+        client: SqlClient,
+        patientId: String,
+        department: String?,
+        ward: String?,
+        admitDate: OffsetDateTime,
+        dischargeDate: OffsetDateTime?,
+        excludeEncounterId: String?,
+    ): Future<Void> {
+        val bedDepartment = department?.trim()?.takeIf(String::isNotBlank)
+        val bedWard = ward?.trim()?.takeIf(String::isNotBlank)
+        val bedKey = if (bedDepartment != null && bedWard != null) "bed:$bedDepartment/$bedWard" else null
+
+        var conflict = ENCOUNTERS.ENCOUNTER_TYPE.eq("ELDERLY_CARE")
+            .and(admissionOverlapCondition(admitDate, dischargeDate))
+        if (excludeEncounterId != null) conflict = conflict.and(ENCOUNTERS.ID.ne(excludeEncounterId))
+
+        // 冲突检查必须是惰性函数：Vert.x 的 execute() 会立即发起查询，若在取锁之前构建
+        // Future，SELECT 就跑在锁外面，咨询锁将形同虚设（READ COMMITTED 下仍可写入重叠记录）。
+        fun bedConflictCheck(): Future<Void> {
+            if (bedKey == null) return Future.succeededFuture()
+            val query = ctx.select(ENCOUNTERS.ENCOUNTER_NO, ENCOUNTERS.DISCHARGE_DATE)
+                .from(ENCOUNTERS)
+                .where(
+                    conflict.and(ENCOUNTERS.DEPARTMENT.eq(bedDepartment))
+                        .and(ENCOUNTERS.WARD.eq(bedWard)),
+                )
+            return execute(client, query).compose { rows ->
+                val row = rows.iterator().asSequence().firstOrNull()
+                if (row == null) {
+                    Future.succeededFuture()
+                } else {
+                    Future.failedFuture(
+                        ConflictException(
+                            "bed already occupied: department=$bedDepartment ward=$bedWard" +
+                                " encounter_no=${row.getString("encounter_no")}" +
+                                " until=${admissionUntil(row.getOffsetDateTime("discharge_date"))}",
+                        ),
+                    )
+                }
+            }
+        }
+
+        fun patientConflictCheck(): Future<Void> {
+            val query = ctx.select(ENCOUNTERS.ENCOUNTER_NO, ENCOUNTERS.DISCHARGE_DATE)
+                .from(ENCOUNTERS)
+                .where(conflict.and(ENCOUNTERS.PATIENT_ID.eq(patientId)))
+            return execute(client, query).compose { rows ->
+                val row = rows.iterator().asSequence().firstOrNull()
+                if (row == null) {
+                    Future.succeededFuture()
+                } else {
+                    Future.failedFuture(
+                        ConflictException(
+                            "admission interval overlaps existing encounter:" +
+                                " encounter_no=${row.getString("encounter_no")}" +
+                                " until=${admissionUntil(row.getOffsetDateTime("discharge_date"))}",
+                        ),
+                    )
+                }
+            }
+        }
+
+        var locked: Future<Void> = Future.succeededFuture()
+        listOfNotNull(bedKey, "patient:$patientId").forEach { key ->
+            locked = locked.compose { lockAdmissionKey(client, key) }
+        }
+
+        // 顺序固定：取锁 → 床位占用检查 → 同长者区间重叠检查（检查全部在锁内发起）
+        return locked.compose { bedConflictCheck() }.compose { patientConflictCheck() }
+    }
+
+    /** 半开区间重叠谓词（jOOQ 表达，不用原生 SQL 拼接）。 */
+    private fun admissionOverlapCondition(
+        admitDate: OffsetDateTime,
+        dischargeDate: OffsetDateTime?,
+    ): Condition {
+        // B：`O.discharge_date IS NULL OR O.discharge_date > S`，S = 本次入住开始，恒需判定
+        var condition = ENCOUNTERS.DISCHARGE_DATE.isNull.or(ENCOUNTERS.DISCHARGE_DATE.gt(admitDate))
+        // A：`O.admit_date IS NULL OR O.admit_date < X`；X = 本次入住结束，为 null（未定离院）时恒真 → 不加过滤
+        if (dischargeDate != null) {
+            condition = condition.and(ENCOUNTERS.ADMIT_DATE.isNull.or(ENCOUNTERS.ADMIT_DATE.lt(dischargeDate)))
+        }
+        return condition
+    }
+
+    private fun admissionUntil(dischargeDate: OffsetDateTime?): String =
+        dischargeDate?.toString() ?: "ongoing"
+
+    /**
+     * 事务级 PostgreSQL 咨询锁（`pg_advisory_xact_lock`）：同一床位键/`patient_id` 的入住
+     * 校验与插入在同一事务内互斥，关闭 SELECT-then-INSERT 的并发窗口。无迁移依赖。
+     */
+    private fun lockAdmissionKey(client: SqlClient, key: String): Future<Void> =
+        client.preparedQuery("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .execute(Tuple.of(key))
+            .map { null }
 
     private fun createEncounter(
         client: SqlClient,
@@ -1046,8 +1290,24 @@ class HealthcareService(
         val now = OffsetDateTime.now()
         val encounterNo = requiredText(body, "encounter_no")
         return ensureEncounterNoAvailable(client, encounterNo).compose {
-            execute(client, encounterInsert(body, id, patientId, attendingPhysician, forcedType, now))
-                .map { encounterResponse(body, id, patientId, attendingPhysician, forcedType, now) }
+            val encounterType = forcedType ?: body.getString("encounter_type")
+            val slotCheck: Future<Void> = if (encounterType == "ELDERLY_CARE") {
+                ensureAdmissionSlotAvailable(
+                    client,
+                    patientId,
+                    body.getString("department"),
+                    body.getString("ward"),
+                    offsetDateTime(requiredText(body, "admit_date"), "admit_date"),
+                    null,
+                    null,
+                )
+            } else {
+                Future.succeededFuture()
+            }
+            slotCheck.compose {
+                execute(client, encounterInsert(body, id, patientId, attendingPhysician, forcedType, now))
+                    .map { encounterResponse(body, id, patientId, attendingPhysician, forcedType, now) }
+            }
         }
     }
 

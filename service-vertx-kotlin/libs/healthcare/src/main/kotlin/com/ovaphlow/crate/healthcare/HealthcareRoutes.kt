@@ -102,6 +102,16 @@ object HealthcareRoutes {
             ).onSuccess { ctx.json(it) }
                 .onFailure { respondFailure(ctx, it) }
         }
+        // 028 §4.1 床位占用只读查询：当前占用中的养老入住，供办理入住表单提示「该床位当前占用」
+        router.get("/bed-occupancy").handler { ctx ->
+            service.listBedOccupancy(
+                department = ctx.request().getParam("department"),
+                ward = ctx.request().getParam("ward"),
+                limit = limit(ctx),
+                offset = offset(ctx),
+            ).onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
         router.get("/elderly-admissions").handler { ctx ->
             service.listEncounters(
                 patientId = ctx.request().getParam("patient_id"),
@@ -1004,20 +1014,37 @@ object HealthcareRoutes {
             // 025 药品目录端口未接线：fail-closed，不降级为跳过校验
             is DrugCatalogUnavailableException -> respond(ctx, 503, error.message)
             else -> {
-                log.error("healthcare route error", error)
-                respond(ctx, 500, "internal error")
+                // 唯一索引兜底（评审 P2-1）：`PUT /encounters/:id` 走本函数而非 `respondCreateFailure`，
+                // 并发撞 V501/V502 时必须给 409 而不是 500。只按约束名匹配，避免把无关文本误判为冲突。
+                val indexMessage = error.message?.lowercase() ?: ""
+                when {
+                    indexMessage.contains("uq_encounters_active_elderly_care") ->
+                        respond(ctx, 409, "patient already has an active elderly admission")
+                    indexMessage.contains("uq_encounters_encounter_no") ->
+                        respond(ctx, 409, "encounter_no already exists")
+                    else -> {
+                        log.error("healthcare route error", error)
+                        respond(ctx, 500, "internal error")
+                    }
+                }
             }
         }
     }
 
     private fun respondCreateFailure(ctx: RoutingContext, error: Throwable) {
         val message = error.message?.lowercase() ?: ""
-        if (message.contains("encounter_no") || message.contains("uq_encounters_encounter_no")) {
-            respond(ctx, 409, "encounter_no already exists")
-        } else if (error is DuplicateNursingRecordException) {
-            respond(ctx, 409, error.message ?: "nursing record already exists for task execution")
-        } else {
-            respondFailure(ctx, error)
+        when {
+            // 028 §4.2：ConflictException 自带完整业务消息（床位占用/区间重叠/已有活动入住），
+            // 必须原样 409 返回；否则会被下面的 "encounter_no" 子串判据改写成「住院号重复」。
+            error is ConflictException -> respond(ctx, 409, error.message)
+            // V501 部分唯一索引：并发下重复活动养老入住 → 409，不退化为 500
+            message.contains("uq_encounters_active_elderly_care") ->
+                respond(ctx, 409, "patient already has an active elderly admission")
+            message.contains("encounter_no") || message.contains("uq_encounters_encounter_no") ->
+                respond(ctx, 409, "encounter_no already exists")
+            error is DuplicateNursingRecordException ->
+                respond(ctx, 409, error.message ?: "nursing record already exists for task execution")
+            else -> respondFailure(ctx, error)
         }
     }
 
