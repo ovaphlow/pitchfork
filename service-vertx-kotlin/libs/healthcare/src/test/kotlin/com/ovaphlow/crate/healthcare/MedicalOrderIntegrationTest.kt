@@ -63,6 +63,13 @@ class MedicalOrderIntegrationTest {
         private const val DRUG_CODE = "MO-DRUG-ACTIVE"
         private const val DRUG_NAME = "医嘱测试降压药"
         private const val INACTIVE_DRUG_NAME = "医嘱停用降压药"
+
+        /**
+         * 027 用例的 SQL 时间字面量固定格式：始终含秒与偏移。
+         * 不直接用 `OffsetDateTime.toString()`——它在秒为 0 时会省略 `:00`，避免留下解析歧义。
+         */
+        private val SQL_TIMESTAMP_FORMAT =
+            java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssXXX")
     }
 
     private lateinit var host: String
@@ -1021,6 +1028,611 @@ class MedicalOrderIntegrationTest {
             .onSuccess { ctx.completeNow() }
             .onFailure { ctx.failNow(it) }
     }
+
+    // ——— 027 §3.4/§4.5：close-expired 真库用例 ———
+    //
+    // fixture 全部以 `mo-` 前缀在本用例内自建（入住 / 周期 / 医嘱 / 任务 / 执行），
+    // 随既有 @BeforeEach/@AfterEach 的 cleanupFixtures 按外键逆序删除，不依赖任何手工遗留数据，
+    // 也不触碰既有 enc-1..enc-7 fixture。默认验证只保证可编译；真库执行属 §6.3 发布前检查。
+    //
+    // 零改写断言说明：`nursing_task_executions` 没有 `updated_at` 列（V400），
+    // 故以「全列 + xmin 行版本」整行快照作为「零改写」可得的最强证据——任何 UPDATE 都会换掉 xmin。
+
+    @Test
+    fun `closeExpiredOrders真库收束到期医嘱且保留end_time并零改写护理执行`(vertx: Vertx, ctx: VertxTestContext) {
+        val encounterId = fixtureId("ce-main-enc")
+        val periodId = fixtureId("ce-main-period")
+        val orderId = fixtureId("ce-main-order")
+        val taskId = fixtureId("ce-main-task")
+        // 明确的过去终点：2 天前，远大于任何时钟抖动窗口
+        val endTime = OffsetDateTime.now().minusDays(2).withNano(0)
+        val startTime = endTime.minusDays(1)
+        val callStartedAt = OffsetDateTime.now()
+
+        seedCloseExpiredEncounter(encounterId, fixtureId("ce-main-patient"), periodId, "MO-CE-MAIN")
+        seedMedicalOrder(orderId, encounterId, "ACTIVE", endTime, startTime)
+        seedOrderTask(taskId, periodId, encounterId, orderId)
+        seedExecution(fixtureId("ce-main-exec-pending"), taskId, startTime, "PENDING")
+        seedExecution(fixtureId("ce-main-exec-running"), taskId, startTime.plusHours(1), "IN_PROGRESS", endTime.minusHours(1))
+
+        val orderBefore = orderRowText(orderId)
+        val executionsBefore = executionsRowText(taskId)
+
+        request(
+            vertx,
+            HttpMethod.POST,
+            "$HEALTHCARE_BASE/orders/close-expired",
+            JsonObject().put("encounter_id", encounterId),
+        )
+            .compose { (status, body) ->
+                ctx.verify {
+                    assertEquals(200, status, "收束必须 200: ${body.encode()}")
+                    assertEquals(1, body.getInteger("closed"), "该入住只有一条到期医嘱: ${body.encode()}")
+                    assertEquals(listOf(orderId), body.getJsonArray("order_ids").list)
+                    assertEquals(0, body.getJsonArray("warnings").size(), "任务健全时不得有 warnings: ${body.encode()}")
+                    val closedAt = OffsetDateTime.parse(body.getString("closed_at"))
+                    assertFalse(closedAt.isBefore(callStartedAt.minusHours(1)), "closed_at 必须是本次调用时刻")
+                }
+                io.vertx.core.Future.succeededFuture(body.getString("closed_at"))
+            }
+            .compose { closedAt ->
+                io.vertx.core.Future.future<Unit> { promise ->
+                    // 医嘱已收束；end_time 保持 fixture 原临床终点，绝不被 now 覆盖
+                    assertEquals("COMPLETED", queryText("SELECT status FROM healthcare.medical_orders WHERE id = '$orderId'"))
+                    assertEquals(
+                        "t",
+                        queryText("SELECT (end_time = '${sqlTimestamp(endTime)}'::timestamptz)::text FROM healthcare.medical_orders WHERE id = '$orderId'"),
+                        "end_time 必须逐瞬间保持原值 $endTime",
+                    )
+                    assertEquals(
+                        "t",
+                        queryText("SELECT (end_time < now() - interval '1 day')::text FROM healthcare.medical_orders WHERE id = '$orderId'"),
+                        "end_time 不得被收束时刻覆盖",
+                    )
+                    // 审计落库：metadata.convergence.{reason,end_time,at}
+                    assertEquals(
+                        "EXPIRED",
+                        queryText("SELECT metadata->'convergence'->>'reason' FROM healthcare.medical_orders WHERE id = '$orderId'"),
+                    )
+                    assertEquals(
+                        "t",
+                        queryText("SELECT ((metadata->'convergence'->>'end_time')::timestamptz = '${sqlTimestamp(endTime)}'::timestamptz)::text FROM healthcare.medical_orders WHERE id = '$orderId'"),
+                        "审计里的 end_time 必须是原临床终点",
+                    )
+                    assertEquals(
+                        "t",
+                        queryText("SELECT ((metadata->'convergence'->>'at')::timestamptz = '${sqlTimestamp(OffsetDateTime.parse(closedAt))}'::timestamptz)::text FROM healthcare.medical_orders WHERE id = '$orderId'"),
+                        "审计 at 必须等于响应 closed_at",
+                    )
+                    assertEquals(
+                        "t",
+                        queryText("SELECT (updated_at = (metadata->'convergence'->>'at')::timestamptz)::text FROM healthcare.medical_orders WHERE id = '$orderId'"),
+                        "updated_at 必须与收束时刻同源",
+                    )
+                    assertNotEquals(orderBefore, orderRowText(orderId), "收束必须真的改写医嘱行")
+                    // 关联护理任务已结束
+                    assertEquals("COMPLETED", queryText("SELECT status FROM nursing.nursing_tasks WHERE id = '$taskId'"))
+                    // 零 nursing_task_executions 写入：整行（含 xmin）逐字节未变，状态仍是 PENDING/IN_PROGRESS
+                    assertEquals(executionsBefore, executionsRowText(taskId), "收束只提醒，绝不改写护理执行记录")
+                    assertEquals(
+                        "IN_PROGRESS,PENDING",
+                        queryText("SELECT string_agg(status, ',' ORDER BY status) FROM nursing.nursing_task_executions WHERE task_id = '$taskId'"),
+                    )
+                    promise.complete()
+                }
+            }
+            .compose {
+                // API 派生视图同步收敛：status=COMPLETED、is_expired=false、end_time 仍是原值
+                request(vertx, HttpMethod.GET, "$HEALTHCARE_BASE/orders/$orderId")
+            }
+            .compose { (status, order) ->
+                ctx.verify {
+                    assertEquals(200, status, "收束后详情必须可读: ${order.encode()}")
+                    assertEquals("COMPLETED", order.getString("status"))
+                    assertEquals(false, order.getBoolean("is_expired"))
+                    assertEquals(
+                        endTime.toInstant(),
+                        OffsetDateTime.parse(order.getString("end_time")).toInstant(),
+                        "详情返回的 end_time 必须仍是原临床终点",
+                    )
+                }
+                io.vertx.core.Future.succeededFuture<Unit>(Unit)
+            }
+            .onSuccess { ctx.completeNow() }
+            .onFailure { ctx.failNow(it) }
+    }
+
+    @Test
+    fun `closeExpiredOrders真库不收束无终点未来终点与非ACTIVE医嘱`(vertx: Vertx, ctx: VertxTestContext) {
+        val encounterId = fixtureId("ce-edge-enc")
+        val periodId = fixtureId("ce-edge-period")
+        val expiredOrderId = fixtureId("ce-edge-expired")
+        val nearPastOrderId = fixtureId("ce-edge-near-past")
+        val nullEndOrderId = fixtureId("ce-edge-null-end")
+        val nearFutureOrderId = fixtureId("ce-edge-near-future")
+        val farFutureOrderId = fixtureId("ce-edge-far-future")
+        val discontinuedOrderId = fixtureId("ce-edge-discontinued")
+        val cancelledOrderId = fixtureId("ce-edge-cancelled")
+        val completedOrderId = fixtureId("ce-edge-completed")
+        val startTime = OffsetDateTime.now().minusDays(5).withNano(0)
+        // 判据是「严格小于」。真库无法稳定构造 end_time == now（服务端在调用时自取 now），
+        // 故用「刚刚过去」（-30 分钟，必须收束）与「即将到期」（+30 分钟，必须不收束）夹住该边界，
+        // 两侧余量远大于本用例的毫秒级抖动；精确等值（end_time == now → false）由非数据库单测
+        // HealthcareMedicalOrderTest#computeExpiryFields边界_严格小于与终态 覆盖。
+        val past = OffsetDateTime.now().minusDays(2).withNano(0)
+        val nearPast = OffsetDateTime.now().minusMinutes(30).withNano(0)
+        val nearFuture = OffsetDateTime.now().plusMinutes(30).withNano(0)
+        val farFuture = OffsetDateTime.now().plusDays(2).withNano(0)
+
+        seedCloseExpiredEncounter(encounterId, fixtureId("ce-edge-patient"), periodId, "MO-CE-EDGE")
+        seedMedicalOrder(expiredOrderId, encounterId, "ACTIVE", past, startTime)
+        seedMedicalOrder(nearPastOrderId, encounterId, "ACTIVE", nearPast, startTime)
+        seedMedicalOrder(nullEndOrderId, encounterId, "ACTIVE", null, startTime)
+        seedMedicalOrder(nearFutureOrderId, encounterId, "ACTIVE", nearFuture, startTime)
+        seedMedicalOrder(farFutureOrderId, encounterId, "ACTIVE", farFuture, startTime)
+        seedMedicalOrder(discontinuedOrderId, encounterId, "DISCONTINUED", past, startTime)
+        seedMedicalOrder(cancelledOrderId, encounterId, "CANCELLED", past, startTime)
+        seedMedicalOrder(completedOrderId, encounterId, "COMPLETED", past, startTime)
+        val taskByOrder = mapOf(
+            expiredOrderId to fixtureId("ce-edge-task-expired"),
+            nearPastOrderId to fixtureId("ce-edge-task-near-past"),
+            nullEndOrderId to fixtureId("ce-edge-task-null-end"),
+            nearFutureOrderId to fixtureId("ce-edge-task-near-future"),
+            farFutureOrderId to fixtureId("ce-edge-task-far-future"),
+            discontinuedOrderId to fixtureId("ce-edge-task-discontinued"),
+            cancelledOrderId to fixtureId("ce-edge-task-cancelled"),
+            completedOrderId to fixtureId("ce-edge-task-completed"),
+        )
+        taskByOrder.forEach { (orderId, taskId) -> seedOrderTask(taskId, periodId, encounterId, orderId) }
+        val notCandidateOrderIds = listOf(
+            nullEndOrderId,
+            nearFutureOrderId,
+            farFutureOrderId,
+            discontinuedOrderId,
+            cancelledOrderId,
+            completedOrderId,
+        )
+        val rowsBefore = notCandidateOrderIds.associateWith { orderRowText(it) }
+
+        request(
+            vertx,
+            HttpMethod.POST,
+            "$HEALTHCARE_BASE/orders/close-expired",
+            JsonObject().put("encounter_id", encounterId),
+        )
+            .compose { (status, body) ->
+                ctx.verify {
+                    assertEquals(200, status, "收束必须 200: ${body.encode()}")
+                    assertEquals(2, body.getInteger("closed"), "只应收束明确的过去终点 ACTIVE 医嘱: ${body.encode()}")
+                    assertEquals(
+                        setOf(expiredOrderId, nearPastOrderId),
+                        body.getJsonArray("order_ids").list.toSet(),
+                    )
+                    assertEquals(0, body.getJsonArray("warnings").size(), "无异常任务不得有 warnings: ${body.encode()}")
+                }
+                io.vertx.core.Future.succeededFuture(Unit)
+            }
+            .compose {
+                io.vertx.core.Future.future<Unit> { promise ->
+                    // 两个明确的过去终点候选都被收束（含刚刚过去 30 分钟的那条，证明判据是严格小于而非宽松窗口）
+                    listOf(expiredOrderId, nearPastOrderId).forEach { orderId ->
+                        assertEquals(
+                            "COMPLETED",
+                            queryText("SELECT status FROM healthcare.medical_orders WHERE id = '$orderId'"),
+                            "候选 $orderId 必须被收束",
+                        )
+                        assertEquals(
+                            "EXPIRED",
+                            queryText("SELECT metadata->'convergence'->>'reason' FROM healthcare.medical_orders WHERE id = '$orderId'"),
+                        )
+                        assertEquals(
+                            "COMPLETED",
+                            queryText("SELECT status FROM nursing.nursing_tasks WHERE id = '${taskByOrder.getValue(orderId)}'"),
+                        )
+                    }
+                    assertEquals(
+                        "t",
+                        queryText("SELECT (end_time = '${sqlTimestamp(nearPast)}'::timestamptz)::text FROM healthcare.medical_orders WHERE id = '$nearPastOrderId'"),
+                        "刚刚过去的候选也必须保留原 end_time",
+                    )
+                    // 边界与非 ACTIVE 一律不被收束：整行逐字节未变（status/end_time/metadata/updated_at）
+                    assertEquals(
+                        rowsBefore,
+                        notCandidateOrderIds.associateWith { orderRowText(it) },
+                        "非候选医嘱行必须逐行未变",
+                    )
+                    assertNull(
+                        queryText("SELECT end_time::text FROM healthcare.medical_orders WHERE id = '$nullEndOrderId'"),
+                        "end_time 为空的医嘱永不到期",
+                    )
+                    assertEquals(
+                        "t",
+                        queryText("SELECT (end_time > now())::text FROM healthcare.medical_orders WHERE id = '$nearFutureOrderId'"),
+                        "近未来终点不得被收束",
+                    )
+                    assertEquals(
+                        "t",
+                        queryText("SELECT (end_time > now())::text FROM healthcare.medical_orders WHERE id = '$farFutureOrderId'"),
+                        "远未来终点不得被收束",
+                    )
+                    assertEquals("DISCONTINUED", queryText("SELECT status FROM healthcare.medical_orders WHERE id = '$discontinuedOrderId'"))
+                    assertEquals("CANCELLED", queryText("SELECT status FROM healthcare.medical_orders WHERE id = '$cancelledOrderId'"))
+                    assertEquals("COMPLETED", queryText("SELECT status FROM healthcare.medical_orders WHERE id = '$completedOrderId'"))
+                    // 非候选医嘱的关联任务必须保持 ACTIVE（没有被 terminateOrderTask 碰过）
+                    notCandidateOrderIds.forEach { orderId ->
+                        assertEquals(
+                            "ACTIVE",
+                            queryText("SELECT status FROM nursing.nursing_tasks WHERE id = '${taskByOrder.getValue(orderId)}'"),
+                            "非候选医嘱 $orderId 的护理任务不得被结束",
+                        )
+                    }
+                    promise.complete()
+                }
+            }
+            .onSuccess { ctx.completeNow() }
+            .onFailure { ctx.failNow(it) }
+    }
+
+    @Test
+    fun `closeExpiredOrders真库幂等_第二次closed为0且医嘱行不被二次改写`(vertx: Vertx, ctx: VertxTestContext) {
+        val encounterId = fixtureId("ce-idem-enc")
+        val periodId = fixtureId("ce-idem-period")
+        val orderId = fixtureId("ce-idem-order")
+        val taskId = fixtureId("ce-idem-task")
+        val endTime = OffsetDateTime.now().minusDays(2).withNano(0)
+        val startTime = endTime.minusDays(1)
+
+        seedCloseExpiredEncounter(encounterId, fixtureId("ce-idem-patient"), periodId, "MO-CE-IDEM")
+        seedMedicalOrder(orderId, encounterId, "ACTIVE", endTime, startTime)
+        seedOrderTask(taskId, periodId, encounterId, orderId)
+        seedExecution(fixtureId("ce-idem-exec"), taskId, startTime, "PENDING")
+
+        var afterFirstCall: List<String?>? = null
+
+        request(
+            vertx,
+            HttpMethod.POST,
+            "$HEALTHCARE_BASE/orders/close-expired",
+            JsonObject().put("encounter_id", encounterId),
+        )
+            .compose { (status, body) ->
+                ctx.verify {
+                    assertEquals(200, status, "首次收束必须 200: ${body.encode()}")
+                    assertEquals(1, body.getInteger("closed"), "首次调用必须收束唯一候选: ${body.encode()}")
+                }
+                io.vertx.core.Future.future<Unit> { promise ->
+                    assertEquals("COMPLETED", queryText("SELECT status FROM healthcare.medical_orders WHERE id = '$orderId'"))
+                    afterFirstCall = listOf(orderRowText(orderId), taskRowText(taskId), executionsRowText(taskId))
+                    promise.complete()
+                }
+            }
+            .compose {
+                request(
+                    vertx,
+                    HttpMethod.POST,
+                    "$HEALTHCARE_BASE/orders/close-expired",
+                    JsonObject().put("encounter_id", encounterId),
+                )
+            }
+            .compose { (status, body) ->
+                ctx.verify {
+                    assertEquals(200, status, "第二次调用必须仍 200: ${body.encode()}")
+                    assertEquals(0, body.getInteger("closed"), "幂等：第二次不得再收束")
+                    assertEquals(0, body.getJsonArray("order_ids").size())
+                    assertEquals(0, body.getJsonArray("warnings").size())
+                }
+                io.vertx.core.Future.future<Unit> { promise ->
+                    assertEquals(
+                        afterFirstCall,
+                        listOf(orderRowText(orderId), taskRowText(taskId), executionsRowText(taskId)),
+                        "幂等：第二次调用不得二次改写医嘱（updated_at/metadata 不变）、护理任务或护理执行",
+                    )
+                    assertEquals("COMPLETED", queryText("SELECT status FROM healthcare.medical_orders WHERE id = '$orderId'"))
+                    assertEquals("COMPLETED", queryText("SELECT status FROM nursing.nursing_tasks WHERE id = '$taskId'"))
+                    promise.complete()
+                }
+            }
+            .onSuccess { ctx.completeNow() }
+            .onFailure { ctx.failNow(it) }
+    }
+
+    @Test
+    fun `closeExpiredOrders真库按encounter_id限定范围且不带时为全量`(vertx: Vertx, ctx: VertxTestContext) {
+        // 不带 encounter_id 时作用域是全库（计划的已知残余风险）。为绝不误伤非 fixture 数据，
+        // 先确认隔离库里没有 `mo-` 之外的到期 ACTIVE 医嘱；否则本用例按假设跳过（诚实报告而非误改）。
+        val foreignCandidates = queryText(
+            "SELECT count(*)::text FROM healthcare.medical_orders " +
+                "WHERE id NOT LIKE '${FIXTURE_PREFIX}%' AND status = 'ACTIVE' AND end_time IS NOT NULL AND end_time < now()",
+        )?.toLong() ?: 0L
+        Assumptions.assumeTrue(
+            foreignCandidates == 0L,
+            "aceso_test 存在 $foreignCandidates 条非 fixture 的到期 ACTIVE 医嘱；全量收束用例只在干净隔离库上执行",
+        )
+
+        val encounterA = fixtureId("ce-scope-a-enc")
+        val periodA = fixtureId("ce-scope-a-period")
+        val orderA = fixtureId("ce-scope-a-order")
+        val orderAFuture = fixtureId("ce-scope-a-future")
+        val taskA = fixtureId("ce-scope-a-task")
+        val encounterB = fixtureId("ce-scope-b-enc")
+        val periodB = fixtureId("ce-scope-b-period")
+        val orderB = fixtureId("ce-scope-b-order")
+        val taskB = fixtureId("ce-scope-b-task")
+        val ghostEncounter = fixtureId("ce-scope-ghost")
+        val past = OffsetDateTime.now().minusDays(2).withNano(0)
+        val future = OffsetDateTime.now().plusDays(2).withNano(0)
+        val startTime = past.minusDays(1)
+
+        seedCloseExpiredEncounter(encounterA, fixtureId("ce-scope-a-patient"), periodA, "MO-CE-SCOPE-A")
+        seedCloseExpiredEncounter(encounterB, fixtureId("ce-scope-b-patient"), periodB, "MO-CE-SCOPE-B")
+        seedMedicalOrder(orderA, encounterA, "ACTIVE", past, startTime)
+        seedMedicalOrder(orderAFuture, encounterA, "ACTIVE", future, startTime)
+        seedOrderTask(taskA, periodA, encounterA, orderA)
+        seedOrderTask(fixtureId("ce-scope-a-task-future"), periodA, encounterA, orderAFuture)
+        seedMedicalOrder(orderB, encounterB, "ACTIVE", past, startTime)
+        seedOrderTask(taskB, periodB, encounterB, orderB)
+
+        request(
+            vertx,
+            HttpMethod.POST,
+            "$HEALTHCARE_BASE/orders/close-expired",
+            JsonObject().put("encounter_id", ghostEncounter),
+        )
+            .compose { (status, body) ->
+                ctx.verify {
+                    assertEquals(404, status, "未知入住的 encounter_id 必须 404: ${body.encode()}")
+                    assertEquals("encounter not found: $ghostEncounter", body.getString("error"))
+                }
+                request(
+                    vertx,
+                    HttpMethod.POST,
+                    "$HEALTHCARE_BASE/orders/close-expired",
+                    JsonObject().put("encounter_id", encounterA),
+                )
+            }
+            .compose { (status, body) ->
+                ctx.verify {
+                    assertEquals(200, status, "带 encounter_id 收束必须 200: ${body.encode()}")
+                    assertEquals(1, body.getInteger("closed"), "带 encounter_id 时只收束该入住的候选: ${body.encode()}")
+                    assertEquals(listOf(orderA), body.getJsonArray("order_ids").list)
+                    assertEquals(0, body.getJsonArray("warnings").size())
+                }
+                io.vertx.core.Future.future<Unit> { promise ->
+                    assertEquals("COMPLETED", queryText("SELECT status FROM healthcare.medical_orders WHERE id = '$orderA'"))
+                    // 另一入住、以及同入住的未来终点医嘱完全未被动过
+                    assertEquals("ACTIVE", queryText("SELECT status FROM healthcare.medical_orders WHERE id = '$orderB'"))
+                    assertNull(
+                        queryText("SELECT metadata::text FROM healthcare.medical_orders WHERE id = '$orderB'"),
+                        "另一入住的医嘱不得被收束（无 convergence 审计）",
+                    )
+                    assertEquals("ACTIVE", queryText("SELECT status FROM nursing.nursing_tasks WHERE id = '$taskB'"))
+                    assertEquals("ACTIVE", queryText("SELECT status FROM healthcare.medical_orders WHERE id = '$orderAFuture'"))
+                    promise.complete()
+                }
+            }
+            .compose {
+                // 不带 encounter_id（显式空对象）= 全量：此时只剩 enc-B 一条候选
+                request(vertx, HttpMethod.POST, "$HEALTHCARE_BASE/orders/close-expired", JsonObject())
+            }
+            .compose { (status, body) ->
+                ctx.verify {
+                    assertEquals(200, status, "全量收束必须 200: ${body.encode()}")
+                    assertEquals(1, body.getInteger("closed"), "不带 encounter_id 时必须收束另一入住的候选: ${body.encode()}")
+                    assertEquals(listOf(orderB), body.getJsonArray("order_ids").list)
+                }
+                io.vertx.core.Future.future<Unit> { promise ->
+                    assertEquals("COMPLETED", queryText("SELECT status FROM healthcare.medical_orders WHERE id = '$orderB'"))
+                    assertEquals(
+                        "EXPIRED",
+                        queryText("SELECT metadata->'convergence'->>'reason' FROM healthcare.medical_orders WHERE id = '$orderB'"),
+                    )
+                    assertEquals("COMPLETED", queryText("SELECT status FROM nursing.nursing_tasks WHERE id = '$taskB'"))
+                    assertEquals("ACTIVE", queryText("SELECT status FROM healthcare.medical_orders WHERE id = '$orderAFuture'"))
+                    promise.complete()
+                }
+            }
+            .compose {
+                // 真正不带请求体（契约允许空体）→ 200 且 0 候选，全量幂等
+                request(vertx, HttpMethod.POST, "$HEALTHCARE_BASE/orders/close-expired")
+            }
+            .compose { (status, body) ->
+                ctx.verify {
+                    assertEquals(200, status, "空请求体必须被接受: ${body.encode()}")
+                    assertEquals(0, body.getInteger("closed"))
+                    assertEquals(0, body.getJsonArray("order_ids").size())
+                }
+                io.vertx.core.Future.succeededFuture<Unit>(Unit)
+            }
+            .onSuccess { ctx.completeNow() }
+            .onFailure { ctx.failNow(it) }
+    }
+
+    @Test
+    fun `closeExpiredOrders真库任务缺失或任务非ACTIVE时降级warnings仍收束`(vertx: Vertx, ctx: VertxTestContext) {
+        val encounterId = fixtureId("ce-warn-enc")
+        val periodId = fixtureId("ce-warn-period")
+        val noTaskOrderId = fixtureId("ce-warn-no-task")
+        val terminalTaskOrderId = fixtureId("ce-warn-terminal-task")
+        val terminalTaskId = fixtureId("ce-warn-task-cancelled")
+        val past = OffsetDateTime.now().minusDays(2).withNano(0)
+        val startTime = past.minusDays(1)
+
+        seedCloseExpiredEncounter(encounterId, fixtureId("ce-warn-patient"), periodId, "MO-CE-WARN")
+        // 场景 1：ACTIVE 且已到期，但没有任何关联护理任务
+        seedMedicalOrder(noTaskOrderId, encounterId, "ACTIVE", past, startTime)
+        // 场景 2：ACTIVE 且已到期，但关联护理任务已非 ACTIVE（CANCELLED）
+        seedMedicalOrder(terminalTaskOrderId, encounterId, "ACTIVE", past, startTime)
+        seedOrderTask(terminalTaskId, periodId, encounterId, terminalTaskOrderId, status = "CANCELLED")
+        val terminalTaskBefore = taskRowText(terminalTaskId)
+
+        request(
+            vertx,
+            HttpMethod.POST,
+            "$HEALTHCARE_BASE/orders/close-expired",
+            JsonObject().put("encounter_id", encounterId),
+        )
+            .compose { (status, body) ->
+                ctx.verify {
+                    assertEquals(200, status, "warnings 是降级而非失败: ${body.encode()}")
+                    assertEquals(2, body.getInteger("closed"), "任务异常不得阻断收束: ${body.encode()}")
+                    assertEquals(setOf(noTaskOrderId, terminalTaskOrderId), body.getJsonArray("order_ids").list.toSet())
+                    val warnings = body.getJsonArray("warnings").map { it as JsonObject }
+                    assertEquals(2, warnings.size, "每条异常必须记入 warnings: ${body.encode()}")
+                    assertEquals(
+                        setOf(noTaskOrderId, terminalTaskOrderId),
+                        warnings.map { it.getString("order_id") }.toSet(),
+                    )
+                    assertEquals(
+                        setOf(
+                            "order has no linked task: $noTaskOrderId",
+                            "order task is in unexpected status: CANCELLED",
+                        ),
+                        warnings.map { it.getString("reason") }.toSet(),
+                    )
+                }
+                io.vertx.core.Future.future<Unit> { promise ->
+                    listOf(noTaskOrderId, terminalTaskOrderId).forEach { orderId ->
+                        assertEquals(
+                            "COMPLETED",
+                            queryText("SELECT status FROM healthcare.medical_orders WHERE id = '$orderId'"),
+                            "warnings 场景仍必须收束 $orderId",
+                        )
+                        assertEquals(
+                            "EXPIRED",
+                            queryText("SELECT metadata->'convergence'->>'reason' FROM healthcare.medical_orders WHERE id = '$orderId'"),
+                        )
+                        assertEquals(
+                            "t",
+                            queryText("SELECT (end_time = '${sqlTimestamp(past)}'::timestamptz)::text FROM healthcare.medical_orders WHERE id = '$orderId'"),
+                            "$orderId 的 end_time 必须保持原值",
+                        )
+                    }
+                    // 任务缺失：本来就没有任务行
+                    assertEquals(
+                        "0",
+                        queryText("SELECT count(*)::text FROM nursing.nursing_tasks WHERE order_item_id = '$noTaskOrderId'"),
+                    )
+                    // 任务非 ACTIVE：不得被降级路径改写（status 与 updated_at 逐字节未变）
+                    assertEquals(terminalTaskBefore, taskRowText(terminalTaskId), "非 ACTIVE 护理任务不得被收束路径改写")
+                    assertEquals("CANCELLED", queryText("SELECT status FROM nursing.nursing_tasks WHERE id = '$terminalTaskId'"))
+                    promise.complete()
+                }
+            }
+            .onSuccess { ctx.completeNow() }
+            .onFailure { ctx.failNow(it) }
+    }
+
+    // ——— 027 close-expired fixture / 断言小工具（全部自包含，`mo-` 前缀随既有清理删除）———
+
+    /** 自建一个 ELDERLY_CARE ACTIVE 入住与它唯一的 ACTIVE 照护周期（V404：ELDERLY_CARE 必须绑定入住）。 */
+    private fun seedCloseExpiredEncounter(
+        encounterId: String,
+        patientId: String,
+        periodId: String,
+        encounterNo: String,
+    ) {
+        DriverManager.getConnection(jdbcUrl(), user, password).use { conn ->
+            val stmt = conn.createStatement()
+            stmt.execute(
+                "INSERT INTO healthcare.patients (id, name, gender, birth_date, status) " +
+                    "VALUES ('$patientId', '收束测试长者', '男', '1940-01-01', 'ACTIVE')",
+            )
+            stmt.execute(
+                "INSERT INTO healthcare.encounters (id, patient_id, encounter_type, encounter_no, admit_date, status) " +
+                    "VALUES ('$encounterId', '$patientId', 'ELDERLY_CARE', '$encounterNo', '2026-08-01T00:00:00+08:00', 'ACTIVE')",
+            )
+            stmt.execute(
+                "INSERT INTO nursing.nursing_service_periods (id, patient_id, service_type, encounter_id, start_date, status) " +
+                    "VALUES ('$periodId', '$patientId', 'ELDERLY_CARE', '$encounterId', '2026-08-01', 'ACTIVE')",
+            )
+        }
+    }
+
+    /** 直接落一条医嘱行（可指定 status 与 end_time；`endTime = null` 表示长期无明确终点）。 */
+    private fun seedMedicalOrder(
+        orderId: String,
+        encounterId: String,
+        status: String,
+        endTime: OffsetDateTime?,
+        startTime: OffsetDateTime,
+        orderType: String = "THERAPY",
+    ) {
+        val end = endTime?.let { "'${sqlTimestamp(it)}'" } ?: "NULL"
+        DriverManager.getConnection(jdbcUrl(), user, password).use { conn ->
+            conn.createStatement().execute(
+                "INSERT INTO healthcare.medical_orders " +
+                    "(id, encounter_id, order_type, order_class, order_content, order_details, start_time, end_time, doctor, status) " +
+                    "VALUES ('$orderId', '$encounterId', '$orderType', 'LONG_TERM', '收束测试医嘱', '{}'::jsonb, '${sqlTimestamp(startTime)}', $end, '测试医生', '$status')",
+            )
+        }
+    }
+
+    /** 直接落一条医嘱派生的护理任务（`order_item_id` 精确弱关联医嘱）。 */
+    private fun seedOrderTask(
+        taskId: String,
+        periodId: String,
+        encounterId: String,
+        orderId: String,
+        status: String = "ACTIVE",
+    ) {
+        DriverManager.getConnection(jdbcUrl(), user, password).use { conn ->
+            conn.createStatement().execute(
+                "INSERT INTO nursing.nursing_tasks " +
+                    "(id, period_id, encounter_id, order_item_id, task_type, description, frequency_code, frequency_name, start_date, status) " +
+                    "VALUES ('$taskId', '$periodId', '$encounterId', '$orderId', 'TREATMENT', '收束测试任务', 'QD', '每日一次', '2026-08-01', '$status')",
+            )
+        }
+    }
+
+    /** 直接落一条护理执行记录（V401 唯一索引要求同一任务内 `planned_time` 互不相同）。 */
+    private fun seedExecution(
+        executionId: String,
+        taskId: String,
+        plannedTime: OffsetDateTime,
+        status: String,
+        actualTime: OffsetDateTime? = null,
+    ) {
+        val actual = actualTime?.let { "'${sqlTimestamp(it)}'" } ?: "NULL"
+        DriverManager.getConnection(jdbcUrl(), user, password).use { conn ->
+            conn.createStatement().execute(
+                "INSERT INTO nursing.nursing_task_executions (id, task_id, planned_time, actual_time, executor, status) " +
+                    "VALUES ('$executionId', '$taskId', '${sqlTimestamp(plannedTime)}', $actual, '测试护士', '$status')",
+            )
+        }
+    }
+
+    /** SQL 时间字面量：固定 `yyyy-MM-ddTHH:mm:ssXXX`，与 companion 的 [SQL_TIMESTAMP_FORMAT] 配套。 */
+    private fun sqlTimestamp(value: OffsetDateTime): String = value.format(SQL_TIMESTAMP_FORMAT)
+
+    /** 只读单值查询：返回第一行第一列的文本表示（无行时为 null）。 */
+    private fun queryText(sql: String): String? =
+        DriverManager.getConnection(jdbcUrl(), user, password).use { conn ->
+            conn.createStatement().executeQuery(sql).use { rs ->
+                if (rs.next()) rs.getString(1) else null
+            }
+        }
+
+    /** 医嘱行可比较快照：status|end_time|metadata|updated_at（用于「未被动过」与幂等断言）。 */
+    private fun orderRowText(orderId: String): String? = queryText(
+        "SELECT status||'|'||coalesce(end_time::text,'NULL')||'|'||coalesce(metadata::text,'NULL')||'|'||coalesce(updated_at::text,'NULL') " +
+            "FROM healthcare.medical_orders WHERE id = '$orderId'",
+    )
+
+    /** 护理任务行可比较快照：status|end_date|updated_at。 */
+    private fun taskRowText(taskId: String): String? = queryText(
+        "SELECT status||'|'||coalesce(end_date::text,'NULL')||'|'||coalesce(updated_at::text,'NULL') " +
+            "FROM nursing.nursing_tasks WHERE id = '$taskId'",
+    )
+
+    /**
+     * 护理执行整行快照（含 `xmin` 行版本）：`nursing_task_executions` 无 `updated_at` 列，
+     * 故「全列 + xmin」是「零改写」可得的最强证据——任何 UPDATE 都会换掉 xmin。
+     */
+    private fun executionsRowText(taskId: String): String? = queryText(
+        "SELECT string_agg(id||'|'||status||'|'||coalesce(planned_time::text,'NULL')||'|'||coalesce(actual_time::text,'NULL')||'|'||" +
+            "coalesce(executor,'NULL')||'|'||coalesce(metadata::text,'NULL')||'|'||coalesce(created_at::text,'NULL')||'|'||xmin::text, " +
+            "' ;; ' ORDER BY id) FROM nursing.nursing_task_executions WHERE task_id = '$taskId'",
+    )
 
     private fun snapshotCounts(): String {
         DriverManager.getConnection(jdbcUrl(), user, password).use { conn ->

@@ -23,6 +23,7 @@ import org.jooq.DSLContext
 import org.jooq.JSONB
 import org.jooq.Query
 import org.jooq.impl.DSL
+import java.time.Duration
 import java.time.LocalDate
 import java.time.OffsetDateTime
 import java.time.ZoneId
@@ -96,6 +97,28 @@ class MedicalOrderService(
         /** 目录药品判定：药品 = 启用状态的 `category = '药品'` 物资 */
         const val DRUG_CATEGORY = "药品"
         const val ACTIVE_STATUS = "ACTIVE"
+
+        /** 027 收束审计原因：只读到期派生（`is_expired`）触发的显式收束 */
+        const val CONVERGENCE_REASON_EXPIRED = "EXPIRED"
+
+        /**
+         * 027 医嘱到期的只读派生（§3.3）：
+         * `is_expired = status == "ACTIVE" && end_time != null && end_time < now`；
+         * `expired_minutes` 仅在到期时为 `floor(Duration.between(end_time, now))`，否则为 null。
+         *
+         * `end_time == now` 不算到期，`end_time = null`（长期无明确终点）永不到期，
+         * 终态医嘱永不到期。同一响应内的所有行必须传入同一个 `now`。
+         */
+        fun computeExpiryFields(
+            status: String?,
+            endTime: OffsetDateTime?,
+            now: OffsetDateTime,
+        ): Pair<Boolean, Int?> {
+            if (status != ACTIVE_STATUS || endTime == null || !endTime.isBefore(now)) {
+                return false to null
+            }
+            return true to Duration.between(endTime, now).toMinutes().toInt()
+        }
 
         private val businessZone = ZoneId.of("Asia/Shanghai")
         private val OPEN_PERIOD_STATUSES = setOf("ACTIVE", "SUSPENDED")
@@ -190,8 +213,9 @@ class MedicalOrderService(
                 ),
             )
         }.compose {
+            // 027 响应内固定同一个 now：到期派生字段与写入时间同源
             readOrderWithTask(connection, orderId).map { row ->
-                orderJson(row, row.getString("task_id"))
+                orderJson(row, row.getString("task_id"), now)
             }
         }
     }
@@ -282,8 +306,9 @@ class MedicalOrderService(
         return execute(pool, countQuery).compose { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
             execute(pool, dataQuery).map { dataRows ->
+                val now = OffsetDateTime.now()
                 JsonObject()
-                    .put("records", JsonArray(dataRows.map { orderJson(it, it.getString("task_id")) }))
+                    .put("records", JsonArray(dataRows.map { orderJson(it, it.getString("task_id"), now) }))
                     .put("meta", JsonObject().put("total", total))
             }
         }
@@ -317,7 +342,7 @@ class MedicalOrderService(
                     summary.put(execStatus, summaryRow.getLong("cnt") ?: 0L)
                 }
                 administrationSummary(id).map { adminSummary ->
-                    orderJson(row, row.getString("task_id"))
+                    orderJson(row, row.getString("task_id"), OffsetDateTime.now())
                         .put("execution_summary", summary)
                         .put("administration_summary", adminSummary)
                 }
@@ -541,9 +566,58 @@ class MedicalOrderService(
                     }
                     .compose {
                         readOrderWithTask(connection, id).map { orderRow ->
-                            orderJson(orderRow, orderRow.getString("task_id"))
+                            orderJson(orderRow, orderRow.getString("task_id"), now)
                         }
                     }
+            }
+        }
+    }
+
+    /**
+     * 027 显式收束到期医嘱（幂等，§3.4/§4.5）：把 `ACTIVE` 且 `end_time < now` 的医嘱收束为 `COMPLETED`。
+     *
+     * - 请求体只允许 `encounter_id`（缺省/空白 = 全量）：未知字段 400，入住不存在 404。
+     * - 单事务：先做 `encounter_id` 的**非加锁**存在性校验（R4-1，普通 select，绝不 `FOR UPDATE`），
+     *   再 `SELECT ... FOR UPDATE` 锁候选医嘱，按 `id` 升序加锁。加锁对象因此只有
+     *   `medical_orders`（→ `nursing.nursing_tasks`），与 `updateOrderStatus` 一致，
+     *   不再与 `nurseCheckOrder`（Order→Encounter）构成 ABBA 死锁环。
+     * - 逐条结束关联护理任务（`terminateOrderTask(..., "COMPLETED")`）；任务缺失或已非 `ACTIVE`
+     *   （`ConflictException`）只记入 `warnings` 而不阻断收束，否则候选会被永久卡住。
+     * - **绝不写 `nursing_task_executions`**：未执行记录保持原状态，继续留在逾期队列提醒。
+     * - `end_time` 保持原值（临床终点不被收束时刻覆盖），审计写入 `metadata.convergence`。
+     */
+    fun closeExpiredOrders(body: JsonObject): Future<JsonObject> {
+        val encounterId = try {
+            validateCloseExpiredInput(body)
+        } catch (error: IllegalArgumentException) {
+            return Future.failedFuture(error)
+        }
+        return pool.withTransaction<JsonObject> { connection ->
+            val now = OffsetDateTime.now()
+            val encounterGate: Future<Void> = if (encounterId == null) {
+                Future.succeededFuture()
+            } else {
+                ensureEncounterExists(connection, encounterId)
+            }
+            encounterGate.compose {
+                val conditions = mutableListOf<Condition>(
+                    MEDICAL_ORDERS.STATUS.eq(ACTIVE_STATUS),
+                    MEDICAL_ORDERS.END_TIME.isNotNull,
+                    MEDICAL_ORDERS.END_TIME.lt(now),
+                )
+                encounterId?.let { conditions.add(MEDICAL_ORDERS.ENCOUNTER_ID.eq(it)) }
+                val candidateQuery = ctx.select(MEDICAL_ORDERS.ID, MEDICAL_ORDERS.END_TIME)
+                    .from(MEDICAL_ORDERS)
+                    .where(conditions)
+                    .orderBy(MEDICAL_ORDERS.ID)
+                    .forUpdate()
+                execute(connection, candidateQuery).compose { rows ->
+                    // 先物化候选再逐条写：候选顺序即响应 order_ids 顺序，避免游标与后续写交错
+                    val candidates = rows.iterator().asSequence().mapNotNull { row ->
+                        row.getString("id")?.let { id -> id to row.getOffsetDateTime("end_time") }
+                    }.toList()
+                    convergeExpiredOrders(connection, candidates, now)
+                }
             }
         }
     }
@@ -597,7 +671,7 @@ class MedicalOrderService(
                         .where(MEDICAL_ORDERS.ID.eq(id))
                     execute(connection, updateQuery).compose {
                         readOrderWithTask(connection, id).map { row ->
-                            orderJson(row, row.getString("task_id"))
+                            orderJson(row, row.getString("task_id"), now)
                         }
                     }
                 }
@@ -691,6 +765,8 @@ class MedicalOrderService(
         limit: Int,
         offset: Int,
     ): Future<JsonObject> {
+        // 027（P2-2）：同一响应内固定一个 now，逐行派生 is_expired/expired_minutes 复用该值
+        val now = OffsetDateTime.now()
         val conditions = mutableListOf<Condition>()
         conditions.add(MEDICAL_ORDERS.ORDER_TYPE.eq("MEDICATION"))
         conditions.add(MEDICAL_ORDERS.STATUS.eq("ACTIVE"))
@@ -748,7 +824,7 @@ class MedicalOrderService(
             val total = countRows.iterator().next().getLong("total") ?: 0L
             execute(client, dataQuery).map { dataRows ->
                 JsonObject()
-                    .put("records", JsonArray(dataRows.map(::nurseCheckPendingRowJson)))
+                    .put("records", JsonArray(dataRows.map { nurseCheckPendingRowJson(it, now) }))
                     .put("meta", JsonObject().put("total", total))
             }
         }
@@ -918,10 +994,18 @@ class MedicalOrderService(
     /**
      * 护士核对汇总行：字段与 orderJson 一致并补患者/入住信息，但不读 task_id
      * （汇总查询未 join 护理任务，jOOQ Row 对未选列取值会抛异常）。
+     *
+     * 027（P2-2）：`is_expired`/`expired_minutes` 与 `orderJson` 同源同口径，
+     * 由调用方传入**同一响应共用**的 `now`，不在逐行 map 内取时钟。
      */
-    private fun nurseCheckPendingRowJson(row: Row): JsonObject {
+    private fun nurseCheckPendingRowJson(row: Row, now: OffsetDateTime): JsonObject {
         val orderType = row.getString("order_type")
         val orderClass = row.getString("order_class")
+        val (isExpired, expiredMinutes) = computeExpiryFields(
+            row.getString("status"),
+            row.getOffsetDateTime("end_time"),
+            now,
+        )
         return JsonObject()
             .put("id", row.getString("id"))
             .put("encounter_id", row.getString("encounter_id"))
@@ -938,6 +1022,8 @@ class MedicalOrderService(
             .put("end_time", row.getOffsetDateTime("end_time")?.toString())
             .put("doctor", row.getString("doctor"))
             .put("status", row.getString("status"))
+            .put("is_expired", isExpired)
+            .put("expired_minutes", expiredMinutes)
             .put("nurse_checked_by", row.getString("nurse_checked_by"))
             .put("nurse_checked_at", row.getOffsetDateTime("nurse_checked_at")?.toString())
             .put("created_at", row.getOffsetDateTime("created_at")?.toString())
@@ -978,6 +1064,24 @@ class MedicalOrderService(
                         .put("status", row.getString("status"))
                 )
             } ?: Future.failedFuture(HealthcareNotFoundException("encounter not found: $id"))
+        }
+
+    /**
+     * 027 收束（R4-1）的**非加锁**入住存在性校验：普通 select，绝不 `FOR UPDATE`。
+     *
+     * `closeExpiredOrders` 曾先 `lockEncounter`（`encounters` 行锁）再锁 `medical_orders`，
+     * 而 `nurseCheckOrder` 是 Order→Encounter，同一入住同一条医嘱并发时构成 ABBA 死锁环。
+     * 收束只按 `encounter_id` 过滤候选医嘱，本身不需要入住行锁，因此这里只保留
+     * 既有的 404 语义（文案 `encounter not found: <id>`）。共享的 [lockEncounter] 保持不变，
+     * 仍供开立医嘱、护士核对、离院/去世等需要锁定入住行的路径使用。
+     */
+    private fun ensureEncounterExists(client: SqlClient, id: String): Future<Void> =
+        execute(client, ctx.select(ENCOUNTERS.ID).from(ENCOUNTERS).where(ENCOUNTERS.ID.eq(id))).compose { rows ->
+            if (rows.iterator().hasNext()) {
+                Future.succeededFuture()
+            } else {
+                Future.failedFuture(HealthcareNotFoundException("encounter not found: $id"))
+            }
         }
 
     private fun lockPeriod(client: SqlClient, encounterId: String): Future<JsonObject> =
@@ -1047,6 +1151,98 @@ class MedicalOrderService(
                 .compose { loop(index + 1) }
         }
         return loop(0)
+    }
+
+    /**
+     * 027 收束请求体严格性：只接受 `encounter_id`，别的键一律 `unknown field: <name>`（400）。
+     * 缺省、`null` 与纯空白等价于「全量」，不触发入住存在性校验。
+     */
+    private fun validateCloseExpiredInput(body: JsonObject): String? {
+        val unknown = body.fieldNames().firstOrNull { it != "encounter_id" }
+        if (unknown != null) {
+            throw IllegalArgumentException("unknown field: $unknown")
+        }
+        return when (val value = body.getValue("encounter_id")) {
+            null -> null
+            is String -> value.trim().takeIf(String::isNotBlank)
+            else -> throw IllegalArgumentException("encounter_id must be a string")
+        }
+    }
+
+    /**
+     * 027 逐条收束候选医嘱：结束护理任务 → 写 `COMPLETED` + `metadata.convergence`。
+     * 任务侧 `ConflictException` 降级为 `warnings` 一条，仍继续收束该医嘱（幂等闭环），
+     * 其它异常（如数据库故障）向上冒泡并回滚整个事务。
+     */
+    private fun convergeExpiredOrders(
+        client: SqlClient,
+        candidates: List<Pair<String, OffsetDateTime?>>,
+        now: OffsetDateTime,
+    ): Future<JsonObject> {
+        val closedIds = mutableListOf<String>()
+        val warnings = JsonArray()
+
+        fun loop(index: Int): Future<JsonObject> {
+            if (index >= candidates.size) {
+                return Future.succeededFuture(
+                    JsonObject()
+                        .put("closed", closedIds.size)
+                        .put("order_ids", JsonArray(closedIds.toList()))
+                        .put("warnings", warnings)
+                        .put("closed_at", now.toString()),
+                )
+            }
+            val (orderId, endTime) = candidates[index]
+            return taskService.terminateOrderTask(client, orderId, "COMPLETED")
+                .recover { error ->
+                    val recovered: Future<Void> = if (error is ConflictException) {
+                        warnings.add(JsonObject().put("order_id", orderId).put("reason", error.message))
+                        Future.succeededFuture()
+                    } else {
+                        Future.failedFuture(error)
+                    }
+                    recovered
+                }
+                .compose { markOrderConverged(client, orderId, endTime, now) }
+                .compose {
+                    closedIds.add(orderId)
+                    loop(index + 1)
+                }
+        }
+        return loop(0)
+    }
+
+    /**
+     * 027 收束写库：`status = COMPLETED`、`updated_at = now`，
+     * `metadata = COALESCE(metadata,'{}'::jsonb) || {"convergence":{...}}`。
+     * **不写 `end_time`**（保持原临床终点），也不触碰 `nursing_task_executions`。
+     */
+    private fun markOrderConverged(
+        client: SqlClient,
+        orderId: String,
+        endTime: OffsetDateTime?,
+        now: OffsetDateTime,
+    ): Future<Void> {
+        val convergence = JsonObject()
+            .put("reason", CONVERGENCE_REASON_EXPIRED)
+            .put("at", now.toString())
+            .put("end_time", endTime?.toString())
+        val metadataPatch = JSONB.valueOf(JsonObject().put("convergence", convergence).encode())
+        val updateQuery = ctx.update(MEDICAL_ORDERS)
+            .set(MEDICAL_ORDERS.STATUS, "COMPLETED")
+            .set(MEDICAL_ORDERS.UPDATED_AT, now)
+            .set(
+                MEDICAL_ORDERS.METADATA,
+                DSL.field(
+                    "COALESCE({0}, '{}'::jsonb) || {1}",
+                    JSONB::class.java,
+                    MEDICAL_ORDERS.METADATA,
+                    // `val` 是 Kotlin 硬关键字：Java 静态方法必须用反引号调用，才能作为绑定参数
+                    DSL.`val`(metadataPatch),
+                ),
+            )
+            .where(MEDICAL_ORDERS.ID.eq(orderId))
+        return execute(client, updateQuery).map<Void> { null }
     }
 
     private fun orderSelectFields(): List<org.jooq.Field<*>> =
@@ -1144,9 +1340,15 @@ class MedicalOrderService(
         return normalized
     }
 
-    private fun orderJson(row: Row, taskId: String? = null): JsonObject {
+    private fun orderJson(row: Row, taskId: String?, now: OffsetDateTime): JsonObject {
         val orderType = row.getString("order_type")
         val orderClass = row.getString("order_class")
+        // 027 到期只读派生（§3.3/§4.4）：调用方保证同一响应共用同一个 now
+        val (isExpired, expiredMinutes) = computeExpiryFields(
+            row.getString("status"),
+            row.getOffsetDateTime("end_time"),
+            now,
+        )
         return JsonObject()
             .put("id", row.getString("id"))
             .put("encounter_id", row.getString("encounter_id"))
@@ -1160,6 +1362,8 @@ class MedicalOrderService(
             .put("end_time", row.getOffsetDateTime("end_time")?.toString())
             .put("doctor", row.getString("doctor"))
             .put("status", row.getString("status"))
+            .put("is_expired", isExpired)
+            .put("expired_minutes", expiredMinutes)
             .put("nurse_checked_by", row.getString("nurse_checked_by"))
             .put("nurse_checked_at", row.getOffsetDateTime("nurse_checked_at")?.toString())
             .put("task_id", taskId ?: row.getString("task_id"))

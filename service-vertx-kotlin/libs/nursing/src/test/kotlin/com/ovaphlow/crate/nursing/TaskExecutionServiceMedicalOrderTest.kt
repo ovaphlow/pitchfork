@@ -23,7 +23,8 @@ import java.time.OffsetDateTime
  *   - QOD/QW/BIW/TIW 星期模式与 metadata.schedule_times 覆盖
  *   - ensureExecutionsForDateRange 只选 ACTIVE 任务 + ACTIVE 周期，支持 periodId 限定
  *   - PRN/STAT 医嘱任务不产生计划执行（任务保留由 TaskService 负责）
- *   - todayExecutions LEFT JOIN 绑定医嘱，带出 order_details / order_type 且计数查询不加 JOIN
+ *   - todayExecutions / overdueExecutions 列表投影绑定医嘱的 order_details / order_type，
+ *     两字段进入返回 JSON（共用 FROM/JOIN 的不变量由 TaskExecutionQuerySqlTest 锁定）
  */
 class TaskExecutionServiceMedicalOrderTest {
 
@@ -44,7 +45,6 @@ class TaskExecutionServiceMedicalOrderTest {
 
     private fun mockRow(values: Map<String, Any?>): Row {
         val row = mockk<Row>()
-        every { row.getColumnIndex(any<String>()) } answers { if (values.containsKey(firstArg<String>())) 0 else -1 }
         every { row.getString(any<String>()) } answers { values[firstArg<String>()] as? String }
         every { row.getValue(any<String>()) } answers { values[firstArg<String>()] }
         every { row.getLocalDate(any<String>()) } answers { values[firstArg<String>()] as? LocalDate }
@@ -90,11 +90,18 @@ class TaskExecutionServiceMedicalOrderTest {
         return base
     }
 
-    /** inner：默认参数与分发复用外层类的 rowSet()/normalized() 辅助函数。 */
-    private inner class TodayStub(
-        var countRows: RowSet<Row> = rowSet(),
-        var overdueRows: RowSet<Row> = rowSet(),
+    /**
+     * 执行查询池桩（`/today` 与 `/overdue` 共用）：按 SQL 特征分发行集。
+     *
+     * 027 合并后 `todayExecutions` 共四条 SQL（total / status_totals+overdue_total_all 聚合 /
+     * overdue_total / 列表），`overdueExecutions` 两条（total / 列表）；聚合与计数经
+     * `fetchRow` 取 `iterator().next()`，因此每个分支都必须返回至少一行。
+     */
+    private inner class ExecutionPoolStub(
         var dataRows: RowSet<Row> = rowSet(),
+        var total: Long = 1L,
+        var overdueTotal: Long = 0L,
+        var overdueTotalAll: Long = 0L,
     ) {
         val queries = mutableListOf<String>()
         val pool = mockk<Pool>()
@@ -107,16 +114,29 @@ class TaskExecutionServiceMedicalOrderTest {
             every { pool.preparedQuery(any<String>(), any()) } answers { record(firstArg<String>()); pq }
             every { pq.execute(any<Tuple>()) } answers {
                 val sql = lastSql
-                val result =
-                    when {
-                        sql.contains("overdue_total") -> overdueRows
-                        sql.startsWith("select count") -> countRows
-                        sql.contains("task_description") -> dataRows
-                        else -> rowSet()
-                    }
-                Future.succeededFuture(result)
+                Future.succeededFuture(resultFor(sql))
             }
         }
+
+        private fun resultFor(sql: String): RowSet<Row> =
+            when {
+                sql.contains("nursing_task_execution_consumptions") -> rowSet()
+                sql.contains("task_description") -> dataRows
+                sql.contains("overdue_total_all") ->
+                    rows(
+                        mapOf(
+                            "status_pending" to 1L,
+                            "status_in_progress" to 0L,
+                            "status_completed" to 0L,
+                            "status_skipped" to 0L,
+                            "status_cancelled" to 0L,
+                            "overdue_total_all" to overdueTotalAll,
+                        ),
+                    )
+                sql.contains("overdue_total") -> rows(mapOf("overdue_total" to overdueTotal))
+                sql.contains("as total") -> rows(mapOf("total" to total))
+                else -> rowSet()
+            }
 
         private fun record(sql: String) {
             val normalizedSql = normalized(sql)
@@ -268,35 +288,34 @@ class TaskExecutionServiceMedicalOrderTest {
         assertTrue(taskSql.contains("t.period_id = $"), "任务查询必须按 period_id 限定: $taskSql")
     }
 
-    // ——— 4. todayExecutions 带出绑定医嘱的结构化明细 ———
+    // ——— 4. 执行读模型带出绑定医嘱的结构化明细（/today 与 /overdue 共用） ———
 
     private val leftJoinMedicalOrders = Regex("left( outer)? join healthcare\\.medical_orders as mo")
 
+    private val orderProjection =
+        listOf("mo.order_details as order_details", "mo.order_type as order_type")
+
+    /** 列表 SQL 的投影片段（select ... from），用于断言投影列而非 WHERE 条件 */
+    private fun projection(sql: String): String =
+        sql.substringAfter("select ", "").substringBefore(" from ", "")
+
     @Test
-    fun `今日执行查询LEFT_JOIN绑定医嘱并带出明细与类型`() {
-        val stub =
-            TodayStub(
-                countRows = rows(mapOf("total" to 1L)),
-                overdueRows = rows(mapOf("overdue_total" to 0L)),
-                dataRows = rows(todayExecutionRow()),
-            )
+    fun `今日执行列表投影绑定医嘱明细与类型且进入返回JSON`() {
+        val stub = ExecutionPoolStub(dataRows = rows(todayExecutionRow()))
         val service = TaskExecutionService(stub.pool)
 
         val result =
             service.todayExecutions(date = LocalDate.of(2026, 8, 1)).toCompletionStage().toCompletableFuture().get()
 
         val dataSql = stub.queries.first { it.contains("task_description") }
-        assertTrue(leftJoinMedicalOrders.containsMatchIn(dataSql), "今日执行查询必须 LEFT JOIN 绑定医嘱: $dataSql")
-        assertTrue(dataSql.contains("mo.order_details as order_details"), "必须投影医嘱明细: $dataSql")
-        assertTrue(dataSql.contains("mo.order_type as order_type"), "必须投影医嘱类型: $dataSql")
+        val columns = projection(dataSql)
+        for (column in orderProjection) {
+            assertTrue(columns.contains(column), "今日执行列表必须投影 $column: $dataSql")
+        }
+        assertTrue(leftJoinMedicalOrders.containsMatchIn(dataSql), "今日执行列表必须 LEFT JOIN 绑定医嘱: $dataSql")
         assertTrue(dataSql.contains("t.order_item_id = mo.id"), "必须按任务绑定的医嘱 ID 关联: $dataSql")
 
-        // 计数与逾期计数查询不加 JOIN：行数语义保持原样
-        val countSql = stub.queries.first { it.startsWith("select count") && !it.contains("overdue_total") }
-        assertFalse(countSql.contains("medical_orders"), "计数查询不得加入医嘱 JOIN: $countSql")
-        val overdueSql = stub.queries.first { it.contains("overdue_total") }
-        assertFalse(overdueSql.contains("medical_orders"), "逾期计数查询不得加入医嘱 JOIN: $overdueSql")
-
+        // 共用同一 FROM/JOIN 的不变量由 TaskExecutionQuerySqlTest 锁定，此处只断言投影与响应字段
         assertEquals(1L, result.getJsonObject("meta").getLong("total"))
         assertEquals(0L, result.getJsonObject("meta").getLong("overdue_total"))
         val record = result.getJsonArray("records").getJsonObject(0)
@@ -306,5 +325,24 @@ class TaskExecutionServiceMedicalOrderTest {
         // 既有字段语义不变
         assertEquals("高血压引起的头痛", record.getString("task_description"))
         assertEquals("PENDING", record.getString("status"))
+    }
+
+    @Test
+    fun `跨日逾期队列列表同样带出绑定医嘱明细与类型`() {
+        val stub = ExecutionPoolStub(dataRows = rows(todayExecutionRow()))
+        val service = TaskExecutionService(stub.pool)
+
+        val result = service.overdueExecutions().toCompletionStage().toCompletableFuture().get()
+
+        val dataSql = stub.queries.first { it.contains("task_description") }
+        val columns = projection(dataSql)
+        for (column in orderProjection) {
+            assertTrue(columns.contains(column), "跨日逾期队列必须投影 $column: $dataSql")
+        }
+        assertTrue(leftJoinMedicalOrders.containsMatchIn(dataSql), "跨日逾期队列必须 LEFT JOIN 绑定医嘱: $dataSql")
+
+        val record = result.getJsonArray("records").getJsonObject(0)
+        assertEquals("MEDICATION", record.getString("order_type"))
+        assertEquals("口服", record.getJsonObject("order_details").getString("route"))
     }
 }

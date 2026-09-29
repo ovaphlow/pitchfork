@@ -60,7 +60,18 @@ class TaskService(
             "CANCELLED" to emptyList()
         )
 
-        fun toJson(row: Row): JsonObject {
+        fun toJson(row: Row): JsonObject = toJson(row, withBoundOrder = false)
+
+        /**
+         * 任务行 → 响应 JSON。
+         *
+         * `withBoundOrder = true` 只用于带 `LEFT JOIN healthcare.medical_orders` 的读路径
+         * （`list`/`get`）。其余路径（`lockOrderTask` / `lockActivePlanTasks` /
+         * `CarePlanRevisionService.readPlanTasks` / create 系列）的行里没有这两列，按显式
+         * 开关直接返回 null——**不去探测行里有没有该列**：`Row.getColumnIndex` 是驱动实现
+         * 细节，靠它探测会让所有 mock 行与其它驱动的行都变脆。
+         */
+        fun toJson(row: Row, withBoundOrder: Boolean): JsonObject {
             return JsonObject()
                 .put("id", row.getValue("id")?.toString())
                 .put("period_id", row.getValue("period_id")?.toString())
@@ -77,15 +88,17 @@ class TaskService(
                 .put("metadata", row.getValue("metadata") as? JsonObject)
                 .put("created_at", row.getValue("created_at")?.toString())
                 .put("updated_at", row.getValue("updated_at")?.toString())
-                // 绑定医嘱的结构化明细与类型：只有经过 LEFT JOIN medical_orders 的读路径
-                // （list/get）才有这两列；create/lock 等路径保持显式 null 以维持返回形状。
-                .put("order_details", optionalValue(row, "order_details") as? JsonObject)
-                .put("order_type", optionalValue(row, "order_type")?.toString())
+                // 绑定医嘱的结构化明细与类型：只有 JOIN 读路径才取值，其它路径恒 null，
+                // 两种情况都保留这两个键以维持同一返回形状。
+                .put(
+                    "order_details",
+                    if (withBoundOrder) row.getValue("order_details") as? JsonObject else null,
+                )
+                .put(
+                    "order_type",
+                    if (withBoundOrder) row.getValue("order_type")?.toString() else null,
+                )
         }
-
-        /** 行里不存在该列时返回 null（同一 toJson 同时服务带/不带医嘱 JOIN 的查询）。 */
-        private fun optionalValue(row: Row, column: String): Any? =
-            if (row.getColumnIndex(column) >= 0) row.getValue(column) else null
     }
 
     fun create(body: JsonObject): Future<JsonObject> {
@@ -184,7 +197,8 @@ class TaskService(
                     .execute(DatabaseConfig.tuple(dataQuery))
                     .map { dataRows ->
                         val records = JsonArray()
-                        for (row in dataRows) records.add(toJson(row))
+                        // 该查询带 LEFT JOIN healthcare.medical_orders，行里确有这两列
+                        for (row in dataRows) records.add(toJson(row, withBoundOrder = true))
                         JsonObject().put("records", records)
                             .put("meta", JsonObject().put("total", total))
                     }
@@ -205,7 +219,8 @@ class TaskService(
             .flatMap { rows ->
                 if (rows.size() == 0)
                     Future.failedFuture(NotFoundException("task not found: $id"))
-                else Future.succeededFuture(toJson(rows.iterator().next()))
+                // 该查询带 LEFT JOIN healthcare.medical_orders，行里确有这两列
+                else Future.succeededFuture(toJson(rows.iterator().next(), withBoundOrder = true))
             }
     }
 

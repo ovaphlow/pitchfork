@@ -154,6 +154,13 @@ object HealthcareRoutes {
             ).onSuccess { ctx.json(it) }
                 .onFailure { respondFailure(ctx, it) }
         }
+        // 027 到期医嘱显式收束（幂等）：静态路径必须先于泛型 /orders/:id。
+        // 契约允许空请求体，故此处对缺失 body 兜底为空对象（`body()` 在无 body 时为 null）。
+        router.post("/orders/close-expired").handler { ctx ->
+            service.closeExpiredOrders(ctx.body()?.asJsonObject() ?: JsonObject())
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
         router.get("/orders/:id").handler { ctx ->
             service.getOrder(requiredId(ctx))
                 .onSuccess { ctx.json(it) }

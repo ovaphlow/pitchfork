@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Badge, Button, Card, EmptyState, Input, Modal, Table, type Column } from "@pitchfork/ui";
 import {
+  closeExpiredMedicalOrders,
   createDiagnosis,
   createMedicalOrder,
   createProgressNote,
@@ -229,6 +230,20 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
 }
 
+/** 已到期时长（§3.3 派生字段 expired_minutes）：按天/小时展示，避免超长小时数 */
+function formatExpiredMinutes(minutes: number | null | undefined): string {
+  if (minutes === null || minutes === undefined) return "";
+  if (minutes < 60) return `已到期 ${minutes} 分钟`;
+  if (minutes < 1440) {
+    const hours = Math.floor(minutes / 60);
+    const remaining = minutes % 60;
+    return remaining === 0 ? `已到期 ${hours} 小时` : `已到期 ${hours} 小时 ${remaining} 分钟`;
+  }
+  const days = Math.floor(minutes / 1440);
+  const hours = Math.floor((minutes % 1440) / 60);
+  return hours === 0 ? `已到期 ${days} 天` : `已到期 ${days} 天 ${hours} 小时`;
+}
+
 /** SSR 安全地读取 URL 上的 encounter_id，用于进入页面时优先选中该入住 */
 function readEncounterIdFromUrl(): string {
   if (typeof window === "undefined") return "";
@@ -279,6 +294,13 @@ export default function OrdersPage() {
   const [ordersError, setOrdersError] = useState("");
   const [orderTypeFilter, setOrderTypeFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
+  // ——— 收束已到期医嘱（027 §4.5，显式、幂等） ———
+  const [converging, setConverging] = useState(false);
+  const [convergeError, setConvergeError] = useState("");
+  const [convergeMessage, setConvergeMessage] = useState("");
+  /** 上次收束的实际条数：0 时反馈必须是中性提示，不能用成功语气（P2-1） */
+  const [convergeClosed, setConvergeClosed] = useState<number | null>(null);
+  const [convergeWarningCount, setConvergeWarningCount] = useState(0);
 
   // —— 药品目录（025：药品 = materials 中 category='药品' 且 status='ACTIVE'）——
   const [drugCatalog, setDrugCatalog] = useState<InventoryMaterial[]>([]);
@@ -417,9 +439,24 @@ export default function OrdersPage() {
     void loadOrders();
   }, [loadOrders]);
 
+  // 切换入住时清空收束反馈，避免上一位长者的收束结果残留在界面上
+  useEffect(() => {
+    setConvergeError("");
+    setConvergeMessage("");
+    setConvergeClosed(null);
+    setConvergeWarningCount(0);
+  }, [selectedEncounterId]);
+
   const selectedAdmission = admissions.find((admission) => admission.id === selectedEncounterId) ?? null;
   // 已离院/已去世等非活动入住只读历史
   const isReadOnly = selectedAdmission !== null && selectedAdmission.status !== "ACTIVE";
+
+  /**
+   * 当前可见医嘱中已到期（ACTIVE 且 end_time < now）的条数（P2-1）：
+   * 仅作为按钮上的提示计数，不作按钮可见性判据；可见列表受 order_type/status 筛选
+   * 与 limit 100 影响，可能低于服务端实际收束范围，故不作声明。
+   */
+  const expiredOrderCount = orders.filter((order) => order.is_expired).length;
 
   const selectedDrugMaterial = drugCatalog.find((material) => material.id === form.materialId) ?? null;
 
@@ -665,6 +702,44 @@ export default function OrdersPage() {
     }
   }
 
+  /** 收束已到期医嘱（027 §4.5，显式、幂等）：显式二次确认 → 幂等 POST → 刷新列表与详情 */
+  async function handleCloseExpiredOrders() {
+    if (!selectedAdmission) return;
+    // 服务端按 encounter_id 收束「该入住全部 ACTIVE 且已到期」的医嘱，
+    // 可见列表可能被类型/状态筛选与 limit 截断，故确认文案只描述范围，不声称具体条数（P2-1）。
+    const confirmed = window.confirm(
+      `确认收束「${selectedAdmission.patientName}」本入住全部已到期（结束时间已过）且状态为进行中的医嘱吗？\n` +
+        "收束后医嘱状态变为已完成：结束时间保留原值，其护理任务被结束；" +
+        "未执行的护理记录保持原状态，仍会出现在逾期队列中提醒。",
+    );
+    if (!confirmed) return;
+    setConverging(true);
+    setConvergeError("");
+    setConvergeMessage("");
+    setConvergeClosed(null);
+    setConvergeWarningCount(0);
+    try {
+      const result = await closeExpiredMedicalOrders({ encounter_id: selectedAdmission.id });
+      // closed > 0 才是成功语气；closed === 0 用中性提示（幂等重放/确实无到期医嘱）
+      setConvergeMessage(result.closed > 0 ? `已收束 ${result.closed} 条已到期医嘱` : "没有已到期医嘱");
+      setConvergeClosed(result.closed);
+      setConvergeWarningCount(result.warnings.length);
+      await loadOrders();
+      if (detailTarget) {
+        // 详情刷新失败不覆盖收束结果，避免误导为「收束失败」
+        try {
+          setDetail(await getMedicalOrder(detailTarget.id));
+        } catch {
+          /* 忽略：列表已刷新，详情可手动重开 */
+        }
+      }
+    } catch (error) {
+      setConvergeError(errorMessage(error, "无法收束已到期医嘱"));
+    } finally {
+      setConverging(false);
+    }
+  }
+
   const columns: Column<MedicalOrder>[] = [
     {
       key: "order_type",
@@ -726,9 +801,16 @@ export default function OrdersPage() {
       header: "状态",
       className: "min-w-[100px]",
       render: (row) => (
-        <Badge variant={ORDER_STATUS_VARIANT[row.status] ?? "default"}>
-          {ORDER_STATUS_LABEL[row.status] ?? row.status}
-        </Badge>
+        <div className="flex flex-wrap items-center gap-1">
+          <Badge variant={ORDER_STATUS_VARIANT[row.status] ?? "default"}>
+            {ORDER_STATUS_LABEL[row.status] ?? row.status}
+          </Badge>
+          {row.is_expired && (
+            <span title={row.expired_minutes != null ? formatExpiredMinutes(row.expired_minutes) : "已过结束时间"}>
+              <Badge variant="danger">已到期</Badge>
+            </span>
+          )}
+        </div>
       ),
     },
     {
@@ -984,7 +1066,37 @@ export default function OrdersPage() {
               <Button variant="secondary" size="md" disabled={ordersLoading} onClick={() => void loadOrders()}>
                 刷新
               </Button>
+              {!isReadOnly && (
+                <Button
+                  variant="warning"
+                  size="md"
+                  loading={converging}
+                  disabled={converging}
+                  onClick={() => void handleCloseExpiredOrders()}
+                  title="把已过结束时间但仍为「进行中」的医嘱收束为「已完成」，并结束其护理任务；作用范围为本入住全部已到期医嘱，与当前筛选无关"
+                >
+                  收束已到期医嘱{expiredOrderCount > 0 ? ` (${expiredOrderCount})` : ""}
+                </Button>
+              )}
             </div>
+
+            {convergeError && (
+              <div className="mb-4 rounded-lg border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">
+                {convergeError}
+              </div>
+            )}
+
+            {convergeMessage && (
+              <div className={`mb-4 rounded-lg border px-4 py-3 text-sm ${convergeClosed === 0 ? "border-info/30 bg-info-bg text-info" : "border-success/30 bg-success-bg text-success"}`}>
+                {convergeMessage}
+              </div>
+            )}
+
+            {convergeWarningCount > 0 && (
+              <div className="mb-4 rounded-lg border border-info/30 bg-info-bg px-4 py-3 text-sm text-info">
+                另有 {convergeWarningCount} 条医嘱的关联护理任务结束异常，已记录为警告；收束本身已完成，不影响医嘱状态。
+              </div>
+            )}
 
             {ordersError && (
               <div className="mb-4 rounded-lg border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">
@@ -1445,11 +1557,19 @@ export default function OrdersPage() {
                 <Badge variant={ORDER_STATUS_VARIANT[detail.status] ?? "default"}>
                   {ORDER_STATUS_LABEL[detail.status] ?? detail.status}
                 </Badge>
+                {detail.is_expired && (
+                  <span className="ml-2 align-middle">
+                    <Badge variant="danger">已到期</Badge>
+                  </span>
+                )}
               </p>
               <p className="sm:col-span-2"><span className="text-fg-dimmed">医嘱正文：</span>{detail.order_content}</p>
               <p><span className="text-fg-dimmed">医生：</span>{detail.doctor || "-"}</p>
               <p><span className="text-fg-dimmed">开始时间：</span>{formatDateTime(detail.start_time)}</p>
               <p><span className="text-fg-dimmed">结束时间：</span>{formatDateTime(detail.end_time)}</p>
+              {detail.is_expired && detail.expired_minutes != null && (
+                <p><span className="text-fg-dimmed">已到期时长：</span><span className="text-danger">{formatExpiredMinutes(detail.expired_minutes)}</span></p>
+              )}
               <p><span className="text-fg-dimmed">任务 ID：</span>{detail.task_id ?? "-"}</p>
               <p><span className="text-fg-dimmed">创建时间：</span>{formatDateTime(detail.created_at)}</p>
               <p><span className="text-fg-dimmed">更新时间：</span>{formatDateTime(detail.updated_at)}</p>

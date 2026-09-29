@@ -27,6 +27,7 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.extension.ExtendWith
 import java.math.BigDecimal
+import java.time.Duration
 import java.time.LocalDate
 import java.time.OffsetDateTime
 import java.util.function.Function as JavaFunction
@@ -1164,6 +1165,10 @@ class HealthcareMedicalOrderTest {
                 ctx.verify {
                     assertEquals(201, status, "创建医嘱必须 201")
                     assertEquals("ord-1", body.getString("id"))
+                    // 027 创建响应同样由 orderJson 输出到期派生字段（无 end_time 不到期）
+                    assertFalse(body.getBoolean("is_expired"))
+                    assertTrue(body.containsKey("expired_minutes"))
+                    assertNull(body.getInteger("expired_minutes"))
                 }
                 httpRequest(vertx, port, HttpMethod.GET, "/healthcare/v1/encounters/enc-1/orders")
                     .compose { (listStatus, listBody) ->
@@ -1209,6 +1214,9 @@ class HealthcareMedicalOrderTest {
                 ctx.verify {
                     assertEquals(200, status)
                     assertEquals("DISCONTINUED", body.getString("status"))
+                    // 027 终态医嘱永不到期，即使 end_time 已过
+                    assertFalse(body.getBoolean("is_expired"))
+                    assertNull(body.getInteger("expired_minutes"))
                 }
             }
         }.onComplete { ar ->
@@ -1623,6 +1631,74 @@ class HealthcareMedicalOrderTest {
     }
 
     @Test
+    fun `待核对汇总列表每行带到期派生字段且同一响应共用一个now`() {
+        val sharedEnd = OffsetDateTime.now().minusMinutes(100)
+        val patient = mapOf("patient_id" to "pat-1", "patient_name" to "张奶奶", "encounter_no" to "A20260801001")
+        val stub = DatabaseStub(
+            orders = rows(
+                orderRow(patient + mapOf("id" to "ord-expired-a", "end_time" to sharedEnd)),
+                // 与上一行 end_time 完全相同：同一响应共用一个 now 时必须得到完全相同的分钟数
+                orderRow(patient + mapOf("id" to "ord-expired-b", "end_time" to sharedEnd)),
+                orderRow(patient + mapOf("id" to "ord-null-end", "end_time" to null)),
+                orderRow(patient + mapOf("id" to "ord-future", "end_time" to OffsetDateTime.now().plusDays(1))),
+                orderRow(patient + mapOf("id" to "ord-done", "status" to "COMPLETED", "end_time" to sharedEnd)),
+            ),
+            encounters = rows(encounterRow()),
+            patients = rows(mapOf("id" to "pat-1", "name" to "张奶奶", "status" to "ACTIVE")),
+            countRows = rows(mapOf("total" to 5L)),
+        )
+        val before = OffsetDateTime.now()
+        val result = HealthcareService(stub.pool)
+            .listPendingNurseCheckOrders(stub.pool, null, null, 50, 0)
+            .toCompletionStage().toCompletableFuture().get()
+        val after = OffsetDateTime.now()
+
+        val records = result.getJsonArray("records").map { it as JsonObject }
+            .associateBy { it.getString("id") }
+        assertEquals(5, records.size)
+
+        // 到期行：与 orderJson 同口径（ACTIVE + end_time < now），分钟数落在 [请求前, 响应后] 区间内
+        val lowerBound = Duration.between(sharedEnd, before).toMinutes()
+        val upperBound = Duration.between(sharedEnd, after).toMinutes()
+        for (id in listOf("ord-expired-a", "ord-expired-b")) {
+            val expired = records.getValue(id)
+            assertTrue(expired.getBoolean("is_expired"), "$id 必须判为到期")
+            assertTrue(expired.containsKey("expired_minutes"), "$id 必须含 expired_minutes")
+            val minutes = expired.getLong("expired_minutes")
+            assertTrue(
+                minutes in lowerBound..upperBound,
+                "$id expired_minutes=$minutes 必须落在 [$lowerBound, $upperBound]",
+            )
+        }
+        // 同一响应内固定一个 now：相同 end_time 的多行必须得到完全相同的分钟数
+        assertEquals(
+            records.getValue("ord-expired-a").getLong("expired_minutes"),
+            records.getValue("ord-expired-b").getLong("expired_minutes"),
+            "同一响应内所有行必须共用同一个 now",
+        )
+
+        // 非到期行：end_time 为空 / 未来 / 终态，一律 false + null
+        for (id in listOf("ord-null-end", "ord-future", "ord-done")) {
+            val record = records.getValue(id)
+            assertTrue(record.containsKey("is_expired"), "$id 必须返回 is_expired")
+            assertFalse(record.getBoolean("is_expired"), "$id 不得判为到期")
+            assertTrue(record.containsKey("expired_minutes"), "$id 必须返回 expired_minutes")
+            assertNull(record.getInteger("expired_minutes"), "$id 未到期必须返回 null")
+        }
+
+        // 既有响应形状不变，且只读：计数 + 列表两条查询，无任何写语句
+        val first = records.getValue("ord-expired-a")
+        assertEquals("张奶奶", first.getString("patient_name"))
+        assertEquals("A20260801001", first.getString("encounter_no"))
+        assertEquals(5L, result.getJsonObject("meta").getLong("total"))
+        assertEquals(2, stub.queries.size, "只应有计数与列表两条查询: ${stub.queries}")
+        assertTrue(
+            stub.queries.none { it.startsWith("insert") || it.startsWith("update") || it.startsWith("delete") },
+            "待核对汇总列表必须只读: ${stub.queries}",
+        )
+    }
+
+    @Test
     fun `待核对汇总静态路由不被泛型路由吞掉`(vertx: Vertx, ctx: VertxTestContext) {
         val stub = DatabaseStub(
             orders = rows(orderRow(mapOf("patient_id" to "pat-1", "patient_name" to "张奶奶", "encounter_no" to "A20260801001"))),
@@ -1638,10 +1714,421 @@ class HealthcareMedicalOrderTest {
                 ctx.verify {
                     assertEquals(200, status, "待核对汇总路由必须命中而非被泛型 /orders/:id 吞掉")
                     assertEquals(1, body.getJsonArray("records").size())
-                    assertEquals("张奶奶", body.getJsonArray("records").getJsonObject(0).getString("patient_name"))
+                    val record = body.getJsonArray("records").getJsonObject(0)
+                    assertEquals("张奶奶", record.getString("patient_name"))
                     assertEquals(1L, body.getJsonObject("meta").getLong("total"))
+                    // 027（P2-2）：路由响应每行必须携带到期派生字段（fixture end_time = null → 恒假）
+                    assertTrue(record.containsKey("is_expired"), "每行必须含 is_expired: $record")
+                    assertFalse(record.getBoolean("is_expired"))
+                    assertTrue(record.containsKey("expired_minutes"), "每行必须含 expired_minutes: $record")
+                    assertNull(record.getInteger("expired_minutes"))
                 }
             }
+        }.onComplete { ar ->
+            if (ar.succeeded()) ctx.completeNow() else ctx.failNow(ar.cause())
+        }
+    }
+
+    // ——— 8. 027 医嘱到期派生与显式收束 ———
+
+    @Test
+    fun `computeExpiryFields边界_严格小于与终态`() {
+        val now = OffsetDateTime.parse("2026-09-29T12:00:00+08:00")
+
+        // ACTIVE + end_time 已过 → 到期，分钟数为 end_time → now 的向下取整
+        assertEquals(true to 72000, MedicalOrderService.computeExpiryFields("ACTIVE", now.minusDays(50), now))
+        // 不足一分钟 → 0 分钟，但依然到期
+        assertEquals(true to 0, MedicalOrderService.computeExpiryFields("ACTIVE", now.minusSeconds(30), now))
+        // end_time == now 不算到期（严格小于）
+        assertEquals(false to null, MedicalOrderService.computeExpiryFields("ACTIVE", now, now))
+        // end_time 在未来不到期
+        assertEquals(false to null, MedicalOrderService.computeExpiryFields("ACTIVE", now.plusMinutes(1), now))
+        // end_time = null（长期无明确终点）永不到期
+        assertEquals(false to null, MedicalOrderService.computeExpiryFields("ACTIVE", null, now))
+        // 终态永不到期
+        for (status in listOf("COMPLETED", "DISCONTINUED", "CANCELLED")) {
+            assertEquals(
+                false to null,
+                MedicalOrderService.computeExpiryFields(status, now.minusDays(50), now),
+                status,
+            )
+        }
+        // status 缺失也不到期
+        assertEquals(false to null, MedicalOrderService.computeExpiryFields(null, now.minusDays(50), now))
+    }
+
+    @Test
+    fun `orderJson到期派生字段出现在列表与详情响应`(vertx: Vertx, ctx: VertxTestContext) {
+        val expiredEnd = OffsetDateTime.now().minusDays(50)
+        val stub = DatabaseStub(
+            orders = rows(
+                orderRow(mapOf("id" to "ord-expired", "end_time" to expiredEnd)),
+                orderRow(mapOf("id" to "ord-null-end", "end_time" to null)),
+                orderRow(mapOf("id" to "ord-future", "end_time" to OffsetDateTime.now().plusDays(1))),
+                orderRow(mapOf("id" to "ord-done", "status" to "COMPLETED", "end_time" to expiredEnd)),
+            ),
+            countRows = rows(mapOf("total" to 4L)),
+        )
+        withServer(vertx, stub) { port ->
+            // 服务端 now 必落在 [请求前, 响应后] 区间内，据此给出 expired_minutes 的精确边界
+            val lowerBound = Duration.between(expiredEnd, OffsetDateTime.now()).toMinutes()
+            httpRequest(vertx, port, HttpMethod.GET, "/healthcare/v1/encounters/enc-1/orders")
+                .compose { (status, body) ->
+                    ctx.verify {
+                        assertEquals(200, status)
+                        val records = body.getJsonArray("records").map { it as JsonObject }
+                        assertEquals(4, records.size)
+                        val byId = records.associateBy { it.getString("id") }
+
+                        val expired = byId.getValue("ord-expired")
+                        assertTrue(expired.getBoolean("is_expired"), "ACTIVE + end_time 已过必须到期")
+                        assertTrue(expired.containsKey("expired_minutes"))
+                        val upperBound = Duration.between(expiredEnd, OffsetDateTime.now()).toMinutes()
+                        val minutes = expired.getLong("expired_minutes")
+                        assertTrue(
+                            minutes in lowerBound..upperBound,
+                            "expired_minutes=$minutes 必须落在 [$lowerBound, $upperBound]",
+                        )
+
+                        for (id in listOf("ord-null-end", "ord-future", "ord-done")) {
+                            val record = byId.getValue(id)
+                            assertTrue(record.containsKey("is_expired"), "$id 必须返回 is_expired")
+                            assertFalse(record.getBoolean("is_expired"), "$id 不得判为到期")
+                            assertTrue(record.containsKey("expired_minutes"))
+                            assertNull(record.getInteger("expired_minutes"), "$id 未到期必须返回 null")
+                        }
+                    }
+                    httpRequest(vertx, port, HttpMethod.GET, "/healthcare/v1/orders/ord-expired")
+                        .map { (detailStatus, detailBody) ->
+                            ctx.verify {
+                                assertEquals(200, detailStatus)
+                                assertTrue(detailBody.getBoolean("is_expired"), "详情必须携带到期派生字段")
+                                assertNotNull(detailBody.getInteger("expired_minutes"))
+                            }
+                        }
+                }
+        }.onComplete { ar ->
+            if (ar.succeeded()) ctx.completeNow() else ctx.failNow(ar.cause())
+        }
+    }
+
+    @Test
+    fun `closeExpiredOrders收束到期医嘱且保留end_time并写审计`(vertx: Vertx, ctx: VertxTestContext) {
+        val endTime = OffsetDateTime.now().minusDays(50)
+        val order = orderRow(mapOf("id" to "ord-1", "end_time" to endTime))
+        val stub = DatabaseStub(
+            orders = rows(order),
+            tasks = rows(taskRow()),
+            onOrderUpdate = { order["status"] = "COMPLETED" },
+        )
+        withServer(vertx, stub) { port ->
+            httpRequest(vertx, port, HttpMethod.POST, "/healthcare/v1/orders/close-expired", JsonObject())
+                .map { (status, body) ->
+                    ctx.verify {
+                        assertEquals(200, status)
+                        assertEquals(1, body.getInteger("closed"))
+                        assertEquals(listOf("ord-1"), body.getJsonArray("order_ids").list)
+                        assertEquals(0, body.getJsonArray("warnings").size())
+                        val closedAt = OffsetDateTime.parse(body.getString("closed_at"))
+                        assertTrue(closedAt.isAfter(OffsetDateTime.now().minusMinutes(5)))
+
+                        // 候选：ACTIVE + end_time 非空 + end_time < now，按 id 升序加锁
+                        val candidateSql = stub.queries.first {
+                            it.contains("from healthcare.medical_orders") && it.contains("for update")
+                        }
+                        assertTrue(candidateSql.contains("medical_orders.status"), "必须限定 ACTIVE: $candidateSql")
+                        assertTrue(candidateSql.contains("medical_orders.end_time is not null"), "必须排除无终点: $candidateSql")
+                        assertTrue(candidateSql.contains("medical_orders.end_time <"), "必须限定已到期: $candidateSql")
+                        assertTrue(candidateSql.contains("order by"), "必须固定加锁顺序: $candidateSql")
+                        assertFalse(
+                            candidateSql.contains("medical_orders.encounter_id"),
+                            "未限定入住时不得附带 encounter_id 条件: $candidateSql",
+                        )
+                        // R4-1：不带 encounter_id 时不校验入住，更不得锁 encounters 行
+                        assertTrue(
+                            stub.queries.none { it.contains("healthcare.encounters") },
+                            "未限定入住时不得查询入住表: ${stub.queries}",
+                        )
+                        assertTrue(
+                            stub.queries.none { it.contains("healthcare.encounters") && it.contains("for update") },
+                            "收束流程不得锁 encounters 行（ABBA 环）: ${stub.queries}",
+                        )
+
+                        // 关联护理任务被结束为 COMPLETED
+                        val taskUpdateSql = stub.queries.first { it.contains("update nursing.nursing_tasks") }
+                        assertTrue(taskUpdateSql.contains("status"))
+                        assertTrue(
+                            stub.tuples.first { it.first == taskUpdateSql }.second.contains("COMPLETED"),
+                            "护理任务必须收束为 COMPLETED",
+                        )
+
+                        // 绝不写 nursing_task_executions（无副作用）
+                        val executionWrites = stub.queries.filter {
+                            it.contains("nursing_task_executions") &&
+                                (it.startsWith("insert") || it.startsWith("update") || it.startsWith("delete"))
+                        }
+                        assertTrue(executionWrites.isEmpty(), "收束不得写执行记录: $executionWrites")
+                        assertTrue(
+                            stub.queries.none { it.contains("nursing_task_executions") },
+                            "收束流程不应触及执行记录表: ${stub.queries.filter { it.contains("nursing_task_executions") }}",
+                        )
+
+                        // 医嘱更新：status=COMPLETED、updated_at=now、metadata JSONB 合并，end_time 不被覆盖
+                        val orderUpdateSql = stub.queries.first { it.contains("update healthcare.medical_orders") }
+                        assertTrue(orderUpdateSql.contains("metadata"), "必须合并 metadata: $orderUpdateSql")
+                        assertTrue(
+                            orderUpdateSql.contains("coalesce(") &&
+                                orderUpdateSql.contains("'{}'::jsonb) || cast("),
+                            "必须按 COALESCE(metadata,'{}'::jsonb) || patch 合并: $orderUpdateSql",
+                        )
+                        assertFalse(orderUpdateSql.contains("end_time"), "end_time 必须保持原值: $orderUpdateSql")
+
+                        val updateValues = stub.tuples.last { it.first == orderUpdateSql }.second
+                        assertTrue(updateValues.contains("COMPLETED"), "医嘱状态必须写 COMPLETED")
+                        val patch = updateValues.filterIsInstance<JsonObject>().single()
+                        val convergence = patch.getJsonObject("convergence")
+                        assertEquals("EXPIRED", convergence.getString("reason"))
+                        assertEquals(endTime.toString(), convergence.getString("end_time"))
+                        assertEquals(closedAt.toString(), convergence.getString("at"))
+                    }
+                }
+        }.onComplete { ar ->
+            if (ar.succeeded()) ctx.completeNow() else ctx.failNow(ar.cause())
+        }
+    }
+
+    @Test
+    fun `closeExpiredOrders幂等_第二次closed为0且不重复写库`(vertx: Vertx, ctx: VertxTestContext) {
+        val order = orderRow(mapOf("id" to "ord-1", "end_time" to OffsetDateTime.now().minusDays(50)))
+        val stub = DatabaseStub(
+            orders = rows(order),
+            tasks = rows(taskRow()),
+            onOrderUpdate = { order["status"] = "COMPLETED" },
+        )
+        withServer(vertx, stub) { port ->
+            // 第一次：请求体完全为空（契约允许空体）
+            httpRequest(vertx, port, HttpMethod.POST, "/healthcare/v1/orders/close-expired")
+                .compose { (firstStatus, firstBody) ->
+                    ctx.verify {
+                        assertEquals(200, firstStatus)
+                        assertEquals(1, firstBody.getInteger("closed"))
+                    }
+                    // 收束后该医嘱已非 ACTIVE，不再是候选
+                    stub.orders = rowSet()
+                    httpRequest(vertx, port, HttpMethod.POST, "/healthcare/v1/orders/close-expired", JsonObject())
+                        .map { (secondStatus, secondBody) ->
+                            ctx.verify {
+                                assertEquals(200, secondStatus)
+                                assertEquals(0, secondBody.getInteger("closed"))
+                                assertEquals(0, secondBody.getJsonArray("order_ids").size())
+                                assertEquals(0, secondBody.getJsonArray("warnings").size())
+                                assertEquals(
+                                    1,
+                                    stub.queries.count { it.contains("update healthcare.medical_orders") },
+                                    "幂等：只应写入一次医嘱收束",
+                                )
+                            }
+                        }
+                }
+        }.onComplete { ar ->
+            if (ar.succeeded()) ctx.completeNow() else ctx.failNow(ar.cause())
+        }
+    }
+
+    @Test
+    fun `closeExpiredOrders按encounter_id限定候选`(vertx: Vertx, ctx: VertxTestContext) {
+        val stub = DatabaseStub(
+            encounters = rows(encounterRow(mapOf("id" to "enc-2"))),
+            orders = rows(orderRow(mapOf("id" to "ord-2", "encounter_id" to "enc-2", "end_time" to OffsetDateTime.now().minusDays(10)))),
+            tasks = rows(taskRow(mapOf("id" to "tsk-2", "order_item_id" to "ord-2"))),
+        )
+        withServer(vertx, stub) { port ->
+            httpRequest(
+                vertx, port, HttpMethod.POST,
+                "/healthcare/v1/orders/close-expired",
+                JsonObject().put("encounter_id", "enc-2"),
+            ).map { (status, body) ->
+                ctx.verify {
+                    assertEquals(200, status)
+                    assertEquals(1, body.getInteger("closed"))
+                    assertEquals("ord-2", body.getJsonArray("order_ids").getString(0))
+
+                    // R4-1：入住只做非加锁存在性校验，且必须先于候选查询
+                    val existenceIndex = stub.queries.indexOfFirst { it.contains("from healthcare.encounters") }
+                    assertTrue(existenceIndex >= 0, "必须校验入住存在: ${stub.queries}")
+                    val existenceSql = stub.queries[existenceIndex]
+                    assertTrue(existenceSql.startsWith("select"), "入住校验必须是普通 select: $existenceSql")
+                    assertFalse(
+                        existenceSql.contains("for update"),
+                        "入住存在性校验不得加行锁（否则与 nurseCheckOrder 构成 ABBA）: $existenceSql",
+                    )
+                    val candidateSql = stub.queries.first {
+                        it.contains("from healthcare.medical_orders") && it.contains("for update")
+                    }
+                    assertTrue(
+                        existenceIndex < stub.queries.indexOf(candidateSql),
+                        "存在性校验必须先于候选查询: ${stub.queries}",
+                    )
+                    assertTrue(
+                        candidateSql.contains("medical_orders.encounter_id"),
+                        "必须按入住限定候选: $candidateSql",
+                    )
+                    assertTrue(
+                        stub.tuples.first { it.first == candidateSql }.second.contains("enc-2"),
+                        "候选查询必须绑定 encounter_id",
+                    )
+                    assertFalse(
+                        candidateSql.contains("healthcare.encounters"),
+                        "候选加锁语句只应锁 medical_orders: $candidateSql",
+                    )
+                    assertTrue(
+                        stub.queries.none { it.contains("healthcare.encounters") && it.contains("for update") },
+                        "收束流程不得锁 encounters 行（ABBA 环）: ${stub.queries}",
+                    )
+                }
+            }
+        }.onComplete { ar ->
+            if (ar.succeeded()) ctx.completeNow() else ctx.failNow(ar.cause())
+        }
+    }
+
+    @Test
+    fun `closeExpiredOrders任务异常降级warnings但仍收束`(vertx: Vertx, ctx: VertxTestContext) {
+        val missingTaskOrder = orderRow(mapOf("id" to "ord-1", "end_time" to OffsetDateTime.now().minusDays(3)))
+        val missingTaskStub = DatabaseStub(
+            orders = rows(missingTaskOrder),
+            tasks = rowSet(),
+            onOrderUpdate = { missingTaskOrder["status"] = "COMPLETED" },
+        )
+        val terminatedTaskOrder = orderRow(mapOf("id" to "ord-1", "end_time" to OffsetDateTime.now().minusDays(3)))
+        val terminatedTaskStub = DatabaseStub(
+            orders = rows(terminatedTaskOrder),
+            tasks = rows(taskRow(mapOf("status" to "COMPLETED"))),
+            onOrderUpdate = { terminatedTaskOrder["status"] = "COMPLETED" },
+        )
+        withServer(vertx, missingTaskStub) { port ->
+            httpRequest(vertx, port, HttpMethod.POST, "/healthcare/v1/orders/close-expired", JsonObject())
+                .map { (status, body) ->
+                    ctx.verify {
+                        assertEquals(200, status, "任务缺失不得让收束失败")
+                        assertEquals(1, body.getInteger("closed"))
+                        val warnings = body.getJsonArray("warnings")
+                        assertEquals(1, warnings.size())
+                        val warning = warnings.getJsonObject(0)
+                        assertEquals("ord-1", warning.getString("order_id"))
+                        assertTrue(
+                            warning.getString("reason").contains("no linked task"),
+                            "告警必须记录任务缺失原因: ${warning.getString("reason")}",
+                        )
+                        assertTrue(
+                            missingTaskStub.queries.any { it.contains("update healthcare.medical_orders") },
+                            "有告警仍必须收束医嘱",
+                        )
+                    }
+                }
+        }.compose {
+            withServer(vertx, terminatedTaskStub) { port ->
+                httpRequest(vertx, port, HttpMethod.POST, "/healthcare/v1/orders/close-expired", JsonObject())
+                    .map { (status, body) ->
+                        ctx.verify {
+                            assertEquals(200, status)
+                            assertEquals(1, body.getInteger("closed"))
+                            val warning = body.getJsonArray("warnings").getJsonObject(0)
+                            assertTrue(
+                                warning.getString("reason").contains("unexpected status"),
+                                "已终态任务也必须降级为告警: ${warning.getString("reason")}",
+                            )
+                        }
+                    }
+            }
+        }.onComplete { ar ->
+            if (ar.succeeded()) ctx.completeNow() else ctx.failNow(ar.cause())
+        }
+    }
+
+    @Test
+    fun `closeExpiredOrders未知字段400与未知入住404`(vertx: Vertx, ctx: VertxTestContext) {
+        val stub = DatabaseStub(encounters = rowSet())
+        withServer(vertx, stub) { port ->
+            httpRequest(
+                vertx, port, HttpMethod.POST,
+                "/healthcare/v1/orders/close-expired",
+                JsonObject().put("foo", "bar"),
+            ).compose { (unknownStatus, unknownBody) ->
+                ctx.verify {
+                    assertEquals(400, unknownStatus)
+                    assertEquals("unknown field: foo", unknownBody.getString("error"))
+                }
+                httpRequest(
+                    vertx, port, HttpMethod.POST,
+                    "/healthcare/v1/orders/close-expired",
+                    JsonObject().put("encounter_id", "missing").put("closed", 1),
+                ).compose { (mixedStatus, mixedBody) ->
+                    ctx.verify {
+                        assertEquals(400, mixedStatus, "未知字段优先于入住存在性校验")
+                        assertEquals("unknown field: closed", mixedBody.getString("error"))
+                        assertEquals(0, stub.transactionCalls, "400 不得开启事务")
+                    }
+                    httpRequest(
+                        vertx, port, HttpMethod.POST,
+                        "/healthcare/v1/orders/close-expired",
+                        JsonObject().put("encounter_id", "missing"),
+                    ).map { (missingStatus, missingBody) ->
+                        ctx.verify {
+                            assertEquals(404, missingStatus)
+                            assertEquals("encounter not found: missing", missingBody.getString("error"))
+                            assertEquals(1, stub.transactionCalls)
+                            // R4-1：404 路径的入住校验也必须是普通 select，绝不加行锁
+                            val existenceIndex = stub.queries.indexOfFirst { it.contains("from healthcare.encounters") }
+                            assertTrue(existenceIndex >= 0, "必须查询入住存在性: ${stub.queries}")
+                            assertFalse(
+                                stub.queries[existenceIndex].contains("for update"),
+                                "入住存在性校验不得加行锁: ${stub.queries[existenceIndex]}",
+                            )
+                            assertTrue(
+                                stub.queries.none { it.contains("from healthcare.medical_orders") },
+                                "入住不存在时不得查询候选医嘱",
+                            )
+                            assertTrue(
+                                stub.queries.none { it.contains("update healthcare.medical_orders") },
+                                "入住不存在时不得写医嘱",
+                            )
+                            assertTrue(
+                                stub.queries.none { it.contains("healthcare.encounters") && it.contains("for update") },
+                                "收束流程不得锁 encounters 行（ABBA 环）: ${stub.queries}",
+                            )
+                        }
+                    }
+                }
+            }
+        }.onComplete { ar ->
+            if (ar.succeeded()) ctx.completeNow() else ctx.failNow(ar.cause())
+        }
+    }
+
+    @Test
+    fun `close-expired静态路由不被泛型orders_id吞掉`(vertx: Vertx, ctx: VertxTestContext) {
+        val stub = DatabaseStub()
+        withServer(vertx, stub) { port ->
+            httpRequest(vertx, port, HttpMethod.POST, "/healthcare/v1/orders/close-expired", JsonObject())
+                .compose { (postStatus, postBody) ->
+                    ctx.verify {
+                        assertEquals(200, postStatus, "POST /orders/close-expired 必须命中静态路由")
+                        assertEquals(0, postBody.getInteger("closed"), "无候选时 closed = 0")
+                        assertTrue(postBody.containsKey("order_ids"))
+                        assertTrue(postBody.containsKey("warnings"))
+                        assertTrue(postBody.containsKey("closed_at"))
+                        assertNull(postBody.getString("id"), "不得落入 /orders/:id 的医嘱详情响应")
+                    }
+                    // 同路径 GET 仍由泛型 /orders/:id 处理：两条路由并存，静态路径优先
+                    httpRequest(vertx, port, HttpMethod.GET, "/healthcare/v1/orders/close-expired")
+                        .map { (getStatus, getBody) ->
+                            ctx.verify {
+                                assertEquals(404, getStatus)
+                                assertEquals("order not found: close-expired", getBody.getString("error"))
+                            }
+                        }
+                }
         }.onComplete { ar ->
             if (ar.succeeded()) ctx.completeNow() else ctx.failNow(ar.cause())
         }

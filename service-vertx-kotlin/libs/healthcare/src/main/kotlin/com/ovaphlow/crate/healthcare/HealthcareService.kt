@@ -394,6 +394,10 @@ class HealthcareService(
     fun nurseCheckOrder(id: String, userId: String, body: JsonObject): Future<JsonObject> =
         medicalOrderService.nurseCheckOrder(id, userId, body)
 
+    /** 027 到期医嘱显式收束（幂等）：委托 MedicalOrderService，保持医嘱写入单一入口 */
+    fun closeExpiredOrders(body: JsonObject): Future<JsonObject> =
+        medicalOrderService.closeExpiredOrders(body)
+
     /** 护士核对汇总列表：跨入住待核对用药医嘱，供护理汇总页核对 */
     fun listPendingNurseCheckOrders(
         client: SqlClient,

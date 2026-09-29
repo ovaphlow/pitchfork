@@ -26,6 +26,7 @@ import java.time.OffsetDateTime
  * 医嘱派生护理任务（连接绑定内部协作）的非数据库测试：
  *   - createOrderTask 输入校验与插入 SQL/参数（含 nullable 字段不绑定）
  *   - list/get 读模型 LEFT JOIN healthcare.medical_orders，带出 order_details / order_type
+ *   - 没有该列的行（lock / 计划任务回读）不抛异常且两键为 null（列探测守卫）
  *   - terminateOrderTask 合法目标联动、非法目标、缺失/异常任务
  *   - 公共 create 白名单仍拒绝 MEDICATION/TREATMENT，既有五类不受影响
  */
@@ -308,6 +309,72 @@ class TaskServiceMedicalOrderTest {
         assertEquals("tsk-1", record.getString("id"))
     }
 
+    // ——— 3b. 非 JOIN 读路径不得触碰 order_details / order_type 两列 ———
+
+    /**
+     * 严格行桩：只认 fixture 里有的列，取缺失列时**抛 `NoSuchElementException`**
+     * （贴近 `Row.getValue(String)` 的真实实现，而 MockK 默认桩只是返回 null）。
+     * 并且**不实现 `getColumnIndex`**：任何「先探测列是否存在再取值」的写法都会在这里
+     * 立刻炸掉。
+     *
+     * 因此 `TaskService.toJson(row)`（非 JOIN 路径）必须完全不碰这两列：
+     * 一旦有人把两列改成无条件读取，本组用例必红。
+     */
+    private fun strictColumnRow(values: Map<String, Any?>): Row {
+        val row = mockk<Row>()
+        every { row.getValue(any<String>()) } answers {
+            val column = firstArg<String>()
+            if (!values.containsKey(column)) throw NoSuchElementException("Column '$column' not found")
+            values[column]
+        }
+        every { row.getString(any<String>()) } answers { values[firstArg<String>()] as? String }
+        every { row.getLocalDate(any<String>()) } answers { values[firstArg<String>()] as? LocalDate }
+        every { row.getOffsetDateTime(any<String>()) } answers { values[firstArg<String>()] as? OffsetDateTime }
+        every { row.getBigDecimal(any<String>()) } answers { values[firstArg<String>()] as? BigDecimal }
+        return row
+    }
+
+    @Test
+    fun `无医嘱列的行不抛异常且两键为null`() {
+        // lockOrderTask / lockActivePlanTasks / CarePlanRevisionService.readPlanTasks
+        // 三者都对「没有 order_details / order_type 列」的行调用同一个 TaskService.toJson
+        // （readPlanTasks 见 CarePlanRevisionService.kt 中逐行 TaskService.toJson）。
+        for (values in listOf(taskRow(), taskRow(mapOf("order_item_id" to null)))) {
+            val json = TaskService.toJson(strictColumnRow(values))
+            assertTrue(json.containsKey("order_details"), "返回形状必须保留 order_details 键")
+            assertNull(json.getJsonObject("order_details"), "无该列时必须为 null 而不是抛异常")
+            assertTrue(json.containsKey("order_type"), "返回形状必须保留 order_type 键")
+            assertNull(json.getString("order_type"), "无该列时必须为 null 而不是抛异常")
+        }
+    }
+
+    @Test
+    fun `lockOrderTask与lockActivePlanTasks对无医嘱列的行不抛异常`() {
+        val service = TaskService(mockk<Pool>())
+
+        val lockStub = TaskStub(lockTasks = rowSet(strictColumnRow(taskRow())))
+        val locked =
+            requireNotNull(
+                service.lockOrderTask(lockStub.client, "ord-1")
+                    .toCompletionStage().toCompletableFuture().get(),
+            )
+        assertEquals("tsk-1", locked.getString("id"))
+        assertNull(locked.getJsonObject("order_details"))
+        assertNull(locked.getString("order_type"))
+
+        val planStub =
+            TaskStub(
+                lockTasks = rowSet(strictColumnRow(taskRow(mapOf("order_item_id" to null, "plan_item_id" to "pli-1")))),
+            )
+        val planTasks =
+            service.lockActivePlanTasks(planStub.client, "pln-1")
+                .toCompletionStage().toCompletableFuture().get()
+        assertEquals(1, planTasks.size)
+        assertEquals("tsk-1", planTasks[0].getString("id"))
+        assertNull(planTasks[0].getJsonObject("order_details"))
+        assertNull(planTasks[0].getString("order_type"))
+    }
+
     // ——— 4. terminateOrderTask ———
 
     @Test
@@ -401,9 +468,6 @@ class TaskServiceMedicalOrderTest {
 
 private fun mockRow(values: Map<String, Any?>): Row {
     val row = mockk<Row>()
-    // 行里是否存在某列：TaskService.toJson 对 LEFT JOIN 才有的列用 getColumnIndex 探测，
-    // 未出现在 fixture 里的列必须报 -1（等价于该查询没有投影这一列）。
-    every { row.getColumnIndex(any<String>()) } answers { if (values.containsKey(firstArg<String>())) 0 else -1 }
     every { row.getString(any<String>()) } answers { values[firstArg<String>()] as? String }
     every { row.getValue(any<String>()) } answers { values[firstArg<String>()] }
     every { row.getLocalDate(any<String>()) } answers { values[firstArg<String>()] as? LocalDate }

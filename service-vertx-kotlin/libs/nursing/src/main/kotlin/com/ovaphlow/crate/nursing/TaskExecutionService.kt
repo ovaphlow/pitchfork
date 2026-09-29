@@ -92,6 +92,21 @@ class TaskExecutionService(
     private val materialsTable = DSL.table(DSL.name("public", "materials"))
     private val matName = DSL.field("mat.name", String::class.java)
 
+    /** 把结果行中的时间列（TIMESTAMPTZ / 文本）统一解析为 OffsetDateTime */
+    private fun rowTimestamp(value: Any?): OffsetDateTime? = when (value) {
+        null -> null
+        is OffsetDateTime -> value
+        is String -> {
+            try {
+                OffsetDateTime.parse(value)
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+        else -> null
+    }
+
     private fun executionWithSummaryJson(
         row: Row,
         now: OffsetDateTime = OffsetDateTime.now(),
@@ -108,30 +123,32 @@ class TaskExecutionService(
         json.put("order_details", row.getValue("order_details") as? JsonObject)
         json.put("order_type", row.getValue("order_type")?.toString())
 
-        // 逾期派生字段
+        // 只读派生字段：全部复用同一次响应内固定的 now，避免同一响应内时间漂移
         val status = row.getValue("status")?.toString()
-        val plannedTime =
-            row.getValue("planned_time")?.let {
-                if (it is OffsetDateTime) {
-                    it
-                } else if (it is String) {
-                    try {
-                        OffsetDateTime.parse(it)
-                    } catch (_: Exception) {
-                        null
-                    }
-                } else {
-                    null
-                }
-            }
+        val plannedTime = rowTimestamp(row.getValue("planned_time"))
         val (isOverdue, overdueMinutes) = computeOverdueFields(status, plannedTime, now)
         json.put("is_overdue", isOverdue)
         json.put("overdue_minutes", overdueMinutes)
+
+        // 长挂执行派生字段（§3.2）：仅提醒，不触发任何写入
+        val actualTime = rowTimestamp(row.getValue("actual_time"))
+        val (inProgressMinutes, isStale) = computeInProgressFields(status, actualTime, now)
+        json.put("in_progress_minutes", inProgressMinutes)
+        json.put("is_stale", isStale)
 
         return json
     }
 
     companion object {
+        /** 长挂执行阈值：进入 IN_PROGRESS 后超过该分钟数即标记 is_stale（1440 分钟 = 24 小时） */
+        const val STALE_IN_PROGRESS_MINUTES = 1440
+
+        /** 跨日逾期队列分页默认值 */
+        const val OVERDUE_LIMIT_DEFAULT = 50
+
+        /** 跨日逾期队列分页上限 */
+        const val OVERDUE_LIMIT_MAX = 200
+
         private val VALID_STATUS_TRANSITIONS =
             mapOf(
                 "PENDING" to listOf("IN_PROGRESS", "SKIPPED", "CANCELLED"),
@@ -172,6 +189,37 @@ class TaskExecutionService(
                     plannedTime.isBefore(now)
             val minutes = if (isOverdue) Duration.between(plannedTime, now).toMinutes().toInt() else null
             return Pair(isOverdue, minutes)
+        }
+
+        /**
+         * 计算单条执行记录的长挂派生字段（§3.2）。
+         * 纯函数，不依赖任何外部状态：
+         * - 仅 `IN_PROGRESS` 且 `actual_time != null` 才产出分钟数，其余返回 null；
+         * - 分钟数取 `Duration.between(actual_time, now).toMinutes()` 并截断到 0 以上，
+         *   因此 `actual_time` 晚于 `now` 时为 0（不出现负数）；
+         * - `is_stale` 仅在分钟数 >= [STALE_IN_PROGRESS_MINUTES] 时为真，终态恒为假。
+         */
+        fun computeInProgressFields(
+            status: String?,
+            actualTime: OffsetDateTime?,
+            now: OffsetDateTime,
+        ): Pair<Int?, Boolean> {
+            if (status != "IN_PROGRESS" || actualTime == null) return Pair(null, false)
+            val minutes = maxOf(0L, Duration.between(actualTime, now).toMinutes()).toInt()
+            return Pair(minutes, minutes >= STALE_IN_PROGRESS_MINUTES)
+        }
+
+        /**
+         * 跨日逾期队列分页收敛（§4.3）：limit 默认 50 并收敛到 1..200，offset 默认 0 且不小于 0。
+         * 纯函数，便于单测覆盖边界。
+         */
+        fun normalizeOverduePaging(
+            limit: Int?,
+            offset: Int?,
+        ): Pair<Int, Int> {
+            val normalizedLimit = (limit ?: OVERDUE_LIMIT_DEFAULT).coerceIn(1, OVERDUE_LIMIT_MAX)
+            val normalizedOffset = (offset ?: 0).coerceAtLeast(0)
+            return Pair(normalizedLimit, normalizedOffset)
         }
 
         fun toJson(row: Row): JsonObject =
@@ -1061,6 +1109,127 @@ class TaskExecutionService(
     ): Future<JsonObject> = ensureExecutionsForDateRange(date, date, periodId)
 
     // ========================================================================
+    //  执行查询公共片段（`/today` 与 `/overdue` 共用投影列、from/join 与耗材摘要）
+    // ========================================================================
+
+    /**
+     * 执行记录列表的统一投影列：列名与 `toJson` 期望的键一一对应。
+     * `/today`、`/overdue` 必须共用，禁止各自复制一份查询。
+     */
+    private fun executionProjectionColumns(): List<org.jooq.Field<*>> =
+        listOf(
+            DSL.field("e.id").`as`("id"),
+            DSL.field("e.task_id").`as`("task_id"),
+            DSL.field("e.planned_time").`as`("planned_time"),
+            DSL.field("e.actual_time").`as`("actual_time"),
+            DSL.field("e.executor").`as`("executor"),
+            DSL.field("e.status").`as`("status"),
+            DSL.field("e.stock_operation_detail_id").`as`("stock_operation_detail_id"),
+            DSL.field("e.quantity").`as`("quantity"),
+            DSL.field("e.note").`as`("note"),
+            DSL.field("e.metadata").`as`("metadata"),
+            DSL.field("e.created_at").`as`("created_at"),
+            DSL.field("t.description").`as`("task_description"),
+            DSL.field("t.task_type").`as`("task_type"),
+            DSL.field("t.frequency_name").`as`("task_frequency_name"),
+            DSL.field("t.period_id").`as`("task_period_id"),
+            DSL.field("p.patient_id").`as`("patient_id"),
+            DSL.field("pat.name").`as`("patient_name"),
+            // 绑定医嘱的结构化明细与类型（未绑定医嘱时为 null）。任务描述是医生手写的
+            // 自由文本，护士执行用药时必须在工作台上看到药品、剂量与途径。
+            DSL.field("mo.order_details").`as`("order_details"),
+            DSL.field("mo.order_type").`as`("order_type"),
+        )
+
+    /**
+     * 执行记录查询的公共 FROM/JOIN：
+     * e = nursing.nursing_task_executions，t = nursing.nursing_tasks，
+     * p = nursing.nursing_service_periods，pat = healthcare.patients，
+     * mo = healthcare.medical_orders（经 t.order_item_id 绑定，未绑定医嘱时为 null）。
+     * `/today` 与 `/overdue` 的列表、计数与聚合全部复用，保证口径一致。
+     *
+     * mo 的 JOIN 落在 `medical_orders.id`（V500 已确认是 PRIMARY KEY）上，至多 1:1，
+     * 因此计数/聚合行数不变；共用同一 FROM 是本节既有约定（两个入口禁止各自复制查询）。
+     */
+    private fun executionRowsQuery(
+        columns: List<org.jooq.Field<*>>,
+        conditions: List<org.jooq.Condition>,
+    ) = ctx
+        .select(columns)
+        .from(DSL.table(DSL.name("nursing", "nursing_task_executions")).`as`("e"))
+        .join(DSL.table(DSL.name("nursing", "nursing_tasks")).`as`("t"))
+        .on(DSL.field("e.task_id").eq(DSL.field("t.id")))
+        .leftJoin(DSL.table(DSL.name("nursing", "nursing_service_periods")).`as`("p"))
+        .on(DSL.field("t.period_id").eq(DSL.field("p.id")))
+        .leftJoin(DSL.table(DSL.name("healthcare", "patients")).`as`("pat"))
+        .on(DSL.field("p.patient_id").eq(DSL.field("pat.id")))
+        .leftJoin(DSL.table(DSL.name("healthcare", "medical_orders")).`as`("mo"))
+        .on(DSL.field("t.order_item_id").eq(DSL.field("mo.id")))
+        .where(conditions)
+
+    /** 执行单条聚合/计数查询（聚合与计数恒返回一行） */
+    private fun fetchRow(query: org.jooq.Query): Future<Row> =
+        pool
+            .preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
+            .map { it.iterator().next() }
+
+    /** 结果行 → 响应记录，并批量补齐耗材摘要（`/today` 与 `/overdue` 共用，避免 N+1） */
+    private fun recordsWithConsumptionSummary(
+        rows: io.vertx.sqlclient.RowSet<Row>,
+        now: OffsetDateTime,
+    ): Future<JsonArray> {
+        val records = JsonArray()
+        val execIds = mutableListOf<String>()
+        for (row in rows) {
+            records.add(executionWithSummaryJson(row, now))
+            row.getValue("id")?.toString()?.let { execIds.add(it) }
+        }
+        return loadConsumptionSummaryBatch(execIds).map { summary ->
+            for (i in 0 until records.size()) {
+                val record = records.getJsonObject(i)
+                record.getString("id")?.let { id -> summary[id]?.let { s -> record.put("consumption_summary", s) } }
+            }
+            records
+        }
+    }
+
+    /**
+     * 任务参与条件 + 可选周期/执行人/任务类型：`/today` 与 `/overdue` 的公共基础范围（不含日期窗口）。
+     * 每次调用返回独立列表，避免调用方互相污染。
+     */
+    private fun participationConditions(
+        periodId: String?,
+        executor: String?,
+        taskType: String?,
+    ): MutableList<org.jooq.Condition> {
+        val conditions = mutableListOf<org.jooq.Condition>()
+        // 只看活动服务期的执行；全院性康复活动（period_id 为空）同样参与。
+        // 已收束周期的历史记录仍可由时间线/统计查询。
+        conditions.add(
+            taskParticipationCondition(
+                taskPeriodId = DSL.field("t.period_id", String::class.java),
+                taskType = DSL.field("t.task_type", String::class.java),
+                periodStatus = DSL.field("p.status", String::class.java),
+            ),
+        )
+        periodId?.let { conditions.add(DSL.field("t.period_id").eq(it)) }
+        executor?.let { conditions.add(DSL.field("e.executor").eq(it)) }
+        taskType?.let { conditions.add(DSL.field("t.task_type").eq(it)) }
+        return conditions
+    }
+
+    /** §3.1 逾期定义：status ∈ {PENDING, IN_PROGRESS} 且 planned_time < now（严格小于） */
+    private fun overdueDefinition(
+        plannedField: org.jooq.Field<OffsetDateTime>,
+        now: OffsetDateTime,
+    ): org.jooq.Condition =
+        DSL
+            .field("e.status", String::class.java)
+            .`in`("PENDING", "IN_PROGRESS")
+            .and(plannedField.lt(now))
+
+    // ========================================================================
     //  今日执行查询（带任务、长者摘要和耗材摘要）
     // ========================================================================
 
@@ -1080,158 +1249,134 @@ class TaskExecutionService(
             val dayStart = date.atStartOfDay().atOffset(zone)
             val dayEnd = date.plusDays(1).atStartOfDay().atOffset(zone)
 
-            val conditions = mutableListOf<org.jooq.Condition>()
             val plannedField = DSL.field("e.planned_time", OffsetDateTime::class.java)
+            val statusField = DSL.field("e.status", String::class.java)
+            val dateWindow = plannedField.ge(dayStart).and(plannedField.lt(dayEnd))
+
+            // 既有 total 语义（003 已冻结）：日期 + 参与条件 + 周期/执行人/任务类型 + status/overdue 筛选
+            val conditions = participationConditions(periodId, executor, taskType)
             conditions.add(plannedField.ge(dayStart))
             conditions.add(plannedField.lt(dayEnd))
-            // 今日工作台只展示活动服务期的执行；已收束周期的历史记录仍可由时间线/统计查询。
-            // 全院性康复活动（period_id 为空）同样参与今日看板。
-            conditions.add(
-                taskParticipationCondition(
-                    taskPeriodId = DSL.field("t.period_id", String::class.java),
-                    taskType = DSL.field("t.task_type", String::class.java),
-                    periodStatus = DSL.field("p.status", String::class.java),
-                ),
-            )
-
-            periodId?.let { conditions.add(DSL.field("t.period_id").eq(it)) }
-            executor?.let { conditions.add(DSL.field("e.executor").eq(it)) }
-            status?.let { conditions.add(DSL.field("e.status").eq(it)) }
-            taskType?.let { conditions.add(DSL.field("t.task_type").eq(it)) }
-
+            status?.let { conditions.add(statusField.eq(it)) }
             // 逾期筛选条件：仅未完成且计划时间已过
             if (overdue == true) {
-                conditions.add(DSL.field("e.status").`in`("PENDING", "IN_PROGRESS"))
-                conditions.add(plannedField.lt(now))
+                conditions.add(overdueDefinition(plannedField, now))
             }
 
-            // 计算 overdue_total 的基础条件（忽略 status 和 overdue 筛选）
-            val overdueTotalConditions = mutableListOf<org.jooq.Condition>()
+            // 既有 overdue_total 语义（003 已冻结）：当天 + 参与条件 + 周期/执行人/任务类型范围内的逾期数，
+            // 忽略 status 与 overdue 筛选
+            val overdueTotalConditions = participationConditions(periodId, executor, taskType)
             overdueTotalConditions.add(plannedField.ge(dayStart))
             overdueTotalConditions.add(plannedField.lt(dayEnd))
-            overdueTotalConditions.add(
-                taskParticipationCondition(
-                    taskPeriodId = DSL.field("t.period_id", String::class.java),
-                    taskType = DSL.field("t.task_type", String::class.java),
-                    periodStatus = DSL.field("p.status", String::class.java),
-                ),
-            )
-            periodId?.let { overdueTotalConditions.add(DSL.field("t.period_id").eq(it)) }
-            executor?.let { overdueTotalConditions.add(DSL.field("e.executor").eq(it)) }
-            taskType?.let { overdueTotalConditions.add(DSL.field("t.task_type").eq(it)) }
-            overdueTotalConditions.add(DSL.field("e.status").`in`("PENDING", "IN_PROGRESS"))
-            overdueTotalConditions.add(plannedField.lt(now))
+            overdueTotalConditions.add(overdueDefinition(plannedField, now))
 
-            val allColumns =
-                listOf(
-                    DSL.field("e.id").`as`("id"),
-                    DSL.field("e.task_id").`as`("task_id"),
-                    DSL.field("e.planned_time").`as`("planned_time"),
-                    DSL.field("e.actual_time").`as`("actual_time"),
-                    DSL.field("e.executor").`as`("executor"),
-                    DSL.field("e.status").`as`("status"),
-                    DSL.field("e.stock_operation_detail_id").`as`("stock_operation_detail_id"),
-                    DSL.field("e.quantity").`as`("quantity"),
-                    DSL.field("e.note").`as`("note"),
-                    DSL.field("e.metadata").`as`("metadata"),
-                    DSL.field("e.created_at").`as`("created_at"),
-                    DSL.field("t.description").`as`("task_description"),
-                    DSL.field("t.task_type").`as`("task_type"),
-                    DSL.field("t.frequency_name").`as`("task_frequency_name"),
-                    DSL.field("t.period_id").`as`("task_period_id"),
-                    DSL.field("p.patient_id").`as`("patient_id"),
-                    DSL.field("pat.name").`as`("patient_name"),
-                    // 绑定医嘱的结构化明细与类型（LEFT JOIN，未绑定医嘱时为 null）
-                    DSL.field("mo.order_details").`as`("order_details"),
-                    DSL.field("mo.order_type").`as`("order_type"),
+            // §4.2 新增聚合，全部在 SQL 内完成（禁止拉全表内存计数、禁止 N+1）：
+            // - status_totals：日期窗口 + 参与条件 + 周期/执行人/任务类型内各状态计数，忽略 status/overdue 筛选；
+            // - overdue_total_all：忽略日期窗口，仅保留参与条件 + 周期/执行人/任务类型 + 逾期定义。
+            // 两者日期范围不同，因此以「无日期窗口的基础范围」为 FROM，用 count() FILTER (WHERE ...) 一次取回。
+            val metaColumns =
+                listOf<org.jooq.Field<*>>(
+                    count().filterWhere(dateWindow.and(statusField.eq("PENDING"))).`as`("status_pending"),
+                    count().filterWhere(dateWindow.and(statusField.eq("IN_PROGRESS"))).`as`("status_in_progress"),
+                    count().filterWhere(dateWindow.and(statusField.eq("COMPLETED"))).`as`("status_completed"),
+                    count().filterWhere(dateWindow.and(statusField.eq("SKIPPED"))).`as`("status_skipped"),
+                    count().filterWhere(dateWindow.and(statusField.eq("CANCELLED"))).`as`("status_cancelled"),
+                    count().filterWhere(overdueDefinition(plannedField, now)).`as`("overdue_total_all"),
                 )
 
-            val baseSelect =
-                ctx
-                    .select(allColumns)
-                    .from(DSL.table(DSL.name("nursing", "nursing_task_executions")).`as`("e"))
-                    .join(DSL.table(DSL.name("nursing", "nursing_tasks")).`as`("t"))
-                    .on(DSL.field("e.task_id").eq(DSL.field("t.id")))
-                    .leftJoin(DSL.table(DSL.name("nursing", "nursing_service_periods")).`as`("p"))
-                    .on(DSL.field("t.period_id").eq(DSL.field("p.id")))
-                    .leftJoin(DSL.table(DSL.name("healthcare", "patients")).`as`("pat"))
-                    .on(DSL.field("p.patient_id").eq(DSL.field("pat.id")))
-                    // 绑定医嘱：medical_orders.id 是主键，至多 1:1，不改变行数。
-                    // count / overdue_total 查询不加此 JOIN，计数语义保持原样。
-                    .leftJoin(DSL.table(DSL.name("healthcare", "medical_orders")).`as`("mo"))
-                    .on(DSL.field("t.order_item_id").eq(DSL.field("mo.id")))
-                    .where(conditions)
-
-            val countQuery =
-                ctx
-                    .select(count().`as`("total"))
-                    .from(DSL.table(DSL.name("nursing", "nursing_task_executions")).`as`("e"))
-                    .join(DSL.table(DSL.name("nursing", "nursing_tasks")).`as`("t"))
-                    .on(DSL.field("e.task_id").eq(DSL.field("t.id")))
-                    .leftJoin(DSL.table(DSL.name("nursing", "nursing_service_periods")).`as`("p"))
-                    .on(DSL.field("t.period_id").eq(DSL.field("p.id")))
-                    .leftJoin(DSL.table(DSL.name("healthcare", "patients")).`as`("pat"))
-                    .on(DSL.field("p.patient_id").eq(DSL.field("pat.id")))
-                    .where(conditions)
-
+            val baseSelect = executionRowsQuery(executionProjectionColumns(), conditions)
+            val countQuery = executionRowsQuery(listOf(count().`as`("total")), conditions)
             // overdue_total — 独立聚合，不受 status / overdue 筛选影响
-            val overdueTotalQuery =
-                ctx
-                    .select(count().`as`("overdue_total"))
-                    .from(DSL.table(DSL.name("nursing", "nursing_task_executions")).`as`("e"))
-                    .join(DSL.table(DSL.name("nursing", "nursing_tasks")).`as`("t"))
-                    .on(DSL.field("e.task_id").eq(DSL.field("t.id")))
-                    .leftJoin(DSL.table(DSL.name("nursing", "nursing_service_periods")).`as`("p"))
-                    .on(DSL.field("t.period_id").eq(DSL.field("p.id")))
-                    .leftJoin(DSL.table(DSL.name("healthcare", "patients")).`as`("pat"))
-                    .on(DSL.field("p.patient_id").eq(DSL.field("pat.id")))
-                    .where(overdueTotalConditions)
+            val overdueTotalQuery = executionRowsQuery(listOf(count().`as`("overdue_total")), overdueTotalConditions)
+            val metaQuery = executionRowsQuery(metaColumns, participationConditions(periodId, executor, taskType))
 
             val dataQuery =
                 baseSelect
-                    .orderBy(DSL.field("e.planned_time").asc())
+                    .orderBy(plannedField.asc())
                     .limit(limit)
                     .offset(offset)
 
-            pool
-                .preparedQuery(DatabaseConfig.sql(countQuery))
-                .execute(DatabaseConfig.tuple(countQuery))
-                .flatMap { countRows ->
-                    val total = countRows.iterator().next().getLong("total") ?: 0L
-                    pool
-                        .preparedQuery(DatabaseConfig.sql(dataQuery))
-                        .execute(DatabaseConfig.tuple(dataQuery))
-                        .flatMap { dataRows ->
-                            val records = JsonArray()
-                            val execIds = mutableListOf<String>()
-                            for (row in dataRows) {
-                                records.add(executionWithSummaryJson(row, now))
-                                row.getValue("id")?.toString()?.let { execIds.add(it) }
-                            }
-                            pool
-                                .preparedQuery(DatabaseConfig.sql(overdueTotalQuery))
-                                .execute(DatabaseConfig.tuple(overdueTotalQuery))
-                                .flatMap { otRows ->
-                                    val overdueTotal = otRows.iterator().next().getLong("overdue_total") ?: 0L
-                                    loadConsumptionSummaryBatch(execIds).map { summary ->
-                                        for (i in 0 until records.size()) {
-                                            val record = records.getJsonObject(i)
-                                            val eid = record.getString("id")
-                                            eid?.let { summary[it]?.let { s -> record.put("consumption_summary", s) } }
-                                        }
+            fetchRow(countQuery)
+                .compose { countRow ->
+                    val total = countRow.getLong("total") ?: 0L
+                    fetchRow(metaQuery).map { metaRow -> Pair(total, metaRow) }
+                }.compose { (total, metaRow) ->
+                    fetchRow(overdueTotalQuery).compose { overdueRow ->
+                        val overdueTotal = overdueRow.getLong("overdue_total") ?: 0L
+                        pool
+                            .preparedQuery(DatabaseConfig.sql(dataQuery))
+                            .execute(DatabaseConfig.tuple(dataQuery))
+                            .compose { dataRows -> recordsWithConsumptionSummary(dataRows, now) }
+                            .map { records ->
+                                JsonObject()
+                                    .put("records", records)
+                                    .put(
+                                        "meta",
                                         JsonObject()
-                                            .put("records", records)
+                                            .put("total", total)
+                                            .put("overdue_total", overdueTotal)
+                                            .put("overdue_total_all", metaRow.getLong("overdue_total_all") ?: 0L)
                                             .put(
-                                                "meta",
+                                                "status_totals",
                                                 JsonObject()
-                                                    .put("total", total)
-                                                    .put("overdue_total", overdueTotal),
-                                            )
-                                    }
-                                }
-                        }
+                                                    .put("PENDING", metaRow.getLong("status_pending") ?: 0L)
+                                                    .put("IN_PROGRESS", metaRow.getLong("status_in_progress") ?: 0L)
+                                                    .put("COMPLETED", metaRow.getLong("status_completed") ?: 0L)
+                                                    .put("SKIPPED", metaRow.getLong("status_skipped") ?: 0L)
+                                                    .put("CANCELLED", metaRow.getLong("status_cancelled") ?: 0L),
+                                            ),
+                                    )
+                            }
+                    }
                 }
         }
+    }
+
+    // ========================================================================
+    //  跨日逾期队列（§4.3）：无日期窗口、按 planned_time ASC、只读无写副作用
+    // ========================================================================
+
+    /**
+     * 跨日全量逾期队列：逾期定义（§3.1）+ 任务参与条件 + 可选 period_id/executor/task_type。
+     *
+     * - 不施加任何日期窗口（忽略调用方可能传入的 date，路由层直接不读取该参数）；
+     * - 不调用 `ensureExecutionsForDate`，因此不产生任何写副作用；
+     * - `limit` 默认 50 并收敛到 1..200，`offset` 默认 0（见 [normalizeOverduePaging]）。
+     */
+    fun overdueExecutions(
+        periodId: String? = null,
+        executor: String? = null,
+        taskType: String? = null,
+        limit: Int? = OVERDUE_LIMIT_DEFAULT,
+        offset: Int? = 0,
+    ): Future<JsonObject> {
+        val now = OffsetDateTime.now()
+        val (effectiveLimit, effectiveOffset) = normalizeOverduePaging(limit, offset)
+
+        val plannedField = DSL.field("e.planned_time", OffsetDateTime::class.java)
+        val conditions = participationConditions(periodId, executor, taskType)
+        conditions.add(overdueDefinition(plannedField, now))
+
+        val countQuery = executionRowsQuery(listOf(count().`as`("total")), conditions)
+        val dataQuery =
+            executionRowsQuery(executionProjectionColumns(), conditions)
+                .orderBy(plannedField.asc())
+                .limit(effectiveLimit)
+                .offset(effectiveOffset)
+
+        return fetchRow(countQuery)
+            .compose { countRow ->
+                val total = countRow.getLong("total") ?: 0L
+                pool
+                    .preparedQuery(DatabaseConfig.sql(dataQuery))
+                    .execute(DatabaseConfig.tuple(dataQuery))
+                    .compose { dataRows -> recordsWithConsumptionSummary(dataRows, now) }
+                    .map { records ->
+                        JsonObject()
+                            .put("records", records)
+                            .put("meta", JsonObject().put("total", total))
+                    }
+            }
     }
 
     // ========================================================================

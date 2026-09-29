@@ -392,9 +392,6 @@ class CarePlanRevisionServiceTest {
 
 private fun mockRow(values: Map<String, Any?>): Row {
     val row = mockk<Row>()
-    // TaskService.toJson 对「绑定医嘱 JOIN 才有的列」用 getColumnIndex 探测：不在 fixture
-    // 里的列必须报 -1，等价于该查询没有投影这一列（计划任务锁读路径即如此）。
-    every { row.getColumnIndex(any<String>()) } answers { if (values.containsKey(firstArg<String>())) 0 else -1 }
     every { row.getString(any<String>()) } answers { values[firstArg<String>()] as? String }
     every { row.getValue(any<String>()) } answers { values[firstArg<String>()] }
     every { row.getLocalDate(any<String>()) } answers { values[firstArg<String>()] as? LocalDate }

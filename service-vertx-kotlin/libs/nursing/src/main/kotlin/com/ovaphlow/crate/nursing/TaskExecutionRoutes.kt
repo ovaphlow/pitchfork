@@ -111,6 +111,23 @@ object TaskExecutionRoutes {
                 .onFailure { NursingRoutes.respondError(ctx, it) }
         }
 
+        // ——— 跨日逾期队列（§4.3）：无日期窗口，只读；必须在 /:id 之前注册 ———
+        // date 参数按契约静默忽略（不读取，也不报错）：逾期队列天然跨日。
+        fun handleOverdue(ctx: io.vertx.ext.web.RoutingContext) {
+            val params = ctx.request()
+            service.overdueExecutions(
+                periodId = params.getParam("period_id"),
+                executor = params.getParam("executor"),
+                taskType = params.getParam("task_type"),
+                limit = params.getParam("limit")?.toIntOrNull() ?: TaskExecutionService.OVERDUE_LIMIT_DEFAULT,
+                offset = params.getParam("offset")?.toIntOrNull() ?: 0
+            ).onSuccess { ctx.json(it) }
+                .onFailure { NursingRoutes.respondError(ctx, it) }
+        }
+        router.get("/overdue").handler { handleOverdue(it) }
+        // 容错尾部斜杠
+        router.get("/overdue/").handler { handleOverdue(it) }
+
         // ——— 执行统计（护理员工作量与计划完成率） ———
         fun handleStatistics(ctx: io.vertx.ext.web.RoutingContext) {
             val params = ctx.request()
