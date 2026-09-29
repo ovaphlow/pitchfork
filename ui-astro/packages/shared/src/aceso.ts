@@ -148,7 +148,7 @@ export interface Encounter {
   discharge_diagnosis: string | null;
   attending_physician: string | null;
   status: string;
-  /** 结算收束冻结标记（养老收费）；未收束为 null */
+  /** 结算关账冻结标记（养老收费）；未关账为 null */
   settled_at: string | null;
   metadata: Record<string, unknown> | null;
   created_at: string;
@@ -712,8 +712,10 @@ export function listEncounters(params: {
   return request<EncounterList>(`/healthcare/v1/encounters${suffix}`);
 }
 
-export function listElderlyAdmissions(params: { status?: string; search?: string; limit?: number; offset?: number } = {}): Promise<EncounterList> {
+export function listElderlyAdmissions(params: { patient_id?: string; status?: string; search?: string; limit?: number; offset?: number } = {}): Promise<EncounterList> {
   const query = new URLSearchParams();
+  // patient_id 用于按长者取入住历史（健康监测页选择「入住」）；服务端已支持该过滤
+  if (params.patient_id?.trim()) query.set("patient_id", params.patient_id.trim());
   // status 显式传入空串时取全部入住（含已离院/已去世），用于医生诊疗页只读历史
   if (params.status !== undefined) query.set("status", params.status.trim());
   if (params.search?.trim()) query.set("search", params.search.trim());
@@ -725,6 +727,43 @@ export function listElderlyAdmissions(params: { status?: string; search?: string
 
 export function listActiveElderlyAdmissions(params: { search?: string; limit?: number; offset?: number } = {}): Promise<EncounterList> {
   return listElderlyAdmissions({ status: "ACTIVE", ...params });
+}
+
+// ─── 床位占用只读查询（GET /bed-occupancy） ─────────────────────────────────
+//
+// 口径（计划 028 §4.1）：只读当前占用中的养老（ELDERLY_CARE）入住，即
+// `discharge_date IS NULL OR discharge_date > now()`，按 department/ward/admit_date 升序。
+// 后端无床位主数据（D1），`department`/`ward` 仍是自由文本；调用方按 trim 后精确比较。
+
+export interface BedOccupancyRecord {
+  /** 入住（encounter）ID */
+  encounter_id: string;
+  encounter_no: string | null;
+  patient_id: string;
+  patient_name: string | null;
+  /** 照护单元/病区（自由文本，比较前需 trim） */
+  department: string | null;
+  /** 房间床位（自由文本，比较前需 trim） */
+  ward: string | null;
+  admit_date: string | null;
+  discharge_date: string | null;
+  status: string;
+}
+
+export interface BedOccupancyList {
+  records: BedOccupancyRecord[];
+  meta: { total: number };
+}
+
+/** 当前床位占用（department/ward 为 trim 后精确过滤；limit 服务端默认 50、上限 100） */
+export function listBedOccupancy(params: { department?: string; ward?: string; limit?: number; offset?: number } = {}): Promise<BedOccupancyList> {
+  const query = new URLSearchParams();
+  if (params.department?.trim()) query.set("department", params.department.trim());
+  if (params.ward?.trim()) query.set("ward", params.ward.trim());
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<BedOccupancyList>(`/healthcare/v1/bed-occupancy${suffix}`);
 }
 
 // ─── 养老离院交接摘要归档 (DISCHARGE_SUMMARY) ──────────────────────────────
@@ -1625,7 +1664,7 @@ export function listMedicationAdministrationSources(executionId: string): Promis
   return request<NursingPage<MedicationAdministrationSource>>(`/nursing/v1/executions/${encodeURIComponent(executionId)}/administration/sources`);
 }
 
-/** MAR 查询：按老人（encounter_id）/医嘱/给药日期/结果过滤给药明细 */
+/** MAR 查询：按长者（encounter_id）/医嘱/给药日期/结果过滤给药明细 */
 export function listMedicationAdministrations(params: {
   encounter_id?: string;
   medical_order_id?: string;
@@ -2839,7 +2878,7 @@ export function getPharmacyPurchaseReceipt(id: string): Promise<PharmacyPurchase
 }
 
 // ─── 随访管理 (Followup · healthcare) ────────────────────────────────────
-// 养老/福利院方向：离院老人回访 + 在院慢病老人定期随访。
+// 养老/福利院方向：离院长者回访 + 在院慢病长者定期随访。
 // 业务枚举（中文值）：随访类型 出院后随访/慢病随访/常规电话随访；
 // 方式 电话/上门/门诊；结果 正常/异常/需复访/需转诊；状态 待随访/已完成/已取消
 // （「已逾期」由查询计算：待随访且计划日早于今天，不落库）。
@@ -3031,7 +3070,7 @@ export function createFollowupRecord(input: FollowupRecordInput): Promise<Follow
   });
 }
 
-/** 老人随访历史时间线（详情页用）：plans 与 records 各按时间倒序 */
+/** 长者随访历史时间线（详情页用）：plans 与 records 各按时间倒序 */
 export function listPatientFollowups(patientId: string): Promise<FollowupPatientTimeline> {
   return request<FollowupPatientTimeline>(`/healthcare/v1/patients/${encodeURIComponent(patientId)}/followups`);
 }
@@ -3116,7 +3155,7 @@ export interface VitalSignTrend {
   records: VitalSignRecord[];
 }
 
-/** 按老人查询体征记录（时间倒序，可分页，按类型/时间范围过滤） */
+/** 按长者查询体征记录（时间倒序，可分页，按类型/时间范围过滤） */
 export function listVitalSigns(params: {
   patient_id: string;
   type?: string;
@@ -3169,7 +3208,7 @@ export function getVitalSignSnapshot(patientId: string): Promise<VitalSignSnapsh
   );
 }
 
-/** 趋势序列：指定老人、指定体征类型在一段时间内的测量点（时间升序，供绘图） */
+/** 趋势序列：指定长者、指定体征类型在一段时间内的测量点（时间升序，供绘图） */
 export function getVitalSignTrend(
   patientId: string,
   type: VitalSignType,
@@ -3226,7 +3265,7 @@ export interface VitalSignReferResult {
   followup_plan: FollowupPlan;
 }
 
-/** 跨老人异常列表：仅 abnormal=true 的记录（patient_id 可选过滤），按测量时间倒序 */
+/** 跨长者异常列表：仅 abnormal=true 的记录（patient_id 可选过滤），按测量时间倒序 */
 export function listAbnormalVitalSigns(params: {
   patient_id?: string;
   type?: VitalSignType;
@@ -4164,13 +4203,13 @@ export function getMealStatistics(params: {
 // ========================================================================
 //  Healthcare API — Deposit (押金登记与退押)
 //  养老费用管理独立子任务：入住押金登记、退押与台账，挂 encounter
-//  （不强制关联费用项目字典；核销由结算收束手工触发，见下方养老收费分组）。
-//  退押为独立操作：不校验 encounter 收束状态，离院/去世后仍可退押。
+//  （不强制关联费用项目字典；核销由结算关账手工触发，见下方养老收费分组）。
+//  退押为独立操作：不校验 encounter 关账状态，离院/去世后仍可退押。
 // ========================================================================
 
 /**
  * 押金台账记录类型：`登记` 与 `退押` 由押金管理页提交；
- * `核销` 由结算收束时的押金核销写入，不是用户可登记的类型。
+ * `核销` 由结算关账时的押金核销写入，不是用户可登记的类型。
  */
 export type DepositType = "登记" | "退押" | "核销";
 
@@ -4231,9 +4270,9 @@ export function listDeposits(
 
 // ========================================================================
 //  Healthcare API — 养老收费 (Fee Items / Bills / Payments / Settlement)
-//  费用字典、账单（按月自动计费 + 手工加项）、缴费与欠费、结算收束入口，
+//  费用字典、账单（按月自动计费 + 手工加项）、缴费与欠费、结算关账入口，
 //  路径 /healthcare/v1/*，沿用 request 封装（token 注入、JSON、401、{records,meta}）。
-//  结算收束可选携带押金核销金额，核销由服务端同时写入缴费流水（method = 押金）
+//  结算关账可选携带押金核销金额，核销由服务端同时写入缴费流水（method = 押金）
 //  与押金台账（type = 核销）；押金登记/退押仍只在押金管理页。
 // ========================================================================
 
@@ -4350,13 +4389,13 @@ export interface Bill {
   settled_at?: string | null;
   total_amount: number;
   /**
-   * 收束（结算收束）时刻该账单的未结余额快照：`0` 表示收束时已收妥或已被押金核销；
-   * 历史（V519 之前）收束的账单不回填，恒为 `0`。收束前该值为 `0`。
+   * 关账（结算关账）时刻该账单的未结余额快照：`0` 表示关账时已收妥或已被押金核销；
+   * 历史（V519 之前）关账的账单不回填，恒为 `0`。关账前该值为 `0`。
    */
   outstanding_amount: number;
   /**
-   * 收束时未结余额被放弃（减免）的原因，仅当 `outstanding_amount > 0` 时非空；
-   * 由收束请求的 `write_off_reason` 原样写入，冻结后不可再改。
+   * 关账时未结余额被放弃（减免）的原因，仅当 `outstanding_amount > 0` 时非空；
+   * 由关账请求的 `write_off_reason` 原样写入，冻结后不可再改。
    */
   write_off_reason: string | null;
   /** 仅详情接口返回（列表接口为空数组） */
@@ -4461,14 +4500,14 @@ export function precheckBillGeneration(encounterId: string, month: string): Prom
 }
 
 /**
- * 结算收束（已离院/去世未结算的养老入住）：生成区间最终账单并冻结全部账单，返回收束后的 encounter。
+ * 结算关账（已离院/去世未结算的养老入住）：生成区间最终账单并冻结全部账单，返回关账后的 encounter。
  *
  * 押金核销（`depositOffset`）与未结判定、减免留痕都在**同一事务内**完成：服务端先生成区间最终账单
  * （以 `待缴费` 建立、同样可被核销），再用押金按 `min(押金余额, 未结合计)` 的上限核销。
  *
- * 存在未结余额而未提供 `writeOffReason` 时整个收束被拒（409
+ * 存在未结余额而未提供 `writeOffReason` 时整个关账被拒（409
  * `unsettled bills require explicit write-off: outstanding <金额>`），且不产生任何写入；
- * 提供原因后，核销后仍未结的部分随收束冻结、**不可再收**，并写入账单的 `outstanding_amount`
+ * 提供原因后，核销后仍未结的部分随关账冻结、**不可再收**，并写入账单的 `outstanding_amount`
  * 与 `write_off_reason`。
  *
  * - `depositOffset`：缺省或 `0` 表示不核销（该键不发送）；
@@ -4489,16 +4528,16 @@ export function settleEncounterBilling(
   });
 }
 
-// ─── 结算收束预览 (Billing Settlement Preview) ────────────────────────
+// ─── 结算关账预览 (Billing Settlement Preview) ────────────────────────
 
-/** 预览里的区间最终账单账期（与收束实际生成的账期同源） */
+/** 预览里的区间最终账单账期（与关账实际生成的账期同源） */
 export interface SettlementPreviewPeriod {
   start: string;
   end: string;
 }
 
 /**
- * 结算收束预览：提交前「会发生什么」的权威口径（只读、可反复调用，不产生任何写入）。
+ * 结算关账预览：提交前「会发生什么」的权威口径（只读、可反复调用，不产生任何写入）。
  *
  * 口径关系：
  * - `pending_balance`：既有 `待缴费` 账单的未结合计（**核销前**）；
@@ -4507,7 +4546,7 @@ export interface SettlementPreviewPeriod {
  * - `requires_write_off`：`outstanding_total > max_offset`，即「即使全额核销仍有未结」。
  */
 export interface SettlementPreview {
-  /** `null` 表示本次收束不生成区间最终账单 */
+  /** `null` 表示本次关账不生成区间最终账单 */
   settlement_period: SettlementPreviewPeriod | null;
   final_bill_total: number;
   pending_balance: number;
@@ -4518,8 +4557,8 @@ export interface SettlementPreview {
 }
 
 /**
- * 结算收束预览（只读）：收束前展示最终账单金额、押金余额、可核销上限与核销后仍需减免的金额。
- * 资格不满足时与收束一致返回 400/404/409；需认证，未认证 401。
+ * 结算关账预览（只读）：关账前展示最终账单金额、押金余额、可核销上限与核销后仍需减免的金额。
+ * 资格不满足时与关账一致返回 400/404/409；需认证，未认证 401。
  */
 export function previewEncounterBilling(encounterId: string): Promise<SettlementPreview> {
   return request<SettlementPreview>(
@@ -4618,13 +4657,13 @@ export function listArrears(
 }
 
 /**
- * 收费汇总：三项既有口径互不重叠，恒等式 `应缴 − 已缴 = 欠费` 在收束前后均成立。
+ * 收费汇总：三项既有口径互不重叠，恒等式 `应缴 − 已缴 = 欠费` 在关账前后均成立。
  *
  * - `due_amount` = Σ账单合计（应缴）；
- * - `paid_amount` = Σ缴费金额（已缴，含收束核销写入的 `method = 押金` 行）；
- * - `arrears_amount` = Σ(`待缴费` 且余额 > 0 的账单余额)（欠费，收束后恒为 0）；
- * - `write_off_amount` = Σ(已结算账单的 `outstanding_amount`)（收束时被放弃的减免合计，
- *   是收束动作产生的第三项，**不并入欠费**）。
+ * - `paid_amount` = Σ缴费金额（已缴，含关账核销写入的 `method = 押金` 行）；
+ * - `arrears_amount` = Σ(`待缴费` 且余额 > 0 的账单余额)（欠费，关账后恒为 0）；
+ * - `write_off_amount` = Σ(已结算账单的 `outstanding_amount`)（关账时被放弃的减免合计，
+ *   是关账动作产生的第三项，**不并入欠费**）。
  */
 export interface PaymentSummary {
   due_amount: number;

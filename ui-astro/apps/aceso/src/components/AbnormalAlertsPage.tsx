@@ -15,6 +15,7 @@ import {
   type VitalSignType,
 } from "@pitchfork/shared/aceso";
 import { formatDate, formatDateTime, toOffsetDateTime } from "../lib/datetime";
+import { useSubjectDirectory } from "../lib/identity";
 
 const PAGE_SIZE = 20;
 
@@ -31,6 +32,13 @@ const TYPE_LABELS: Record<VitalSignType, string> = {
 };
 
 const TYPE_OPTIONS = Object.entries(TYPE_LABELS) as [VitalSignType, string][];
+
+/**
+ * 「体征类型」筛选选项：体重不判异常（服务端参考范围不含 WEIGHT，`isAbnormal` 恒 false），
+ * 故不作为告警筛选维度——否则选了永远 0 条。`TYPE_LABELS` 仍保留 WEIGHT，
+ * 列表与统计分布里的历史体重记录照常显示中文名。
+ */
+const ABNORMAL_TYPE_OPTIONS = TYPE_OPTIONS.filter(([type]) => type !== "WEIGHT");
 
 /** 处理状态展示映射 */
 const REVIEW_STATUS_LABELS: Record<VitalSignReviewStatus, string> = {
@@ -81,6 +89,9 @@ function StatCard({ label, value, tone, icon }: { label: string; value: number; 
 }
 
 export default function AbnormalAlertsPage() {
+  /** 认证主体 ID（复核人 / 随访责任人）→ 姓名；目录不可用时回退原始 ID */
+  const { subjectLabel } = useSubjectDirectory();
+
   // ——— 统计摘要 ———
   const [summary, setSummary] = useState<VitalSignAbnormalSummary | null>(null);
 
@@ -116,14 +127,14 @@ export default function AbnormalAlertsPage() {
   const [referError, setReferError] = useState("");
   const [savingRefer, setSavingRefer] = useState(false);
 
-  // ——— 老人搜索 ———
+  // ——— 长者搜索 ———
   const searchPatients = useCallback(async (query: string) => {
     setPatientError("");
     try {
       const response = await listPatients({ name: query.trim() || undefined, status: "ACTIVE", limit: 20 });
       setPatientOptions(response.records);
     } catch (error) {
-      setPatientError(errorMessage(error, "无法加载老人列表"));
+      setPatientError(errorMessage(error, "无法加载长者列表"));
       setPatientOptions([]);
     }
   }, []);
@@ -244,8 +255,13 @@ export default function AbnormalAlertsPage() {
     },
     {
       key: "patient_name",
-      header: "老人",
+      header: "长者",
       render: (row) => <span className="font-medium">{row.patient_name || "-"}</span>,
+    },
+    {
+      key: "encounter_no",
+      header: "住院号",
+      render: (row) => <span className="text-fg-muted">{row.encounter_no ?? "-"}</span>,
     },
     {
       key: "type",
@@ -273,7 +289,7 @@ export default function AbnormalAlertsPage() {
       render: (row) =>
         row.reviewed_by ? (
           <span className="text-fg-muted text-xs">
-            {row.reviewed_by}
+            {subjectLabel(row.reviewed_by)}
             {row.reviewed_at ? ` · ${formatDateTime(row.reviewed_at)}` : ""}
             {row.review_result ? ` · ${row.review_result}` : ""}
           </span>
@@ -333,7 +349,7 @@ export default function AbnormalAlertsPage() {
       <Card title="异常列表" actions={<span className="text-xs text-fg-dimmed">共 {total} 条，按测量时间倒序</span>}>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3">
           <label className="block relative">
-            <span className="text-xs text-fg-muted">老人</span>
+            <span className="text-xs text-fg-muted">长者</span>
             <Input
               className="mt-1"
               placeholder="输入姓名筛选…"
@@ -367,7 +383,7 @@ export default function AbnormalAlertsPage() {
               onChange={(event) => { setTypeFilter(event.target.value); setPage(1); }}
             >
               <option value="">全部</option>
-              {TYPE_OPTIONS.map(([type, label]) => (
+              {ABNORMAL_TYPE_OPTIONS.map(([type, label]) => (
                 <option key={type} value={type}>{label}</option>
               ))}
             </select>
@@ -431,7 +447,7 @@ export default function AbnormalAlertsPage() {
         {reviewing && reviewDone === null && (
           <div className="space-y-4">
             <div className="text-sm text-fg-muted">
-              老人：<span className="text-fg-emphasis font-medium">{reviewing.patient_name || "-"}</span>
+              长者：<span className="text-fg-emphasis font-medium">{reviewing.patient_name || "-"}</span>
               {" · "}{formatDateTime(reviewing.measured_at)} 测量
               {" · "}{formatValue(reviewing.value)}{reviewing.unit}
               {reviewing.note ? ` · ${reviewing.note}` : ""}
@@ -511,7 +527,7 @@ export default function AbnormalAlertsPage() {
         {referring && referResult === null && (
           <div className="space-y-4">
             <p className="text-sm text-fg-muted">
-              确认将 <span className="font-medium text-fg-emphasis">{referring.patient_name || "该老人"}</span> 的
+              确认将 <span className="font-medium text-fg-emphasis">{referring.patient_name || "该长者"}</span> 的
               {TYPE_LABELS[referring.type] ?? referring.type}异常（{formatValue(referring.value)}{referring.unit}，
               {formatDateTime(referring.measured_at)} 测量）转诊？系统将自动创建
               <span className="font-medium text-fg-emphasis">慢病随访计划（门诊）</span>，安排责任人跟进。
@@ -528,7 +544,7 @@ export default function AbnormalAlertsPage() {
             <p className="text-sm text-fg-muted">
               已创建随访计划：<span className="font-medium text-fg-emphasis">{referResult.followup_plan.followup_type}</span>
               {" · "}计划日期 {formatDate(referResult.followup_plan.planned_date)}
-              {" · "}责任人 {referResult.followup_plan.assignee}
+              {" · "}责任人 {subjectLabel(referResult.followup_plan.assignee)}
             </p>
             <div className="flex justify-end gap-2">
               <Button variant="functional" onClick={() => { window.location.href = "/dashboard/followup"; }}>前往随访管理</Button>

@@ -6,10 +6,12 @@ import {
   dischargeEncounter,
   getElderlyDischargeHandover,
   listActiveElderlyAdmissions,
+  listBedOccupancy,
   listElderlyAdmissions,
   listIdentitySubjects,
   listPatients,
   markEncounterDeath,
+  type BedOccupancyRecord,
   type ElderlyAdmissionInput,
   type ElderlyDischargeHandover,
   type ElderlyDischargeHandoverSnapshot,
@@ -17,6 +19,7 @@ import {
   type IdentitySubject,
   type Patient,
 } from "@pitchfork/shared/aceso";
+import { admissionErrorMessage } from "./admissionMessages";
 import { dayBoundary, formatDate, formatDateTime, toOffsetDateTime } from "../lib/datetime";
 
 interface AdmissionForm {
@@ -314,11 +317,13 @@ export default function AdmissionsPage() {
   const [loading, setLoading] = useState(true);
   const [dischargedLoading, setDischargedLoading] = useState(false);
   const [pageError, setPageError] = useState("");
-  /** 离院/去世成功后的下一步指引（023：离院不再收束账单，账单需到「养老收费 → 结算收束」收尾） */
+  /** 离院/去世成功后的下一步指引（023：离院不再关账，账单需到「养老收费 → 结算关账」收尾） */
   const [notice, setNotice] = useState("");
   const [editorOpen, setEditorOpen] = useState(false);
   const [form, setForm] = useState<AdmissionForm>(admissionFormDefaults);
   const [formError, setFormError] = useState("");
+  /** 当前占用中的床位（只读，用于办理入住时提示冲突；加载失败静默降级为空列表） */
+  const [bedOccupancy, setBedOccupancy] = useState<BedOccupancyRecord[]>([]);
   const [saving, setSaving] = useState(false);
   const [dischargingId, setDischargingId] = useState<string | null>(null);
   const [patientSearch, setPatientSearch] = useState("");
@@ -459,6 +464,26 @@ export default function AdmissionsPage() {
     setEditorOpen(true);
   }
 
+  /**
+   * 办理入住弹窗打开时拉取当前床位占用，用于「房间床位」下方的实时提示。
+   * 计划 028 §4.1：出租（占用）事实来源是 encounters 的 department/ward，无床位主数据（D1）。
+   * 拉取失败静默降级（提示缺失，但保存时的服务端校验仍然生效），不阻塞表单。
+   */
+  useEffect(() => {
+    if (!editorOpen) return;
+    let active = true;
+    listBedOccupancy({ limit: 100 })
+      .then((response) => {
+        if (active) setBedOccupancy(response.records);
+      })
+      .catch(() => {
+        if (active) setBedOccupancy([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [editorOpen]);
+
   function handlePatientSearchChange(value: string) {
     setPatientSearch(value);
     setSelectedPatient(null);
@@ -488,15 +513,15 @@ export default function AdmissionsPage() {
       setEditorOpen(false);
       await load();
     } catch (error) {
-      setFormError(errorMessage(error, "无法保存入住记录"));
+      setFormError(admissionErrorMessage(error, "无法保存入住记录"));
     } finally {
       setSaving(false);
     }
   }
 
-  /** 023：离院/去世只标记事实，账单收束是收费页的独立显式动作，成功路径必须给出下一步指引 */
+  /** 023：离院/去世只标记事实，账单关账是收费页的独立显式动作，成功路径必须给出下一步指引 */
   const BILLING_SETTLEMENT_HINT =
-    "请到「养老收费 → 结算收束」完成账单收尾（可核销押金，未结部分需说明减免原因）。";
+    "请到「养老收费 → 结算关账」完成账单收尾（可核销押金，未结部分需说明减免原因）。";
 
   async function handleDischarge(encounter: Encounter) {
     if (!window.confirm(`确认办理住院号 ${encounter.encounter_no} 的离院吗？`)) return;
@@ -506,7 +531,7 @@ export default function AdmissionsPage() {
     try {
       await dischargeEncounter(encounter.id, new Date().toISOString());
       await load();
-      setNotice(`已办理离院。该长者的账单尚未收束，${BILLING_SETTLEMENT_HINT}`);
+      setNotice(`已办理离院。该长者的账单尚未关账，${BILLING_SETTLEMENT_HINT}`);
     } catch (error) {
       setPageError(errorMessage(error, "无法办理离院"));
     } finally {
@@ -541,7 +566,7 @@ export default function AdmissionsPage() {
       setDeathDate("");
       setDeathCause("");
       await load();
-      setNotice(`已办理去世。该长者的账单尚未收束，${BILLING_SETTLEMENT_HINT}`);
+      setNotice(`已办理去世。该长者的账单尚未关账，${BILLING_SETTLEMENT_HINT}`);
     } catch (error) {
       // 409/网络/校验失败：保留表单输入，错误独立展示（不得用错误面板替换输入表单）
       setDeathError(errorMessage(error, "无法办理去世"));
@@ -612,6 +637,22 @@ export default function AdmissionsPage() {
 
   const availablePatients = patients.filter((patient) => !admissions.some((admission) => admission.patient_id === patient.id));
   const availablePatientOptions = patientOptions.filter((patient) => !admissions.some((admission) => admission.patient_id === patient.id));
+
+  /**
+   * 所选床位的当前占用记录：部门与床位都填写后，按 trim 后精确相等匹配（计划 028 D1，
+   * 不做大小写/全角归一，`'001'` 与 `' 001'` 视为同一床位，`'001'` 与 `'01'` 视为不同床位）。
+   */
+  const wardOccupancy = useMemo(() => {
+    const department = form.department.trim();
+    const ward = form.ward.trim();
+    if (!department || !ward) return null;
+    return (
+      bedOccupancy.find(
+        (record) => (record.department ?? "").trim() === department && (record.ward ?? "").trim() === ward,
+      ) ?? null
+    );
+  }, [bedOccupancy, form.department, form.ward]);
+
   const activeColumns: Column<AdmissionRow>[] = [
     { key: "patientName", header: "长者", className: "min-w-[140px]" },
     { key: "encounter_no", header: "住院号", className: "min-w-[140px]" },
@@ -817,12 +858,29 @@ export default function AdmissionsPage() {
               onChange={(event) => setForm((current) => ({ ...current, department: event.target.value }))}
               placeholder="请输入照护单元或病区"
             />
-            <Input
-              label="房间床位"
-              value={form.ward}
-              onChange={(event) => setForm((current) => ({ ...current, ward: event.target.value }))}
-              placeholder="请输入房间和床位"
-            />
+            <div className="flex flex-col gap-1.5">
+              <Input
+                label="房间床位"
+                value={form.ward}
+                onChange={(event) => setForm((current) => ({ ...current, ward: event.target.value }))}
+                placeholder="请输入房间和床位"
+              />
+              {wardOccupancy && (
+                <p
+                  role="status"
+                  className="rounded-md border border-warning/30 bg-warning-bg px-3 py-2 text-xs text-warning"
+                >
+                  该床位当前占用：{wardOccupancy.patient_name ?? wardOccupancy.patient_id} · 住院号{" "}
+                  {wardOccupancy.encounter_no ?? "-"} ·{" "}
+                  {wardOccupancy.discharge_date
+                    ? `预计离院 ${formatDate(wardOccupancy.discharge_date)}`
+                    : "仍在住"}
+                </p>
+              )}
+              <p className="text-xs text-fg-dimmed">
+                同一床位在重叠时段不能重复入住；保存时系统会校验并拒绝冲突。
+              </p>
+            </div>
             <p className="text-sm text-fg-muted sm:col-span-2">
               责任医生/照护师：保存时自动记为当前操作人，不可修改
             </p>
@@ -908,7 +966,7 @@ export default function AdmissionsPage() {
       >
         <div className="space-y-4">
           <p className="rounded-lg border border-info/30 bg-info-bg px-4 py-3 text-sm text-info">
-            办理去世将收束该入住全部医嘱、任务与照护周期，并关闭患者档案。此操作不可撤销，请确认后再提交。
+            办理去世将一并结束该入住全部医嘱、任务与照护周期，并关闭患者档案。此操作不可撤销，请确认后再提交。
           </p>
           {deathError && (
             <div id="death-error" role="alert" className="rounded-lg border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">

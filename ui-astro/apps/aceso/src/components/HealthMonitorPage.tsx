@@ -5,14 +5,17 @@ import {
   deleteVitalSign,
   getVitalSignSnapshot,
   getVitalSignTrend,
+  listElderlyAdmissions,
   listPatients,
   listVitalSigns,
   updateVitalSign,
+  type Encounter,
   type Patient,
   type VitalSignRecord,
   type VitalSignType,
 } from "@pitchfork/shared/aceso";
 import { dayBoundary, daysAgoLocal, formatDate, formatDateTime, nowLocalInput, toInputValue, toOffsetDateTime } from "../lib/datetime";
+import { useSubjectDirectory } from "../lib/identity";
 
 const PAGE_SIZE = 20;
 
@@ -39,6 +42,14 @@ const TYPE_UNITS: Record<VitalSignType, string> = {
   WEIGHT: "kg",
 };
 
+/** 入住状态展示映射（与收费/押金页口径一致） */
+const ADMISSION_STATUS_LABEL: Record<string, string> = {
+  ACTIVE: "在住",
+  DISCHARGED: "已离院",
+  TRANSFERRED: "已转出",
+  DECEASED: "已去世",
+};
+
 /** 表单输入顺序与占位提示 */
 const FORM_FIELDS: { type: VitalSignType; placeholder: string; step?: string }[] = [
   { type: "TEMPERATURE", placeholder: "36.0–37.3", step: "0.1" },
@@ -46,7 +57,9 @@ const FORM_FIELDS: { type: VitalSignType; placeholder: string; step?: string }[]
   { type: "RESPIRATION", placeholder: "12–20", step: "1" },
   { type: "SYSTOLIC_BP", placeholder: "90–140", step: "1" },
   { type: "DIASTOLIC_BP", placeholder: "60–90", step: "1" },
-  { type: "SPO2", placeholder: "≥95（0–100）", step: "1" },
+  // SPO2 占位只写正常范围（95–100，与服务端参考范围一致）；0–100 的合法输入范围
+  // 仍由 submitForm 的客户端校验与服务端 sanityCheck 共同保障，不放在提示文案里。
+  { type: "SPO2", placeholder: "95–100", step: "1" },
   { type: "BLOOD_GLUCOSE", placeholder: "3.9–6.1", step: "0.1" },
   { type: "WEIGHT", placeholder: "kg，不判异常", step: "0.1" },
 ];
@@ -167,7 +180,10 @@ function TrendChart({ records, type }: { records: VitalSignRecord[]; type: Vital
 }
 
 export default function HealthMonitorPage() {
-  // ——— 异常告警页跳转参数：?patient=<id>&type=<TYPE> 自动选中老人与趋势类型 ———
+  /** 认证主体 ID（记录人）→ 姓名；目录不可用时回退原始 ID */
+  const { subjectLabel } = useSubjectDirectory();
+
+  // ——— 异常告警页跳转参数：?patient=<id>&type=<TYPE> 自动选中长者与趋势类型 ———
   const initialPatientId = useMemo(
     () => (typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("patient")),
     [],
@@ -177,7 +193,7 @@ export default function HealthMonitorPage() {
     [],
   );
 
-  // ——— 老人选择 ———
+  // ——— 长者选择 ———
   const [patientQuery, setPatientQuery] = useState("");
   const [patientOptions, setPatientOptions] = useState<Patient[]>([]);
   const [selectedPatient, setSelectedPatient] = useState<Patient | null>(null);
@@ -190,6 +206,12 @@ export default function HealthMonitorPage() {
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
   const [pageError, setPageError] = useState("");
+
+  // ——— 入住选择（可选）：体征记录挂接到具体入住，异常告警可按住院号追溯 ———
+  const [admissionOptions, setAdmissionOptions] = useState<Encounter[]>([]);
+  const [admissionLoading, setAdmissionLoading] = useState(false);
+  const [admissionError, setAdmissionError] = useState("");
+  const [selectedEncounterId, setSelectedEncounterId] = useState("");
 
   // ——— 录入表单 ———
   const [form, setForm] = useState<Record<string, string>>({});
@@ -214,14 +236,14 @@ export default function HealthMonitorPage() {
   const [trendLoading, setTrendLoading] = useState(false);
   const [trendError, setTrendError] = useState("");
 
-  // ——— 老人搜索 ———
+  // ——— 长者搜索 ———
   const searchPatients = useCallback(async (query: string) => {
     setPatientError("");
     try {
       const response = await listPatients({ name: query.trim() || undefined, status: "ACTIVE", limit: 20 });
       setPatientOptions(response.records);
     } catch (error) {
-      setPatientError(errorMessage(error, "无法加载老人列表"));
+      setPatientError(errorMessage(error, "无法加载长者列表"));
       setPatientOptions([]);
     }
   }, []);
@@ -230,7 +252,7 @@ export default function HealthMonitorPage() {
     searchPatients("");
   }, [searchPatients]);
 
-  // 从异常告警页跳转时，老人列表加载后自动选中目标老人与体征类型（首屏 20 条未命中则扩大查找）
+  // 从异常告警页跳转时，长者列表加载后自动选中目标长者与体征类型（首屏 20 条未命中则扩大查找）
   useEffect(() => {
     if (selectedPatient || !initialPatientId || patientOptions.length === 0) return;
     const match = patientOptions.find((patient) => patient.id === initialPatientId);
@@ -315,6 +337,48 @@ export default function HealthMonitorPage() {
     }
   }, [selectedPatient, refreshAll]);
 
+  /**
+   * 选中长者后拉取其入住记录（`status` 显式传空串 = 含历史全部入住，按入住日期倒序）。
+   * 恰好一条「在住」时默认选中它；其余情况默认不挂接，由操作者显式选择（计划 028 D4）。
+   */
+  const loadAdmissions = useCallback(async (patientId: string) => {
+    setAdmissionLoading(true);
+    setAdmissionError("");
+    try {
+      const response = await listElderlyAdmissions({ patient_id: patientId, status: "", limit: 20 });
+      const sorted = [...response.records].sort((a, b) => (b.admit_date ?? "").localeCompare(a.admit_date ?? ""));
+      setAdmissionOptions(sorted);
+      const active = sorted.filter((record) => record.status === "ACTIVE");
+      setSelectedEncounterId(active.length === 1 ? active[0].id : "");
+    } catch (error) {
+      setAdmissionOptions([]);
+      setSelectedEncounterId("");
+      setAdmissionError(errorMessage(error, "无法加载入住记录"));
+    } finally {
+      setAdmissionLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!selectedPatient) {
+      setAdmissionOptions([]);
+      setSelectedEncounterId("");
+      setAdmissionError("");
+      return;
+    }
+    void loadAdmissions(selectedPatient.id);
+  }, [selectedPatient, loadAdmissions]);
+
+  /**
+   * 028（评审 P2-4）：恰有一条「在住」养老入住时，服务端 `VitalSignService` 会自动挂接
+   * （D4，`V501` 部分唯一索引保证至多一条）。界面据此隐藏「不挂接」选项并给出说明，
+   * 避免出现「界面允许不挂接、服务端仍然挂上」的承诺落差。
+   */
+  const forcedAdmission = useMemo(() => {
+    const active = admissionOptions.filter((encounter) => encounter.status === "ACTIVE");
+    return active.length === 1 ? active[0] : null;
+  }, [admissionOptions]);
+
   const snapshotByType = useMemo(() => {
     const map = new Map<VitalSignType, VitalSignRecord>();
     snapshot.forEach((record) => {
@@ -351,6 +415,8 @@ export default function HealthMonitorPage() {
       await createVitalSigns(
         inputs.map((input) => ({
           patient_id: selectedPatient.id,
+          // 选中入住时挂接 encounter_id（未选择则不带，居家/社区场景 encounter_id 保持 null）
+          ...(selectedEncounterId ? { encounter_id: selectedEncounterId } : {}),
           type: input.type,
           value: input.value,
           measured_at: toOffsetDateTime(measuredAt),
@@ -433,6 +499,11 @@ export default function HealthMonitorPage() {
       render: (row) => <span className="text-fg-emphasis">{formatDateTime(row.measured_at)}</span>,
     },
     {
+      key: "encounter_no",
+      header: "住院号",
+      render: (row) => <span className="text-fg-muted">{row.encounter_no ?? "-"}</span>,
+    },
+    {
       key: "type",
       header: "体征",
       render: (row) => (
@@ -459,7 +530,7 @@ export default function HealthMonitorPage() {
     {
       key: "recorded_by",
       header: "记录人",
-      render: (row) => <span className="text-fg-muted">{row.recorded_by || "-"}</span>,
+      render: (row) => <span className="text-fg-muted">{subjectLabel(row.recorded_by)}</span>,
     },
     {
       key: "note",
@@ -482,11 +553,11 @@ export default function HealthMonitorPage() {
 
   return (
     <div className="space-y-6">
-      {/* 老人选择 */}
-      <Card title="选择老人">
+      {/* 长者选择 */}
+      <Card title="选择长者">
         <div className="relative">
           <Input
-            placeholder="输入姓名搜索入住老人…"
+            placeholder="输入姓名搜索入住长者…"
             value={patientQuery}
             onChange={(event) => {
               setPatientQuery(event.target.value);
@@ -513,7 +584,7 @@ export default function HealthMonitorPage() {
         {patientError && <p className="text-sm text-danger mt-2">{patientError}</p>}
         {selectedPatient && (
           <p className="text-sm text-fg-muted mt-3">
-            当前老人：<span className="text-fg-emphasis font-medium">{selectedPatient.name}</span>
+            当前长者：<span className="text-fg-emphasis font-medium">{selectedPatient.name}</span>
             {selectedPatient.birth_date ? `（${formatDate(selectedPatient.birth_date)}出生）` : ""}
           </p>
         )}
@@ -521,7 +592,7 @@ export default function HealthMonitorPage() {
 
       {!selectedPatient ? (
         <Card>
-          <EmptyState icon="❤️" title="请先选择老人" description="选择入住老人后即可查看体征快照、录入与趋势" />
+          <EmptyState icon="❤️" title="请先选择长者" description="选择入住长者后即可查看体征快照、录入与趋势" />
         </Card>
       ) : (
         <>
@@ -584,6 +655,42 @@ export default function HealthMonitorPage() {
                 </label>
               ))}
             </div>
+            <div className="mt-4 flex flex-col gap-1.5">
+              <label className="text-xs text-fg-muted" htmlFor="vital-admission">入住（可选）</label>
+              {admissionLoading ? (
+                <p className="text-xs text-fg-dimmed">正在加载入住记录…</p>
+              ) : admissionError ? (
+                <p className="text-xs text-danger">{admissionError}</p>
+              ) : admissionOptions.length === 0 ? (
+                <p className="text-xs text-fg-dimmed">该长者暂无入住记录，体征将不挂接入住</p>
+              ) : (
+                <>
+                  <select
+                    id="vital-admission"
+                    className="h-10 w-full rounded-md border border-border bg-surface px-3 text-sm text-fg"
+                    value={selectedEncounterId}
+                    onChange={(event) => setSelectedEncounterId(event.target.value)}
+                  >
+                    {/* 028（评审 P2-4）：恰一条「在住」时服务端会强制挂接（D4），
+                        故不再提供「不挂接」选项，避免界面承诺一件服务端不会照做的事。 */}
+                    {!forcedAdmission && <option value="">不挂接入住（居家/社区）</option>}
+                    {admissionOptions.map((encounter) => (
+                      <option key={encounter.id} value={encounter.id}>
+                        住院号 {encounter.encounter_no} · {ADMISSION_STATUS_LABEL[encounter.status] ?? encounter.status}
+                        {encounter.admit_date ? ` · 入住 ${formatDate(encounter.admit_date)}` : ""}
+                        {encounter.ward ? ` · ${encounter.ward}` : ""}
+                      </option>
+                    ))}
+                  </select>
+                  {forcedAdmission && (
+                    <p className="text-xs text-fg-dimmed">
+                      该长者当前在住（住院号 {forcedAdmission.encounter_no}），体征将挂接到该入住记录；
+                      如需不挂接，请先办理离院。
+                    </p>
+                  )}
+                </>
+              )}
+            </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-4">
               <label className="block">
                 <span className="text-xs text-fg-muted">测量时间</span>
@@ -642,7 +749,7 @@ export default function HealthMonitorPage() {
             ) : trendError ? (
               <p className="text-sm text-danger py-8 text-center">{trendError}</p>
             ) : trendPoints.length === 0 ? (
-              <EmptyState icon="📈" title="暂无趋势数据" description={`该老人在所选时间段内没有${TYPE_LABELS[trendType]}记录`} />
+              <EmptyState icon="📈" title="暂无趋势数据" description={`该长者在所选时间段内没有${TYPE_LABELS[trendType]}记录`} />
             ) : (
               <>
                 <TrendChart records={trendPoints} type={trendType} />
