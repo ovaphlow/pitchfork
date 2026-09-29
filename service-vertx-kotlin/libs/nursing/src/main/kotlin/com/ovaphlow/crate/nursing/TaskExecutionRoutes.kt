@@ -2,6 +2,7 @@ package com.ovaphlow.crate.nursing
 
 import io.vertx.core.Handler
 import io.vertx.core.Vertx
+import io.vertx.core.json.JsonObject
 import io.vertx.ext.web.Router
 import io.vertx.ext.web.RoutingContext
 import io.vertx.ext.web.handler.BodyHandler
@@ -11,6 +12,68 @@ import java.time.LocalDate
 
 object TaskExecutionRoutes {
     private val TERMINAL_STATUSES = setOf("COMPLETED", "SKIPPED", "CANCELLED")
+
+    /** 逾期收口（030 §4.3）请求体白名单：未知键一律 400，不做静默忽略 */
+    private val CONVERGE_OVERDUE_KEYS = setOf("encounter_id", "task_type", "min_overdue_minutes", "limit")
+
+    /**
+     * 030 安全读体（评审 P2-1 收口）：
+     * 请求体缺失或为空 → 空对象（各键可选，由服务层套用默认值）；
+     * 非 JSON 对象（数组/字符串/畸形 JSON）→ `null`，由调用方显式映射 400，
+     * **不得**让 `ctx.body().asJsonObject()` 抛 `DecodeException` 退化成 500。
+     */
+    private fun safeJsonObjectBody(ctx: RoutingContext): JsonObject? {
+        val raw = ctx.body()?.buffer()?.toString()?.trim()
+        if (raw.isNullOrEmpty()) return JsonObject()
+        return try {
+            JsonObject(raw)
+        } catch (_: RuntimeException) {
+            null
+        }
+    }
+
+    /**
+     * 读取逾期收口请求体中的可选整数字段（030 §4.3）。
+     *
+     * - 键缺失或为 `null` → `null`（默认值由服务层套用）；
+     * - JSON 整数 → 原值（0/负数由服务层按契约拒绝）；
+     * - 非整数（含字符串 `"abc"`、小数、布尔）→ [IllegalArgumentException]（路由映射 400）。
+     */
+    fun optionalInt(
+        body: JsonObject,
+        key: String,
+    ): Int? {
+        val raw = body.getValue(key) ?: return null
+        val value = when (raw) {
+            is Int -> raw.toLong()
+            is Long -> raw
+            is String -> raw.trim().toLongOrNull() ?: throw IllegalArgumentException("$key must be an integer")
+            else -> throw IllegalArgumentException("$key must be an integer")
+        }
+        if (value < Int.MIN_VALUE.toLong() || value > Int.MAX_VALUE.toLong()) {
+            throw IllegalArgumentException("$key must be an integer")
+        }
+        return value.toInt()
+    }
+
+    /**
+     * 读取逾期收口请求体中的可选文本字段（030 §4.3）。
+     *
+     * - 键缺失、`null`、或 trim 后为空 → `null`（视为未提供，不参与过滤）；
+     * - 字符串 → trim 后的值；
+     * - 其它类型（数字/数组/对象/布尔）→ [IllegalArgumentException]（路由映射 400）。
+     *
+     * 不使用 `JsonObject#getString`：键存在但值不是字符串时它会抛 [ClassCastException]，
+     * 落到全局失败处理会误报 500；本端点的请求体错误一律 400。
+     */
+    fun optionalText(
+        body: JsonObject,
+        key: String,
+    ): String? {
+        val raw = body.getValue(key) ?: return null
+        val value = raw as? String ?: throw IllegalArgumentException("$key must be a string")
+        return value.trim().takeIf { it.isNotEmpty() }
+    }
 
     fun parseOverdueParam(value: String?): Boolean? = when {
         value == null -> null
@@ -127,6 +190,55 @@ object TaskExecutionRoutes {
         router.get("/overdue").handler { handleOverdue(it) }
         // 容错尾部斜杠
         router.get("/overdue/").handler { handleOverdue(it) }
+
+        // ——— 逾期收口（030 §3 D5 / §4.3）：把逾期未终态的执行显式置 SKIPPED（漏执行）。
+        // 写操作、幂等、单次上限 200；与 /today、/overdue 同处静态段，
+        // 必须在 /:id、/:id/status 等泛型路径之前注册。
+        fun handleConvergeOverdue(ctx: io.vertx.ext.web.RoutingContext) {
+            // 空请求体按 `{}` 处理：白名单内所有键均可选，默认值由服务层套用。
+            // 030 评审 P2-1：非 JSON 对象的请求体（数组/字符串/畸形 JSON）必须显式 400，
+            // 不得因 `asJsonObject()` 抛 DecodeException 而退化成 500。
+            val body = safeJsonObjectBody(ctx)
+            if (body == null) {
+                NursingRoutes.respond(ctx, 400, "body must be a JSON object")
+                return
+            }
+            val unknownKeys = body.fieldNames().filter { it !in CONVERGE_OVERDUE_KEYS }
+            if (unknownKeys.isNotEmpty()) {
+                NursingRoutes.respond(ctx, 400, "unsupported converge keys: ${unknownKeys.joinToString(", ")}")
+                return
+            }
+
+            val encounterId: String?
+            val taskType: String?
+            val minOverdueMinutes: Int?
+            val limit: Int?
+            try {
+                encounterId = optionalText(body, "encounter_id")
+                taskType = optionalText(body, "task_type")
+                minOverdueMinutes = optionalInt(body, "min_overdue_minutes")
+                limit = optionalInt(body, "limit")
+            } catch (error: IllegalArgumentException) {
+                NursingRoutes.respond(ctx, 400, error.message)
+                return
+            }
+
+            service.convergeOverdueExecutions(
+                encounterId = encounterId,
+                taskType = taskType,
+                minOverdueMinutes = minOverdueMinutes,
+                limit = limit,
+            ).onSuccess { ctx.json(it) }
+                .onFailure {
+                    when (it) {
+                        is IllegalArgumentException -> NursingRoutes.respond(ctx, 400, it.message)
+                        else -> NursingRoutes.respondError(ctx, it)
+                    }
+                }
+        }
+        router.post("/converge-overdue").handler { handleConvergeOverdue(it) }
+        // 容错尾部斜杠
+        router.post("/converge-overdue/").handler { handleConvergeOverdue(it) }
 
         // ——— 执行统计（护理员工作量与计划完成率） ———
         fun handleStatistics(ctx: io.vertx.ext.web.RoutingContext) {

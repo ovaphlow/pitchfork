@@ -149,10 +149,32 @@ class TaskExecutionService(
         /** 跨日逾期队列分页上限 */
         const val OVERDUE_LIMIT_MAX = 200
 
+        /** 逾期收口默认阈值：1440 分钟 = 24 小时，与 [STALE_IN_PROGRESS_MINUTES] 同口径（030 §3 D5） */
+        const val CONVERGE_MIN_OVERDUE_MINUTES_DEFAULT = 1440
+
+        /** 逾期收口单次上限与默认值（030 §4.3：默认 200、最大 200） */
+        const val CONVERGE_LIMIT_DEFAULT = 200
+
+        /** 逾期收口单次上限（030 §4.3） */
+        const val CONVERGE_LIMIT_MAX = 200
+
+        /** 逾期收口留痕原因（030 §4.3 冻结文案，不得改写） */
+        const val CONVERGE_REASON = "逾期未执行，批量标记漏执行"
+
+        /**
+         * 执行状态机（003 冻结）。
+         *
+         * `IN_PROGRESS → SKIPPED` 的扩条来自计划
+         * `docs/plans/030.aceso-fee-catalog-and-operational-gaps.md` §3 D5 / §4.3：
+         * 逾期收口要把「已开始但逾期未完成」的执行显式置为漏执行（`SKIPPED`），
+         * 否则收口覆盖不到 `IN_PROGRESS` 行（027 只交付了跨日逾期队列与 `is_stale` 派生，
+         * 没有任何终态收口入口）。这是有意为之的口径统一：通用 `PATCH /:id/status`
+         * 因此也支持该转移，仅新增一条允许转移，其余语义逐字不变（终态仍无出边）。
+         */
         private val VALID_STATUS_TRANSITIONS =
             mapOf(
                 "PENDING" to listOf("IN_PROGRESS", "SKIPPED", "CANCELLED"),
-                "IN_PROGRESS" to listOf("COMPLETED", "CANCELLED"),
+                "IN_PROGRESS" to listOf("COMPLETED", "SKIPPED", "CANCELLED"),
                 "COMPLETED" to emptyList(),
                 "SKIPPED" to emptyList(),
                 "CANCELLED" to emptyList(),
@@ -221,6 +243,37 @@ class TaskExecutionService(
             val normalizedOffset = (offset ?: 0).coerceAtLeast(0)
             return Pair(normalizedLimit, normalizedOffset)
         }
+
+        /**
+         * 逾期收口请求归一化（030 §4.3），纯函数，便于单测覆盖边界：
+         * - `minOverdueMinutes` 默认 [CONVERGE_MIN_OVERDUE_MINUTES_DEFAULT]（1440）；
+         *   显式值必须 `>= 1`，否则抛 [IllegalArgumentException]（路由层映射 400）；
+         * - `limit` 默认 [CONVERGE_LIMIT_DEFAULT]（200）并收敛到 `1..`[CONVERGE_LIMIT_MAX]，
+         *   沿用 [normalizeOverduePaging] 的「越界钳制」口径（不报错）。
+         */
+        fun normalizeConvergeRequest(
+            minOverdueMinutes: Int?,
+            limit: Int?,
+        ): Pair<Int, Int> {
+            val effectiveMinutes = minOverdueMinutes ?: CONVERGE_MIN_OVERDUE_MINUTES_DEFAULT
+            require(effectiveMinutes >= 1) { "min_overdue_minutes must be an integer >= 1" }
+            val effectiveLimit = (limit ?: CONVERGE_LIMIT_DEFAULT).coerceIn(1, CONVERGE_LIMIT_MAX)
+            return Pair(effectiveMinutes, effectiveLimit)
+        }
+
+        /**
+         * 逾期收口留痕载荷（030 §4.3）：合并写入 `metadata.convergence`，不覆盖其它键。纯函数。
+         *
+         * @param at 收敛时刻，序列化为 ISO-8601（[OffsetDateTime.toString]）
+         */
+        fun convergencePayload(
+            minOverdueMinutes: Int,
+            at: OffsetDateTime,
+        ): JsonObject =
+            JsonObject()
+                .put("reason", CONVERGE_REASON)
+                .put("at", at.toString())
+                .put("min_overdue_minutes", minOverdueMinutes)
 
         fun toJson(row: Row): JsonObject =
             JsonObject()
@@ -1376,6 +1429,161 @@ class TaskExecutionService(
                             .put("records", records)
                             .put("meta", JsonObject().put("total", total))
                     }
+            }
+    }
+
+    // ========================================================================
+    //  逾期执行收口（030 §3 D5 / §4.3）：幂等批量置 SKIPPED，metadata.convergence 留痕
+    // ========================================================================
+
+    /**
+     * 把「逾期未终态」的执行批量置为 `SKIPPED`（漏执行），幂等。
+     *
+     * 口径（030 §4.3 冻结契约，逐字实现）：
+     * - 命中 `status ∈ {PENDING, IN_PROGRESS}` 且 `planned_time < now - minOverdueMinutes`；
+     * - 可选 `encounterId`（任务的 `encounter_id` 或任务所属周期的 `encounter_id`，
+     *   与 MAR 查询同口径）与 `taskType` 过滤；两者同时给出时为「与」关系；
+     * - 按 `planned_time ASC` 取前 `limit` 条（同刻以 `id ASC` 兜底，保证可复现）；
+     * - 逐条 `status = 'SKIPPED'`，并把
+     *   `metadata.convergence = {reason, at, min_overdue_minutes}` **合并**写入既有 `metadata`
+     *   （`COALESCE(metadata,'{}'::jsonb) || patch`，只替换 `convergence` 键，不覆盖其它键）；
+     * - 「选取候选 + 逐条更新」在**同一事务**内提交（[Pool.withTransaction]）；
+     * - UPDATE 自带 `status IN ('PENDING','IN_PROGRESS')` 守卫：终态行（`COMPLETED`/`SKIPPED`/
+     *   `CANCELLED`）永远不产生任何写；被并发流转的行 `rowCount = 0`，不计入 `converged`；
+     * - 幂等：上次已收敛的行不再命中，第二次调用 `converged` 自然为 0。
+     *
+     * 有意不叠加 027 的「活跃周期参与条件」：本端点是人工触发的运维收口动作
+     * （030 §2.2 明确不做定时任务），命中条件以本契约逐字为准。
+     *
+     * @return `{"converged": N, "ids": [...], "truncated": bool, "min_overdue_minutes": n}`
+     */
+    fun convergeOverdueExecutions(
+        encounterId: String? = null,
+        taskType: String? = null,
+        minOverdueMinutes: Int? = null,
+        limit: Int? = null,
+    ): Future<JsonObject> {
+        val effectiveMinutes: Int
+        val effectiveLimit: Int
+        try {
+            val normalized = normalizeConvergeRequest(minOverdueMinutes, limit)
+            effectiveMinutes = normalized.first
+            effectiveLimit = normalized.second
+        } catch (error: IllegalArgumentException) {
+            return Future.failedFuture(error)
+        }
+
+        val now = OffsetDateTime.now()
+        val threshold = now.minusMinutes(effectiveMinutes.toLong())
+        val convergencePatch =
+            JSONB.valueOf(
+                JsonObject().put("convergence", convergencePayload(effectiveMinutes, now)).encode(),
+            )
+
+        val eStatus = DSL.field("e.status", String::class.java)
+        val ePlannedTime = DSL.field("e.planned_time", OffsetDateTime::class.java)
+        val conditions = mutableListOf<org.jooq.Condition>()
+        conditions.add(eStatus.`in`("PENDING", "IN_PROGRESS"))
+        conditions.add(ePlannedTime.lt(threshold))
+        encounterId?.takeIf { it.isNotBlank() }?.let { id ->
+            conditions.add(
+                DSL
+                    .field("p.encounter_id", String::class.java)
+                    .eq(id)
+                    .or(DSL.field("t.encounter_id", String::class.java).eq(id)),
+            )
+        }
+        taskType?.takeIf { it.isNotBlank() }?.let { conditions.add(DSL.field("t.task_type", String::class.java).eq(it)) }
+
+        // 多取 1 条仅用于判定 truncated；该行不参与收敛
+        val candidateQuery =
+            ctx
+                .select(DSL.field("e.id").`as`("id"))
+                .from(DSL.table(DSL.name("nursing", "nursing_task_executions")).`as`("e"))
+                .join(DSL.table(DSL.name("nursing", "nursing_tasks")).`as`("t"))
+                .on(DSL.field("e.task_id").eq(DSL.field("t.id")))
+                .leftJoin(DSL.table(DSL.name("nursing", "nursing_service_periods")).`as`("p"))
+                .on(DSL.field("t.period_id").eq(DSL.field("p.id")))
+                .where(conditions)
+                .orderBy(ePlannedTime.asc(), DSL.field("e.id", String::class.java).asc())
+                .limit(effectiveLimit + 1)
+
+        return pool.withTransaction<JsonObject> { connection ->
+            connection
+                .preparedQuery(DatabaseConfig.sql(candidateQuery))
+                .execute(DatabaseConfig.tuple(candidateQuery))
+                .compose { rows ->
+                    val candidates = mutableListOf<String>()
+                    for (row in rows) {
+                        row.getValue("id")?.toString()?.let { candidates.add(it) }
+                    }
+                    convergeSequentially(
+                        connection = connection,
+                        ids = candidates.take(effectiveLimit),
+                        index = 0,
+                        convergedIds = mutableListOf(),
+                        convergencePatch = convergencePatch,
+                        minOverdueMinutes = effectiveMinutes,
+                        truncated = candidates.size > effectiveLimit,
+                    )
+                }
+        }
+    }
+
+    /**
+     * 在调用方事务内逐条把执行置为 `SKIPPED` 并合并 `metadata.convergence`。
+     * 只有 `rowCount > 0` 的行计入 `converged`/`ids`（并发流转走或已是终态的行自动跳过）。
+     */
+    private fun convergeSequentially(
+        connection: SqlConnection,
+        ids: List<String>,
+        index: Int,
+        convergedIds: MutableList<String>,
+        convergencePatch: JSONB,
+        minOverdueMinutes: Int,
+        truncated: Boolean,
+    ): Future<JsonObject> {
+        if (index >= ids.size) {
+            return Future.succeededFuture(
+                JsonObject()
+                    .put("converged", convergedIds.size)
+                    .put("ids", JsonArray(convergedIds.toList()))
+                    .put("truncated", truncated)
+                    .put("min_overdue_minutes", minOverdueMinutes),
+            )
+        }
+
+        val id = ids[index]
+        val updateQuery =
+            ctx
+                .update(t)
+                .set(cStatus, "SKIPPED")
+                .set(
+                    cMetadata,
+                    DSL.field(
+                        "COALESCE({0}, '{}'::jsonb) || {1}",
+                        JSONB::class.java,
+                        cMetadata,
+                        // `val` 是 Kotlin 硬关键字：Java 静态方法需用反引号调用才能作为绑定参数
+                        DSL.`val`(convergencePatch),
+                    ),
+                ).where(cId.eq(id))
+                .and(cStatus.`in`("PENDING", "IN_PROGRESS"))
+
+        return connection
+            .preparedQuery(DatabaseConfig.sql(updateQuery))
+            .execute(DatabaseConfig.tuple(updateQuery))
+            .compose { result ->
+                if (result.rowCount() > 0) convergedIds.add(id)
+                convergeSequentially(
+                    connection = connection,
+                    ids = ids,
+                    index = index + 1,
+                    convergedIds = convergedIds,
+                    convergencePatch = convergencePatch,
+                    minOverdueMinutes = minOverdueMinutes,
+                    truncated = truncated,
+                )
             }
     }
 
