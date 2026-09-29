@@ -167,10 +167,10 @@ export default function BillingPage() {
   // 生成账单前置校验：由服务端 precheck 判定（前端只渲染，不再复刻计价/取级规则）。
   // null 表示尚未拿到结果或请求失败，两种情况都走刻意降级（不禁用生成）。
   const [precheck, setPrecheck] = useState<BillPrecheck | null>(null);
-  // 生成/缴费/加项/收束会改变账期状态（如某账期已生成），用它触发 precheck 复验
+  // 生成/缴费/加项/关账会改变账期状态（如某账期已生成），用它触发 precheck 复验
   const [precheckTick, setPrecheckTick] = useState(0);
 
-  // 结算收束
+  // 结算关账
   const [settleOpen, setSettleOpen] = useState(false);
   const [settling, setSettling] = useState(false);
   // 结算核销：押金余额（已扣除核销）与本次核销金额输入
@@ -182,7 +182,7 @@ export default function BillingPage() {
   const [encounterArrears, setEncounterArrears] = useState(0);
   const [encounterArrearsLoading, setEncounterArrearsLoading] = useState(false);
   const [encounterArrearsError, setEncounterArrearsError] = useState("");
-  // 结算收束预览（只读）：提交前展示「会发生什么」的权威口径（含区间最终账单，故与卡片上的欠费合计不同源）
+  // 结算关账预览（只读）：提交前展示「会发生什么」的权威口径（含区间最终账单，故与卡片上的欠费合计不同源）
   const [settlePreview, setSettlePreview] = useState<SettlementPreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   // 预览不可用时的中文错误（走 billingMessages）；此时弹窗退化为「不显示预览数字、按后端错误兜底」
@@ -195,7 +195,7 @@ export default function BillingPage() {
     setAdmissionsLoading(true);
     setPageError("");
     try {
-      // 含已离院/已去世入住（结算收束入口需要），ACTIVE 优先排列
+      // 含已离院/已去世入住（结算关账入口需要），ACTIVE 优先排列
       const [patientResponse, encounterResponse] = await Promise.all([
         listPatients({ limit: 200 }),
         listElderlyAdmissions({ status: "", limit: 200 }),
@@ -320,9 +320,9 @@ export default function BillingPage() {
   }, []);
 
   /**
-   * 结算收束预览（只读，与收束实际算法同源）：打开收束弹窗时拉取。
+   * 结算关账预览（只读，与关账实际算法同源）：打开关账弹窗时拉取。
    *
-   * 失败时**不阻塞收束**：只显示中文错误，`settlePreview` 保持 `null`，
+   * 失败时**不阻塞关账**：只显示中文错误，`settlePreview` 保持 `null`，
    * 弹窗内退化为「不显示预览数字、核销上限不做前端校验、减免原因可自愿填写」，
    * 最终以服务端返回的错误文案兜底（`unsettled bills require explicit write-off` 已有中文映射）。
    */
@@ -455,7 +455,7 @@ export default function BillingPage() {
    */
   const previewMaxOffset = settlePreview ? Math.max(settlePreview.max_offset, 0) : null;
 
-  /** 本次收束是否真的生成区间最终账单：账期为 `null` 或金额为 0 都表示不生成 */
+  /** 本次关账是否真的生成区间最终账单：账期为 `null` 或金额为 0 都表示不生成 */
   const hasFinalBill =
     settlePreview != null && settlePreview.settlement_period !== null && settlePreview.final_bill_total !== 0;
 
@@ -662,7 +662,7 @@ export default function BillingPage() {
     }
   }
 
-  // ─── 结算收束 ───────────────────────────────────────────────────────
+  // ─── 结算关账 ───────────────────────────────────────────────────────
 
   const canSettle =
     selectedAdmission != null &&
@@ -670,7 +670,7 @@ export default function BillingPage() {
     !selectedAdmission.settled_at;
 
   /**
-   * 打开结算收束确认：押金余额与欠费合计已在选择入住时随结算入口加载（卡片显示不变），
+   * 打开结算关账确认：押金余额与欠费合计已在选择入住时随结算入口加载（卡片显示不变），
    * 这里只清空上次的核销输入与减免勾选，并拉取只读预览（含区间最终账单的权威口径）。
    */
   function openSettle() {
@@ -715,14 +715,14 @@ export default function BillingPage() {
       setOffsetAmount("");
       setWriteOffConfirmed(false);
       setWriteOffReason("");
-      // 收束后该入住已结算，预览必然 409（已收束）：清空而不重拉，避免把 409 当加载失败展示；
-      // 若弹窗再次打开（选了别的可收束入住），openSettle 会重新拉取最新预览。
+      // 关账后该入住已结算，预览必然 409（已关账）：清空而不重拉，避免把 409 当加载失败展示；
+      // 若弹窗再次打开（选了别的可关账入住），openSettle 会重新拉取最新预览。
       setSettlePreview(null);
       setPreviewError("");
       refreshAfterChange();
       void loadDepositBalance(selectedEncounterId);
     } catch (error) {
-      setActionError(errorMessage(error, "结算收束失败"));
+      setActionError(errorMessage(error, "结算关账失败"));
     } finally {
       setSettling(false);
     }
@@ -744,11 +744,11 @@ export default function BillingPage() {
       render: (row) => (
         <div className="flex flex-wrap items-center gap-1">
           <Badge variant={BILL_STATUS_VARIANT[row.status] ?? "default"}>{row.status}</Badge>
-          {/* 只有「已结算 且 收束时未结余额 > 0」才标记：outstanding_amount = 0 的已结算账单不显示，避免噪音 */}
+          {/* 只有「已结算 且 关账时未结余额 > 0」才标记：outstanding_amount = 0 的已结算账单不显示，避免噪音 */}
           {row.status === "已结算" && row.outstanding_amount > 0 && (
             <Badge variant="warning" className="cursor-help">
-              <span title={`收束时未结 ¥ ${formatAmount(row.outstanding_amount)}｜减免原因：${row.write_off_reason ?? "—"}`}>
-                收束时未结
+              <span title={`关账时未结 ¥ ${formatAmount(row.outstanding_amount)}｜减免原因：${row.write_off_reason ?? "—"}`}>
+                关账时未结
               </span>
             </Badge>
           )}
@@ -889,7 +889,7 @@ export default function BillingPage() {
       <div>
         <h2 className="text-lg font-semibold text-fg-emphasis">养老收费</h2>
         <p className="text-sm text-fg-muted mt-1">
-          账单生成（按月自动计费）、手工加项、缴费、欠费列表与结算收束入口。押金登记/退押见「押金管理」页。
+          账单生成（按月自动计费）、手工加项、缴费、欠费列表与结算关账入口。押金登记/退押见「押金管理」页。
         </p>
       </div>
 
@@ -927,7 +927,7 @@ export default function BillingPage() {
                 <Badge variant={ENCOUNTER_STATUS_VARIANT[selectedAdmission.status] ?? "default"}>
                   {ENCOUNTER_STATUS_LABEL[selectedAdmission.status] ?? selectedAdmission.status}
                 </Badge>
-                {selectedAdmission.settled_at && <Badge variant="default">已结算收束</Badge>}
+                {selectedAdmission.settled_at && <Badge variant="default">已关账</Badge>}
                 <span className="text-sm text-fg-muted">
                   {selectedAdmission.patientName} · {selectedAdmission.department ?? "—"} {selectedAdmission.ward ?? ""}
                 </span>
@@ -959,7 +959,7 @@ export default function BillingPage() {
             )}
             {generateGateNotice}
             {selectedAdmission?.settled_at && (
-              <p className="mb-4 text-sm text-fg-muted">该入住已完成结算收束，账单已冻结（不可生成账单、手工加项或缴费）。</p>
+              <p className="mb-4 text-sm text-fg-muted">该入住已关账，账单已冻结（不可生成账单、手工加项或缴费）。</p>
             )}
             <Table
               columns={billColumns}
@@ -976,9 +976,9 @@ export default function BillingPage() {
       </Card>
 
       {/* 结算入口 */}
-      <Card title="结算收束">
+      <Card title="结算关账">
         {!selectedAdmission ? (
-          <EmptyState icon="🏁" title="请先选择入住" description="结算收束需要选定一位入住长者" />
+          <EmptyState icon="🏁" title="请先选择入住" description="结算关账需要选定一位入住长者" />
         ) : (
           <div className="space-y-4">
             <div className="flex flex-wrap items-center gap-3">
@@ -990,17 +990,17 @@ export default function BillingPage() {
                 {selectedAdmission.department ? ` · ${selectedAdmission.department} ${selectedAdmission.ward ?? ""}` : ""}
               </span>
               {selectedAdmission.settled_at ? (
-                <Badge variant="default">已结算收束 {formatDateTime(selectedAdmission.settled_at, "—")}</Badge>
+                <Badge variant="default">已关账 {formatDateTime(selectedAdmission.settled_at, "—")}</Badge>
               ) : (
                 <Badge variant="info">未结算</Badge>
               )}
             </div>
             <p className="text-sm text-fg-muted">
               {selectedAdmission.settled_at
-                ? "该入住已完成结算收束：全部账单已冻结，不可再生成账单、手工加项或缴费。"
+                ? "该入住已关账：全部账单已冻结，不可再生成账单、手工加项或缴费。"
                 : canSettle
-                  ? "该入住已离院/去世且未结算：结算收束将生成区间最终账单并冻结全部账单，冻结后不可再生成账单、手工加项或缴费。收束时可选择用押金余额手工核销欠费。"
-                  : "结算收束适用于已离院/去世的养老入住；在住入住不可结算。"}
+                  ? "该入住已离院/去世且未结算：结算关账将生成区间最终账单并冻结全部账单，冻结后不可再生成账单、手工加项或缴费。关账时可选择用押金余额手工核销欠费。"
+                  : "结算关账适用于已离院/去世的养老入住；在住入住不可结算。"}
             </p>
             {!selectedAdmission.settled_at && (
               <div className="grid gap-4 md:grid-cols-2">
@@ -1032,7 +1032,7 @@ export default function BillingPage() {
                 disabled={!canSettle}
                 onClick={openSettle}
               >
-                结算收束
+                结算关账
               </Button>
             )}
           </div>
@@ -1063,14 +1063,14 @@ export default function BillingPage() {
                 <p className="text-xs text-fg-dimmed">欠费合计（元）</p>
                 <p className="text-lg font-bold text-danger mt-0.5">{formatAmount(summary.arrears_amount)}</p>
               </div>
-              {/* 收束减免：既不是收入（已缴）也不是欠费，故用 warning 系配色以示「已放弃」 */}
+              {/* 关账减免：既不是收入（已缴）也不是欠费，故用 warning 系配色以示「已放弃」 */}
               <div className="rounded-md border border-border bg-surface-alt px-4 py-3">
-                <p className="text-xs text-fg-dimmed">收束减免（元）</p>
+                <p className="text-xs text-fg-dimmed">关账减免（元）</p>
                 <p className="text-lg font-bold text-warning mt-0.5">{formatAmount(summary.write_off_amount ?? 0)}</p>
-                <p className="text-xs text-fg-dimmed mt-1">收束时未结而被放弃的金额合计（不并入欠费）</p>
+                <p className="text-xs text-fg-dimmed mt-1">关账时未结而被放弃的金额合计（不并入欠费）</p>
               </div>
             </div>
-            <p className="text-xs text-fg-dimmed mt-3 mb-5">应缴 − 已缴 = 欠费 + 收束减免（减免为 0 时即 应缴 − 已缴 = 欠费）</p>
+            <p className="text-xs text-fg-dimmed mt-3 mb-5">应缴 − 已缴 = 欠费 + 关账减免（减免为 0 时即 应缴 − 已缴 = 欠费）</p>
           </>
         )}
         {arrearsError && (
@@ -1210,14 +1210,14 @@ export default function BillingPage() {
               <span className="text-sm text-fg-muted">
                 {formatDate(detail.bill.period_start, "—")} ~ {formatDate(detail.bill.period_end, "—")} · 合计 ¥ {formatAmount(detail.bill.total_amount)}
               </span>
-              {detail.bill.settled_at && <Badge variant="default">已收束 {formatDateTime(detail.bill.settled_at, "—")}</Badge>}
+              {detail.bill.settled_at && <Badge variant="default">已关账 {formatDateTime(detail.bill.settled_at, "—")}</Badge>}
             </div>
-            {/* 收束时未结（减免）留痕：仅 outstanding_amount > 0 的已结算账单显示 */}
+            {/* 关账时未结（减免）留痕：仅 outstanding_amount > 0 的已结算账单显示 */}
             {detail.bill.status === "已结算" && detail.bill.outstanding_amount > 0 && (
               <div className="rounded-md border border-warning/30 bg-warning-bg px-4 py-3 text-sm text-warning">
-                <p className="font-medium">收束时未结 ¥ {formatAmount(detail.bill.outstanding_amount)}</p>
+                <p className="font-medium">关账时未结 ¥ {formatAmount(detail.bill.outstanding_amount)}</p>
                 <p className="mt-1">减免原因：{detail.bill.write_off_reason ?? "—"}</p>
-                <p className="mt-1 text-xs">该未结余额在结算收束时被显式放弃（减免），已随收束冻结、不可再收。</p>
+                <p className="mt-1 text-xs">该未结余额在结算关账时被显式放弃（减免），已随关账冻结、不可再收。</p>
               </div>
             )}
             <div>
@@ -1256,14 +1256,14 @@ export default function BillingPage() {
         )}
       </Modal>
 
-      {/* 结算收束确认（含押金核销） */}
-      <Modal open={settleOpen} onClose={() => setSettleOpen(false)} title="确认结算收束">
+      {/* 结算关账确认（含押金核销） */}
+      <Modal open={settleOpen} onClose={() => setSettleOpen(false)} title="确认结算关账">
         <div className="space-y-4">
           <p className="text-sm text-fg-muted">
-            将为{selectedAdmission?.patientName ?? ""}生成区间最终账单并冻结全部账单（收束后不可再生成账单、手工加项或缴费）。
+            将为{selectedAdmission?.patientName ?? ""}生成区间最终账单并冻结全部账单（关账后不可再生成账单、手工加项或缴费）。
           </p>
 
-          {/* 结算预览（只读，与收束实际算法同源）：提交前告知会发生什么，含本次将生成的区间最终账单 */}
+          {/* 结算预览（只读，与关账实际算法同源）：提交前告知会发生什么，含本次将生成的区间最终账单 */}
           {previewLoading ? (
             <div className="flex items-center gap-2 rounded-md border border-border bg-surface-alt px-4 py-3 text-sm text-fg-muted">
               <LoadingSpinner size={16} />
@@ -1288,7 +1288,7 @@ export default function BillingPage() {
                 <p className="text-xs text-fg-dimmed mt-1">既有「待缴费」账单未结合计</p>
               </div>
               <div className="rounded-md border border-border bg-surface-alt px-4 py-3">
-                <p className="text-xs text-fg-dimmed">收束后未结合计（元）</p>
+                <p className="text-xs text-fg-dimmed">关账后未结合计（元）</p>
                 <p className="text-lg font-bold text-warning mt-0.5">{formatAmount(settlePreview.outstanding_total)}</p>
                 <p className="text-xs text-fg-dimmed mt-1">= 当前欠费 + 区间最终账单金额</p>
               </div>
@@ -1339,7 +1339,7 @@ export default function BillingPage() {
               </Button>
             </div>
             <p className="text-xs text-fg-dimmed">
-              押金核销只在结算收束时发生：核销会同时写入缴费流水（方式「押金」）与押金台账（类型「核销」），
+              押金核销只在结算关账时发生：核销会同时写入缴费流水（方式「押金」）与押金台账（类型「核销」），
               押金余额与账单欠费同减，不产生现金流入。
             </p>
           </div>
@@ -1372,7 +1372,7 @@ export default function BillingPage() {
           ) : remaining > 0 ? (
             <div className="space-y-3 rounded-md border border-warning/30 bg-warning-bg px-4 py-3 text-sm">
               <p className="font-medium text-warning">
-                核销后仍未结 ¥ {formatAmount(remaining)}，将随本次收束冻结、不可再收。
+                核销后仍未结 ¥ {formatAmount(remaining)}，将随本次关账冻结、不可再收。
               </p>
               {previewRequiresWriteOff && (
                 <p className="text-warning">即使全额核销仍会剩余未结，必须填写减免原因。</p>

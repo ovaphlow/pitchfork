@@ -128,7 +128,7 @@ interface TaskExecProgress {
 
 export default function ActivitiesPage() {
   // ========================================================================
-  //  基础数据：老人、照护周期、执行人（用于展示与创建时选择）
+  //  基础数据：长者、照护周期、执行人（用于展示与创建时选择）
   // ========================================================================
   const [patients, setPatients] = useState<Patient[]>([]);
   const [periodByPatient, setPeriodByPatient] = useState<Map<string, NursingServicePeriod>>(new Map());
@@ -153,7 +153,7 @@ export default function ActivitiesPage() {
         setPatientNameById(new Map(patientRes.records.map((p) => [p.id, p.name])));
         setSubjects(subjectRes.records);
       } catch {
-        // 基础数据加载失败不影响页面主体，创建时选择老人会提示重试
+        // 基础数据加载失败不影响页面主体，创建时选择长者会提示重试
       }
     })();
   }, []);
@@ -421,7 +421,7 @@ export default function ActivitiesPage() {
     if (form.participants.trim()) metadata.participants = form.participants.trim();
     if (form.remark.trim()) metadata.remark = form.remark.trim();
 
-    // Q2：按老人维度各建一条 REHABILITATION 任务；不选择老人则创建为全院性活动（Q4）
+    // Q2：按长者维度各建一条 REHABILITATION 任务；不选择长者则创建为全院性活动（Q4）
     const targetPatientIds = form.patientIds.length > 0 ? form.patientIds : [null];
     setCreateSaving(true);
     setCreateError("");
@@ -1103,7 +1103,7 @@ export default function ActivitiesPage() {
               label="参与对象（可选）"
               value={createForm.participants}
               onChange={(event) => setCreateForm((current) => ({ ...current, participants: event.target.value }))}
-              placeholder="例如：自理老人 / 轮椅长者"
+              placeholder="例如：自理、轮椅长者"
             />
           </div>
           <div className="flex flex-col gap-1.5">
@@ -1120,12 +1120,12 @@ export default function ActivitiesPage() {
             />
           </div>
           <div className="flex flex-col gap-1.5">
-            <span className="text-sm font-medium text-fg-muted">参与老人（可选，可多选）</span>
+            <span className="text-sm font-medium text-fg-muted">参与长者（可选，可多选）</span>
             <p className="text-xs text-fg-dimmed">
-              每位老人将各建一条康复活动任务（按老人维度打卡）；不选择老人则创建为全院性活动（不挂老人）。
+              每位长者将各建一条康复活动任务（按长者维度打卡）；不选择长者则创建为全院性活动（不挂长者）。
             </p>
             {patients.length === 0 ? (
-              <p className="text-xs text-fg-dimmed">暂无在住老人可选，将创建为全院性活动。</p>
+              <p className="text-xs text-fg-dimmed">暂无在住长者可选，将创建为全院性活动。</p>
             ) : (
               <div className="max-h-44 overflow-y-auto rounded-md border border-border divide-y divide-border/50">
                 {patients.map((patient) => {

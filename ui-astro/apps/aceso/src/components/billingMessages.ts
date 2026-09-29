@@ -24,7 +24,7 @@ export const BILLING_BLOCKED_REASONS: Record<NonNullable<BillPrecheckBlockedBy>,
   already_exists: "该账期已经生成过账单，不能重复生成。",
   not_overlapping: "所选账期与该入住的在院区间没有重合。",
   no_admit_date: "该入住缺少入住日期，无法计费。",
-  settled: "该入住已完成结算收束，不能生成账单。",
+  settled: "该入住已关账，不能生成账单。",
   not_elderly_admission: "只有养老入住可以生成账单。",
 };
 
@@ -67,22 +67,22 @@ export const BILLING_ERROR_MAPPINGS: BillingErrorMapping[] = [
     render: () => `该费用项目已停用，请到${FEE_ITEMS_LOCATION}启用后再试。`,
   },
 
-  // ─── 结算收束状态（BillService / PaymentService / DepositOffsetService） ─
+  // ─── 结算关账状态（BillService / PaymentService / DepositOffsetService） ─
   {
     pattern: /^encounter billing is already settled$/,
-    render: () => "该入住已完成结算收束，不能重复收束。",
+    render: () => "该入住已关账，不能重复关账。",
   },
   {
     pattern: /^encounter billing is settled, cannot pay$/,
-    render: () => "该入住已完成结算收束，不能再缴费。",
+    render: () => "该入住已关账，不能再缴费。",
   },
   {
     pattern: /^encounter billing is settled, cannot generate bills$/,
-    render: () => "该入住已完成结算收束，不能生成账单。",
+    render: () => "该入住已关账，不能生成账单。",
   },
   {
     pattern: /^encounter billing is settled, cannot add items$/,
-    render: () => "该入住已完成结算收束，不能手工加项。",
+    render: () => "该入住已关账，不能手工加项。",
   },
   {
     pattern: /^bill is settled, cannot add items$/,
@@ -119,11 +119,11 @@ export const BILLING_ERROR_MAPPINGS: BillingErrorMapping[] = [
   },
   {
     pattern: /^encounter is not discharged or deceased/,
-    render: () => "结算收束只适用于已离院/已去世的养老入住。",
+    render: () => "结算关账只适用于已离院/已去世的养老入住。",
   },
   {
     pattern: /^(?:encounter has no discharge date|encounter has no death date)/,
-    render: () => "该入住缺少离院/去世日期，无法结算收束。",
+    render: () => "该入住缺少离院/去世日期，无法结算关账。",
   },
   {
     pattern: /^encounter has no admit date/,
@@ -146,11 +146,11 @@ export const BILLING_ERROR_MAPPINGS: BillingErrorMapping[] = [
     render: () => "账期格式应为 YYYY-MM。",
   },
 
-  // ─── 收束未结余额与减免（BillService.settleEncounter） ─────────────────
+  // ─── 关账未结余额与减免（BillService.settleEncounter） ─────────────────
   {
     pattern: /^unsettled bills require explicit write-off: outstanding (.+)$/,
     render: (m) =>
-      `收束时仍有未结余额 ¥${m[1] ?? ""}，需要显式确认减免并填写原因后重新提交。`,
+      `关账时仍有未结余额 ¥${m[1] ?? ""}，需要显式确认减免并填写原因后重新提交。`,
   },
   {
     pattern: /^write_off_reason must not exceed 500 characters$/,

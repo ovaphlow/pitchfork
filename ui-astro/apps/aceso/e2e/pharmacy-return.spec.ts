@@ -818,7 +818,7 @@ test("退药主线：从已发药明细创建待确认退药单，UI 确认入�
   expect(await readStock(fixture.materialId, fixture.lotId)).toEqual({ quantity: 9, totalCost: 22.5 });
   expect(await countReturnInboundDetails(fixture.materialId)).toBe(0);
 
-  // UI：详情 → 创建退药 → 待确认退药单（默认数量 1、原因预填「老人未使用」）
+  // UI：详情 → 创建退药 → 待确认退药单（默认数量 1、原因预填「长者未使用」）
   await createReturnViaUi(page, patientName);
 
   const returnsList = await api<PharmacyReturnList>(

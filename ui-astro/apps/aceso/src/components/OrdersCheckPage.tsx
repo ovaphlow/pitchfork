@@ -119,7 +119,7 @@ export default function OrdersCheckPage() {
         actions={
           <div className="flex flex-wrap items-center gap-2">
             <Input
-              placeholder="搜索药名 / 医嘱内容 / 老人 / 住院号"
+              placeholder="搜索药名 / 医嘱内容 / 长者 / 住院号"
               value={searchInput}
               onChange={(event) => setSearchInput(event.target.value)}
               onKeyDown={(event) => {

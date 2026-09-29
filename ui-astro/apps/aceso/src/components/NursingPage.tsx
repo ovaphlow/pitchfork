@@ -1367,6 +1367,12 @@ export default function NursingPage() {
       setActionError("至少填写一条护理措施");
       return;
     }
+    // 028 §2.1-10：评估 → 计划 的顺序是强制门禁（服务端 PlanService.create 同样校验并返回 409，
+    // 这里只做快速反馈；两边文案一致，避免出现「服务端会拒但界面不提示」）
+    if (assessments.length === 0) {
+      setActionError("照护计划必须先有护理评估：请先完成至少一条护理评估，再制定照护计划");
+      return;
+    }
 
     setSaving(true);
     setActionError("");
@@ -1623,7 +1629,7 @@ export default function NursingPage() {
         <div>
           <h2 className="text-lg font-semibold text-fg-emphasis">照护管理</h2>
           <p className="mt-1 text-sm text-fg-muted">
-            {mainView === "today" ? "查看今日所有长者的待执行任务" : "选择长者 → 评估 → 计划 → 任务 → 完成记录"}
+            {mainView === "today" ? "查看今日所有长者的待执行任务" : "选择长者 → 评估（至少一条）→ 计划 → 任务 → 完成记录"}
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -2682,7 +2688,7 @@ export default function NursingPage() {
           </div>
           <div className="flex flex-col gap-1.5">
             <label className="text-sm font-medium text-fg-muted" htmlFor="incident-initial-action">即时处置（可选）</label>
-            <textarea id="incident-initial-action" rows={2} className={textareaClass} value={incidentForm.initialAction} onChange={(event) => setIncidentForm((current) => ({ ...current, initialAction: event.target.value }))} placeholder="例如：已扶起老人并评估伤情、通知家属（填写后事件直接进入处理中）" />
+            <textarea id="incident-initial-action" rows={2} className={textareaClass} value={incidentForm.initialAction} onChange={(event) => setIncidentForm((current) => ({ ...current, initialAction: event.target.value }))} placeholder="例如：已扶起长者并评估伤情、通知家属（填写后事件直接进入处理中）" />
           </div>
           {incidentError && <p className="text-sm text-danger">{incidentError}</p>}
           <div className="flex justify-end gap-3">

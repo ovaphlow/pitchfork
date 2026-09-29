@@ -123,7 +123,7 @@ export default function DepositsPage() {
     }, initial);
   }, [ledger]);
 
-  /** 台账中是否存在结算收束写入的核销记录（用于展示来源说明） */
+  /** 台账中是否存在结算关账写入的核销记录（用于展示来源说明） */
   const hasOffsetRecords = useMemo(
     () => (ledger?.records ?? []).some((record) => record.type === "核销"),
     [ledger],
@@ -205,7 +205,7 @@ export default function DepositsPage() {
         const billId = row.type === "核销" ? offsetBillId(row) : null;
         return (
           <span className="text-fg-muted text-sm">
-            {row.remark ?? (row.type === "核销" ? "结算收束押金核销" : "—")}
+            {row.remark ?? (row.type === "核销" ? "结算关账押金核销" : "—")}
             {billId ? `（关联账单 ${billId}）` : ""}
           </span>
         );
@@ -218,8 +218,8 @@ export default function DepositsPage() {
       <div>
         <h2 className="text-lg font-semibold text-fg-emphasis">押金管理</h2>
         <p className="text-sm text-fg-muted mt-1">
-          入住押金登记、退押与台账。退押仍是独立操作：结算收束不会自动冲抵押金，离院/去世后仍可退押。
-          押金核销不在本页操作，而是在「养老收费 → 结算收束」时手工选择核销金额；核销会同时记入本台账（类型「核销」）。
+          入住押金登记、退押与台账。退押仍是独立操作：结算关账不会自动冲抵押金，离院/去世后仍可退押。
+          押金核销不在本页操作，而是在「养老收费 → 结算关账」时手工选择核销金额；核销会同时记入本台账（类型「核销」）。
         </p>
       </div>
 
@@ -285,7 +285,7 @@ export default function DepositsPage() {
             </Card>
             <Card title="累计核销">
               <div className="text-2xl font-bold text-accent">{ledger ? `¥ ${formatAmount(totals.核销)}` : "—"}</div>
-              <p className="text-xs text-fg-dimmed mt-1">结算收束时用押金抵扣欠费的金额合计</p>
+              <p className="text-xs text-fg-dimmed mt-1">结算关账时用押金抵扣欠费的金额合计</p>
             </Card>
           </div>
 
@@ -303,7 +303,7 @@ export default function DepositsPage() {
             )}
             {hasOffsetRecords && (
               <p className="mb-4 text-xs text-fg-dimmed">
-                核销：结算收束时用押金抵扣欠费，同时写入缴费流水（方式「押金」），关联账单见养老收费页。
+                核销：结算关账时用押金抵扣欠费，同时写入缴费流水（方式「押金」），关联账单见养老收费页。
               </p>
             )}
             <Table

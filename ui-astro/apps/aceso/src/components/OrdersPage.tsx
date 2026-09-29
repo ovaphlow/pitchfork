@@ -922,7 +922,7 @@ export default function OrdersPage() {
         {admissions.length > 0 && (
           <div className="flex flex-wrap items-end gap-3">
             <div className="flex flex-col gap-1.5">
-              <label className="text-sm font-medium text-fg-muted" htmlFor="orders-encounter">入住老人</label>
+              <label className="text-sm font-medium text-fg-muted" htmlFor="orders-encounter">入住长者</label>
               <select
                 id="orders-encounter"
                 className={`${selectClass} min-w-[280px]`}
@@ -954,7 +954,7 @@ export default function OrdersPage() {
         <Card>
           <EmptyState
             icon="🏠"
-            title="暂无入住老人"
+            title="暂无入住长者"
             description="请先在入住管理办理养老入住，再开展诊疗工作。"
             action={
               <a
