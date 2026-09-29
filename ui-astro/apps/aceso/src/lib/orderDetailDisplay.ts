@@ -1,7 +1,7 @@
 /**
  * 医嘱「主明细」展示规则 — 医生页（OrdersPage）与护理页（NursingPage）共用。
  *
- * 医嘱正文（`order_content`）是自由文本，结构化事实在 `order_details` JSONB 里；
+ * 医嘱说明（`order_content`）是自由文本，结构化事实在 `order_details` JSONB 里；
  * 用药医嘱若只显示正文，护士看不出是什么药、多少剂量、什么途径。这里把医生页
  * 已有的推导规则抽出来，避免医生页与护理页的展示口径漂移。
  */

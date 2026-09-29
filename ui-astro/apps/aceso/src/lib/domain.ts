@@ -21,7 +21,8 @@ export type PageTitlePath =
   | "/dashboard/elders"
   | "/dashboard/admission"
   | "/dashboard/inpatient"
-  | "/dashboard/followup";
+  | "/dashboard/followup"
+  | "/dashboard/beds";
 
 export interface PageTitleDomainLabel {
   /** 医疗域基准名：静态 `<title>`、`BreadcrumbTitle` fallback 与内联脚本兜底都用它 */
@@ -39,6 +40,8 @@ export const PAGE_TITLE_DOMAIN_LABELS: Record<PageTitlePath, PageTitleDomainLabe
   "/dashboard/admission": { base: "入院管理", labels: { 养老: "入住管理" } },
   "/dashboard/inpatient": { base: "住院护理", labels: { 养老: "照护管理" } },
   "/dashboard/followup": { base: "随访管理", labels: { 儿保: "儿童保健随访" } },
+  // 床位主数据（030 W8）：与域无关，三个域共用同一名称，故 labels 为空
+  "/dashboard/beds": { base: "床位管理", labels: {} },
 };
 
 /** 按域取标签；该域没有覆盖名时回退基准名 */

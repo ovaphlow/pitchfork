@@ -616,7 +616,7 @@ export default function OrdersPage() {
     const input = buildOrderInput();
     if (!input) {
       if (!form.orderContent.trim() || !form.doctor.trim() || !form.startTime.trim()) {
-        setFormError("医嘱正文、医生和开始时间不能为空");
+        setFormError("医嘱说明、医生和开始时间不能为空");
       } else if (form.orderType === "MEDICATION" && !form.materialId.trim()) {
         setFormError("用药医嘱必须从药品目录选择药品");
       } else if (form.orderType === "THERAPY" && !form.treatmentItem.trim()) {
@@ -776,7 +776,7 @@ export default function OrdersPage() {
     },
     {
       key: "order_content",
-      header: "医嘱正文",
+      header: "医嘱说明",
       className: "min-w-[240px] max-w-[380px]",
       render: (row) => (
         <span className="block truncate" title={row.order_content}>
@@ -1315,7 +1315,7 @@ export default function OrdersPage() {
             </div>
 
             <div className="flex flex-col gap-1.5 sm:col-span-2">
-              <label className="text-sm font-medium text-fg-muted" htmlFor="order-content">医嘱正文（必填）</label>
+              <label className="text-sm font-medium text-fg-muted" htmlFor="order-content">医嘱说明（用法/临床备注，必填）</label>
               <textarea
                 id="order-content"
                 className={textareaClass}
@@ -1323,11 +1323,16 @@ export default function OrdersPage() {
                 maxLength={2000}
                 value={form.orderContent}
                 onChange={(event) => setForm((current) => ({ ...current, orderContent: event.target.value }))}
-                placeholder="请输入医嘱正文，最多 2000 字"
+                placeholder="请输入医嘱说明（用法/临床备注），最多 2000 字"
                 required
                 aria-invalid={formError && hasOrderFieldError(form, "orderContent") ? true : undefined}
                 aria-describedby={formError && hasOrderFieldError(form, "orderContent") ? "order-form-error" : undefined}
               />
+              <p className="text-xs text-fg-dimmed">
+                这里填写用法与临床备注；
+                <span className="font-medium text-fg-muted">药品/项目等结构化事实请在下方『药品/项目』中选择</span>
+                ，不要只写在说明里。
+              </p>
             </div>
 
             <div className="sm:col-span-2">
@@ -1563,7 +1568,7 @@ export default function OrdersPage() {
                   </span>
                 )}
               </p>
-              <p className="sm:col-span-2"><span className="text-fg-dimmed">医嘱正文：</span>{detail.order_content}</p>
+              <p className="sm:col-span-2"><span className="text-fg-dimmed">医嘱说明：</span>{detail.order_content}</p>
               <p><span className="text-fg-dimmed">医生：</span>{detail.doctor || "-"}</p>
               <p><span className="text-fg-dimmed">开始时间：</span>{formatDateTime(detail.start_time)}</p>
               <p><span className="text-fg-dimmed">结束时间：</span>{formatDateTime(detail.end_time)}</p>

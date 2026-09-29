@@ -95,6 +95,12 @@ export const menuItems: Item[] = [
       { label: "物资",     path: "/dashboard/materials",    icon: "🏷️", domains: ["医疗", "养老", "儿保"] },
       { label: "角色",     path: "/dashboard/roles",        icon: "🔐", domains: ["医疗", "养老", "儿保"] },
       { label: "费用项目", path: "/dashboard/fee-items",    icon: "🧾", domains: ["养老"] },
+      {
+        // 床位主数据（030 W8）：与「费用项目」同属系统设置分组
+        label: PAGE_TITLE_DOMAIN_LABELS["/dashboard/beds"].base,
+        domainLabels: PAGE_TITLE_DOMAIN_LABELS["/dashboard/beds"].labels,
+        path: "/dashboard/beds", icon: "🛏️", domains: ["医疗", "养老", "儿保"],
+      },
     ],
   },
 ];

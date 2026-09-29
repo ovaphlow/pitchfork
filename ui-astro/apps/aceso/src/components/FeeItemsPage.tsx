@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import {
+  NURSING_FEE_LEVELS,
   createFeeItem,
   deleteFeeItem,
   listFeeItems,
@@ -32,14 +33,16 @@ const FEE_ITEM_CATEGORIES: FeeItemCategory[] = [
 /** 参与按月自动计费的分类；其余仅供账单手工加项 */
 const AUTO_BILLING_CATEGORIES: FeeItemCategory[] = ["床位费", "护理费", "伙食费"];
 
-/** 护理评估的结果等级（与照护评估界面同值）；护理费名称必须逐字一致 */
-const NURSING_RESULT_LEVELS = ["低风险", "中风险", "高风险", "无需干预"];
-
 const selectClass =
   "h-10 rounded-md border border-border bg-surface px-3 text-sm text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent";
 
 function errorMessage(error: unknown, fallback: string): string {
-  return error instanceof Error && error.message ? error.message : fallback;
+  const raw = error instanceof Error && error.message ? error.message : fallback;
+  // 服务端冲突（409）：启用态同等级已有一条
+  if (/already bound to level/i.test(raw)) {
+    return "该护理等级已有一条启用项：每个等级只能保留一条启用项，请先停用其中一条。";
+  }
+  return raw;
 }
 
 function formatUnitPrice(value: number | string | null | undefined): string {
@@ -51,23 +54,26 @@ function isAutoBillingCategory(category: FeeItemCategory): boolean {
   return AUTO_BILLING_CATEGORIES.includes(category);
 }
 
-/** 护理费名称必须取自护理评估结果等级，避免生成账单时匹配不到 */
-function isNursingResultLevel(name: string): boolean {
-  return NURSING_RESULT_LEVELS.includes(name);
+/** 等级白名单（与服务端和护理评估表单同源：共享客户端 NURSING_FEE_LEVELS） */
+function isNursingLevel(value: string): boolean {
+  return (NURSING_FEE_LEVELS as readonly string[]).includes(value);
 }
 
 interface FeeItemForm {
   category: "" | FeeItemCategory;
   name: string;
+  /** 仅护理费使用：绑定的护理评估结果等级 */
+  nursingLevel: string;
   unitPrice: string;
   remark: string;
 }
 
-const emptyForm: FeeItemForm = { category: "", name: "", unitPrice: "", remark: "" };
+const emptyForm: FeeItemForm = { category: "", name: "", nursingLevel: "", unitPrice: "", remark: "" };
 
 interface ValidatedForm {
   category: FeeItemCategory;
   name: string;
+  nursing_level: string | null;
   unit_price: number;
   remark: string | null;
 }
@@ -90,7 +96,10 @@ function parseUnitPrice(raw: string): { ok: true; value: number } | { ok: false;
   return { ok: true, value };
 }
 
-/** 前端校验与服务端字段白名单保持一致：分类 6 值、名称 ≤100、单价 >0 且 ≤2 位小数、备注 ≤500 */
+/**
+ * 前端校验与服务端字段白名单保持一致：分类 6 值、名称 ≤100、单价 >0 且 ≤2 位小数、备注 ≤500；
+ * 护理费必须绑定护理等级（四值枚举），非护理费不得携带等级（计划 030 §4.1）。
+ */
 function validateFeeItemForm(
   form: FeeItemForm,
 ): { ok: true; value: ValidatedForm } | { ok: false; error: string } {
@@ -100,6 +109,13 @@ function validateFeeItemForm(
   const name = form.name.trim();
   if (!name) return { ok: false, error: "名称不能为空" };
   if (name.length > NAME_MAX) return { ok: false, error: `名称不能超过 ${NAME_MAX} 个字符` };
+  const nursingLevel = form.nursingLevel.trim();
+  if (form.category === "护理费") {
+    if (!nursingLevel) return { ok: false, error: "护理费必须绑定护理评估结果等级" };
+    if (!isNursingLevel(nursingLevel)) {
+      return { ok: false, error: `护理等级只能取：${NURSING_FEE_LEVELS.join(" / ")}` };
+    }
+  }
   const price = parseUnitPrice(form.unitPrice);
   if (!price.ok) return { ok: false, error: price.error };
   const remark = form.remark.trim();
@@ -111,18 +127,20 @@ function validateFeeItemForm(
     value: {
       category: form.category as FeeItemCategory,
       name,
+      nursing_level: form.category === "护理费" ? nursingLevel : null,
       unit_price: price.value,
       remark: remark || null,
     },
   };
 }
 
-/** PUT 全量替换分类/名称/单价/备注；状态不走这里（PATCH /:id/status） */
+/** PUT 全量替换分类/名称/等级/单价/备注；状态不走这里（PATCH /:id/status） */
 function toFeeItemInput(value: ValidatedForm): FeeItemInput {
   return {
     category: value.category,
     name: value.name,
     unit_price: value.unit_price,
+    ...(value.nursing_level ? { nursing_level: value.nursing_level } : {}),
     ...(value.remark ? { remark: value.remark } : {}),
   };
 }
@@ -143,7 +161,7 @@ export default function FeeItemsPage() {
   const [formError, setFormError] = useState("");
   const [saving, setSaving] = useState(false);
 
-  /** 已启用的护理费名称：用于同名重复的即时提示（服务端 400 之外的前端一层） */
+  /** 已启用的护理费：用于同等级重复的即时提示（服务端 409 之外的前端一层） */
   const [nursingEnabled, setNursingEnabled] = useState<FeeItem[]>([]);
 
   const load = useCallback(async () => {
@@ -196,6 +214,7 @@ export default function FeeItemsPage() {
     setForm({
       category: item.category,
       name: item.name,
+      nursingLevel: item.nursing_level ?? "",
       unitPrice: formatUnitPrice(item.unit_price),
       remark: item.remark ?? "",
     });
@@ -261,9 +280,11 @@ export default function FeeItemsPage() {
     }
   }
 
-  const duplicateNursingName =
-    form.category === "护理费" && form.name.trim()
-      ? nursingEnabled.find((row) => row.name === form.name.trim() && row.id !== editingId) ?? null
+  const duplicateNursingLevel =
+    form.category === "护理费" && form.nursingLevel.trim()
+      ? nursingEnabled.find(
+          (row) => row.nursing_level === form.nursingLevel.trim() && row.id !== editingId,
+        ) ?? null
       : null;
 
   // ——— 表格 ———
@@ -285,14 +306,22 @@ export default function FeeItemsPage() {
       key: "name",
       header: "名称",
       className: "min-w-[180px]",
-      render: (row) => (
-        <span className="font-medium text-fg-emphasis">
-          {row.name}
-          {row.category === "护理费" && !isNursingResultLevel(row.name) && (
-            <span className="ml-2 text-xs font-normal text-warning">非评估等级名称</span>
-          )}
-        </span>
-      ),
+      render: (row) => <span className="font-medium text-fg-emphasis">{row.name}</span>,
+    },
+    {
+      key: "nursing_level",
+      header: "护理等级",
+      className: "min-w-[110px]",
+      render: (row) =>
+        row.category === "护理费" ? (
+          row.nursing_level ? (
+            <Badge variant="info">{row.nursing_level}</Badge>
+          ) : (
+            <span className="text-xs text-warning">未绑定（无法自动计费）</span>
+          )
+        ) : (
+          "—"
+        ),
     },
     {
       key: "unit_price",
@@ -350,6 +379,8 @@ export default function FeeItemsPage() {
   ];
 
   const emptyDictionary = !loading && items.length === 0 && !categoryFilter && !statusFilter;
+  const editingLegacyLevel =
+    form.category === "护理费" && form.nursingLevel.trim() !== "" && !isNursingLevel(form.nursingLevel.trim());
 
   return (
     <div className="space-y-6">
@@ -357,7 +388,7 @@ export default function FeeItemsPage() {
         <div>
           <h2 className="text-lg font-semibold text-fg-emphasis">费用项目</h2>
           <p className="mt-1 text-sm text-fg-muted">
-            维护养老收费的收费项目字典：分类 / 名称 / 单价（元）/ 备注。床位费 / 护理费 / 伙食费
+            维护养老收费的收费项目字典：分类 / 名称 / 护理等级 / 单价（元）/ 备注。床位费 / 护理费 / 伙食费
             参与按月自动计费；个性化服务费 / 押金 / 其他 仅用于账单手工加项，不会自动抵扣或自动计费。
           </p>
         </div>
@@ -372,7 +403,8 @@ export default function FeeItemsPage() {
 
       <p className="rounded-lg border border-border bg-surface-alt px-4 py-3 text-xs text-fg-muted">
         启用 / 停用只影响之后生成的账单：已生成账单的明细是快照（名称、单价已定格），改价、停用或删除字典项都不影响历史账单。
-        护理费按名称精确匹配护理评估的「结果等级」，每个等级只能保留一条启用项。
+        护理费按<b>绑定的护理等级</b>匹配护理评估的「结果等级」，不再看名称：每个等级只能保留一条启用项，
+        <b>改名不会打断计费</b>（名称只是描述文本）。
       </p>
 
       <Card
@@ -424,9 +456,10 @@ export default function FeeItemsPage() {
                   <ul className="list-disc space-y-1 pl-4">
                     <li>床位费 × 1（按在院天数计费）</li>
                     <li>
-                      护理费 × 每个评估等级 × 1（低风险 / 中风险 / 高风险 / 无需干预，按等级分段天数计费）
+                      护理费 × 每个评估等级 × 1（低风险 / 中风险 / 高风险 / 无需干预，按等级分段天数计费；
+                      长者没有护理评估时该账期不计护理费，页面会提示）
                     </li>
-                    <li>伙食费 × 1（按账期内折合餐次计费）</li>
+                    <li>伙食费 × 1（按账期内就餐登记折合餐次计费：正常=1、部分=0.5、未就餐/拒食=0）</li>
                   </ul>
                   <p className="mt-2">
                     个性化服务费 / 押金 / 其他 只用于账单手工加项，不参与自动计费；押金请在押金管理中登记。
@@ -494,6 +527,7 @@ export default function FeeItemsPage() {
                   setForm((current) => ({
                     ...current,
                     category: event.target.value as "" | FeeItemCategory,
+                    nursingLevel: event.target.value === "护理费" ? current.nursingLevel : "",
                   }))
                 }
               >
@@ -510,35 +544,42 @@ export default function FeeItemsPage() {
               label="名称"
               value={form.name}
               onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))}
-              placeholder={form.category === "护理费" ? "例如 中风险（须与评估结果等级一致）" : "例如 床位费-标准间"}
+              placeholder={form.category === "护理费" ? "例如 一级护理（仅描述，可随时改）" : "例如 床位费-标准间"}
             />
 
             {form.category === "护理费" && (
-              <div className="rounded-lg border border-warning/30 bg-warning-bg px-4 py-3 text-xs text-warning sm:col-span-2">
-                <p>
-                  护理费名称必须与护理评估的「结果等级」完全一致，且每个等级只能有一个启用项；否则生成账单会报错或计费错误。
-                </p>
-                <div className="mt-3 flex flex-wrap items-center gap-2">
-                  <span>快捷填入评估结果等级：</span>
-                  {NURSING_RESULT_LEVELS.map((level) => (
-                    <Button
-                      key={level}
-                      type="button"
-                      size="sm"
-                      variant="secondary"
-                      onClick={() => setForm((current) => ({ ...current, name: level }))}
-                    >
+              <div className="flex flex-col gap-1.5 sm:col-span-2">
+                <label className="text-sm font-medium text-fg-muted" htmlFor="fee-item-nursing-level">
+                  护理等级（计费依据，必选）
+                </label>
+                <select
+                  id="fee-item-nursing-level"
+                  className={selectClass}
+                  value={form.nursingLevel}
+                  onChange={(event) =>
+                    setForm((current) => ({ ...current, nursingLevel: event.target.value }))
+                  }
+                >
+                  <option value="">选择护理评估结果等级</option>
+                  {NURSING_FEE_LEVELS.map((level) => (
+                    <option key={level} value={level}>
                       {level}
-                    </Button>
+                    </option>
                   ))}
-                </div>
+                  {editingLegacyLevel && (
+                    <option value={form.nursingLevel}>{form.nursingLevel}（历史值，请改选四值之一）</option>
+                  )}
+                </select>
+                <p className="text-xs text-fg-muted">
+                  计费按此等级匹配护理评估的「结果等级」，与名称无关；每个等级只能保留一条启用项。
+                </p>
               </div>
             )}
 
-            {duplicateNursingName && (
+            {duplicateNursingLevel && (
               <div className="rounded-lg border border-danger/30 bg-danger-bg px-4 py-3 text-xs text-danger sm:col-span-2">
-                「{duplicateNursingName.name}」已存在一条启用项；同名多条启用项会让生成账单报「多个启用项」。
-                请先停用其中一条，或改用其它评估结果等级名称。
+                「{duplicateNursingLevel.nursing_level}」等级已有一条启用项（{duplicateNursingLevel.name}）。
+                同一等级多条启用项会让生成账单报「多个启用项」，请先停用其中一条。
               </div>
             )}
 
@@ -560,7 +601,7 @@ export default function FeeItemsPage() {
           </div>
 
           <p className="rounded-lg border border-border bg-surface-alt px-4 py-3 text-xs text-fg-muted">
-            保存会全量替换分类 / 名称 / 单价 / 备注，不会改变启用状态；启用或停用请在列表操作列点击「启用 / 停用」。
+            保存会全量替换分类 / 名称 / 护理等级 / 单价 / 备注，不会改变启用状态；启用或停用请在列表操作列点击「启用 / 停用」。
             只有 床位费 / 护理费 / 伙食费 参与按月自动计费，其余分类仅作为账单手工加项的来源。
           </p>
 

@@ -48,7 +48,8 @@ export const BILLING_ERROR_MAPPINGS: BillingErrorMapping[] = [
   {
     pattern: /^no enabled fee item for nursing level (.+)$/,
     render: (m) =>
-      `护理等级「${m[1] ?? ""}」没有对应的启用护理费项目。护理费名称必须与护理评估的「结果等级」完全一致，请到${FEE_ITEMS_LOCATION}新增并启用。`,
+      `护理等级「${m[1] ?? ""}」没有对应的启用护理费项目。请到${FEE_ITEMS_LOCATION}新增（或编辑）一条「护理费」，` +
+      `把它的「护理等级」绑定为「${m[1] ?? ""}」——计费按绑定的等级匹配，与项目名称无关。`,
   },
   {
     pattern: /^multiple enabled fee items for category (.+), expected exactly one$/,
@@ -120,6 +121,10 @@ export const BILLING_ERROR_MAPPINGS: BillingErrorMapping[] = [
   {
     pattern: /^encounter is not discharged or deceased/,
     render: () => "结算关账只适用于已离院/已去世的养老入住。",
+  },
+  {
+    pattern: /^encounter is not an elderly admission/,
+    render: () => "该入住不是养老入住，不适用养老收费与离院结算。",
   },
   {
     pattern: /^(?:encounter has no discharge date|encounter has no death date)/,

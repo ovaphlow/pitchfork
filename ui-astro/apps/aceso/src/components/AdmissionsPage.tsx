@@ -7,10 +7,12 @@ import {
   getElderlyDischargeHandover,
   listActiveElderlyAdmissions,
   listBedOccupancy,
+  listBeds,
   listElderlyAdmissions,
   listIdentitySubjects,
   listPatients,
   markEncounterDeath,
+  type Bed,
   type BedOccupancyRecord,
   type ElderlyAdmissionInput,
   type ElderlyDischargeHandover,
@@ -324,6 +326,8 @@ export default function AdmissionsPage() {
   const [formError, setFormError] = useState("");
   /** 当前占用中的床位（只读，用于办理入住时提示冲突；加载失败静默降级为空列表） */
   const [bedOccupancy, setBedOccupancy] = useState<BedOccupancyRecord[]>([]);
+  /** 启用的床位主数据（只读候选，用于两个字段的 datalist；加载失败静默降级为空候选） */
+  const [beds, setBeds] = useState<Bed[]>([]);
   const [saving, setSaving] = useState(false);
   const [dischargingId, setDischargingId] = useState<string | null>(null);
   const [patientSearch, setPatientSearch] = useState("");
@@ -468,6 +472,9 @@ export default function AdmissionsPage() {
    * 办理入住弹窗打开时拉取当前床位占用，用于「房间床位」下方的实时提示。
    * 计划 029 §4.1：出租（占用）事实来源是 encounters 的 department/ward，无床位主数据（D1）。
    * 拉取失败静默降级（提示缺失，但保存时的服务端校验仍然生效），不阻塞表单。
+   *
+   * 计划 030 §4.5 D4：同一次打开时拉取启用的床位主数据，仅作为两个字段的 <datalist> 候选；
+   * 失败同样静默降级为空候选，两个字段仍可自由输入历史文本，029 的占用提示与保存校验不变。
    */
   useEffect(() => {
     if (!editorOpen) return;
@@ -478,6 +485,13 @@ export default function AdmissionsPage() {
       })
       .catch(() => {
         if (active) setBedOccupancy([]);
+      });
+    listBeds({ status: "启用", limit: 200 })
+      .then((response) => {
+        if (active) setBeds(response.records);
+      })
+      .catch(() => {
+        if (active) setBeds([]);
       });
     return () => {
       active = false;
@@ -652,6 +666,23 @@ export default function AdmissionsPage() {
       ) ?? null
     );
   }, [bedOccupancy, form.department, form.ward]);
+
+  /**
+   * 床位主数据候选（计划 030 §4.5 D4、D4 裁决「只做候选来源」）：
+   * department 用去重后的全部照护单元/病区；ward 用「已选 department（trim 精确匹配）对应的床位」，
+   * 未填 department 时给出全部候选。candidates 为空时 datalist 不渲染任何 option，字段仍是自由文本。
+   */
+  const bedDepartmentOptions = useMemo(
+    () => [...new Set(beds.map((bed) => bed.department.trim()).filter(Boolean))],
+    [beds],
+  );
+  const bedWardOptions = useMemo(() => {
+    const department = form.department.trim();
+    const scoped = department
+      ? beds.filter((bed) => bed.department.trim() === department)
+      : beds;
+    return [...new Set(scoped.map((bed) => bed.ward.trim()).filter(Boolean))];
+  }, [beds, form.department]);
 
   const activeColumns: Column<AdmissionRow>[] = [
     { key: "patientName", header: "长者", className: "min-w-[140px]" },
@@ -854,17 +885,29 @@ export default function AdmissionsPage() {
             />
             <Input
               label="照护单元/病区"
+              list="admission-bed-department-options"
               value={form.department}
               onChange={(event) => setForm((current) => ({ ...current, department: event.target.value }))}
               placeholder="请输入照护单元或病区"
             />
+            <datalist id="admission-bed-department-options">
+              {bedDepartmentOptions.map((value) => (
+                <option key={value} value={value} />
+              ))}
+            </datalist>
             <div className="flex flex-col gap-1.5">
               <Input
                 label="房间床位"
+                list="admission-bed-ward-options"
                 value={form.ward}
                 onChange={(event) => setForm((current) => ({ ...current, ward: event.target.value }))}
                 placeholder="请输入房间和床位"
               />
+              <datalist id="admission-bed-ward-options">
+                {bedWardOptions.map((value) => (
+                  <option key={value} value={value} />
+                ))}
+              </datalist>
               {wardOccupancy && (
                 <p
                   role="status"
@@ -881,6 +924,9 @@ export default function AdmissionsPage() {
                 同一床位在重叠时段不能重复入住；保存时系统会校验并拒绝冲突。
               </p>
             </div>
+            <p className="text-xs text-fg-dimmed sm:col-span-2">
+              床位主数据在『系统设置 → 床位管理』维护；历史自由文本仍可直接填写。
+            </p>
             <p className="text-sm text-fg-muted sm:col-span-2">
               责任医生/照护师：保存时自动记为当前操作人，不可修改
             </p>

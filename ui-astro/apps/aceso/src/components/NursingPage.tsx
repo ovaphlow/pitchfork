@@ -3,6 +3,7 @@ import { Badge, Button, Card, EmptyState, Input, Modal, Table, type Column } fro
 import {
   appendShiftHandoverItem,
   closeNursingIncident,
+  convergeOverdueExecutions,
   createCarePlanRevision,
   createNursingAssessment,
   createNursingIncident,
@@ -49,6 +50,7 @@ import {
   recordMedicationAdministration,
   type CarePlanRevisionDetail,
   type CarePlanRevisionListItem,
+  type ConvergeOverdueResult,
   type Encounter,
   type IdentitySubject,
   type NursingAssessment,
@@ -172,6 +174,31 @@ const textareaClass = "w-full resize-none rounded-md border border-border bg-sur
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
+}
+
+// ——— 跨日逾期批量收口（W5，计划 030 §4.3）：人工触发的显式收口，无自动/定时改写 ———
+/** 默认阈值 1440 分钟 = 24 小时，与后端「长挂执行」阈值同口径 */
+const CONVERGE_DEFAULT_MIN_OVERDUE_MINUTES = 1440;
+/** 与后端一致的单次收口上限 */
+const CONVERGE_LIMIT = 200;
+
+/**
+ * 收口端点的后端英文错误 → 中文映射（本页其余端点无映射表，未命中时原样展示 message，
+ * 并把原文附在括号里，避免翻译掩盖真实错误）。
+ */
+const CONVERGE_ERROR_MESSAGES: Array<[string, string]> = [
+  ["unsupported converge keys", "请求参数不被支持，请关闭弹窗后重试"],
+  ["min_overdue_minutes", "逾期阈值不合法：必须是不小于 1 的整数分钟"],
+  ["limit", "单次收口上限不合法：请关闭弹窗后重试"],
+];
+
+function convergeErrorMessage(error: unknown, fallback: string): string {
+  const raw = errorMessage(error, "");
+  if (!raw) return fallback;
+  for (const [needle, text] of CONVERGE_ERROR_MESSAGES) {
+    if (raw.includes(needle)) return `${text}（后端：${raw}）`;
+  }
+  return raw;
 }
 
 function assessmentTypeLabel(value: string): string {
@@ -431,6 +458,14 @@ export default function NursingPage() {
   const [actionSaving, setActionSaving] = useState(false);
   // 操作弹窗类型：null | "complete" | "skip" | "cancel"
   const [actionModal, setActionModal] = useState<"complete" | "skip" | "cancel" | null>(null);
+  // ——— 跨日逾期批量收口（W5，计划 030 §4.3） ———
+  const [convergeOpen, setConvergeOpen] = useState(false);
+  /** 阈值输入（分钟，受控字符串）：默认 1440 = 24 小时 */
+  const [convergeThreshold, setConvergeThreshold] = useState(String(CONVERGE_DEFAULT_MIN_OVERDUE_MINUTES));
+  const [convergeSaving, setConvergeSaving] = useState(false);
+  const [convergeError, setConvergeError] = useState("");
+  /** 本次收口结果；为 null 表示尚未执行（弹窗保持打开，便于按 truncated 再次执行） */
+  const [convergeResult, setConvergeResult] = useState<ConvergeOverdueResult | null>(null);
   // ——— 统计面板版本号 ———
   const [statReloadKey, setStatReloadKey] = useState(0);
   // ——— 耗材详情弹窗 ———
@@ -602,7 +637,7 @@ export default function NursingPage() {
   //  今日执行工作台 — 数据加载与操作
   // ========================================================================
 
-  const loadTodayExecutions = useCallback(async () => {
+  const loadTodayExecutions = useCallback(async (options?: { refreshCounts?: boolean }) => {
     setTodayLoading(true);
     setActionError("");
     try {
@@ -621,6 +656,23 @@ export default function NursingPage() {
         );
         // 保存队列总数与返回条数用于截断提示（meta.total 为全量，records 为本次分页结果）
         setTodayOverdueQueue({ total: queue.meta.total ?? queue.records.length, shown: queue.records.length });
+        // 030 W5：逾期队列模式的默认加载路径保持 027 行为（只刷队列与截断信息）；
+        // 批量收口成功后显式要求同口径补刷顶部跨日计数与状态计数，避免计数滞后。
+        // 计数请求失败不影响已加载的队列，只保留旧值。
+        if (options?.refreshCounts) {
+          const counts = await listNursingTodayExecutions({
+            date: todayDate,
+            status: todayStatusFilter || undefined,
+            executor: todayExecutorFilter || undefined,
+            period_id: period?.id || undefined,
+            limit: 100,
+          }).catch(() => null);
+          if (counts) {
+            setTodayOverdueTotal(counts.meta.overdue_total ?? 0);
+            if (counts.meta.overdue_total_all !== undefined) setTodayOverdueAllTotal(counts.meta.overdue_total_all);
+            if (counts.meta.status_totals !== undefined) setTodayStatusTotals(counts.meta.status_totals);
+          }
+        }
         return;
       }
       const response = await listNursingTodayExecutions({
@@ -1075,6 +1127,61 @@ export default function NursingPage() {
       setActionError(errorMessage(error, "操作失败"));
     } finally {
       setActionSaving(false);
+    }
+  }
+
+  // ========================================================================
+  //  跨日逾期批量收口（W5，计划 030 §4.3）：人工显式触发，不做自动改写
+  // ========================================================================
+
+  /** 当前逾期队列的收口范围：队列按所选入住记录的周期过滤（与 027 队列口径一致），无周期时为跨长者全量 */
+  const convergeScopeLabel = period && selectedAdmission
+    ? `长者 ${selectedAdmission.patientName} 当前照护周期`
+    : "全部长者（当前未选定照护周期）";
+  /** 确认文案里展示的阈值：输入非法时回退默认值（提交时仍会校验并拒绝非法输入） */
+  const convergeThresholdLabel = (() => {
+    const value = Number(convergeThreshold.trim());
+    return Number.isInteger(value) && value >= 1 ? value : CONVERGE_DEFAULT_MIN_OVERDUE_MINUTES;
+  })();
+
+  function openConvergeModal() {
+    setConvergeThreshold(String(CONVERGE_DEFAULT_MIN_OVERDUE_MINUTES));
+    setConvergeError("");
+    setConvergeResult(null);
+    setConvergeOpen(true);
+  }
+
+  function closeConvergeModal() {
+    if (convergeSaving) return;
+    setConvergeOpen(false);
+    setConvergeError("");
+  }
+
+  async function handleConvergeOverdue() {
+    const threshold = Number(convergeThreshold.trim());
+    if (!Number.isInteger(threshold) || threshold < 1) {
+      setConvergeError("逾期阈值必须是不小于 1 的整数（分钟）");
+      return;
+    }
+    setConvergeSaving(true);
+    setConvergeError("");
+    setConvergeResult(null);
+    try {
+      const result = await convergeOverdueExecutions({
+        // encounter 维度只在队列本身受周期约束时一并收窄，避免收口范围大于页面上看到的队列
+        ...(period && selectedAdmission ? { encounter_id: selectedAdmission.id } : {}),
+        min_overdue_minutes: threshold,
+        limit: CONVERGE_LIMIT,
+      });
+      setConvergeResult(result);
+      // 成功后刷新逾期队列，并要求同口径补刷顶部计数；不引入轮询/定时器
+      await loadTodayExecutions({ refreshCounts: true });
+      setStatReloadKey((k) => k + 1);
+    } catch (error) {
+      // 失败保留弹窗与已填阈值，只展示错误
+      setConvergeError(convergeErrorMessage(error, "收口逾期执行失败，请稍后重试"));
+    } finally {
+      setConvergeSaving(false);
     }
   }
 
@@ -1745,12 +1852,24 @@ export default function NursingPage() {
 
           <Card className="min-w-0 overflow-hidden">
             {todayOverdueOnly && (
-              <p className="mb-3 rounded-md border border-warning/30 bg-warning-bg px-3 py-2 text-xs text-warning">
-                跨日期逾期队列（不受所选日期限制）：列出全部已过计划时间且未结束的执行，按计划时间由早到晚排列。
-                {todayOverdueQueue !== null && todayOverdueQueue.total > todayOverdueQueue.shown && (
-                  <> 仅显示最早的 {todayOverdueQueue.shown} 条，共 {todayOverdueQueue.total} 条逾期。</>
-                )}
-              </p>
+              <div className="mb-3 flex flex-wrap items-start justify-between gap-3 rounded-md border border-warning/30 bg-warning-bg px-3 py-2">
+                <p className="text-xs text-warning">
+                  跨日期逾期队列（不受所选日期限制）：列出全部已过计划时间且未结束的执行，按计划时间由早到晚排列。
+                  {todayOverdueQueue !== null && todayOverdueQueue.total > todayOverdueQueue.shown && (
+                    <> 仅显示最早的 {todayOverdueQueue.shown} 条，共 {todayOverdueQueue.total} 条逾期。</>
+                  )}
+                </p>
+                {/* 批量收口入口只在逾期队列模式出现，避免在普通今日列表误操作 */}
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  className="shrink-0"
+                  disabled={todayLoading || convergeSaving}
+                  onClick={openConvergeModal}
+                >
+                  批量标记漏执行
+                </Button>
+              </div>
             )}
             <Table columns={todayColumns} data={todayExecutions} loading={todayLoading} emptyMessage={
               todayOverdueOnly
@@ -2289,6 +2408,49 @@ export default function NursingPage() {
             </Button>
           </div>
           {actionError && <p className="text-sm text-danger">{actionError}</p>}
+        </form>
+      </Modal>
+
+      {/* ——— 跨日逾期批量收口确认弹窗（W5，计划 030 §4.3） ——— */}
+      <Modal open={convergeOpen} onClose={closeConvergeModal} title="批量标记漏执行" width="36rem">
+        <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void handleConvergeOverdue(); }}>
+          <div className="rounded-md border border-danger/30 bg-danger-bg px-3 py-2 text-sm text-danger">
+            本动作把「逾期超过 {convergeThresholdLabel} 分钟且仍未完成 / 未开始的执行」置为<b>漏执行（已跳过）</b>终态，
+            <b>不可撤销</b>，也不会自动执行（由人工在此显式触发，系统无定时收口）。
+          </div>
+          <Input
+            label="逾期阈值（分钟）"
+            type="number"
+            min={1}
+            step={1}
+            inputMode="numeric"
+            value={convergeThreshold}
+            onChange={(event) => { setConvergeThreshold(event.target.value); setConvergeError(""); }}
+            disabled={convergeSaving}
+          />
+          <p className="text-xs text-fg-dimmed">
+            默认 1440 分钟 = 24 小时，与系统「长挂执行」阈值同口径：只有计划时间早于「现在 − 阈值」且状态仍是待执行 / 执行中的执行会被收口。
+          </p>
+          <p className="text-xs text-fg-dimmed">
+            收口范围：{convergeScopeLabel}；命中「待执行 / 执行中」且不限任务类型（含用药任务，统一记「逾期未执行」，不记录给药结果，需按漏服等结果留痕时请改用单条的「记录给药」），不按执行人与状态筛选收窄；单次最多 {CONVERGE_LIMIT} 条，超额需再次执行。
+          </p>
+
+          {convergeResult && (
+            <div className={`rounded-md border px-3 py-2 text-sm ${convergeResult.converged > 0 ? "border-success/30 bg-success-bg text-success" : "border-border bg-surface-alt text-fg-muted"}`}>
+              {convergeResult.converged > 0
+                ? <p>已收口 {convergeResult.converged} 条（阈值 {convergeResult.min_overdue_minutes} 分钟，状态已置为「漏执行」）。</p>
+                : <p>没有符合条件的逾期执行。</p>}
+              {convergeResult.truncated && <p className="mt-1">仍有更多逾期未收口，可再次执行。</p>}
+            </div>
+          )}
+          {convergeError && <p className="text-sm text-danger">{convergeError}</p>}
+
+          <div className="flex justify-end gap-3">
+            <Button type="button" variant="ghost" onClick={closeConvergeModal} disabled={convergeSaving}>关闭</Button>
+            <Button type="submit" variant="danger" loading={convergeSaving}>
+              {convergeResult ? "再次执行" : "确认收口"}
+            </Button>
+          </div>
         </form>
       </Modal>
 

@@ -3,6 +3,8 @@ import { Badge, Button, Card, EmptyState, Input, Modal, Table, type Column } fro
 import PurchaseOrdersSection from "./PurchaseOrdersSection";
 import RequisitionsSection from "./RequisitionsSection";
 import {
+  ApiRequestError,
+  bindMaterialOrdersBatch,
   cancelPharmacyDispense,
   cancelPharmacyReturn,
   confirmPharmacyDispense,
@@ -18,6 +20,7 @@ import {
   listPharmacyDispenses,
   listPharmacyMedicationOrders,
   listPharmacyReturns,
+  listUnboundMaterialOrders,
   listWarehouseOptions,
   reviewPharmacyDispense,
   startPharmacyDispense,
@@ -29,11 +32,12 @@ import {
   type PharmacyDispense,
   type PharmacyMedicationOrder,
   type PharmacyReturn,
+  type UnboundMaterialOrder,
   type WarehouseOption,
 } from "@pitchfork/shared/aceso";
 import { formatDate, formatDateTime } from "../lib/datetime";
 
-type Tab = "orders" | "dispenses" | "returns" | "requisitions" | "purchase";
+type Tab = "orders" | "unbound" | "dispenses" | "returns" | "requisitions" | "purchase";
 
 interface ActiveAdmission extends Encounter {
   patientName: string;
@@ -78,6 +82,74 @@ const DISPENSE_TYPE_LABEL: Record<string, string> = {
 };
 
 const selectClass = "h-10 rounded-md border border-border bg-surface px-3 text-sm text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent";
+const checkboxClass = "h-4 w-4 rounded border-border bg-surface accent-accent";
+
+// ─── 目录药品补绑失败的中文映射（030 W6） ─────────────────────────────
+//
+// 后端沿用 `{ "error": "<message>" }`，message 是英文句式（`MedicalOrderService.bindDrugMaterial`
+// 与 `DrugCatalogPort` 的错误串被 Kotlin 侧断言锁定），「中文化」只能在前端做：按
+// 「HTTP 状态 + 关键片段」翻成「中文 + 去哪改」。口径与 `billingMessages.ts`、
+// `admissionMessages.ts` 的错误映射表一致；本页新增的补绑入口（勾选行 → 逐行选药品 →
+// 批量绑定）的提交前校验与提交失败提示都走这一张表，不再各写一套文案。
+
+interface MaterialBindErrorMapping {
+  /** 需要匹配的 HTTP 状态；`null` 表示只看 `pattern` */
+  status: number | null;
+  /** 后端 message 的匹配正则；`null` 表示只看 `status` */
+  pattern: RegExp | null;
+  /** 中文可操作提示 */
+  message: string;
+}
+
+/** 顺序即优先级：先具体错误串，再按状态兜底 */
+const MATERIAL_BIND_ERROR_MAPPINGS: MaterialBindErrorMapping[] = [
+  {
+    status: null,
+    pattern: /drug catalog port is not configured/i,
+    message: "目录服务不可用，请稍后重试或联系系统管理员。",
+  },
+  {
+    status: null,
+    pattern: /order already bound to a drug material/i,
+    message: "所选医嘱中已有已绑定目录药品的记录，整批未生效；请刷新清单后重新勾选。",
+  },
+  {
+    status: null,
+    pattern: /material not found/i,
+    message: "目录项不存在或已被删除，整批未生效；请刷新清单后重新选择。",
+  },
+  {
+    status: null,
+    pattern: /material is not a drug|material is not active/i,
+    message: "所选目录项不可用（不是药品或已停用），整批未生效；请在「库存计量 → 物资」改用启用的药品目录物资。",
+  },
+  { status: 503, pattern: null, message: "目录服务不可用，请稍后重试或联系系统管理员。" },
+  { status: 409, pattern: null, message: "所选医嘱中已有已绑定目录药品的记录，整批未生效；请刷新清单后重新勾选。" },
+  { status: 404, pattern: null, message: "目录项不存在或已被删除，整批未生效；请刷新清单后重新选择。" },
+  { status: 400, pattern: null, message: "请求参数错误（如单次超过 100 条或结构不合法），整批未生效；请调整后重试。" },
+];
+
+/** 是否含中文字符（说明 message 已是本地文案，例如前端自校验抛错或网络层提示） */
+const CJK_PATTERN = /[\u4e00-\u9fff]/;
+
+/**
+ * 把目录药品补绑的后端错误映射为中文可操作提示；未命中时返回中文兜底并附原始信息。
+ * 与 `billingMessages.ts#billingErrorMessage` 同口径。
+ */
+function materialBindErrorMessage(error: unknown, fallback: string): string {
+  const raw = error instanceof Error ? error.message : undefined;
+  const message = typeof raw === "string" ? raw.trim() : "";
+  const status = error instanceof ApiRequestError ? error.status : null;
+
+  for (const mapping of MATERIAL_BIND_ERROR_MAPPINGS) {
+    if (mapping.status !== null && mapping.status !== status) continue;
+    if (mapping.pattern !== null && !mapping.pattern.test(message)) continue;
+    return mapping.message;
+  }
+
+  if (message && CJK_PATTERN.test(message)) return message;
+  return message ? `${fallback}（原始信息：${message}）` : fallback;
+}
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
@@ -147,6 +219,25 @@ export default function PharmacyPage() {
   const [drugCatalog, setDrugCatalog] = useState<InventoryMaterial[]>([]);
   const [drugCatalogLoading, setDrugCatalogLoading] = useState(false);
   const [drugCatalogError, setDrugCatalogError] = useState("");
+
+  // ── 待补绑医嘱（030 W6：历史自由文本医嘱批量补绑目录药品）─────────
+  const [unboundOrders, setUnboundOrders] = useState<UnboundMaterialOrder[]>([]);
+  const [unboundTotal, setUnboundTotal] = useState(0);
+  const [unboundLoading, setUnboundLoading] = useState(false);
+  const [unboundError, setUnboundError] = useState("");
+  const [unboundEncounterFilter, setUnboundEncounterFilter] = useState("");
+  const [unboundSearch, setUnboundSearch] = useState("");
+  const [unboundOffset, setUnboundOffset] = useState(0);
+  const UNBOUND_PAGE = 50;
+  /** 已勾选的医嘱 ID（只提交当前页的勾选，翻页/改条件即清空） */
+  const [unboundChecked, setUnboundChecked] = useState<Record<string, boolean>>({});
+  /** 医嘱 ID → 为它选择的目录药品 ID */
+  const [unboundMaterials, setUnboundMaterials] = useState<Record<string, string>>({});
+  const [unboundBinding, setUnboundBinding] = useState(false);
+  const [unboundFormError, setUnboundFormError] = useState("");
+  const [unboundMessage, setUnboundMessage] = useState("");
+  /** 进页签时已自动请求过一次药品目录（目录为空时不再反复请求，失败走「重试」） */
+  const unboundCatalogRequestedRef = useRef(false);
 
   // ── 操作弹窗（审方/调配/确认/取消） ───────────────────────────────
   const [actionTarget, setActionTarget] = useState<PharmacyDispense | null>(null);
@@ -291,6 +382,26 @@ export default function PharmacyPage() {
     }
   }, [returnStatusFilter, returnsOffset]);
 
+  const loadUnboundOrders = useCallback(async () => {
+    setUnboundLoading(true);
+    setUnboundError("");
+    try {
+      const response = await listUnboundMaterialOrders({
+        encounter_id: unboundEncounterFilter || undefined,
+        search: unboundSearch.trim() || undefined,
+        limit: UNBOUND_PAGE,
+        offset: unboundOffset,
+      });
+      setUnboundOrders(response.records);
+      setUnboundTotal(response.meta.total);
+    } catch (error) {
+      setUnboundOrders([]);
+      setUnboundError(errorMessage(error, "无法加载待补绑医嘱"));
+    } finally {
+      setUnboundLoading(false);
+    }
+  }, [unboundEncounterFilter, unboundSearch, unboundOffset]);
+
   useEffect(() => {
     void loadSubjects();
     void loadAdmissions();
@@ -307,6 +418,17 @@ export default function PharmacyPage() {
   useEffect(() => {
     if (activeTab === "returns") void loadReturns();
   }, [activeTab, loadReturns]);
+
+  useEffect(() => {
+    if (activeTab === "unbound") void loadUnboundOrders();
+  }, [activeTab, loadUnboundOrders]);
+
+  // 翻页或改筛选条件后，当前页的勾选与已选药品不再对应，直接清空，避免提交到看不见的行
+  useEffect(() => {
+    setUnboundChecked({});
+    setUnboundMaterials({});
+    setUnboundFormError("");
+  }, [unboundEncounterFilter, unboundSearch, unboundOffset]);
 
   // ── 创建发药单 ────────────────────────────────────────────────────
 
@@ -349,6 +471,16 @@ export default function PharmacyPage() {
       setDrugCatalogLoading(false);
     }
   }, []);
+
+  // 待补绑清单每行都要选目录药品：进入页签时按需加载一次（与发药弹窗共用同一份 drugCatalog）。
+  // `requestedRef` 只发一次自动请求：目录为空且无错误时也能停下来，失败由面板内的「重试」触发。
+  useEffect(() => {
+    if (activeTab !== "unbound") return;
+    if (unboundCatalogRequestedRef.current) return;
+    if (drugCatalog.length > 0 || drugCatalogLoading || drugCatalogError) return;
+    unboundCatalogRequestedRef.current = true;
+    void loadDrugCatalog();
+  }, [activeTab, drugCatalog.length, drugCatalogLoading, drugCatalogError, loadDrugCatalog]);
 
   /** 只加载指定药品在当前仓库的可用库存行；未选药品时不请求，避免给出与医嘱无关的物资 */
   const loadStocks = useCallback(async (warehouse: string, materialId: string) => {
@@ -430,6 +562,68 @@ export default function PharmacyPage() {
       setCreateError(errorMessage(error, "创建发药单失败"));
     } finally {
       setCreateSaving(false);
+    }
+  };
+
+  // ── 待补绑医嘱：批量补绑目录药品（030 W6） ─────────────────────────
+
+  /** 当前页勾选的行；只有本页可见行会被提交，翻页即清空勾选 */
+  const checkedUnboundRows = unboundOrders.filter((row) => unboundChecked[row.id] === true);
+
+  const unboundMaterialId = useCallback(
+    (orderId: string) => (unboundMaterials[orderId] ?? "").trim(),
+    [unboundMaterials],
+  );
+
+  /** 勾选了但还没选目录药品的行（提交前的内联校验依据） */
+  const checkedUnboundMissing = checkedUnboundRows.filter((row) => unboundMaterialId(row.id) === "");
+
+  const unboundAllChecked = unboundOrders.length > 0 && checkedUnboundRows.length === unboundOrders.length;
+
+  const toggleUnboundAll = (checked: boolean) => {
+    if (!checked) {
+      setUnboundChecked({});
+      return;
+    }
+    const next: Record<string, boolean> = {};
+    for (const row of unboundOrders) next[row.id] = true;
+    setUnboundChecked(next);
+  };
+
+  const handleBindMaterialOrders = async () => {
+    setUnboundMessage("");
+    setUnboundFormError("");
+    // 未选药品的行不得提交：先校验「已选行数 ≥ 1 且每行都有药品」
+    if (checkedUnboundRows.length === 0) {
+      setUnboundFormError("请先勾选至少一条待补绑医嘱");
+      return;
+    }
+    if (checkedUnboundMissing.length > 0) {
+      setUnboundFormError(
+        `已勾选 ${checkedUnboundRows.length} 条，其中 ${checkedUnboundMissing.length} 条还没选择目录药品；请为每一行选择药品后再提交。`,
+      );
+      return;
+    }
+    if (checkedUnboundRows.length > 100) {
+      setUnboundFormError(`单次最多绑定 100 条，当前已勾选 ${checkedUnboundRows.length} 条，请分批提交。`);
+      return;
+    }
+    setUnboundBinding(true);
+    try {
+      const result = await bindMaterialOrdersBatch({
+        items: checkedUnboundRows.map((row) => ({ order_id: row.id, material_id: unboundMaterialId(row.id) })),
+      });
+      setUnboundMessage(`已绑定 ${result.bound} 条`);
+      setUnboundChecked({});
+      setUnboundMaterials({});
+      // 刷新清单与计数；待接方列表的「未绑定目录」标记同源，一并刷新避免两处口径不一致
+      await loadUnboundOrders();
+      void loadOrders();
+    } catch (error) {
+      // 单事务全成全败：失败时保留勾选与已选药品，便于原地改选后重试
+      setUnboundFormError(materialBindErrorMessage(error, "批量绑定目录药品失败"));
+    } finally {
+      setUnboundBinding(false);
     }
   };
 
@@ -741,6 +935,104 @@ export default function PharmacyPage() {
     },
   ];
 
+  /** 待补绑清单：勾选 + 逐行选目录药品（药品候选与发药弹窗同一份 drugCatalog） */
+  const unboundColumns: Column<UnboundMaterialOrder>[] = [
+    {
+      key: "checked",
+      header: "选择",
+      className: "w-[64px]",
+      render: (row) => (
+        <input
+          type="checkbox"
+          className={checkboxClass}
+          checked={unboundChecked[row.id] === true}
+          onChange={(event) => {
+            const checked = event.target.checked;
+            setUnboundChecked((current) => {
+              const next = { ...current };
+              if (checked) next[row.id] = true;
+              else delete next[row.id];
+              return next;
+            });
+          }}
+          aria-label={`勾选医嘱 ${row.id}`}
+        />
+      ),
+    },
+    {
+      key: "patient",
+      header: "患者 / 住院号",
+      className: "min-w-[150px]",
+      render: (row) => (
+        <div>
+          <div className="font-medium text-fg-emphasis">{row.patient_name || "—"}</div>
+          <div className="text-xs text-fg-dimmed">{row.encounter_no || row.encounter_id}</div>
+        </div>
+      ),
+    },
+    {
+      key: "order_content",
+      header: "医嘱说明",
+      className: "min-w-[200px] max-w-[320px]",
+      render: (row) => (
+        <span className="block truncate" title={row.order_content ?? ""}>
+          {row.order_content || "—"}
+        </span>
+      ),
+    },
+    {
+      key: "drug_name",
+      header: "历史药名",
+      className: "min-w-[130px]",
+      render: (row) => <span className="font-medium text-fg-emphasis">{row.drug_name || "—"}</span>,
+    },
+    {
+      key: "start_time",
+      header: "开嘱时间",
+      className: "min-w-[150px]",
+      render: (row) => <span className="text-fg-muted">{formatDateTime(row.start_time)}</span>,
+    },
+    {
+      key: "nurse_checked",
+      header: "是否已核对",
+      className: "min-w-[110px]",
+      render: (row) =>
+        row.nurse_checked_at ? (
+          <div className="text-sm">
+            <Badge variant="success">已核对</Badge>
+            <div className="mt-1 text-xs text-fg-dimmed">{formatDateTime(row.nurse_checked_at)}</div>
+          </div>
+        ) : (
+          <Badge variant="warning">未核对</Badge>
+        ),
+    },
+    {
+      key: "material_id",
+      header: "目录药品（必选）",
+      className: "min-w-[220px]",
+      render: (row) => (
+        <select
+          className={`${selectClass} w-full`}
+          value={unboundMaterials[row.id] ?? ""}
+          disabled={drugCatalogLoading || drugCatalogError !== ""}
+          onChange={(event) => {
+            const materialId = event.target.value;
+            setUnboundMaterials((current) => ({ ...current, [row.id]: materialId }));
+          }}
+          aria-label={`为医嘱 ${row.id} 选择目录药品`}
+        >
+          <option value="">{drugCatalogLoading ? "正在加载药品目录…" : "请选择药品目录物资"}</option>
+          {drugCatalog.map((material) => (
+            <option key={material.id} value={material.id}>
+              {material.name}（{material.code}
+              {material.spec ? ` · ${material.spec}` : ""}）
+            </option>
+          ))}
+        </select>
+      ),
+    },
+  ];
+
   const actionTitle =
     actionKind === "review" ? "审方" : actionKind === "start" ? "开始调配" : actionKind === "confirm" ? "发药确认" : "取消发药单";
 
@@ -755,6 +1047,7 @@ export default function PharmacyPage() {
         {(
           [
             { key: "orders", label: "待接方用药医嘱" },
+            { key: "unbound", label: "待补绑医嘱" },
             { key: "dispenses", label: "发药单" },
             { key: "returns", label: "退药单" },
             { key: "requisitions", label: "护理站申领" },
@@ -843,6 +1136,130 @@ export default function PharmacyPage() {
                   下一页
                 </Button>
               </div>
+            </div>
+          )}
+        </Card>
+      )}
+
+      {activeTab === "unbound" && (
+        <Card
+          className="min-w-0 overflow-hidden"
+          title="待补绑医嘱"
+          actions={
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                className={selectClass}
+                value={unboundEncounterFilter}
+                onChange={(event) => {
+                  setUnboundEncounterFilter(event.target.value);
+                  setUnboundOffset(0);
+                }}
+              >
+                <option value="">全部活动入住</option>
+                {admissions.map((admission) => (
+                  <option key={admission.id} value={admission.id}>
+                    {admission.patientName} · {admission.encounter_no}
+                  </option>
+                ))}
+              </select>
+              <Input
+                placeholder="搜索医嘱说明 / 历史药名 / 长者 / 住院号"
+                value={unboundSearch}
+                onChange={(event) => {
+                  setUnboundSearch(event.target.value);
+                  setUnboundOffset(0);
+                }}
+                className="w-64"
+              />
+            </div>
+          }
+        >
+          <p className="px-5 pb-3 text-xs text-fg-dimmed">
+            历史自由文本用药医嘱（已核对、进行中且未绑定目录药品）。勾选后为每一行选择目录药品，一次批量补绑；
+            单次最多 100 条，任一条不满足即整批不生效，请在提交前确认每一行的药品。
+          </p>
+
+          {drugCatalogError && (
+            <p role="alert" className="flex flex-wrap items-center gap-2 px-5 pb-3 text-xs text-danger">
+              药品目录加载失败：{drugCatalogError}
+              <Button type="button" variant="link" size="sm" onClick={() => void loadDrugCatalog()}>
+                重试
+              </Button>
+            </p>
+          )}
+          {!drugCatalogLoading && !drugCatalogError && drugCatalog.length === 0 && (
+            <p className="px-5 pb-3 text-xs text-warning">
+              药品目录为空：请先在「库存计量 → 物资」中新建类别为「药品」且状态为「启用」的物资，再回到此处补绑。
+              <a href="/dashboard/materials" className="ml-1 text-accent hover:underline">
+                前往物资
+              </a>
+            </p>
+          )}
+
+          {unboundError ? (
+            <p className="py-10 text-center text-sm text-danger">{unboundError}</p>
+          ) : unboundOrders.length === 0 && !unboundLoading ? (
+            <EmptyState
+              icon="🔗"
+              title="暂无待补绑医嘱"
+              description="仅展示已由护士核对、状态为进行中且未绑定目录药品的用药医嘱；补绑成功后自动从本清单移除。"
+            />
+          ) : (
+            <Table
+              className="min-w-[1080px]"
+              columns={unboundColumns}
+              data={unboundOrders}
+              loading={unboundLoading}
+              emptyMessage="暂无匹配的待补绑医嘱"
+            />
+          )}
+
+          {unboundTotal > UNBOUND_PAGE && (
+            <div className="flex items-center justify-between px-5 py-3 border-t border-border">
+              <span className="text-xs text-fg-dimmed">
+                共 {unboundTotal} 条 · 第 {Math.floor(unboundOffset / UNBOUND_PAGE) + 1} 页
+              </span>
+              <div className="flex gap-2">
+                <Button size="sm" variant="secondary" disabled={unboundOffset === 0} onClick={() => setUnboundOffset((value) => Math.max(0, value - UNBOUND_PAGE))}>
+                  上一页
+                </Button>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={unboundOffset + UNBOUND_PAGE >= unboundTotal}
+                  onClick={() => setUnboundOffset((value) => value + UNBOUND_PAGE)}
+                >
+                  下一页
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {unboundFormError && (
+            <p role="alert" className="px-5 pt-3 text-sm text-danger">
+              {unboundFormError}
+            </p>
+          )}
+          {unboundMessage && <p className="px-5 pt-3 text-sm text-success">{unboundMessage}</p>}
+
+          {!unboundError && (
+            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border px-5 py-3">
+              <label className="flex items-center gap-2 text-sm text-fg">
+                <input
+                  type="checkbox"
+                  className={checkboxClass}
+                  checked={unboundAllChecked}
+                  disabled={unboundOrders.length === 0}
+                  onChange={(event) => toggleUnboundAll(event.target.checked)}
+                />
+                全选当页
+                <span className="text-xs text-fg-dimmed">
+                  （共 {unboundTotal} 条待补绑 · 已选 {checkedUnboundRows.length} 条）
+                </span>
+              </label>
+              <Button loading={unboundBinding} disabled={unboundBinding} onClick={() => void handleBindMaterialOrders()}>
+                批量绑定
+              </Button>
             </div>
           )}
         </Card>

@@ -20,6 +20,7 @@ import {
   type Bill,
   type BillItem,
   type BillPrecheck,
+  type BillPrecheckNotice,
   type BillPrecheckRequirement,
   type Encounter,
   type FeeItem,
@@ -30,6 +31,7 @@ import {
 } from "@pitchfork/shared/aceso";
 import { formatDate, formatDateTime, todayLocal } from "../lib/datetime";
 import { BILLING_BLOCKED_REASONS, FEE_ITEMS_PAGE_PATH, billingErrorMessage } from "./billingMessages";
+import DischargeSettlementWizard from "./DischargeSettlementWizard";
 
 const PAGE_SIZE = 50;
 
@@ -107,7 +109,7 @@ function requirementNotice(requirement: BillPrecheckRequirement): string {
   if (level) {
     return requirement.enabled_count > 1
       ? `护理等级「${level}」存在多条启用的「护理费」项目，请到${FEE_ITEMS_LOCATION}只保留一条启用。`
-      : `护理等级「${level}」缺少同名的启用「护理费」项目：护理费名称必须与护理评估的「结果等级」完全一致。`;
+      : `缺少绑定护理等级「${level}」的启用「护理费」项目：请到${FEE_ITEMS_LOCATION}新增或修改护理费，并把「护理等级」选为「${level}」（计费按等级绑定，与项目名称无关）。`;
   }
   if (requirement.enabled_count > 1) {
     return `「${requirement.category}」存在多条启用的费用项目，请到${FEE_ITEMS_LOCATION}只保留一条启用。`;
@@ -119,6 +121,24 @@ function requirementNotice(requirement: BillPrecheckRequirement): string {
         ? "账期内有就餐记录时自动计费要求「伙食费」恰好一条启用项（按折合餐次计费）。"
         : "自动计费要求该分类恰好一条启用项。";
   return `缺少启用的「${requirement.category}」费用项目：${basis}`;
+}
+
+/**
+ * 计费口径提示（服务端 `notices`）→ 中文文案（计划 030 §3 D3/D8）。
+ * 这些提示**不阻塞**生成账单，只说明「本账期有一类费用不会计入」以及原因与下一步，
+ * 修掉的是「少了护理费/伙食费但页面不告诉用户」的原缺陷。
+ */
+function precheckNoticeText(notice: BillPrecheckNotice): string {
+  switch (notice.code) {
+    case "nursing_fee_not_billed_no_assessment":
+      return "账期内没有生效的护理评估（账期之前也没有）：本账期不计护理费。请先到「照护服务 → 护理评估」补做评估；确需补记本期护理费时，可在账单生成后用「手工加项」单独补一条。";
+    case "meal_fee_not_billed_no_dining_record":
+      return "账期内没有就餐登记（膳食营养 → 配餐名单与就餐登记）：本账期不计伙食费。伙食费按就餐登记折合餐次计费（正常=1 餐、部分=0.5 餐、未就餐/拒食=0 餐）；请假、外出、住院期间未登记就餐同样不计费。";
+    default:
+      return notice.category
+        ? `「${notice.category}」本账期不计费（原因码 ${notice.code}）。`
+        : `本账期有一类费用不会计入（原因码 ${notice.code}）。`;
+  }
 }
 
 export default function BillingPage() {
@@ -431,6 +451,17 @@ export default function BillingPage() {
 
   const feeItemsEmpty = !feeItemsLoading && feeItems.length === 0;
   const generateBlocked = missingFeeItems.length > 0;
+
+  /**
+   * 计费口径提示（计划 030 §4.2，不阻塞生成）：
+   * 服务端 `notices` 只说明「本账期有这样一类费用不会计入」，文案在前端映射，未知 code 归入兜底文案。
+   */
+  const precheckNotices = useMemo((): GenerateBlockNotice[] => {
+    return (precheck?.notices ?? []).map((notice: BillPrecheckNotice, index) => ({
+      key: `${notice.code}-${notice.category ?? ""}-${index}`,
+      text: precheckNoticeText(notice),
+    }));
+  }, [precheck]);
 
   /**
    * 按钮可用性完全取服务端 `can_generate`；precheck 尚未返回或请求失败（null）时**不禁用**，
@@ -884,6 +915,34 @@ export default function BillingPage() {
     </div>
   );
 
+  /**
+   * 自动计费口径说明 + 本账期口径提示（计划 030 §4.2）：始终渲染口述口径，
+   * 服务端 `notices` 存在时逐条补上「哪一类不计 + 原因 + 下一步」。不阻塞生成。
+   */
+  const generateCaliberNotice = precheck !== null && (
+    <div className="mb-4 rounded-md border border-border bg-surface-alt px-4 py-3 text-xs text-fg-muted">
+      <p className="font-medium text-fg">自动计费口径</p>
+      <ul className="mt-2 space-y-1">
+        <li>· 床位费 = 床位单价 × 账期内在院天数（入住日与离院日均计费）。</li>
+        <li>
+          · 护理费 = 按护理评估「结果等级」分段，每段 = 该等级绑定的护理费单价 × 天数；
+          <span className="text-fg">没有护理评估覆盖的天数不计护理费</span>。
+        </li>
+        <li>
+          · 伙食费 = 账期内就餐登记折合餐次 × 单价（正常=1、部分=0.5、未就餐/拒食=0）；
+          <span className="text-fg">没有就餐登记不计伙食费</span>。
+        </li>
+      </ul>
+      {precheckNotices.length > 0 && (
+        <ul className="mt-2 space-y-1 text-warning">
+          {precheckNotices.map((notice) => (
+            <li key={notice.key}>· {notice.text}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+
   return (
     <div className="space-y-6">
       <div>
@@ -1039,6 +1098,25 @@ export default function BillingPage() {
         )}
       </Card>
 
+      {/* 离院结算向导（030 W4）：把「关账（含核销）→ 退押」串成三步，避免离院时漏步骤。
+          仅对已离院/已去世或已关账的入住显示；在住长者的账期账单仍走上方生成/缴费入口。 */}
+      {selectedAdmission && (selectedAdmission.settled_at || selectedAdmission.status !== "ACTIVE") && (
+        <Card title="离院结算向导">
+          <p className="mb-4 text-sm text-fg-muted">
+            按「① 生成区间最终账单 → ② 核销关账 → ③ 退还押金余额」三步收尾，每步完成后再进行下一步。
+            与上方「结算关账」卡片共用同一套服务端口径（同一资格校验与押金余额来源），这里只把三步串成流程。
+          </p>
+          <DischargeSettlementWizard
+            encounterId={selectedAdmission.id}
+            onSettled={() => {
+              refreshAfterChange();
+              void loadDepositBalance(selectedAdmission.id);
+              void loadAdmissions();
+            }}
+          />
+        </Card>
+      )}
+
       {/* 欠费列表 */}
       <Card
         title="欠费列表"
@@ -1094,9 +1172,9 @@ export default function BillingPage() {
           <p className="text-sm text-fg-muted">
             按自然月自动计费（床位费/护理费/伙食费），账期裁剪到在院区间；同入住同账期仅能生成一次。
             {selectedAdmission ? ` 当前入住：${selectedAdmission.patientName}。` : ""}
-          </p>
-          <Input label="账期（月）" value={month} onChange={(event) => setMonth(event.target.value)} placeholder="YYYY-MM" />
+          </p>          <Input label="账期（月）" value={month} onChange={(event) => setMonth(event.target.value)} placeholder="YYYY-MM" />
           {generateGateNotice}
+          {generateCaliberNotice}
           {modalError}
           <div className="flex justify-end gap-2 pt-2">
             <Button variant="ghost" onClick={() => setGenerateOpen(false)}>取消</Button>
@@ -1129,7 +1207,9 @@ export default function BillingPage() {
                   <option value="">请选择</option>
                   {feeItems.map((item) => (
                     <option key={item.id} value={item.id}>
-                      {item.category} · {item.name}（¥ {formatAmount(item.unit_price)}）
+                      {item.category} · {item.name}
+                      {item.category === "护理费" && item.nursing_level ? `（等级 ${item.nursing_level}）` : ""}
+                      （¥ {formatAmount(item.unit_price)}）
                     </option>
                   ))}
                 </select>

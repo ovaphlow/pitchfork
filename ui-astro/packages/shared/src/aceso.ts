@@ -739,7 +739,8 @@ export function listActiveElderlyAdmissions(params: { search?: string; limit?: n
 //
 // 口径（计划 029 §4.1）：只读当前占用中的养老（ELDERLY_CARE）入住，即
 // `discharge_date IS NULL OR discharge_date > now()`，按 department/ward/admit_date 升序。
-// 后端无床位主数据（D1），`department`/`ward` 仍是自由文本；调用方按 trim 后精确比较。
+// 占用事实来源仍是 `encounters.department`/`ward`（计划 029 D1）；计划 030 新增的 `beds`
+// 只是**候选主数据**（床位管理页维护），不强制引用完整性，调用方按 trim 后精确比较。
 
 export interface BedOccupancyRecord {
   /** 入住（encounter）ID */
@@ -770,6 +771,84 @@ export function listBedOccupancy(params: { department?: string; ward?: string; l
   if (params.offset !== undefined) query.set("offset", String(params.offset));
   const suffix = query.toString() ? `?${query.toString()}` : "";
   return request<BedOccupancyList>(`/healthcare/v1/bed-occupancy${suffix}`);
+}
+
+// ─── 床位主数据 (Bed Master Data, 计划 030 §4.5) ──────────────────────
+
+export type BedStatus = "启用" | "停用";
+
+/** 床位主数据条目：占用事实仍来自入住记录，本表只提供候选 `(department, ward)` */
+export interface Bed {
+  id: string;
+  /** 照护单元/病区 */
+  department: string;
+  /** 房间床位 */
+  ward: string;
+  label: string | null;
+  status: BedStatus;
+  remark: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface BedList {
+  records: Bed[];
+  meta: { total: number };
+}
+
+export interface BedInput {
+  department: string;
+  ward: string;
+  label?: string;
+  remark?: string;
+}
+
+/** 床位主数据列表：department/ward/status 过滤，created_at 倒序分页 */
+export function listBeds(params: {
+  department?: string;
+  ward?: string;
+  status?: BedStatus;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<BedList> {
+  const query = new URLSearchParams();
+  if (params.department?.trim()) query.set("department", params.department.trim());
+  if (params.ward?.trim()) query.set("ward", params.ward.trim());
+  if (params.status) query.set("status", params.status);
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<BedList>(`/healthcare/v1/beds${suffix}`);
+}
+
+export function getBed(id: string): Promise<Bed> {
+  return request<Bed>(`/healthcare/v1/beds/${encodeURIComponent(id)}`);
+}
+
+/** 新增床位：department/ward 必填（trim 后非空、≤50 字），启用态下 (department, ward) 唯一 */
+export function createBed(input: BedInput): Promise<Bed> {
+  return request<Bed>("/healthcare/v1/beds", { method: "POST", body: JSON.stringify(input) });
+}
+
+/** 全量更新床位字段；状态只能走 updateBedStatus */
+export function updateBed(id: string, input: BedInput): Promise<Bed> {
+  return request<Bed>(`/healthcare/v1/beds/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+/** 启用/停用流转：非法状态值 400 */
+export function updateBedStatus(id: string, status: BedStatus): Promise<Bed> {
+  return request<Bed>(`/healthcare/v1/beds/${encodeURIComponent(id)}/status`, {
+    method: "PATCH",
+    body: JSON.stringify({ status }),
+  });
+}
+
+/** 删除床位：不存在 404；仍被在住入住占用时 409 */
+export function deleteBed(id: string): Promise<{ id: string }> {
+  return request<{ id: string }>(`/healthcare/v1/beds/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
 // ─── 养老离院交接摘要归档 (DISCHARGE_SUMMARY) ──────────────────────────────
@@ -1140,6 +1219,34 @@ export function listNursingOverdueExecutions(params: {
   offset?: number;
 } = {}): Promise<NursingPage<NursingTodayExecution>> {
   return request<NursingPage<NursingTodayExecution>>(`/nursing/v1/executions/overdue${nursingQuery(params)}`);
+}
+
+/**
+ * 逾期执行收口结果（计划 030 §4.3）：`converged` 为本次被置为 漏执行（SKIPPED）的条数，
+ * `truncated` 表示命中数超过单次上限仍有剩余；重复调用第二次 `converged: 0`（幂等）。
+ */
+export interface ConvergeOverdueResult {
+  converged: number;
+  ids: string[];
+  truncated: boolean;
+  min_overdue_minutes: number;
+}
+
+/**
+ * 批量收口逾期执行（幂等，人工显式触发）：把「逾期超过 min_overdue_minutes 且仍未终态」的
+ * PENDING/IN_PROGRESS 执行置为 `SKIPPED`（漏执行），写 metadata.convergence 留痕。
+ * 默认阈值 1440 分钟（24 小时），单次上限 200 条；不做任何自动/定时改写。
+ */
+export function convergeOverdueExecutions(input: {
+  encounter_id?: string;
+  task_type?: string;
+  min_overdue_minutes?: number;
+  limit?: number;
+} = {}): Promise<ConvergeOverdueResult> {
+  return request<ConvergeOverdueResult>("/nursing/v1/executions/converge-overdue", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
 }
 
 /** 批量生成指定日期范围的执行记录 */
@@ -2169,6 +2276,68 @@ export function listPendingNurseCheckOrders(params: {
 /** 医嘱给药明细（只读）：按 task 关联，与执行汇总/给药汇总同源一致 */
 export function listOrderAdministrations(orderId: string): Promise<MedicalOrderAdministrationList> {
   return request<MedicalOrderAdministrationList>(`/healthcare/v1/orders/${encodeURIComponent(orderId)}/administrations`);
+}
+
+// ─── 历史医嘱待补绑目录药品（计划 030 §4.4） ──────────────────────────
+
+/**
+ * 待补绑目录药品的用药医嘱：`MEDICATION` + `ACTIVE` + `order_details.material_id` 为空，
+ * 且属于养老（`ELDERLY_CARE`）入住。`drug_name` 是历史自由文本药名（可能为空）。
+ */
+export interface UnboundMaterialOrder {
+  id: string;
+  encounter_id: string;
+  encounter_no: string | null;
+  patient_id: string | null;
+  patient_name: string | null;
+  order_content: string | null;
+  /** 历史自由文本药名（`order_details.drug_name`），未填为 null */
+  drug_name: string | null;
+  start_time: string | null;
+  end_time: string | null;
+  nurse_checked_at: string | null;
+  created_at: string | null;
+}
+
+export interface UnboundMaterialOrderList {
+  records: UnboundMaterialOrder[];
+  meta: { total: number };
+}
+
+/** 待补绑清单（只读，可反复调用）：支持 encounter_id / search 过滤，倒序分页 */
+export function listUnboundMaterialOrders(params: {
+  encounter_id?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<UnboundMaterialOrderList> {
+  const query = new URLSearchParams();
+  if (params.encounter_id) query.set("encounter_id", params.encounter_id);
+  if (params.search) query.set("search", params.search);
+  if (params.limit != null) query.set("limit", String(params.limit));
+  if (params.offset != null) query.set("offset", String(params.offset));
+  const qs = query.toString();
+  return request<UnboundMaterialOrderList>(`/healthcare/v1/orders/unbound-material${qs ? `?${qs}` : ""}`);
+}
+
+export interface BoundMaterialItem {
+  order_id: string;
+  material_id: string;
+  material_code: string | null;
+  material_name: string | null;
+}
+
+/**
+ * 批量补绑目录药品（单事务全成全败，≤100 条）：任一目录项不存在/停用或任一条已绑定即整体失败
+ * （404/400/409），不做部分成功。
+ */
+export function bindMaterialOrdersBatch(input: {
+  items: { order_id: string; material_id: string }[];
+}): Promise<{ bound: number; items: BoundMaterialItem[] }> {
+  return request<{ bound: number; items: BoundMaterialItem[] }>(
+    "/healthcare/v1/orders/bind-material-batch",
+    { method: "POST", body: JSON.stringify(input) },
+  );
 }
 
 export function markEncounterDeath(encounterId: string, input: DeathInput): Promise<Encounter> {
@@ -4290,6 +4459,13 @@ export function listDeposits(
 export type FeeItemCategory = "床位费" | "护理费" | "伙食费" | "个性化服务费" | "押金" | "其他";
 export type FeeItemStatus = "启用" | "停用";
 
+/**
+ * 护理费绑定的护理等级枚举（计划 030 D1）：与护理评估表单的「结果等级」四值逐字一致。
+ * 护理费**必须**绑定其中一个等级，计费按等级匹配（不再按名称匹配）；`name` 从此只是描述文本。
+ */
+export const NURSING_FEE_LEVELS = ["低风险", "中风险", "高风险", "无需干预"] as const;
+export type NursingFeeLevel = (typeof NURSING_FEE_LEVELS)[number];
+
 /** 费用项目字典条目；unit_price 为 NUMERIC(12,2) 数值（元） */
 export interface FeeItem {
   id: string;
@@ -4297,6 +4473,8 @@ export interface FeeItem {
   name: string;
   unit_price: number;
   status: FeeItemStatus;
+  /** 仅护理费有值：绑定的护理等级（服务端字段，落 metadata.nursing_level） */
+  nursing_level: NursingFeeLevel | string | null;
   remark: string | null;
   metadata: Record<string, unknown> | null;
   created_at: string;
@@ -4312,6 +4490,8 @@ export interface FeeItemInput {
   category: FeeItemCategory;
   name: string;
   unit_price: number;
+  /** 分类为「护理费」时必填；其它分类不得携带（服务端 400） */
+  nursing_level?: NursingFeeLevel | string | null;
   remark?: string;
   metadata?: Record<string, unknown>;
 }
@@ -4486,6 +4666,19 @@ export type BillPrecheckBlockedBy =
   | "settled"
   | "not_elderly_admission";
 
+/**
+ * 计费口径提示（计划 030 D8，机器可读原因码，中文文案由前端映射）。
+ * 与 `blocked_by` 的区别：notices **不阻塞**生成，只是告知「本账期有一类费用不会计入」。
+ */
+export interface BillPrecheckNotice {
+  /** 例如 `nursing_fee_not_billed_no_assessment` / `meal_fee_not_billed_no_dining_record` */
+  code: string;
+  /** 涉及的费用分类（如 护理费/伙食费）；无归属时为 null */
+  category: string | null;
+  /** 护理费口径下涉及的护理等级；其它口径为 null */
+  level: string | null;
+}
+
 /** 生成账单前置校验结果（只读，可反复调用） */
 export interface BillPrecheck {
   month: string;
@@ -4495,6 +4688,8 @@ export interface BillPrecheck {
   can_generate: boolean;
   blocked_by: BillPrecheckBlockedBy | null;
   requirements: BillPrecheckRequirement[];
+  /** 计费口径提示：恒为数组，无提示时 `[]` */
+  notices: BillPrecheckNotice[];
 }
 
 /**

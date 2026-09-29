@@ -1,0 +1,12 @@
+---
+import DashboardLayout from "../../layouts/DashboardLayout.astro";
+import BedsPage from "../../components/BedsPage.tsx";
+import { PAGE_TITLE_DOMAIN_LABELS } from "../../lib/domain";
+
+// 床位主数据与域无关（三个域共用「床位管理」）；结构照 elders / inpatient 的薄包装口径
+const title = PAGE_TITLE_DOMAIN_LABELS["/dashboard/beds"];
+---
+
+<DashboardLayout title={title.base} titleDomainLabels={title.labels}>
+  <BedsPage client:only="react" />
+</DashboardLayout>
