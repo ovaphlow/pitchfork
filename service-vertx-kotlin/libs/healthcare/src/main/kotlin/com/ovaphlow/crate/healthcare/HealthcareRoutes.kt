@@ -2,6 +2,7 @@ package com.ovaphlow.crate.healthcare
 
 import com.ovaphlow.crate.nursing.ConflictException
 import com.ovaphlow.crate.nursing.NotFoundException
+import com.ovaphlow.crate.nursing.TaskService
 import io.vertx.core.Handler
 import io.vertx.core.Vertx
 import io.vertx.core.json.JsonArray
@@ -40,12 +41,18 @@ object HealthcareRoutes {
     ): Router {
         val router = Router.router(vertx)
         val service = HealthcareService(pool, drugCatalogPort = drugCatalogPort)
+        // 030 §4.4 待补绑清单 / 批量补绑：`HealthcareService` 未透出这两个方法，
+        // 且本波次不允许改 `HealthcareService.kt`，故按同参数（pool + taskService + 目录端口）
+        // 单独构造一个无状态医嘱服务实例，只服务这两条路由。
+        val medicalOrderService =
+            MedicalOrderService(pool, TaskService(pool), drugCatalogPort = drugCatalogPort)
         val chronicDiseaseService = ChronicDiseaseService(pool)
         val followupService = FollowupService(pool, chronicDiseaseService = chronicDiseaseService)
         val vitalSignService = VitalSignService(pool)
         val checkupService = CheckupService(pool)
         val depositService = DepositService(pool)
         val feeItemService = FeeItemService(pool)
+        val bedService = BedService(pool)
         val billService = BillService(pool)
         val paymentService = PaymentService(pool)
 
@@ -168,6 +175,32 @@ object HealthcareRoutes {
         // 契约允许空请求体，故此处对缺失 body 兜底为空对象（`body()` 在无 body 时为 null）。
         router.post("/orders/close-expired").handler { ctx ->
             service.closeExpiredOrders(ctx.body()?.asJsonObject() ?: JsonObject())
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 030 §4.4 历史医嘱待补绑清单（只读，跨入住）：静态路径必须先于泛型 /orders/:id
+        router.get("/orders/unbound-material").handler { ctx ->
+            medicalOrderService.listUnboundMaterialOrders(
+                pool,
+                encounterId = ctx.request().getParam("encounter_id"),
+                search = ctx.request().getParam("search"),
+                limit = limit(ctx),
+                offset = offset(ctx),
+            ).onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 030 §4.4 批量补绑（单事务全成全败）：静态路径必须先于泛型 /orders/:id。
+        // 操作人取认证中间件写入的 userId（落 `material_bound_by` 审计，不接受请求体伪造；
+        // 未注入认证中间件时保持 401 兜底，与同文件其他写路由一致）。
+        // 契约要求空体/坏结构 400，故缺失 body 兜底为空对象，非 JSON 对象的请求体显式拒绝。
+        router.post("/orders/bind-material-batch").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            val requestBody = jsonObjectBodyOrNull(ctx)
+            if (requestBody == null) {
+                respond(ctx, 400, "body must be a JSON object")
+                return@handler
+            }
+            medicalOrderService.bindMaterialBatch(requestBody, userId)
                 .onSuccess { ctx.json(it) }
                 .onFailure { respondFailure(ctx, it) }
         }
@@ -851,6 +884,77 @@ object HealthcareRoutes {
         }
 
         // ========================================================================
+        //  床位主数据 (Bed Master Data) — 计划 030 §4.5（W8）
+        //  占用事实来源仍是 encounters.department/ward（029 D1）；本表只提供候选主数据，
+        //  不强制引用完整性、不写入入住记录。读路由与 GET /fee-items 同口径，
+        //  写路由以 userId(ctx) 兜底 401（App 的 apiAuthenticationGate 已注入；不改 Main.kt）。
+        //  错误码由既有 respondFailure 覆盖：IllegalArgumentException→400、
+        //  HealthcareNotFoundException→404、ConflictException→409（重复启用 / 占用中删除）。
+        // ========================================================================
+        // 列表：{records, meta:{total}}；支持 department/ward/status 过滤；空列表 records: [] 且 total: 0
+        router.get("/beds").handler { ctx ->
+            bedService.listBeds(
+                department = ctx.request().getParam("department"),
+                ward = ctx.request().getParam("ward"),
+                status = ctx.request().getParam("status"),
+                limit = limit(ctx),
+                offset = offset(ctx),
+            ).onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 详情
+        router.get("/beds/:id").handler { ctx ->
+            bedService.getBed(requiredId(ctx))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 创建：体 {department, ward, label?, remark?}；状态默认 启用；重复启用键 409
+        // 读体用 030 安全读体（评审 P2-1）：非 JSON 对象的请求体显式 400，不得因
+        // `asJsonObject()` 抛 DecodeException 而退化成 500。
+        router.post("/beds").handler { ctx ->
+            userId(ctx) ?: return@handler
+            val requestBody = jsonObjectBodyOrNull(ctx)
+            if (requestBody == null) {
+                respond(ctx, 400, "body must be a JSON object")
+                return@handler
+            }
+            bedService.createBed(requestBody)
+                .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 更新：整量替换 department/ward/label/remark；状态只能走 PATCH /:id/status
+        router.put("/beds/:id").handler { ctx ->
+            userId(ctx) ?: return@handler
+            val requestBody = jsonObjectBodyOrNull(ctx)
+            if (requestBody == null) {
+                respond(ctx, 400, "body must be a JSON object")
+                return@handler
+            }
+            bedService.updateBed(requiredId(ctx), requestBody)
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 状态流转：体 {status: 启用|停用}；重新启用撞同键 409
+        router.patch("/beds/:id/status").handler { ctx ->
+            userId(ctx) ?: return@handler
+            val requestBody = jsonObjectBodyOrNull(ctx)
+            if (requestBody == null) {
+                respond(ctx, 400, "body must be a JSON object")
+                return@handler
+            }
+            bedService.updateBedStatus(requiredId(ctx), requestBody)
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 删除：该 (department, ward) 仍有在住养老入住时 409
+        router.delete("/beds/:id").handler { ctx ->
+            userId(ctx) ?: return@handler
+            bedService.deleteBed(requiredId(ctx))
+                .onSuccess { ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+
+        // ========================================================================
         //  账单生成与手工加项 (Bills) — 按月自动计费（床位/护理/伙食）+ 手工加项
         //  写路由的认证中间件由 App 编排层注入；未注入时业务处理器保持 401 兜底。
         //  同 encounter 同账期唯一，重复生成 409；停用字典项不可用于新账单/加项 400；
@@ -989,6 +1093,21 @@ object HealthcareRoutes {
     }
 
     private fun body(ctx: RoutingContext): JsonObject = ctx.body().asJsonObject() ?: JsonObject()
+
+    /**
+     * 030 安全读体：`ctx.body()` 在请求体缺失时可能为 null（[BodyHandler] 已挂载但 body 为空），
+     * 裸调 `asJsonObject()` 会 NPE/500。返回 null 表示「不是 JSON 对象」（调用方映射 400）；
+     * body 缺失或为空按空对象处理，交由服务端校验给出 `items is required`。
+     */
+    private fun jsonObjectBodyOrNull(ctx: RoutingContext): JsonObject? {
+        val raw = ctx.body()?.buffer()?.toString()?.trim()
+        if (raw.isNullOrEmpty()) return JsonObject()
+        return try {
+            JsonObject(raw)
+        } catch (_: RuntimeException) {
+            null
+        }
+    }
 
     private fun requiredId(ctx: RoutingContext): String =
         ctx.pathParam("id")?.takeIf(String::isNotBlank)

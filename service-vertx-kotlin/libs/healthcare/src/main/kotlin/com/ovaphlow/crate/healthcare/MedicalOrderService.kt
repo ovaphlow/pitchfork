@@ -107,6 +107,9 @@ class MedicalOrderService(
         const val DRUG_CATEGORY = "药品"
         const val ACTIVE_STATUS = "ACTIVE"
 
+        /** 030 §4.4 批量补绑单次上限：超过一律 400，不做分批隐式拆分 */
+        const val MAX_BIND_BATCH_SIZE = 100
+
         /** 027 收束审计原因：只读到期派生（`is_expired`）触发的显式收束 */
         const val CONVERGENCE_REASON_EXPIRED = "EXPIRED"
 
@@ -840,6 +843,104 @@ class MedicalOrderService(
     }
 
     /**
+     * 030 §4.4 历史医嘱待补绑清单（只读）：`MEDICATION` + `ACTIVE` + 未绑目录
+     * （`order_details->>'material_id'` 缺失或 JSON null）且入住为 `ELDERLY_CARE` 的医嘱，
+     * 供药房多选批量补绑。倒序分页，`meta.total` 与 `records` 同源。
+     *
+     * `search` 模糊匹配医嘱正文 / `order_details->>'drug_name'` / 患者姓名 / 住院号，
+     * 与 `listPendingNurseCheckOrders` 同口径。读取不写医嘱、不创建任务、不加锁，
+     * 只读场景调用方传 Pool 即可，不开启事务。
+     */
+    fun listUnboundMaterialOrders(
+        client: SqlClient,
+        encounterId: String?,
+        search: String?,
+        limit: Int,
+        offset: Int,
+    ): Future<JsonObject> {
+        val conditions = mutableListOf<Condition>()
+        conditions.add(MEDICAL_ORDERS.ORDER_TYPE.eq("MEDICATION"))
+        conditions.add(MEDICAL_ORDERS.STATUS.eq(ACTIVE_STATUS))
+        // 未绑目录的唯一判据与 025 补绑路径同源：`order_details->>'material_id'` 键缺失或 JSON null；
+        // 谓词只作用于 `medical_orders`，不受 join 影响。
+        // 与同文件 `order_details->>'drug_name'` 一致，使用 jOOQ 单参 `DSL.field`（plain SQL 表达式）
+        conditions.add(DSL.field("order_details->>'material_id'").isNull())
+        // 030 §4.4 入住门禁只要求 ELDERLY_CARE（终态入住下不应再有 ACTIVE 医嘱）
+        conditions.add(ENCOUNTERS.ENCOUNTER_TYPE.eq("ELDERLY_CARE"))
+        // 030 评审 P2-8：空白 encounter_id 视为未提供（与同文件其它过滤的 isNotBlank 口径一致），
+        // 否则 `?encounter_id=` 会退化成 `encounter_id = ''` 并恒返回空集。
+        encounterId?.takeIf(String::isNotBlank)?.let { conditions.add(MEDICAL_ORDERS.ENCOUNTER_ID.eq(it)) }
+        if (!search.isNullOrBlank()) {
+            conditions.add(
+                DSL.or(
+                    MEDICAL_ORDERS.ORDER_CONTENT.like("%$search%"),
+                    DSL.field("order_details->>'drug_name'").like("%$search%"),
+                    PATIENTS.NAME.like("%$search%"),
+                    ENCOUNTERS.ENCOUNTER_NO.like("%$search%"),
+                ),
+            )
+        }
+
+        val fields = listOf(
+            MEDICAL_ORDERS.ID,
+            MEDICAL_ORDERS.ENCOUNTER_ID,
+            ENCOUNTERS.PATIENT_ID,
+            PATIENTS.NAME.`as`("patient_name"),
+            ENCOUNTERS.ENCOUNTER_NO,
+            MEDICAL_ORDERS.ORDER_CONTENT,
+            MEDICAL_ORDERS.ORDER_DETAILS,
+            MEDICAL_ORDERS.START_TIME,
+            MEDICAL_ORDERS.END_TIME,
+            MEDICAL_ORDERS.NURSE_CHECKED_AT,
+            MEDICAL_ORDERS.CREATED_AT,
+        )
+        val from = ctx.select(fields)
+            .from(MEDICAL_ORDERS)
+            .join(ENCOUNTERS).on(MEDICAL_ORDERS.ENCOUNTER_ID.eq(ENCOUNTERS.ID))
+            .join(PATIENTS).on(ENCOUNTERS.PATIENT_ID.eq(PATIENTS.ID))
+            .where(conditions)
+        val countQuery = ctx.select(DSL.count().`as`("total"))
+            .from(MEDICAL_ORDERS)
+            .join(ENCOUNTERS).on(MEDICAL_ORDERS.ENCOUNTER_ID.eq(ENCOUNTERS.ID))
+            .join(PATIENTS).on(ENCOUNTERS.PATIENT_ID.eq(PATIENTS.ID))
+            .where(conditions)
+        val dataQuery = from
+            // 倒序分页：created_at 相同时（存量批量导入）以 id 兜底，保证翻页不重不漏
+            .orderBy(MEDICAL_ORDERS.CREATED_AT.desc(), MEDICAL_ORDERS.ID.desc())
+            .limit(limit)
+            .offset(offset)
+
+        return execute(client, countQuery).compose { countRows ->
+            val total = countRows.iterator().next().getLong("total") ?: 0L
+            execute(client, dataQuery).map { dataRows ->
+                JsonObject()
+                    .put("records", JsonArray(dataRows.map(::unboundMaterialOrderRowJson)))
+                    .put("meta", JsonObject().put("total", total))
+            }
+        }
+    }
+
+    /**
+     * 030 §4.4 待补绑行：`drug_name` 取 `order_details` 里的自由文本快照，
+     * 缺失或纯空白一律 null（存量医嘱可能完全没有 `order_details` 快照）。
+     */
+    private fun unboundMaterialOrderRowJson(row: Row): JsonObject {
+        val details = row.getValue("order_details") as? JsonObject
+        return JsonObject()
+            .put("id", row.getString("id"))
+            .put("encounter_id", row.getString("encounter_id"))
+            .put("encounter_no", row.getString("encounter_no"))
+            .put("patient_id", row.getString("patient_id"))
+            .put("patient_name", row.getString("patient_name"))
+            .put("order_content", row.getString("order_content"))
+            .put("drug_name", details?.trimmedText("drug_name"))
+            .put("start_time", row.getOffsetDateTime("start_time")?.toString())
+            .put("end_time", row.getOffsetDateTime("end_time")?.toString())
+            .put("nurse_checked_at", row.getOffsetDateTime("nurse_checked_at")?.toString())
+            .put("created_at", row.getOffsetDateTime("created_at")?.toString())
+    }
+
+    /**
      * 药房发药事务内精确锁读一条医嘱（011）：FOR UPDATE OF medical_orders，
      * 返回受控快照。必须在调用方外层事务连接内执行，禁止重新取 Pool。
      */
@@ -999,6 +1100,228 @@ class MedicalOrderService(
             execute(client, updateQuery).map { null as Void? }
         }
     }
+
+    /**
+     * 030 §4.4 历史医嘱批量补绑目录药品（单事务全成全败）：
+     *
+     * 1. 请求体严格性先行（未知键 / 结构错 / `items` 缺失或空 / 超 [MAX_BIND_BATCH_SIZE] /
+     *    重复 `order_id` → 400），校验阶段不做任何 IO，也不开启事务；
+     * 2. 事务内先做**医嘱作用域门禁**（030 评审 P2-3）：只接受「`MEDICATION` + `ACTIVE`」的医嘱，
+     *    与清单端点 `listUnboundMaterialOrders` 同一条件；不存在 404、
+     *    非用药 400 `order is not a medication order: <id>`、非活动 409 `order is not active: <id>`，
+     *    且全部在任何写入之前判定，避免把 `material_id` 绑到非用药或终态医嘱上；
+     * 3. 再逐项经 [DrugCatalogPort] 解析目录快照
+     *    （物资不存在 404；`category != 药品` / `status != ACTIVE` 400；端口未接线 503），
+     *    **任何一条解析失败都在写入前终止**，因此解析类失败不会留下任何一条已绑定；
+     * 4. 最后逐项调用 [bindDrugMaterial] 写并集绑定（含 `material_bound_by`/`material_bound_at` 审计），
+     *    已绑定 → 409 且沿用单条补绑原文案；任一步失败由本方法开启的事务整体回滚，不产生半绑批次。
+     *
+     * 与单条 `bindDrugMaterial` 的差异：本方法自己开启事务（单条版本要求调用方在事务内），
+     * 且只写绑定不触碰临床 status/end_time/护理任务，与药房补绑路径保持同一副作用面。
+     */
+    fun bindMaterialBatch(body: JsonObject, operator: String): Future<JsonObject> {
+        val items = try {
+            validateBindMaterialBatchInput(body)
+        } catch (error: IllegalArgumentException) {
+            return Future.failedFuture(error)
+        }
+        val operatorText = operator.trim()
+        if (operatorText.isBlank()) {
+            return Future.failedFuture(IllegalArgumentException("material_bound_by operator must not be blank"))
+        }
+        val port = drugCatalogPort
+            ?: return Future.failedFuture(
+                DrugCatalogUnavailableException("drug catalog port is not configured"),
+            )
+        return pool.withTransaction<JsonObject> { connection ->
+            requireBindableOrders(connection, items.map { it.orderId }).compose {
+                resolveBindMaterials(connection, port, items).compose { resolved ->
+                    bindMaterialItems(connection, resolved, operatorText)
+                }
+            }
+        }
+    }
+
+    /**
+     * 030 评审 P2-3 医嘱作用域门禁：批量补绑只接受「`MEDICATION` + `ACTIVE`」医嘱
+     * （与 [listUnboundMaterialOrders] 同一条件）。一次查询判定全部 `order_id`，
+     * 必须在任何写入之前调用；失败时由调用方事务整体回滚。
+     */
+    private fun requireBindableOrders(client: SqlClient, orderIds: List<String>): Future<Void> {
+        val query = ctx.select(MEDICAL_ORDERS.ID, MEDICAL_ORDERS.ORDER_TYPE, MEDICAL_ORDERS.STATUS)
+            .from(MEDICAL_ORDERS)
+            .where(MEDICAL_ORDERS.ID.`in`(orderIds))
+        return execute(client, query).compose { rows ->
+            val byId = mutableMapOf<String, Pair<String?, String?>>()
+            for (row in rows) {
+                byId[row.getString("id")] = row.getString("order_type") to row.getString("status")
+            }
+            for (orderId in orderIds) {
+                val facts = byId[orderId]
+                    ?: return@compose Future.failedFuture<Void>(
+                        HealthcareNotFoundException("order not found: $orderId"),
+                    )
+                if (facts.first != "MEDICATION") {
+                    return@compose Future.failedFuture<Void>(
+                        IllegalArgumentException("order is not a medication order: $orderId"),
+                    )
+                }
+                if (facts.second != ACTIVE_STATUS) {
+                    return@compose Future.failedFuture<Void>(
+                        ConflictException("order is not active: $orderId"),
+                    )
+                }
+            }
+            Future.succeededFuture()
+        }
+    }
+
+    /** 030 批量补绑请求项（已通过严格性校验，值均 trim 后非空） */
+    private data class BindMaterialItem(val orderId: String, val materialId: String)
+
+    /** 030 批量补绑目录解析结果：绑定写入只用这份快照，不再二次读目录 */
+    private data class ResolvedBindItem(
+        val orderId: String,
+        val materialId: String,
+        val materialCode: String?,
+        val materialName: String,
+    )
+
+    /**
+     * 030 批量补绑阶段一：逐项解析目录快照并校验业务门槛，全部成功才进入写入阶段。
+     * 顺序与单条路径（`resolveDrugMaterialDetails`）一致：不存在 → 非药品 → 非启用。
+     */
+    private fun resolveBindMaterials(
+        client: SqlClient,
+        port: DrugCatalogPort,
+        items: List<BindMaterialItem>,
+    ): Future<List<ResolvedBindItem>> {
+        val resolved = mutableListOf<ResolvedBindItem>()
+
+        fun loop(index: Int): Future<List<ResolvedBindItem>> {
+            if (index >= items.size) {
+                return Future.succeededFuture(resolved.toList())
+            }
+            val item = items[index]
+            return port.findDrugMaterial(client, item.materialId).compose { material ->
+                if (material == null) {
+                    return@compose Future.failedFuture<List<ResolvedBindItem>>(
+                        HealthcareNotFoundException("material not found: ${item.materialId}"),
+                    )
+                }
+                if (material.category != DRUG_CATEGORY) {
+                    return@compose Future.failedFuture<List<ResolvedBindItem>>(
+                        IllegalArgumentException("material is not a drug: ${item.materialId}"),
+                    )
+                }
+                if (material.status != ACTIVE_STATUS) {
+                    return@compose Future.failedFuture<List<ResolvedBindItem>>(
+                        IllegalArgumentException("material is not active: ${item.materialId}"),
+                    )
+                }
+                // 目录药名是 `drug_name`/`material_name` 的唯一来源；为空说明目录数据不可绑定
+                val catalogName = material.name
+                    ?: return@compose Future.failedFuture<List<ResolvedBindItem>>(
+                        IllegalArgumentException("catalog material has no name: ${item.materialId}"),
+                    )
+                resolved.add(
+                    ResolvedBindItem(
+                        orderId = item.orderId,
+                        materialId = material.id,
+                        materialCode = material.code,
+                        materialName = catalogName,
+                    ),
+                )
+                loop(index + 1)
+            }
+        }
+        return loop(0)
+    }
+
+    /** 030 批量补绑阶段二：逐项复用单条 [bindDrugMaterial] 写绑定，顺序即请求顺序 */
+    private fun bindMaterialItems(
+        client: SqlClient,
+        items: List<ResolvedBindItem>,
+        operator: String,
+    ): Future<JsonObject> {
+        val bound = mutableListOf<JsonObject>()
+
+        fun loop(index: Int): Future<JsonObject> {
+            if (index >= items.size) {
+                return Future.succeededFuture(
+                    JsonObject()
+                        .put("bound", bound.size)
+                        .put("items", JsonArray(bound.toList())),
+                )
+            }
+            val item = items[index]
+            return bindDrugMaterial(
+                client,
+                item.orderId,
+                item.materialId,
+                item.materialCode,
+                item.materialName,
+                operator,
+            ).compose {
+                bound.add(
+                    JsonObject()
+                        .put("order_id", item.orderId)
+                        .put("material_id", item.materialId)
+                        .put("material_code", item.materialCode)
+                        .put("material_name", item.materialName),
+                )
+                loop(index + 1)
+            }
+        }
+        return loop(0)
+    }
+
+    /**
+     * 030 §4.4 批量补绑请求体严格性：顶层只接受 `items`，每项只接受 `order_id`/`material_id`。
+     * 文案逐条固定（400），前端与测试据此断言；全部校验在任何 SQL/端口调用之前完成。
+     */
+    private fun validateBindMaterialBatchInput(body: JsonObject): List<BindMaterialItem> {
+        val unknown = body.fieldNames().firstOrNull { it != "items" }
+        if (unknown != null) {
+            throw IllegalArgumentException("unknown field: $unknown")
+        }
+        val rawItems = body.getValue("items")
+            ?: throw IllegalArgumentException("items is required")
+        val array = rawItems as? JsonArray
+            ?: throw IllegalArgumentException("items must be an array of {order_id, material_id}")
+        if (array.isEmpty()) {
+            throw IllegalArgumentException("items must not be empty")
+        }
+        if (array.size() > MAX_BIND_BATCH_SIZE) {
+            throw IllegalArgumentException("items must not exceed $MAX_BIND_BATCH_SIZE")
+        }
+        val seenOrderIds = mutableSetOf<String>()
+        val items = mutableListOf<BindMaterialItem>()
+        for (index in 0 until array.size()) {
+            val item = array.getValue(index) as? JsonObject
+                ?: throw IllegalArgumentException("items[$index] must be an object")
+            val unsupportedKey = item.fieldNames().firstOrNull { it != "order_id" && it != "material_id" }
+            if (unsupportedKey != null) {
+                throw IllegalArgumentException("items[$index] contains unsupported key: $unsupportedKey")
+            }
+            val orderId = requiredItemText(item, "order_id", index)
+            val materialId = requiredItemText(item, "material_id", index)
+            // 同一 order_id 重复出现会让响应顺序与绑定语义歧义，直接 400（不做静默去重）
+            if (!seenOrderIds.add(orderId)) {
+                throw IllegalArgumentException("duplicate order_id: $orderId")
+            }
+            items.add(BindMaterialItem(orderId, materialId))
+        }
+        return items
+    }
+
+    private fun requiredItemText(item: JsonObject, key: String, index: Int): String =
+        when (val value = item.getValue(key)) {
+            is String -> value.trim().takeIf(String::isNotBlank)
+                ?: throw IllegalArgumentException("items[$index].$key is required")
+            null -> throw IllegalArgumentException("items[$index].$key is required")
+            else -> throw IllegalArgumentException("items[$index].$key must be a string")
+        }
 
     /**
      * 护士核对汇总行：字段与 orderJson 一致并补患者/入住信息，但不读 task_id
