@@ -54,10 +54,18 @@ abstract class AcesoDbIntegrationTestBase {
         user = System.getProperty("integration.db.user", "ovaphlow")
         password = System.getenv("PITCHFORK_DB_PASSWORD") ?: ""
         // 兜底门控：即使将来新增的子类忘记加 @EnabledIfSystemProperty，
-        // 缺少密码时也只 skip 整个类，而不是让 :apps:aceso:test 变红。
+        // 缺条件时也只 skip 整个类，而不是让 :apps:aceso:test 变红。
         // 注意必须放在 try 之前：TestAbortedException 是 RuntimeException，
         // 放进 try 会被下面的 catch (e: Exception) 吞掉并转成失败。
-        Assumptions.assumeTrue(password.isNotBlank(), SKIP_REASON)
+        //
+        // 判据必须与类注解**同口径**（integration.db.host 非空），不能只看密码：
+        // 只要环境里导出了 PITCHFORK_DB_PASSWORD（文档就教用户 source apps/aceso/.env），
+        // 漏加注解的子类就会在**没有任何 -Dintegration.db.\*** 的情况下静默连库跑测试
+        // （实测：DispenseIntegrationTest 无注解时曾连到 localhost:5432/aceso_test 真跑并通过）。
+        Assumptions.assumeTrue(
+            System.getProperty("integration.db.host", "").isNotBlank() && password.isNotBlank(),
+            SKIP_REASON,
+        )
         try {
             val dbConfig = JsonObject()
                 .put("host", host)
