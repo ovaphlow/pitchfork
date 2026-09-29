@@ -1,8 +1,12 @@
 ---
 import DashboardLayout from "../../layouts/DashboardLayout.astro";
 import FollowupPage from "../../components/FollowupPage.tsx";
+import { PAGE_TITLE_DOMAIN_LABELS } from "../../lib/domain";
+
+// 静态 <title> 只能是医疗基准名；儿保的「儿童保健随访」由 DashboardLayout 的首屏内联脚本应用
+const title = PAGE_TITLE_DOMAIN_LABELS["/dashboard/followup"];
 ---
 
-<DashboardLayout title="随访管理">
+<DashboardLayout title={title.base} titleDomainLabels={title.labels}>
   <FollowupPage client:only="react" />
 </DashboardLayout>

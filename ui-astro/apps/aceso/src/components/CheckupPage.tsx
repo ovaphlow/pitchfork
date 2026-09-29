@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Badge, Button, Card, EmptyState, Input, Modal, Table, type Column } from "@pitchfork/ui";
+import { useSubjectDirectory } from "../lib/identity";
 import {
   addHealthCheckupMembers,
   convertCheckupResultToFollowup,
@@ -168,6 +169,8 @@ export default function CheckupPage() {
   const [conversionError, setConversionError] = useState("");
 
   const [followupResult, setFollowupResult] = useState<HealthCheckupResult | null>(null);
+  // 028（评审 P2-3）：followup_plan.assignee 是认证主体 ID，必须映射为姓名后再展示
+  const { subjectLabel } = useSubjectDirectory();
   const [followupOpen, setFollowupOpen] = useState(false);
   const [followupForm, setFollowupForm] = useState<FollowupForm>({
     followup_type: "慢病随访",
@@ -587,7 +590,7 @@ export default function CheckupPage() {
       setFollowupOpen(false);
       setConversionMessage(
         `已为「${followupResult.item_name}」生成随访计划（${response.followup_plan.followup_type}，` +
-          `计划日 ${response.followup_plan.planned_date}，责任人 ${response.followup_plan.assignee}）。`,
+          `计划日 ${response.followup_plan.planned_date}，责任人 ${subjectLabel(response.followup_plan.assignee)}）。`,
       );
       loadResults(resultPage);
       refreshDetail();

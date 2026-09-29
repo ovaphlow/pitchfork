@@ -98,7 +98,7 @@ function returnStatusBadge(status: string | null | undefined): React.ReactNode {
 export default function PharmacyPage() {
   const [activeTab, setActiveTab] = useState<Tab>("orders");
 
-  // ── 人员与入住（操作人下拉、发药单老人名映射）─────────────────────
+  // ── 人员与入住（操作人下拉、发药单长者名映射）─────────────────────
   const [subjects, setSubjects] = useState<IdentitySubject[]>([]);
   const [admissions, setAdmissions] = useState<ActiveAdmission[]>([]);
 
@@ -164,7 +164,7 @@ export default function PharmacyPage() {
 
   // ── 创建退药单弹窗 ────────────────────────────────────────────────
   const [returnTarget, setReturnTarget] = useState<PharmacyDispense | null>(null);
-  const [returnForm, setReturnForm] = useState<ReturnForm>({ itemId: "", quantity: "1", reason: "老人未使用", operator: "", remark: "" });
+  const [returnForm, setReturnForm] = useState<ReturnForm>({ itemId: "", quantity: "1", reason: "长者未使用", operator: "", remark: "" });
   const [returnError, setReturnError] = useState("");
   const [returnSaving, setReturnSaving] = useState(false);
   const [returnAction, setReturnAction] = useState<PharmacyReturn | null>(null);
@@ -186,6 +186,25 @@ export default function PharmacyPage() {
   }, [admissions]);
 
   const materialUnit = useMemo(() => new Map(Object.entries(materialUnits)), [materialUnits]);
+
+  /**
+   * 主体 ID → 姓名，复用本页既有的 `subjects`（`loadSubjects` 只为操作人下拉拉过一次目录，
+   * 这里不再发第二次请求）。解析不到时回退原始 ID、空值回退 "-"，与 `lib/identity.ts`
+   * 的 `useSubjectDirectory` 同口径：`medical_orders.nurse_checked_by` 存的是认证主体 ID。
+   */
+  const subjectMap = useMemo(
+    () => new Map(subjects.map((subject) => [subject.id, subject.display_name])),
+    [subjects],
+  );
+
+  const subjectLabel = useCallback(
+    (value: string | null | undefined) => {
+      const trimmed = value?.trim();
+      if (!trimmed) return "-";
+      return subjectMap.get(trimmed) ?? trimmed;
+    },
+    [subjectMap],
+  );
 
   const loadSubjects = useCallback(async () => {
     try {
@@ -474,7 +493,7 @@ export default function PharmacyPage() {
     setReturnForm({
       itemId: selectedItemId,
       quantity: String(selectedItem?.dispensed_quantity ?? firstItem?.dispensed_quantity ?? 1),
-      reason: "老人未使用",
+      reason: "长者未使用",
       operator: "",
       remark: "",
     });
@@ -547,7 +566,7 @@ export default function PharmacyPage() {
   const orderColumns: Column<PharmacyMedicationOrder>[] = [
     {
       key: "patient",
-      header: "老人",
+      header: "长者",
       render: (row) => (
         <div>
           <div className="font-medium text-fg-emphasis">{row.patient_name}</div>
@@ -603,7 +622,7 @@ export default function PharmacyPage() {
       render: (row) =>
         row.nurse_checked_by && row.nurse_checked_at ? (
           <div className="text-sm">
-            <div className="text-fg">{row.nurse_checked_by}</div>
+            <div className="text-fg">{subjectLabel(row.nurse_checked_by)}</div>
             <div className="text-xs text-fg-dimmed">{formatDateTime(row.nurse_checked_at)}</div>
           </div>
         ) : (
@@ -642,7 +661,7 @@ export default function PharmacyPage() {
     },
     {
       key: "patient",
-      header: "老人",
+      header: "长者",
       render: (row) => (
         <div>
           <div className="text-fg">{encounterName.get(row.encounter_id ?? "") ?? row.patient_id}</div>
@@ -703,7 +722,7 @@ export default function PharmacyPage() {
     },
     {
       key: "patient",
-      header: "老人",
+      header: "长者",
       render: (row) => <span className="text-fg">{patientName.get(row.patient_id) ?? row.patient_id}</span>,
     },
     { key: "reason", header: "退药原因", render: (row) => <span className="text-fg-muted">{row.return_reason || "—"}</span> },
@@ -778,7 +797,7 @@ export default function PharmacyPage() {
                 ))}
               </select>
               <Input
-                placeholder="搜索药名 / 医嘱内容 / 老人"
+                placeholder="搜索药名 / 医嘱内容 / 长者"
                 value={search}
                 onChange={(event) => {
                   setSearch(event.target.value);
@@ -1331,7 +1350,7 @@ export default function PharmacyPage() {
                 </select>
               </div>
             </div>
-            <Input label="退药原因" value={returnForm.reason} onChange={(event) => setReturnForm((current) => ({ ...current, reason: event.target.value }))} placeholder="例如：老人未使用" />
+            <Input label="退药原因" value={returnForm.reason} onChange={(event) => setReturnForm((current) => ({ ...current, reason: event.target.value }))} placeholder="例如：长者未使用" />
             <Input label="备注（可选）" value={returnForm.remark} onChange={(event) => setReturnForm((current) => ({ ...current, remark: event.target.value }))} />
             {returnError && <p className="text-sm text-danger">{returnError}</p>}
             <div className="flex justify-end gap-2 pt-2">

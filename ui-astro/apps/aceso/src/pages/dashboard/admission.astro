@@ -1,8 +1,12 @@
 ---
 import DashboardLayout from "../../layouts/DashboardLayout.astro";
 import AdmissionsPage from "../../components/AdmissionsPage";
+import { PAGE_TITLE_DOMAIN_LABELS } from "../../lib/domain";
+
+// 静态 <title> 只能是医疗基准名；养老的「入住管理」由 DashboardLayout 的首屏内联脚本应用
+const title = PAGE_TITLE_DOMAIN_LABELS["/dashboard/admission"];
 ---
 
-<DashboardLayout title="入住管理">
+<DashboardLayout title={title.base} titleDomainLabels={title.labels}>
   <AdmissionsPage client:only="react" />
 </DashboardLayout>

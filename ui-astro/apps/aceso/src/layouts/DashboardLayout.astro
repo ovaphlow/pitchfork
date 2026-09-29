@@ -8,9 +8,17 @@ import BreadcrumbTitle from "../components/BreadcrumbTitle.tsx";
 
 interface Props {
   title: string;
+  /**
+   * 域相关页面的标题覆盖名（域 → 标签）。传入时会在首屏同步改写
+   * `document.title`，避免静态 `<title>`（医疗基准名）先闪一下；
+   * 口径与 `lib/domain.ts` 的 `PAGE_TITLE_DOMAIN_LABELS[path].labels`、
+   * 以及运行期改写标题的 `BreadcrumbTitle` 完全一致。
+   */
+  titleDomainLabels?: Partial<Record<"医疗" | "养老" | "儿保", string>> | null;
 }
 
-const { title } = Astro.props;
+const { title, titleDomainLabels = null } = Astro.props;
+const titleLabels = titleDomainLabels ?? null;
 const currentPath = Astro.url.pathname;
 ---
 
@@ -20,6 +28,24 @@ const currentPath = Astro.url.pathname;
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>{title} — Aceso</title>
+    {
+      titleLabels && (
+        /* 经典（非 module）内联脚本：必须在 hydration 之前同步执行，才能在首屏就
+           用 localStorage 里的域覆盖静态标题。`define:vars` 会阻止 Astro 打包，
+           `is:inline` 再显式声明确保不会被提升为 type="module"。 */
+        <script is:inline define:vars={{ titleLabels, titleFallback: title, domainStorageKey: "aceso-domain" }}>
+          (function () {
+            try {
+              var domain = localStorage.getItem(domainStorageKey) || "医疗";
+              var label = titleLabels[domain] || titleFallback;
+              document.title = label + " — Aceso";
+            } catch (error) {
+              /* localStorage 不可用（隐私模式/被禁用）时保留静态标题 */
+            }
+          })();
+        </script>
+      )
+    }
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <script>
       (function() {

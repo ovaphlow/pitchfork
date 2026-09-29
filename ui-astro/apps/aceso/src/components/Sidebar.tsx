@@ -1,10 +1,22 @@
 import { useState, useEffect } from "react";
+import {
+  DOMAIN_CHANGE_EVENT,
+  DOMAIN_STORAGE_KEY,
+  PAGE_TITLE_DOMAIN_LABELS,
+  displayLabel,
+  readDomain,
+  type Domain,
+} from "../lib/domain";
+
+// 域常量与解析函数已迁到 ../lib/domain.ts：Astro 的 DashboardLayout / pages 需要
+// 在首屏内联脚本里复用同一份口径，而 Astro 模板不能 import 本文件（JSX）。
+// 这里原样再导出，`BreadcrumbTitle` / `DashboardPage` 的既有 import 保持不变。
+export { DOMAIN_CHANGE_EVENT, DOMAIN_STORAGE_KEY, PAGE_TITLE_DOMAIN_LABELS, displayLabel, readDomain };
+export type { Domain };
 
 interface SidebarProps {
   currentPath: string;
 }
-
-export type Domain = "医疗" | "养老" | "儿保";
 
 export interface MenuChild {
   label: string;
@@ -25,20 +37,34 @@ export interface GroupItem {
 
 export type Item = GroupItem;
 
-export const DOMAIN_STORAGE_KEY = "aceso-domain";
-export const DOMAIN_CHANGE_EVENT = "aceso-domain-change";
-
 export const menuItems: Item[] = [
   {
     type: "group", label: "居民管理", domainLabels: { 养老: "长者管理", 儿保: "儿童管理" }, children: [
-      { label: "居民档案", domainLabels: { 养老: "长者档案", 儿保: "儿童健康档案" }, path: "/dashboard/elders", icon: "👤", domains: ["医疗", "养老", "儿保"] },
-      { label: "入院管理", domainLabels: { 养老: "入住管理" }, path: "/dashboard/admission", icon: "🏠", domains: ["医疗", "养老"] },
-      { label: "随访管理", domainLabels: { 儿保: "儿童保健随访" }, path: "/dashboard/followup", icon: "📞", domains: ["医疗", "养老", "儿保"] },
+      {
+        // 标题口径单一事实来源：与首屏 <title> / BreadcrumbTitle 同源（lib/domain.ts）
+        label: PAGE_TITLE_DOMAIN_LABELS["/dashboard/elders"].base,
+        domainLabels: PAGE_TITLE_DOMAIN_LABELS["/dashboard/elders"].labels,
+        path: "/dashboard/elders", icon: "👤", domains: ["医疗", "养老", "儿保"],
+      },
+      {
+        label: PAGE_TITLE_DOMAIN_LABELS["/dashboard/admission"].base,
+        domainLabels: PAGE_TITLE_DOMAIN_LABELS["/dashboard/admission"].labels,
+        path: "/dashboard/admission", icon: "🏠", domains: ["医疗", "养老"],
+      },
+      {
+        label: PAGE_TITLE_DOMAIN_LABELS["/dashboard/followup"].base,
+        domainLabels: PAGE_TITLE_DOMAIN_LABELS["/dashboard/followup"].labels,
+        path: "/dashboard/followup", icon: "📞", domains: ["医疗", "养老", "儿保"],
+      },
     ],
   },
   {
     type: "group", label: "诊疗护理", domainLabels: { 养老: "照护服务", 儿保: "儿童保健" }, children: [
-      { label: "住院护理", domainLabels: { 养老: "照护管理" }, path: "/dashboard/inpatient", icon: "🏥", domains: ["医疗", "养老"], order: { 养老: 1 } },
+      {
+        label: PAGE_TITLE_DOMAIN_LABELS["/dashboard/inpatient"].base,
+        domainLabels: PAGE_TITLE_DOMAIN_LABELS["/dashboard/inpatient"].labels,
+        path: "/dashboard/inpatient", icon: "🏥", domains: ["医疗", "养老"], order: { 养老: 1 },
+      },
       { label: "医生诊疗", path: "/dashboard/orders", icon: "📝", domains: ["养老"], order: { 养老: 2 } },
       { label: "医嘱核对", path: "/dashboard/orders-check", icon: "✅", domains: ["养老"], order: { 养老: 3 } },
       { label: "药房管理",   path: "/dashboard/pharmacy",     icon: "💊", domains: ["医疗", "养老"], order: { 养老: 4 } },
@@ -72,18 +98,6 @@ export const menuItems: Item[] = [
     ],
   },
 ];
-
-export function displayLabel(label: string, domainLabels: Partial<Record<Domain, string>> | undefined, domain: Domain): string {
-  return domainLabels?.[domain] ?? label;
-}
-
-export function readDomain(): Domain {
-  try {
-    const stored = localStorage.getItem(DOMAIN_STORAGE_KEY);
-    if (stored === "医疗" || stored === "养老" || stored === "儿保") return stored;
-  } catch { /* SSR */ }
-  return "医疗";
-}
 
 export default function Sidebar({ currentPath }: SidebarProps) {
   const [domain, setDomain] = useState<Domain>(readDomain);

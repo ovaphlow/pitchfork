@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { Badge, Button, Card, EmptyState, Input, Modal, Table, type Column } from "@pitchfork/ui";
+import { useSubjectDirectory } from "../lib/identity";
 import {
   addRosterItem,
   copyWeeklyMenu,
@@ -1232,6 +1233,8 @@ function RostersTab() {
 // ========================================================================
 
 function ExecutionsTab() {
+  // 028（评审 P2-3）：execution.recorded_by 是认证主体 ID（登记人），展示前映射为姓名
+  const { subjectLabel } = useSubjectDirectory();
   const [date, setDate] = useState(todayLocal());
   const [meal, setMeal] = useState("午餐");
   const [roster, setRoster] = useState<Roster | null>(null);
@@ -1354,7 +1357,7 @@ function ExecutionsTab() {
       className: "min-w-[150px]",
       render: (row) =>
         row.execution ? (
-          <span className="text-xs text-fg-muted">{row.execution.recorded_by} · {formatDateTime(row.execution.recorded_at)}</span>
+          <span className="text-xs text-fg-muted">{subjectLabel(row.execution.recorded_by)} · {formatDateTime(row.execution.recorded_at)}</span>
         ) : (
           <span className="text-fg-dimmed">未登记</span>
         ),

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Badge, Button, Card, EmptyState, Input, LoadingSpinner, Modal, Table, type Column } from "@pitchfork/ui";
+import { useSubjectDirectory } from "../lib/identity";
 import {
   createChronicDisease,
   getChronicDisease,
@@ -84,6 +85,8 @@ function controlBadge(status: string): React.ReactNode {
 }
 
 export default function ChronicDiseasePage() {
+  // 028（评审 P2-3）：随访记录 operator 是认证主体 ID，展示前映射为姓名
+  const { subjectLabel } = useSubjectDirectory();
   const [records, setRecords] = useState<ChronicDiseaseRegistration[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -114,7 +117,7 @@ export default function ChronicDiseasePage() {
     [],
   );
 
-  /** 从医生工作台「登记为慢病」跳转带入：老人/病种/ICD */
+  /** 从医生工作台「登记为慢病」跳转带入：长者/病种/ICD */
   const quickCreate = useMemo(() => {
     if (typeof window === "undefined") return null;
     const params = new URLSearchParams(window.location.search);
@@ -195,7 +198,7 @@ export default function ChronicDiseasePage() {
         })),
       );
     } catch (error) {
-      setCreateError(errorMessage(error, "无法加载老人与活动入住信息"));
+      setCreateError(errorMessage(error, "无法加载长者与活动入住信息"));
     }
   }, [quickCreate]);
 
@@ -209,7 +212,7 @@ export default function ChronicDiseasePage() {
     [admissionOptions, createForm.encounter_id],
   );
 
-  // 选择老人后自动选中其唯一活动入住；病种变化时提示默认频率
+  // 选择长者后自动选中其唯一活动入住；病种变化时提示默认频率
   function handlePatientChange(patientId: string) {
     const options = admissionOptions.filter((option) => option.patient_id === patientId);
     setCreateForm((form) => ({
@@ -219,7 +222,7 @@ export default function ChronicDiseasePage() {
     }));
   }
 
-  // 老人/入住选项加载完成后：URL 带入的老人自动选中其唯一活动入住
+  // 长者/入住选项加载完成后：URL 带入的长者自动选中其唯一活动入住
   useEffect(() => {
     if (!createOpen || !createForm.patient_id || createForm.encounter_id) return;
     const options = admissionOptions.filter((option) => option.patient_id === createForm.patient_id);
@@ -240,7 +243,7 @@ export default function ChronicDiseasePage() {
 
   async function handleCreate() {
     if (!createForm.patient_id || !createForm.encounter_id) {
-      setCreateError("请选择老人及其活动入住");
+      setCreateError("请选择长者及其活动入住");
       return;
     }
     if (!createForm.disease_name.trim()) {
@@ -324,7 +327,7 @@ export default function ChronicDiseasePage() {
     },
     {
       key: "patient_name",
-      header: "老人",
+      header: "长者",
       render: (row) => (
         <div>
           <div className="text-fg">{row.patient_name ?? row.patient_id}</div>
@@ -378,8 +381,8 @@ export default function ChronicDiseasePage() {
         <div className="flex flex-wrap items-center gap-3 pb-4">
           <div className="w-48">
             <Input
-              label="老人筛选"
-              placeholder="按老人姓名/ID"
+              label="长者筛选"
+              placeholder="按长者姓名/ID"
               value={filterPatient}
               onChange={(event) => setFilterPatient(event.target.value)}
             />
@@ -445,7 +448,7 @@ export default function ChronicDiseasePage() {
           <EmptyState
             icon="🩺"
             title="暂无慢病档案"
-            description="登记老人慢病后，将自动生成「慢病随访」计划"
+            description="登记长者慢病后，将自动生成「慢病随访」计划"
             action={<Button variant="primary" size="sm" onClick={() => void openCreate()}>登记慢病</Button>}
           />
         ) : (
@@ -482,13 +485,13 @@ export default function ChronicDiseasePage() {
         <div className="flex flex-col gap-3">
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div>
-              <label className="text-sm font-medium text-fg-muted">老人（活动入住）</label>
+              <label className="text-sm font-medium text-fg-muted">长者（活动入住）</label>
               <select
                 className="h-10 w-full px-3 rounded-md bg-surface border border-border text-sm text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
                 value={createForm.patient_id}
                 onChange={(event) => handlePatientChange(event.target.value)}
               >
-                <option value="">请选择老人</option>
+                <option value="">请选择长者</option>
                 {patientOptions.map((patient) => (
                   <option key={patient.id} value={patient.id}>{patient.name}</option>
                 ))}
@@ -502,7 +505,7 @@ export default function ChronicDiseasePage() {
                 disabled={admissionSelectDisabled}
                 onChange={(event) => setCreateForm((form) => ({ ...form, encounter_id: event.target.value }))}
               >
-                <option value="">{admissionSelectDisabled ? "请先选择老人" : "请选择入住"}</option>
+                <option value="">{admissionSelectDisabled ? "请先选择长者" : "请选择入住"}</option>
                 {patientAdmissions.map((option) => (
                   <option key={option.id} value={option.id}>
                     {option.encounter_no ?? option.id}（{formatDate(option.admit_date, "—")}入住）
@@ -699,7 +702,7 @@ export default function ChronicDiseasePage() {
                   {timeline.followup_records.map((record) => (
                     <li key={record.id} className="rounded-md border border-border p-3 text-sm">
                       <div className="flex items-center justify-between text-xs text-fg-dimmed">
-                        <span>{formatDate(record.followup_date, "—")} · {record.followup_way} · {record.operator}</span>
+                        <span>{formatDate(record.followup_date, "—")} · {record.followup_way} · {subjectLabel(record.operator)}</span>
                         <Badge variant={record.result === "正常" ? "success" : record.result === "异常" ? "danger" : "warning"}>
                           {record.result}
                         </Badge>

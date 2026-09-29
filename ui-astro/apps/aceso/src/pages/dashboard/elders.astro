@@ -1,8 +1,12 @@
 ---
 import DashboardLayout from "../../layouts/DashboardLayout.astro";
 import EldersPage from "../../components/EldersPage.tsx";
+import { PAGE_TITLE_DOMAIN_LABELS } from "../../lib/domain";
+
+// 静态 <title> 只能是医疗基准名；养老/儿保的覆盖名由 DashboardLayout 的首屏内联脚本应用
+const title = PAGE_TITLE_DOMAIN_LABELS["/dashboard/elders"];
 ---
 
-<DashboardLayout title="居民档案">
+<DashboardLayout title={title.base} titleDomainLabels={title.labels}>
   <EldersPage client:only="react" />
 </DashboardLayout>

@@ -16,6 +16,7 @@ import {
   type FollowupRecord,
 } from "@pitchfork/shared/aceso";
 import { formatDate, formatDateTime, nowLocalInput, toOffsetDateTime, todayLocal } from "../lib/datetime";
+import { useSubjectDirectory } from "../lib/identity";
 
 const PAGE_SIZE = 20;
 
@@ -120,12 +121,18 @@ const recordFormDefaults: RecordForm = {
 };
 
 export default function FollowupPage() {
+  // 主体目录（IdP）：责任人 / 记录人列存的是认证主体 ID，取不到目录时回退原始 ID
+  const { subjectLabel } = useSubjectDirectory();
+
   // ——— 概览统计 ———
   const [stats, setStats] = useState<FollowupPlanStats | null>(null);
 
   // ——— 页签与列表 ———
   const [tab, setTab] = useState<Tab>("todo");
-  const [loading, setLoading] = useState(false);
+  // 三个列表的 loading 各自独立：首次挂载会并发预取，共用一个 state 会互相清掉 spinner
+  const [todoLoading, setTodoLoading] = useState(false);
+  const [plansLoading, setPlansLoading] = useState(false);
+  const [recordsLoading, setRecordsLoading] = useState(false);
   const [pageError, setPageError] = useState("");
 
   const [todoPlans, setTodoPlans] = useState<FollowupPlan[]>([]);
@@ -143,7 +150,7 @@ export default function FollowupPage() {
   const [recordsPage, setRecordsPage] = useState(1);
   const [recordsResult, setRecordsResult] = useState("");
 
-  // ——— 老人/入住选项（新建计划与临时随访共用） ———
+  // ——— 长者/入住选项（新建计划与临时随访共用） ———
   const [admissionOptions, setAdmissionOptions] = useState<AdmissionOption[]>([]);
   const [patientQuery, setPatientQuery] = useState("");
 
@@ -184,7 +191,7 @@ export default function FollowupPage() {
   }, []);
 
   const loadTodo = useCallback(async (targetPage: number) => {
-    setLoading(true);
+    setTodoLoading(true);
     setPageError("");
     try {
       const response = await listFollowupPlans({
@@ -198,12 +205,12 @@ export default function FollowupPage() {
     } catch (error) {
       setPageError(errorMessage(error, "无法加载待办随访"));
     } finally {
-      setLoading(false);
+      setTodoLoading(false);
     }
   }, []);
 
   const loadPlans = useCallback(async (targetPage: number) => {
-    setLoading(true);
+    setPlansLoading(true);
     setPageError("");
     try {
       const response = await listFollowupPlans({
@@ -218,12 +225,12 @@ export default function FollowupPage() {
     } catch (error) {
       setPageError(errorMessage(error, "无法加载随访计划"));
     } finally {
-      setLoading(false);
+      setPlansLoading(false);
     }
   }, [plansStatus, plansType]);
 
   const loadRecords = useCallback(async (targetPage: number) => {
-    setLoading(true);
+    setRecordsLoading(true);
     setPageError("");
     try {
       const response = await listFollowupRecords({
@@ -237,7 +244,7 @@ export default function FollowupPage() {
     } catch (error) {
       setPageError(errorMessage(error, "无法加载随访记录"));
     } finally {
-      setLoading(false);
+      setRecordsLoading(false);
     }
   }, [recordsResult]);
 
@@ -261,7 +268,7 @@ export default function FollowupPage() {
         }));
       setAdmissionOptions(options);
     } catch (error) {
-      setPageError(errorMessage(error, "无法加载老人入住信息"));
+      setPageError(errorMessage(error, "无法加载长者入住信息"));
     }
   }, []);
 
@@ -269,10 +276,17 @@ export default function FollowupPage() {
     await Promise.all([loadStats(), loadTodo(todoPage), loadPlans(plansPage), loadRecords(recordsPage)]);
   }, [loadStats, loadTodo, todoPage, loadPlans, plansPage, loadRecords, recordsPage]);
 
+  // 首次挂载：统计与三个页签的列表并发预取，让「全部计划 / 随访记录」的计数
+  // 在页签被打开前就是正确的（13a）。三个请求各自维护 loading，不互相清 spinner。
   useEffect(() => {
     void loadStats();
     void loadTodo(1);
-  }, [loadStats, loadTodo]);
+    void loadPlans(1);
+    void loadRecords(1);
+    // 筛选条件在挂载时为初值；后续筛选/翻页由各自的 onChange 与分页按钮触发，
+    // 若把 loadPlans/loadRecords 放进依赖数组会在改筛选时重复预取并重置页码
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // 页签切换时加载对应列表
   useEffect(() => {
@@ -308,7 +322,7 @@ export default function FollowupPage() {
 
   async function handleCreate() {
     if (!createForm.encounter_id) {
-      setCreateError("请选择老人入住记录");
+      setCreateError("请选择长者入住记录");
       return;
     }
     if (!createForm.followup_type) {
@@ -321,7 +335,7 @@ export default function FollowupPage() {
     }
     const option = admissionOptions.find((item) => item.id === createForm.encounter_id);
     if (!option) {
-      setCreateError("请选择老人入住记录");
+      setCreateError("请选择长者入住记录");
       return;
     }
     setCreating(true);
@@ -378,9 +392,9 @@ export default function FollowupPage() {
       encounterId = plan.encounter_id;
       followupType = plan.followup_type;
     } else {
-      if (!tempEncounterId) return { error: "请选择老人入住记录" };
+      if (!tempEncounterId) return { error: "请选择长者入住记录" };
       const option = admissionOptions.find((item) => item.id === tempEncounterId);
-      if (!option) return { error: "请选择老人入住记录" };
+      if (!option) return { error: "请选择长者入住记录" };
       patientId = option.patient_id;
       encounterId = option.id;
       if (!tempFollowupType) return { error: "请选择随访类型" };
@@ -469,7 +483,7 @@ export default function FollowupPage() {
     }
   }
 
-  // ——— 老人随访历史 ———
+  // ——— 长者随访历史 ———
 
   async function openHistory(patientId: string, patientName: string) {
     setHistoryPatient({ id: patientId, name: patientName });
@@ -490,7 +504,7 @@ export default function FollowupPage() {
   const planColumns: Column<FollowupPlan>[] = [
     {
       key: "patient_name",
-      header: "老人",
+      header: "长者",
       className: "min-w-[140px]",
       render: (row) => (
         <div className="flex items-center gap-2">
@@ -516,7 +530,8 @@ export default function FollowupPage() {
     },
     { key: "planned_date", header: "计划日期", className: "min-w-[110px]", render: (row) => formatDate(row.planned_date) },
     { key: "planned_way", header: "方式", className: "w-[80px]" },
-    { key: "assignee", header: "责任人", className: "min-w-[110px]", render: (row) => displayValue(row.assignee) },
+    // assignee 存的是认证主体 ID，解析不到姓名时回退原始 ID（subjectLabel 已处理空值）
+    { key: "assignee", header: "责任人", className: "min-w-[110px]", render: (row) => subjectLabel(row.assignee) },
     { key: "status", header: "状态", className: "w-[90px]", render: (row) => statusBadge(row.status) },
     {
       key: "actions",
@@ -541,7 +556,7 @@ export default function FollowupPage() {
   const recordColumns: Column<FollowupRecord>[] = [
     {
       key: "patient_name",
-      header: "老人",
+      header: "长者",
       className: "min-w-[140px]",
       render: (row) => (
         <div className="flex items-center gap-2">
@@ -571,7 +586,8 @@ export default function FollowupPage() {
     { key: "condition_summary", header: "状况摘要", className: "min-w-[200px]", render: (row) => <span className="line-clamp-2">{displayValue(row.condition_summary)}</span> },
     { key: "result", header: "结果", className: "w-[90px]", render: (row) => resultBadge(row.result) },
     { key: "next_followup_date", header: "下次随访", className: "min-w-[110px]", render: (row) => formatDate(row.next_followup_date) },
-    { key: "operator", header: "记录人", className: "min-w-[110px]", render: (row) => displayValue(row.operator) },
+    // operator 存的是认证主体 ID，同上
+    { key: "operator", header: "记录人", className: "min-w-[110px]", render: (row) => subjectLabel(row.operator) },
   ];
 
   const todoPageCount = Math.max(1, Math.ceil(todoTotal / PAGE_SIZE));
@@ -590,7 +606,7 @@ export default function FollowupPage() {
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h2 className="text-lg font-semibold text-fg-emphasis">随访管理</h2>
-          <p className="mt-1 text-sm text-fg-muted">离院老人回访与在院慢病老人定期随访，形成计划 → 执行 → 记录 → 转诊/复访闭环</p>
+          <p className="mt-1 text-sm text-fg-muted">离院长者回访与在院慢病长者定期随访，形成计划 → 执行 → 记录 → 转诊/复访闭环</p>
         </div>
         <div className="flex items-center gap-2">
           <Button variant="secondary" onClick={openTempRecord}>临时随访</Button>
@@ -671,15 +687,15 @@ export default function FollowupPage() {
           <Table
             columns={planColumns}
             data={todoPlans}
-            loading={loading}
+            loading={todoLoading}
             emptyMessage="暂无待随访计划"
           />
           {todoTotal > 0 && (
             <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
               <span className="text-sm text-fg-muted">第 {todoPage} / {todoPageCount} 页</span>
               <div className="flex items-center gap-2">
-                <Button variant="secondary" size="sm" disabled={todoPage <= 1 || loading} onClick={() => void loadTodo(todoPage - 1)}>上一页</Button>
-                <Button variant="secondary" size="sm" disabled={todoPage >= todoPageCount || loading} onClick={() => void loadTodo(todoPage + 1)}>下一页</Button>
+                <Button variant="secondary" size="sm" disabled={todoPage <= 1 || todoLoading} onClick={() => void loadTodo(todoPage - 1)}>上一页</Button>
+                <Button variant="secondary" size="sm" disabled={todoPage >= todoPageCount || todoLoading} onClick={() => void loadTodo(todoPage + 1)}>下一页</Button>
               </div>
             </div>
           )}
@@ -717,15 +733,15 @@ export default function FollowupPage() {
           <Table
             columns={planColumns}
             data={plans}
-            loading={loading}
+            loading={plansLoading}
             emptyMessage="暂无随访计划"
           />
           {plansTotal > 0 && (
             <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
               <span className="text-sm text-fg-muted">第 {plansPage} / {plansPageCount} 页</span>
               <div className="flex items-center gap-2">
-                <Button variant="secondary" size="sm" disabled={plansPage <= 1 || loading} onClick={() => void loadPlans(plansPage - 1)}>上一页</Button>
-                <Button variant="secondary" size="sm" disabled={plansPage >= plansPageCount || loading} onClick={() => void loadPlans(plansPage + 1)}>下一页</Button>
+                <Button variant="secondary" size="sm" disabled={plansPage <= 1 || plansLoading} onClick={() => void loadPlans(plansPage - 1)}>上一页</Button>
+                <Button variant="secondary" size="sm" disabled={plansPage >= plansPageCount || plansLoading} onClick={() => void loadPlans(plansPage + 1)}>下一页</Button>
               </div>
             </div>
           )}
@@ -750,15 +766,15 @@ export default function FollowupPage() {
           <Table
             columns={recordColumns}
             data={records}
-            loading={loading}
+            loading={recordsLoading}
             emptyMessage="暂无随访记录"
           />
           {recordsTotal > 0 && (
             <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
               <span className="text-sm text-fg-muted">第 {recordsPage} / {recordsPageCount} 页</span>
               <div className="flex items-center gap-2">
-                <Button variant="secondary" size="sm" disabled={recordsPage <= 1 || loading} onClick={() => void loadRecords(recordsPage - 1)}>上一页</Button>
-                <Button variant="secondary" size="sm" disabled={recordsPage >= recordsPageCount || loading} onClick={() => void loadRecords(recordsPage + 1)}>下一页</Button>
+                <Button variant="secondary" size="sm" disabled={recordsPage <= 1 || recordsLoading} onClick={() => void loadRecords(recordsPage - 1)}>上一页</Button>
+                <Button variant="secondary" size="sm" disabled={recordsPage >= recordsPageCount || recordsLoading} onClick={() => void loadRecords(recordsPage + 1)}>下一页</Button>
               </div>
             </div>
           )}
@@ -774,7 +790,7 @@ export default function FollowupPage() {
           {createError && <div className="rounded-lg border border-danger/30 bg-danger-bg px-3 py-2 text-sm text-danger">{createError}</div>}
 
           <div className="flex flex-col gap-1.5">
-            <label className="text-sm font-medium text-fg-muted" htmlFor="followup-patient">老人（入住记录）</label>
+            <label className="text-sm font-medium text-fg-muted" htmlFor="followup-patient">长者（入住记录）</label>
             <Input
               id="followup-patient-search"
               value={patientQuery}
@@ -787,7 +803,7 @@ export default function FollowupPage() {
               onChange={(event) => setCreateForm((current) => ({ ...current, encounter_id: event.target.value }))}
               className="h-10 rounded-md border border-border bg-surface px-3 text-sm text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
             >
-              <option value="">请选择老人</option>
+              <option value="">请选择长者</option>
               {filteredOptions.map((option) => (
                 <option key={option.id} value={option.id}>
                   {option.patient_name}（{option.encounter_no ?? "-"} · {option.status === "ACTIVE" ? "在院" : "已离院"}）
@@ -874,7 +890,7 @@ export default function FollowupPage() {
             </div>
           ) : (
             <div className="flex flex-col gap-1.5">
-              <label className="text-sm font-medium text-fg-muted" htmlFor="temp-patient">老人（入住记录）</label>
+              <label className="text-sm font-medium text-fg-muted" htmlFor="temp-patient">长者（入住记录）</label>
               <Input
                 id="temp-patient-search"
                 value={patientQuery}
@@ -887,7 +903,7 @@ export default function FollowupPage() {
                 onChange={(event) => setTempEncounterId(event.target.value)}
                 className="h-10 rounded-md border border-border bg-surface px-3 text-sm text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
               >
-                <option value="">请选择老人</option>
+                <option value="">请选择长者</option>
                 {filteredOptions.map((option) => (
                   <option key={option.id} value={option.id}>
                     {option.patient_name}（{option.encounter_no ?? "-"} · {option.status === "ACTIVE" ? "在院" : "已离院"}）
@@ -934,7 +950,7 @@ export default function FollowupPage() {
               label="联系对象"
               value={recordForm.contact_object}
               onChange={(event) => setRecordForm((current) => ({ ...current, contact_object: event.target.value }))}
-              placeholder="老人或家属姓名"
+              placeholder="长者或家属姓名"
             />
             <Input
               label="建议下次随访日期"
@@ -995,7 +1011,7 @@ export default function FollowupPage() {
               onChange={(event) => setRecordForm((current) => ({ ...current, condition_summary: event.target.value }))}
               rows={2}
               className="resize-none rounded-md border border-border bg-surface px-3 py-2 text-sm text-fg placeholder:text-fg-dimmed focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-              placeholder="老人近况、主诉与观察到的状况"
+              placeholder="长者近况、主诉与观察到的状况"
             />
           </div>
 
@@ -1067,7 +1083,7 @@ export default function FollowupPage() {
         </form>
       </Modal>
 
-      {/* 老人随访历史 */}
+      {/* 长者随访历史 */}
       <Modal
         open={historyPatient !== null}
         onClose={() => setHistoryPatient(null)}
@@ -1090,7 +1106,7 @@ export default function FollowupPage() {
                       <span className="font-medium text-fg-emphasis">{plan.followup_type}</span>
                       <span className="text-fg-muted">计划 {formatDate(plan.planned_date)}</span>
                       <span className="text-fg-muted">方式 {plan.planned_way}</span>
-                      <span className="text-fg-muted">责任人 {displayValue(plan.assignee)}</span>
+                      <span className="text-fg-muted">责任人 {subjectLabel(plan.assignee)}</span>
                       {statusBadge(plan.status)}
                       {plan.cancel_reason && <span className="text-xs text-fg-dimmed w-full">取消原因：{plan.cancel_reason}</span>}
                     </div>
@@ -1118,7 +1134,7 @@ export default function FollowupPage() {
                       {record.next_followup_date && (
                         <p className="mt-1 text-xs text-fg-dimmed">建议下次随访：{formatDate(record.next_followup_date)}</p>
                       )}
-                      <p className="mt-1 text-xs text-fg-dimmed">记录人 {displayValue(record.operator)}</p>
+                      <p className="mt-1 text-xs text-fg-dimmed">记录人 {subjectLabel(record.operator)}</p>
                     </div>
                   ))}
                 </div>
