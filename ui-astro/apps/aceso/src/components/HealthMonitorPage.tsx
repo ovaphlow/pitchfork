@@ -339,7 +339,7 @@ export default function HealthMonitorPage() {
 
   /**
    * 选中长者后拉取其入住记录（`status` 显式传空串 = 含历史全部入住，按入住日期倒序）。
-   * 恰好一条「在住」时默认选中它；其余情况默认不挂接，由操作者显式选择（计划 028 D4）。
+   * 恰好一条「在住」时默认选中它；其余情况默认不挂接，由操作者显式选择（计划 029 D4）。
    */
   const loadAdmissions = useCallback(async (patientId: string) => {
     setAdmissionLoading(true);
@@ -370,7 +370,7 @@ export default function HealthMonitorPage() {
   }, [selectedPatient, loadAdmissions]);
 
   /**
-   * 028（评审 P2-4）：恰有一条「在住」养老入住时，服务端 `VitalSignService` 会自动挂接
+   * 029（评审 P2-4）：恰有一条「在住」养老入住时，服务端 `VitalSignService` 会自动挂接
    * （D4，`V501` 部分唯一索引保证至多一条）。界面据此隐藏「不挂接」选项并给出说明，
    * 避免出现「界面允许不挂接、服务端仍然挂上」的承诺落差。
    */
@@ -671,7 +671,7 @@ export default function HealthMonitorPage() {
                     value={selectedEncounterId}
                     onChange={(event) => setSelectedEncounterId(event.target.value)}
                   >
-                    {/* 028（评审 P2-4）：恰一条「在住」时服务端会强制挂接（D4），
+                    {/* 029（评审 P2-4）：恰一条「在住」时服务端会强制挂接（D4），
                         故不再提供「不挂接」选项，避免界面承诺一件服务端不会照做的事。 */}
                     {!forcedAdmission && <option value="">不挂接入住（居家/社区）</option>}
                     {admissionOptions.map((encounter) => (

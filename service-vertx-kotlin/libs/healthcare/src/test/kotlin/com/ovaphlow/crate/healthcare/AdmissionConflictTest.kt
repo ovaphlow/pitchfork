@@ -28,7 +28,7 @@ import java.time.OffsetDateTime
 import java.util.function.Function as JavaFunction
 
 /**
- * 028 W1 入住区间/床位占用冲突校验的非数据库测试（mockk + 嵌入式 HTTP）。
+ * 029 W1 入住区间/床位占用冲突校验的非数据库测试（mockk + 嵌入式 HTTP）。
  *
  * 判定口径（与 `HealthcareService.ensureAdmissionSlotAvailable` 同源）：
  *   - 半开区间 `[admit_date, discharge_date)`：`O.admit_date < X` 且 `coalesce(O.discharge_date, ∞) > S`；
@@ -47,7 +47,7 @@ class AdmissionConflictTest {
 
     private val bedOccupiedMessage = bedMessage("301-1", "A20260801001", "2026-09-30T00:00+08:00")
 
-    /** 028 §4.2 床位冲突文案；`until` 为冲突记录的 `discharge_date`（null → `ongoing`）。 */
+    /** 029 §4.2 床位冲突文案；`until` 为冲突记录的 `discharge_date`（null → `ongoing`）。 */
     private fun bedMessage(ward: String, encounterNo: String, until: String): String =
         "bed already occupied: department=三楼 ward=$ward encounter_no=$encounterNo until=$until"
 
@@ -225,7 +225,7 @@ class AdmissionConflictTest {
     }
 
     /**
-     * 028 补充（评审 D1）：冲突 SELECT 必须在取得咨询锁**之后**才发起。
+     * 029 补充（评审 D1）：冲突 SELECT 必须在取得咨询锁**之后**才发起。
      *
      * Vert.x 的 `execute()` 立即发出查询、Future 不是惰性的，若先构建 Future 再取锁，
      * SELECT 会跑在锁外面，`pg_advisory_xact_lock` 形同虚设（READ COMMITTED 下两个并发
@@ -550,7 +550,7 @@ class AdmissionConflictTest {
                     assertEquals(
                         "patient already has an active elderly admission: encounter_no=A20260701001",
                         body.getString("error"),
-                        "028 §4.2 冻结文案，前端 admissionMessages 按此映射",
+                        "029 §4.2 冻结文案，前端 admissionMessages 按此映射",
                     )
                     ctx.completeNow()
                 }

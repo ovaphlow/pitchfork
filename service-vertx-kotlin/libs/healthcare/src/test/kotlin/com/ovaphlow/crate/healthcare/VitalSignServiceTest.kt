@@ -222,7 +222,7 @@ class VitalSignServiceTest {
         assertNull(record.getString("encounter_id"), "encounter_id 可空（居家/社区场景）")
         assertNull(record.getString("encounter_no"), "无入住挂接时住院号保持 null")
         assertNotNull(record.getString("measured_at"), "未提供测量时间默认当前时间")
-        // 028 D4：未提供 encounter_id 时不再按 id 校验归属，而是查一次「唯一的 ACTIVE 养老入住」；
+        // 029 D4：未提供 encounter_id 时不再按 id 校验归属，而是查一次「唯一的 ACTIVE 养老入住」；
         // 该桩 encounters 为空 → 无自动挂接，语义与居家/社区一致。
         assertFalse(stub.queries.any { it.contains("encounters.id = ") }, "无 encounter_id 不按 id 校验归属")
     }
@@ -236,7 +236,7 @@ class VitalSignServiceTest {
 
         val record = result.getJsonArray("records").getJsonObject(0)
         assertEquals("enc-1", record.getString("encounter_id"))
-        assertEquals("A20260801001", record.getString("encounter_no"), "028 D4：创建响应必须回填真实住院号")
+        assertEquals("A20260801001", record.getString("encounter_no"), "029 D4：创建响应必须回填真实住院号")
     }
 
     @Test
@@ -250,7 +250,7 @@ class VitalSignServiceTest {
         ) as JsonObject
 
         val record = result.getJsonArray("records").getJsonObject(0)
-        assertEquals("enc-1", record.getString("encounter_id"), "028 D4：唯一活动养老入住自动挂接")
+        assertEquals("enc-1", record.getString("encounter_id"), "029 D4：唯一活动养老入住自动挂接")
         assertEquals("A20260801001", record.getString("encounter_no"))
         val insert = stub.queries.single { it.startsWith("insert into healthcare.vital_sign_records") }
         assertTrue(

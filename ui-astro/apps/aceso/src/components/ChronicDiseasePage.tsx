@@ -85,7 +85,7 @@ function controlBadge(status: string): React.ReactNode {
 }
 
 export default function ChronicDiseasePage() {
-  // 028（评审 P2-3）：随访记录 operator 是认证主体 ID，展示前映射为姓名
+  // 029（评审 P2-3）：随访记录 operator 是认证主体 ID，展示前映射为姓名
   const { subjectLabel } = useSubjectDirectory();
   const [records, setRecords] = useState<ChronicDiseaseRegistration[]>([]);
   const [total, setTotal] = useState(0);

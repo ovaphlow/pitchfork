@@ -169,7 +169,7 @@ export default function CheckupPage() {
   const [conversionError, setConversionError] = useState("");
 
   const [followupResult, setFollowupResult] = useState<HealthCheckupResult | null>(null);
-  // 028（评审 P2-3）：followup_plan.assignee 是认证主体 ID，必须映射为姓名后再展示
+  // 029（评审 P2-3）：followup_plan.assignee 是认证主体 ID，必须映射为姓名后再展示
   const { subjectLabel } = useSubjectDirectory();
   const [followupOpen, setFollowupOpen] = useState(false);
   const [followupForm, setFollowupForm] = useState<FollowupForm>({

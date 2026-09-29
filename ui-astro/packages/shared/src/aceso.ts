@@ -731,7 +731,7 @@ export function listActiveElderlyAdmissions(params: { search?: string; limit?: n
 
 // ─── 床位占用只读查询（GET /bed-occupancy） ─────────────────────────────────
 //
-// 口径（计划 028 §4.1）：只读当前占用中的养老（ELDERLY_CARE）入住，即
+// 口径（计划 029 §4.1）：只读当前占用中的养老（ELDERLY_CARE）入住，即
 // `discharge_date IS NULL OR discharge_date > now()`，按 department/ward/admit_date 升序。
 // 后端无床位主数据（D1），`department`/`ward` 仍是自由文本；调用方按 trim 后精确比较。
 

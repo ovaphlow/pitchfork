@@ -160,7 +160,7 @@ class HealthcareService(
         } catch (error: IllegalArgumentException) {
             return Future.failedFuture(error)
         }
-        // 028：入住区间/床位校验与插入必须原子（`admitElderly` 已是事务内，不重复嵌套）
+        // 029：入住区间/床位校验与插入必须原子（`admitElderly` 已是事务内，不重复嵌套）
         return pool.withTransaction<JsonObject> { connection ->
             getPatient(connection, patientId).compose {
                 createEncounter(connection, body, patientId, attendingPhysician)
@@ -211,10 +211,10 @@ class HealthcareService(
     fun getEncounter(id: String): Future<JsonObject> = getEncounter(pool, id)
 
     /**
-     * 床位占用只读查询（028 §4.1）：当前仍占用中的养老入住
+     * 床位占用只读查询（029 §4.1）：当前仍占用中的养老入住
      * （`encounter_type = 'ELDERLY_CARE'` 且 `discharge_date IS NULL OR discharge_date > now`），
      * 按 `department, ward, admit_date` 升序。`department`/`ward` 传入时按 `trim` 后精确过滤
-     * （大小写敏感、不做全角归一，见 028 残余 R1）。空结果仍返回 `records: []` 与 `total: 0`。
+     * （大小写敏感、不做全角归一，见 029 残余 R1）。空结果仍返回 `records: []` 与 `total: 0`。
      */
     fun listBedOccupancy(
         department: String?,
@@ -279,7 +279,7 @@ class HealthcareService(
 
     fun updateEncounter(id: String, body: JsonObject): Future<JsonObject> {
         validateEncounterUpdate(body)
-        // 028 §2.1-2：改 department/ward/status 时必须在同一事务内先 `FOR UPDATE` 锁定，
+        // 029 §2.1-2：改 department/ward/status 时必须在同一事务内先 `FOR UPDATE` 锁定，
         // 再按同一套区间/床位口径复检，否则「已离院记录改回 ACTIVE」会绕过全部入住门禁。
         return pool.withTransaction<JsonObject> { connection ->
             lockEncounter(connection, id).compose { encounter ->
@@ -1125,7 +1125,7 @@ class HealthcareService(
             if (row == null) {
                 Future.succeededFuture()
             } else {
-                // 028 §4.2：已有活动入住是冲突（409），消息带上既有住院号便于前端提示
+                // 029 §4.2：已有活动入住是冲突（409），消息带上既有住院号便于前端提示
                 Future.failedFuture(
                     ConflictException(
                         "patient already has an active elderly admission" +
@@ -1155,7 +1155,7 @@ class HealthcareService(
             if (row == null) {
                 Future.succeededFuture()
             } else {
-                // 028 §4.2 冻结文案：与 ensureNoActiveElderlyAdmission 同串，前端 admissionMessages 才能命中
+                // 029 §4.2 冻结文案：与 ensureNoActiveElderlyAdmission 同串，前端 admissionMessages 才能命中
                 Future.failedFuture(
                     ConflictException(
                         "patient already has an active elderly admission" +
@@ -1170,7 +1170,7 @@ class HealthcareService(
         encounterNo?.takeIf(String::isNotBlank)?.let { ": encounter_no=$it" } ?: ""
 
     /**
-     * 028 D1–D3 入住区间/床位占用校验（仅 `ELDERLY_CARE`）：
+     * 029 D1–D3 入住区间/床位占用校验（仅 `ELDERLY_CARE`）：
      * 存在另一条养老入住 `O`（`O.id <> excludeEncounterId`）满足
      * `(O.admit_date IS NULL OR O.admit_date < X)` 且 `(O.discharge_date IS NULL OR O.discharge_date > S)` 即冲突，
      * 其中 `S = admitDate`、`X = dischargeDate`（`X = null` 表示未定离院 → 第一条条件恒真，不加 `admit_date` 过滤）。

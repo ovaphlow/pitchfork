@@ -27,9 +27,9 @@ import java.time.OffsetDateTime
 import java.util.function.Function as JavaFunction
 
 /**
- * 028 W1 床位占用只读查询（`GET /crate-api/healthcare/v1/bed-occupancy`）的非数据库测试。
+ * 029 W1 床位占用只读查询（`GET /crate-api/healthcare/v1/bed-occupancy`）的非数据库测试。
  *
- * 契约（028 §4.1）：`encounter_type = 'ELDERLY_CARE'` 且 `discharge_date IS NULL OR discharge_date > now`；
+ * 契约（029 §4.1）：`encounter_type = 'ELDERLY_CARE'` 且 `discharge_date IS NULL OR discharge_date > now`；
  * `department`/`ward` 传入时按 `trim` 后精确过滤；`orderBy(department, ward, admit_date)`；
  * 响应 `{ records: [{ encounter_id, encounter_no, patient_id, patient_name, department, ward,
  * admit_date, discharge_date, status }], meta: { total } }`，空结果仍返回 `records: []` 与 `total: 0`。

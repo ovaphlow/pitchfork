@@ -1367,7 +1367,7 @@ export default function NursingPage() {
       setActionError("至少填写一条护理措施");
       return;
     }
-    // 028 §2.1-10：评估 → 计划 的顺序是强制门禁（服务端 PlanService.create 同样校验并返回 409，
+    // 029 §2.1-10：评估 → 计划 的顺序是强制门禁（服务端 PlanService.create 同样校验并返回 409，
     // 这里只做快速反馈；两边文案一致，避免出现「服务端会拒但界面不提示」）
     if (assessments.length === 0) {
       setActionError("照护计划必须先有护理评估：请先完成至少一条护理评估，再制定照护计划");

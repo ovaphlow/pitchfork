@@ -28,7 +28,7 @@ import org.junit.jupiter.api.extension.ExtendWith
 import java.util.Collections
 
 /**
- * 照护计划前置校验（028 §2.1-10 / D10）的嵌入式 HTTP 路由测试。
+ * 照护计划前置校验（029 §2.1-10 / D10）的嵌入式 HTTP 路由测试。
  *
  * 用 mockk 桩 Pool（按 normalized SQL 特征分发行集）启动真实 Vert.x 服务器，
  * 以真实 HTTP 请求验证 `POST /`：

@@ -466,7 +466,7 @@ export default function AdmissionsPage() {
 
   /**
    * 办理入住弹窗打开时拉取当前床位占用，用于「房间床位」下方的实时提示。
-   * 计划 028 §4.1：出租（占用）事实来源是 encounters 的 department/ward，无床位主数据（D1）。
+   * 计划 029 §4.1：出租（占用）事实来源是 encounters 的 department/ward，无床位主数据（D1）。
    * 拉取失败静默降级（提示缺失，但保存时的服务端校验仍然生效），不阻塞表单。
    */
   useEffect(() => {
@@ -639,7 +639,7 @@ export default function AdmissionsPage() {
   const availablePatientOptions = patientOptions.filter((patient) => !admissions.some((admission) => admission.patient_id === patient.id));
 
   /**
-   * 所选床位的当前占用记录：部门与床位都填写后，按 trim 后精确相等匹配（计划 028 D1，
+   * 所选床位的当前占用记录：部门与床位都填写后，按 trim 后精确相等匹配（计划 029 D1，
    * 不做大小写/全角归一，`'001'` 与 `' 001'` 视为同一床位，`'001'` 与 `'01'` 视为不同床位）。
    */
   const wardOccupancy = useMemo(() => {

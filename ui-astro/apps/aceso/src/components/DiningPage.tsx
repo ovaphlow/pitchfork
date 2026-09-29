@@ -1233,7 +1233,7 @@ function RostersTab() {
 // ========================================================================
 
 function ExecutionsTab() {
-  // 028（评审 P2-3）：execution.recorded_by 是认证主体 ID（登记人），展示前映射为姓名
+  // 029（评审 P2-3）：execution.recorded_by 是认证主体 ID（登记人），展示前映射为姓名
   const { subjectLabel } = useSubjectDirectory();
   const [date, setDate] = useState(todayLocal());
   const [meal, setMeal] = useState("午餐");

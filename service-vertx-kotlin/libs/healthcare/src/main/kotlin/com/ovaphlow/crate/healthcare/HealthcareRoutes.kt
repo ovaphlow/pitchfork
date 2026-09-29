@@ -102,7 +102,7 @@ object HealthcareRoutes {
             ).onSuccess { ctx.json(it) }
                 .onFailure { respondFailure(ctx, it) }
         }
-        // 028 §4.1 床位占用只读查询：当前占用中的养老入住，供办理入住表单提示「该床位当前占用」
+        // 029 §4.1 床位占用只读查询：当前占用中的养老入住，供办理入住表单提示「该床位当前占用」
         router.get("/bed-occupancy").handler { ctx ->
             service.listBedOccupancy(
                 department = ctx.request().getParam("department"),
@@ -1034,7 +1034,7 @@ object HealthcareRoutes {
     private fun respondCreateFailure(ctx: RoutingContext, error: Throwable) {
         val message = error.message?.lowercase() ?: ""
         when {
-            // 028 §4.2：ConflictException 自带完整业务消息（床位占用/区间重叠/已有活动入住），
+            // 029 §4.2：ConflictException 自带完整业务消息（床位占用/区间重叠/已有活动入住），
             // 必须原样 409 返回；否则会被下面的 "encounter_no" 子串判据改写成「住院号重复」。
             error is ConflictException -> respond(ctx, 409, error.message)
             // V501 部分唯一索引：并发下重复活动养老入住 → 409，不退化为 500

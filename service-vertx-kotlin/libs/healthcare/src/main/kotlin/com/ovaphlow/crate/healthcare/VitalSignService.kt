@@ -154,7 +154,7 @@ class VitalSignService(
                     Future.all(checks).map { Unit }
                 }
             }.compose {
-                // 028 D4：请求体未给 encounter_id 时，按「该长者唯一的 ACTIVE 养老入住」自动挂接。
+                // 029 D4：请求体未给 encounter_id 时，按「该长者唯一的 ACTIVE 养老入住」自动挂接。
                 // V501 部分唯一索引（`uq_encounters_active_elderly_care`）保证至多一条，故无歧义；
                 // 无入住（居家/社区/仅历史已离院）时保持 NULL，不改变既有可空语义。
                 resolveAutoAttachedEncounters(connection, records)
@@ -836,7 +836,7 @@ class VitalSignService(
             .put("patient_id", record.patientId)
             .put("patient_name", null as String?)
             .put("encounter_id", record.encounterId)
-            // 028 D4：回填真实住院号（此前恒为 null，创建响应无法自证挂到了哪一段入住）
+            // 029 D4：回填真实住院号（此前恒为 null，创建响应无法自证挂到了哪一段入住）
             .put("encounter_no", encounterNo)
             .put("type", record.type)
             .put("value", record.value)
@@ -889,7 +889,7 @@ class VitalSignService(
         }
 
     /**
-     * 028 D4：为「请求体未给 `encounter_id`」的记录解析该长者唯一的 ACTIVE 养老入住 id。
+     * 029 D4：为「请求体未给 `encounter_id`」的记录解析该长者唯一的 ACTIVE 养老入住 id。
      *
      * 返回 `patientId → encounterId`（查不到的患者不出现在 map 中，调用方据此保持 NULL）。
      * 同一批内同一长者只查一次。
@@ -911,7 +911,7 @@ class VitalSignService(
     }
 
     /**
-     * 028 D4：该长者当前唯一的 ACTIVE 养老入住 id；无在住记录时返回 null。
+     * 029 D4：该长者当前唯一的 ACTIVE 养老入住 id；无在住记录时返回 null。
      *
      * `V501` 的部分唯一索引 `uq_encounters_active_elderly_care` 保证同一长者至多一条
      * ACTIVE 养老入住，因此这里无需在应用层消歧；`limit(1)` 只是让 SQL 意图显式。
@@ -930,7 +930,7 @@ class VitalSignService(
         }
     }
 
-    /** 028 D4：`id → encounter_no` 批量回填，供创建响应自证挂接的入住。 */
+    /** 029 D4：`id → encounter_no` 批量回填，供创建响应自证挂接的入住。 */
     private fun encounterNoMap(client: SqlClient, encounterIds: List<String>): Future<Map<String, String?>> {
         if (encounterIds.isEmpty()) return Future.succeededFuture(emptyMap())
         val query = ctx.select(ENCOUNTERS.ID, ENCOUNTERS.ENCOUNTER_NO)
