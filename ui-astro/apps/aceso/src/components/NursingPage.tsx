@@ -72,6 +72,14 @@ import {
   type ShiftHandoverDetail,
   type WarehouseOption,
 } from "@pitchfork/shared/aceso";
+import {
+  daysAgoLocal,
+  formatDate,
+  formatDateTime,
+  nowLocalInput,
+  toOffsetDateTime,
+  todayLocal,
+} from "../lib/datetime";
 import NursingExecutionStatisticsPanel from "./NursingExecutionStatisticsPanel";
 
 type Tab = "overview" | "assessments" | "plans" | "tasks" | "orders" | "incidents" | "handovers" | "timeline";
@@ -159,18 +167,6 @@ interface RevisionForm {
 
 const selectClass = "h-10 rounded-md border border-border bg-surface px-3 text-sm text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent";
 const textareaClass = "w-full resize-none rounded-md border border-border bg-surface px-3 py-2 text-sm text-fg placeholder:text-fg-dimmed focus:outline-none focus-visible:ring-2 focus-visible:ring-accent";
-
-function today(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-
-function formatDate(value: string | null | undefined): string {
-  return value ? value.slice(0, 10) : "-";
-}
-
-function formatDateTime(value: string | null | undefined): string {
-  return value ? value.replace("T", " ").slice(0, 16) : "-";
-}
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
@@ -289,7 +285,7 @@ const executionDefaults = (): ExecutionForm => ({ plannedTime: "", executor: "",
 
 const revisionDefaults = (): RevisionForm => ({
   assessType: "BARTHEL",
-  assessDate: today(),
+  assessDate: todayLocal(),
   assessor: "",
   totalScore: "",
   resultLevel: "",
@@ -298,7 +294,7 @@ const revisionDefaults = (): RevisionForm => ({
   planName: "",
   goals: "",
   createdBy: "",
-  startDate: today(),
+  startDate: todayLocal(),
   endDate: "",
   items: [{ action: "", frequencyCode: "", frequencyName: "", durationDays: undefined, remark: "" }],
 });
@@ -345,18 +341,18 @@ export default function NursingPage() {
   // ——— 时间线 ———
   const [timelineEvents, setTimelineEvents] = useState<NursingTimelineEvent[]>([]);
   const [timelineLoading, setTimelineLoading] = useState(false);
-  const [timelineDateFrom, setTimelineDateFrom] = useState(() => { const d = new Date(); d.setDate(d.getDate() - 30); return d.toISOString().slice(0, 10); });
-  const [timelineDateTo, setTimelineDateTo] = useState(today());
+  const [timelineDateFrom, setTimelineDateFrom] = useState(() => daysAgoLocal(30));
+  const [timelineDateTo, setTimelineDateTo] = useState(todayLocal());
   const [timelineEventType, setTimelineEventType] = useState("");
   // ——— 护理记录 ———
   const [recordOpen, setRecordOpen] = useState(false);
-  const [recordForm, setRecordForm] = useState({ title: "日常护理记录", content: "", recordTime: new Date().toISOString().slice(0, 16), taskExecutionId: "" });
+  const [recordForm, setRecordForm] = useState({ title: "日常护理记录", content: "", recordTime: nowLocalInput(), taskExecutionId: "" });
   const [recordSaving, setRecordSaving] = useState(false);
   const [recordError, setRecordError] = useState("");
   const [selectedRecord, setSelectedRecord] = useState<NursingRecord | null>(null);
   const [recordDetailOpen, setRecordDetailOpen] = useState(false);
   const [correctionOpen, setCorrectionOpen] = useState(false);
-  const [correctionForm, setCorrectionForm] = useState({ content: "", recordTime: new Date().toISOString().slice(0, 16) });
+  const [correctionForm, setCorrectionForm] = useState({ content: "", recordTime: nowLocalInput() });
   // ——— 异常事件（017） ———
   const [incidents, setIncidents] = useState<NursingIncident[]>([]);
   const [incidentLoading, setIncidentLoading] = useState(false);
@@ -365,7 +361,7 @@ export default function NursingPage() {
   const [incidentForm, setIncidentForm] = useState({
     incidentType: "跌倒/坠床",
     severity: "一般",
-    occurredAt: new Date().toISOString().slice(0, 16),
+    occurredAt: nowLocalInput(),
     description: "",
     initialAction: "",
   });
@@ -389,7 +385,7 @@ export default function NursingPage() {
   const [handoverError, setHandoverError] = useState("");
   const [handoverCreateOpen, setHandoverCreateOpen] = useState(false);
   const [handoverIdemKey, setHandoverIdemKey] = useState("");
-  const [handoverForm, setHandoverForm] = useState({ businessDate: today(), shift: "早班", manualItems: "" });
+  const [handoverForm, setHandoverForm] = useState({ businessDate: todayLocal(), shift: "早班", manualItems: "" });
   const [handoverSaving, setHandoverSaving] = useState(false);
   const [handoverDetail, setHandoverDetail] = useState<ShiftHandoverDetail | null>(null);
   const [handoverDetailOpen, setHandoverDetailOpen] = useState(false);
@@ -399,7 +395,7 @@ export default function NursingPage() {
   const [handoverAppendSaving, setHandoverAppendSaving] = useState(false);
   // ——— 今日执行工作台 ———
   const [mainView, setMainView] = useState<MainView>("today");
-  const [todayDate, setTodayDate] = useState(today());
+  const [todayDate, setTodayDate] = useState(todayLocal());
   const [todayExecutions, setTodayExecutions] = useState<NursingTodayExecution[]>([]);
   const [todayLoading, setTodayLoading] = useState(true);
   const [todayStatusFilter, setTodayStatusFilter] = useState("");
@@ -693,7 +689,7 @@ export default function NursingPage() {
       await createNursingIncident(selectedAdmission.id, {
         incident_type: incidentForm.incidentType,
         severity: incidentForm.severity,
-        occurred_at: incidentForm.occurredAt ? new Date(incidentForm.occurredAt).toISOString() : new Date().toISOString(),
+        occurred_at: incidentForm.occurredAt ? toOffsetDateTime(incidentForm.occurredAt) : new Date().toISOString(),
         description: incidentForm.description.trim(),
         ...(incidentForm.initialAction.trim()
           ? { initial_action: { action_type: "处置", body: incidentForm.initialAction.trim() } }
@@ -775,7 +771,7 @@ export default function NursingPage() {
   // ========================================================================
 
   function openHandoverCreate() {
-    setHandoverForm({ businessDate: today(), shift: "早班", manualItems: "" });
+    setHandoverForm({ businessDate: todayLocal(), shift: "早班", manualItems: "" });
     setHandoverIdemKey(`nursing-handover-${Date.now()}`);
     setHandoverError("");
     setHandoverCreateOpen(true);
@@ -871,7 +867,7 @@ export default function NursingPage() {
     setRecordSaving(true);
     setRecordError("");
     try {
-      const recordTime = recordForm.recordTime ? new Date(recordForm.recordTime).toISOString() : undefined;
+      const recordTime = recordForm.recordTime ? toOffsetDateTime(recordForm.recordTime) : undefined;
       await createNursingRecord({
         period_id: period.id,
         encounter_id: selectedAdmission.id,
@@ -882,7 +878,7 @@ export default function NursingPage() {
         author: currentSubjectId || undefined,
       });
       setRecordOpen(false);
-      setRecordForm({ title: "日常护理记录", content: "", recordTime: new Date().toISOString().slice(0, 16), taskExecutionId: "" });
+      setRecordForm({ title: "日常护理记录", content: "", recordTime: nowLocalInput(), taskExecutionId: "" });
       // 刷新时间线
       await loadTimeline(period.id, selectedAdmission.id);
     } catch (error) {
@@ -897,7 +893,7 @@ export default function NursingPage() {
     setRecordForm({
       title: taskExecutionId ? "执行记录补充" : "日常护理记录",
       content: "",
-      recordTime: new Date().toISOString().slice(0, 16),
+      recordTime: nowLocalInput(),
       taskExecutionId: taskExecutionId ?? "",
     });
     setRecordOpen(true);
@@ -916,7 +912,7 @@ export default function NursingPage() {
 
   function openCorrection(record: NursingRecord) {
     setSelectedRecord(record);
-    setCorrectionForm({ content: "", recordTime: new Date().toISOString().slice(0, 16) });
+    setCorrectionForm({ content: "", recordTime: nowLocalInput() });
     setCorrectionOpen(true);
   }
 
@@ -928,7 +924,7 @@ export default function NursingPage() {
     setRecordSaving(true);
     setActionError("");
     try {
-      const recordTime = correctionForm.recordTime ? new Date(correctionForm.recordTime).toISOString() : undefined;
+      const recordTime = correctionForm.recordTime ? toOffsetDateTime(correctionForm.recordTime) : undefined;
       await createNursingRecordCorrection(selectedRecord.id, {
         content: correctionForm.content.trim(),
         record_time: recordTime,
@@ -1386,7 +1382,7 @@ export default function NursingPage() {
     try {
       const execution = await createNursingTaskExecution({
         task_id: executionTask.id,
-        ...(executionForm.plannedTime ? { planned_time: new Date(executionForm.plannedTime).toISOString() } : {}),
+        ...(executionForm.plannedTime ? { planned_time: toOffsetDateTime(executionForm.plannedTime) } : {}),
         actual_time: new Date().toISOString(),
         ...(executionForm.executor.trim() ? { executor: executionForm.executor.trim() } : {}),
         ...(executionForm.note.trim() ? { note: executionForm.note.trim() } : {}),
@@ -1510,19 +1506,19 @@ export default function NursingPage() {
 
   function openAssessment() {
     setActionError("");
-    setAssessmentForm({ ...assessmentDefaults(), assessor: currentSubjectId, assessDate: today() });
+    setAssessmentForm({ ...assessmentDefaults(), assessor: currentSubjectId, assessDate: todayLocal() });
     setAssessmentOpen(true);
   }
 
   function openPlan() {
     setActionError("");
-    setPlanForm({ ...planDefaults(), startDate: today(), createdBy: currentSubjectId });
+    setPlanForm({ ...planDefaults(), startDate: todayLocal(), createdBy: currentSubjectId });
     setPlanOpen(true);
   }
 
   function openTask() {
     setActionError("");
-    setTaskForm({ ...taskDefaults(), startDate: today() });
+    setTaskForm({ ...taskDefaults(), startDate: todayLocal() });
     setTaskOpen(true);
   }
 
@@ -1809,7 +1805,7 @@ export default function NursingPage() {
                   <Card
                     className="min-w-0 overflow-hidden"
                     title="异常事件"
-                    actions={<Button size="sm" onClick={() => { setIncidentForm((current) => ({ ...current, occurredAt: new Date().toISOString().slice(0, 16) })); setIncidentError(""); setIncidentCreateOpen(true); }}>上报事件</Button>}
+                    actions={<Button size="sm" onClick={() => { setIncidentForm((current) => ({ ...current, occurredAt: nowLocalInput() })); setIncidentError(""); setIncidentCreateOpen(true); }}>上报事件</Button>}
                   >
                     {incidentError && <div className="mb-3 rounded-lg border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">{incidentError}</div>}
                     {incidentLoading ? (

@@ -5,12 +5,9 @@ import {
   nurseCheckMedicalOrder,
   type NurseCheckPendingOrder,
 } from "@pitchfork/shared/aceso";
+import { formatDateTime } from "../lib/datetime";
 
 const PAGE_SIZE = 50;
-
-function formatDateTime(value: string | null | undefined): string {
-  return value ? value.replace("T", " ").slice(0, 16) : "-";
-}
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;

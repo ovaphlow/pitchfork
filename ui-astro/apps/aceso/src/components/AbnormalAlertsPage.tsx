@@ -14,6 +14,7 @@ import {
   type VitalSignReviewStatus,
   type VitalSignType,
 } from "@pitchfork/shared/aceso";
+import { formatDate, formatDateTime, toOffsetDateTime } from "../lib/datetime";
 
 const PAGE_SIZE = 20;
 
@@ -57,14 +58,6 @@ const REVIEW_STATUS_VARIANTS: Record<VitalSignReviewStatus, ReviewBadgeVariant> 
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
-}
-
-function formatDateTime(value: string | null | undefined): string {
-  return value ? value.slice(0, 16).replace("T", " ") : "-";
-}
-
-function formatDate(value: string | null | undefined): string {
-  return value ? value.slice(0, 10) : "-";
 }
 
 function formatValue(value: number | null | undefined): string {
@@ -163,8 +156,8 @@ export default function AbnormalAlertsPage() {
         patient_id: patientId,
         type: (typeFilter || undefined) as VitalSignType | undefined,
         review_status: (statusFilter || undefined) as VitalSignReviewStatus | undefined,
-        date_from: dateFrom ? `${dateFrom}:00+08:00` : undefined,
-        date_to: dateTo ? `${dateTo}:00+08:00` : undefined,
+        date_from: dateFrom ? toOffsetDateTime(dateFrom) : undefined,
+        date_to: dateTo ? toOffsetDateTime(dateTo) : undefined,
         limit: PAGE_SIZE,
         offset: (targetPage - 1) * PAGE_SIZE,
       });

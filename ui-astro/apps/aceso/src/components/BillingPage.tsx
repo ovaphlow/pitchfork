@@ -28,6 +28,7 @@ import {
   type PaymentSummary,
   type SettlementPreview,
 } from "@pitchfork/shared/aceso";
+import { formatDate, formatDateTime, todayLocal } from "../lib/datetime";
 import { BILLING_BLOCKED_REASONS, FEE_ITEMS_PAGE_PATH, billingErrorMessage } from "./billingMessages";
 
 const PAGE_SIZE = 50;
@@ -83,29 +84,12 @@ function errorMessage(error: unknown, fallback: string): string {
   return billingErrorMessage(error, fallback);
 }
 
-function formatDateTime(value: string | null | undefined): string {
-  if (!value) return "—";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
-}
-
-function formatDate(value: string | null | undefined): string {
-  if (!value) return "—";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
-}
-
 function formatAmount(value: number): string {
   return value.toFixed(2);
 }
 
 function currentMonth(): string {
-  const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  return todayLocal().slice(0, 7);
 }
 
 /** 生成账单前置提示条目（缺项 / 阻塞原因） */
@@ -751,7 +735,7 @@ export default function BillingPage() {
       key: "period",
       header: "账期",
       render: (row) => (
-        <span className="text-fg">{formatDate(row.period_start)} ~ {formatDate(row.period_end)}</span>
+        <span className="text-fg">{formatDate(row.period_start, "—")} ~ {formatDate(row.period_end, "—")}</span>
       ),
     },
     {
@@ -814,7 +798,7 @@ export default function BillingPage() {
     {
       key: "created_at",
       header: "时间",
-      render: (row) => <span className="text-fg-muted text-sm">{formatDateTime(row.created_at)}</span>,
+      render: (row) => <span className="text-fg-muted text-sm">{formatDateTime(row.created_at, "—")}</span>,
     },
     {
       key: "method",
@@ -844,7 +828,7 @@ export default function BillingPage() {
       key: "period",
       header: "账期",
       render: (row) => (
-        <span className="text-fg-muted text-sm">{formatDate(row.period_start)} ~ {formatDate(row.period_end)}</span>
+        <span className="text-fg-muted text-sm">{formatDate(row.period_start, "—")} ~ {formatDate(row.period_end, "—")}</span>
       ),
     },
     { key: "total_amount", header: "合计（元）", render: (row) => formatAmount(row.total_amount) },
@@ -1006,7 +990,7 @@ export default function BillingPage() {
                 {selectedAdmission.department ? ` · ${selectedAdmission.department} ${selectedAdmission.ward ?? ""}` : ""}
               </span>
               {selectedAdmission.settled_at ? (
-                <Badge variant="default">已结算收束 {formatDateTime(selectedAdmission.settled_at)}</Badge>
+                <Badge variant="default">已结算收束 {formatDateTime(selectedAdmission.settled_at, "—")}</Badge>
               ) : (
                 <Badge variant="info">未结算</Badge>
               )}
@@ -1127,7 +1111,7 @@ export default function BillingPage() {
         {addItemBill && (
           <div className="space-y-4">
             <p className="text-sm text-fg-muted">
-              为 {formatDate(addItemBill.period_start)} ~ {formatDate(addItemBill.period_end)} 账单添加自费药/检查费等手工项目；
+              为 {formatDate(addItemBill.period_start, "—")} ~ {formatDate(addItemBill.period_end, "—")} 账单添加自费药/检查费等手工项目；
               明细为字典快照，单价缺省取字典单价，可覆盖。
             </p>
             {feeItemsLoading ? (
@@ -1176,7 +1160,7 @@ export default function BillingPage() {
         {payTarget && (
           <div className="space-y-4">
             <p className="text-sm text-fg-muted">
-              账单 {formatDate(payTarget.bill.period_start)} ~ {formatDate(payTarget.bill.period_end)}：
+              账单 {formatDate(payTarget.bill.period_start, "—")} ~ {formatDate(payTarget.bill.period_end, "—")}：
               合计 ¥ {formatAmount(payTarget.bill.total_amount)}，剩余应缴 ¥ {formatAmount(payTarget.remaining)}。
               支持多次部分缴费，余额归零后账单转为已结清。
             </p>
@@ -1224,9 +1208,9 @@ export default function BillingPage() {
             <div className="flex flex-wrap items-center gap-3">
               <Badge variant={BILL_STATUS_VARIANT[detail.bill.status] ?? "default"}>{detail.bill.status}</Badge>
               <span className="text-sm text-fg-muted">
-                {formatDate(detail.bill.period_start)} ~ {formatDate(detail.bill.period_end)} · 合计 ¥ {formatAmount(detail.bill.total_amount)}
+                {formatDate(detail.bill.period_start, "—")} ~ {formatDate(detail.bill.period_end, "—")} · 合计 ¥ {formatAmount(detail.bill.total_amount)}
               </span>
-              {detail.bill.settled_at && <Badge variant="default">已收束 {formatDateTime(detail.bill.settled_at)}</Badge>}
+              {detail.bill.settled_at && <Badge variant="default">已收束 {formatDateTime(detail.bill.settled_at, "—")}</Badge>}
             </div>
             {/* 收束时未结（减免）留痕：仅 outstanding_amount > 0 的已结算账单显示 */}
             {detail.bill.status === "已结算" && detail.bill.outstanding_amount > 0 && (
@@ -1294,7 +1278,7 @@ export default function BillingPage() {
                 </p>
                 <p className="text-xs text-fg-dimmed mt-1">
                   {hasFinalBill
-                    ? `账期 ${formatDate(settlePreview.settlement_period?.start)} ~ ${formatDate(settlePreview.settlement_period?.end)}`
+                    ? `账期 ${formatDate(settlePreview.settlement_period?.start, "—")} ~ ${formatDate(settlePreview.settlement_period?.end, "—")}`
                     : "本次不生成区间最终账单"}
                 </p>
               </div>

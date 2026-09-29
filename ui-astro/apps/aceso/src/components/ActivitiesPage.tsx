@@ -21,6 +21,7 @@ import {
   type NursingTodayExecution,
   type Patient,
 } from "@pitchfork/shared/aceso";
+import { daysAgoLocal, formatDate, formatDateTime, formatTime, todayLocal } from "../lib/datetime";
 
 const PAGE_SIZE = 10;
 
@@ -60,28 +61,6 @@ const EXECUTION_STATUS_LABELS: Record<string, string> = {
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
-}
-
-function todayLocal(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-
-function daysAgo(days: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() - days);
-  return d.toISOString().slice(0, 10);
-}
-
-function formatDate(value: string | null | undefined): string {
-  return value ? value.slice(0, 10) : "-";
-}
-
-function formatDateTime(value: string | null | undefined): string {
-  return value ? value.replace("T", " ").slice(0, 16) : "-";
-}
-
-function formatTime(value: string | null | undefined): string {
-  return value ? value.slice(11, 16) : "-";
 }
 
 function formatOverdueMinutes(minutes: number | null | undefined): string {
@@ -338,7 +317,7 @@ export default function ActivitiesPage() {
   // ========================================================================
   //  进度统计（F7）— 复用 GET /task-executions/statistics + task_type 过滤
   // ========================================================================
-  const [statsFrom, setStatsFrom] = useState(() => daysAgo(6));
+  const [statsFrom, setStatsFrom] = useState(() => daysAgoLocal(6));
   const [statsTo, setStatsTo] = useState(todayLocal);
   const [stats, setStats] = useState<NursingExecutionStatisticsPage | null>(null);
   const [statsLoading, setStatsLoading] = useState(false);

@@ -6,6 +6,7 @@ import {
   setIdentityTemporaryPassword,
   type IdentitySubject,
 } from "@pitchfork/shared/aceso";
+import { formatDateTime } from "../lib/datetime";
 import { Badge, Button, Card, Input, Modal, Table, type Column } from "@pitchfork/ui";
 
 const PAGE_SIZE = 20;
@@ -18,11 +19,6 @@ const subjectFormDefaults = {
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
-}
-
-function formatDate(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.valueOf()) ? value : date.toLocaleString("zh-CN");
 }
 
 export default function UsersPage() {
@@ -167,7 +163,7 @@ export default function UsersPage() {
       key: "created_at",
       header: "创建时间",
       className: "min-w-[180px]",
-      render: (row) => formatDate(row.created_at),
+      render: (row) => formatDateTime(row.created_at),
     },
     {
       key: "actions",

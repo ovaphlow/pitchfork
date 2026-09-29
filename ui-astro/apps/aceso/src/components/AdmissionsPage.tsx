@@ -17,6 +17,7 @@ import {
   type IdentitySubject,
   type Patient,
 } from "@pitchfork/shared/aceso";
+import { dayBoundary, formatDate, formatDateTime, toOffsetDateTime } from "../lib/datetime";
 
 interface AdmissionForm {
   patientId: string;
@@ -42,21 +43,13 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
 }
 
-function formatDate(value: string | null | undefined): string {
-  return value ? value.slice(0, 10) : "-";
-}
-
-function formatDateTime(value: string | null | undefined): string {
-  return value ? value.replace("T", " ").slice(0, 16) : "-";
-}
-
 function toAdmissionInput(form: AdmissionForm): ElderlyAdmissionInput | null {
   const encounterNo = form.encounterNo.trim();
   if (!form.patientId || !encounterNo || !form.admitDate) return null;
   return {
     patient_id: form.patientId,
     encounter_no: encounterNo,
-    admit_date: `${form.admitDate}T00:00:00+08:00`,
+    admit_date: dayBoundary(form.admitDate, "start"),
     ...(form.department.trim() ? { department: form.department.trim() } : {}),
     ...(form.ward.trim() ? { ward: form.ward.trim() } : {}),
     // attending_physician 由服务端按当前操作人写入，不由表单提交
@@ -541,7 +534,7 @@ export default function AdmissionsPage() {
     setNotice("");
     try {
       await markEncounterDeath(deathAdmission.id, {
-        death_date: `${deathDateValue}:00+08:00`,
+        death_date: toOffsetDateTime(deathDateValue),
         ...(deathCause.trim() ? { death_cause: deathCause.trim() } : {}),
       });
       setDeathAdmission(null);

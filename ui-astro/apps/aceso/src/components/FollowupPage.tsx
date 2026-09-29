@@ -15,6 +15,7 @@ import {
   type FollowupPlanStats,
   type FollowupRecord,
 } from "@pitchfork/shared/aceso";
+import { formatDate, formatDateTime, nowLocalInput, toOffsetDateTime, todayLocal } from "../lib/datetime";
 
 const PAGE_SIZE = 20;
 
@@ -63,37 +64,6 @@ function errorMessage(error: unknown, fallback: string): string {
 
 function displayValue(value: string | null | undefined): string {
   return value?.trim() || "-";
-}
-
-function formatDate(value: string | null | undefined): string {
-  return value ? value.slice(0, 10) : "-";
-}
-
-function formatDateTime(value: string | null | undefined): string {
-  return value ? value.slice(0, 16).replace("T", " ") : "-";
-}
-
-function pad(n: number): string {
-  return String(n).padStart(2, "0");
-}
-
-/** 本地时区的 date input 值（YYYY-MM-DD） */
-function todayLocal(): string {
-  const d = new Date();
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
-
-/** 本地时区的 datetime-local 值（YYYY-MM-DDTHH:mm） */
-function nowLocalInput(): string {
-  const d = new Date();
-  return `${todayLocal()}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-/** datetime-local → OffsetDateTime 字符串（Asia/Shanghai，服务端拒绝未来时间） */
-function toOffsetDateTime(localInput: string): string {
-  if (!localInput) return "";
-  const withSeconds = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(localInput) ? `${localInput}:00` : localInput;
-  return `${withSeconds}+08:00`;
 }
 
 function statusBadge(status: string) {

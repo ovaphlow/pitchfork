@@ -23,6 +23,7 @@ import {
   type MedicalOrderInput,
   type ProgressNote,
 } from "@pitchfork/shared/aceso";
+import { formatDateTime, toOffsetDateTime, todayLocal } from "../lib/datetime";
 
 interface ActiveAdmission extends Encounter {
   patientName: string;
@@ -114,11 +115,6 @@ function hasOrderFieldError(form: OrderForm, field: string): boolean {
 }
 
 const noteFormDefaults: NoteForm = { content: "", physician: "", recordTime: "" };
-
-function todayLocal(): string {
-  const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-}
 
 const diagnosisFormDefaults: DiagnosisForm = {
   diagnosisType: "PRIMARY",
@@ -236,10 +232,6 @@ const radioClass = "h-4 w-4 border-border bg-surface accent-accent";
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
-}
-
-function formatDateTime(value: string | null | undefined): string {
-  return value ? value.replace("T", " ").slice(0, 16) : "-";
 }
 
 /** SSR 安全地读取 URL 上的 encounter_id，用于进入页面时优先选中该入住 */
@@ -464,7 +456,7 @@ export default function OrdersPage() {
         note_type: "DAILY",
         content,
         physician,
-        ...(recordTime ? { record_time: `${recordTime}:00+08:00` } : {}),
+        ...(recordTime ? { record_time: toOffsetDateTime(recordTime) } : {}),
       });
       setNoteForm(noteFormDefaults);
       setNoteEditorOpen(false);
@@ -588,8 +580,8 @@ export default function OrdersPage() {
       order_class: form.orderClass,
       order_content: orderContent,
       doctor,
-      start_time: `${startTime}:00+08:00`,
-      ...(endTime ? { end_time: `${endTime}:00+08:00` } : {}),
+      start_time: toOffsetDateTime(startTime),
+      ...(endTime ? { end_time: toOffsetDateTime(endTime) } : {}),
       ...(Object.keys(details).length > 0 ? { order_details: details } : {}),
     };
   }

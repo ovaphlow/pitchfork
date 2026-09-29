@@ -12,6 +12,7 @@ import {
   type VitalSignRecord,
   type VitalSignType,
 } from "@pitchfork/shared/aceso";
+import { dayBoundary, daysAgoLocal, formatDate, formatDateTime, nowLocalInput, toInputValue, toOffsetDateTime } from "../lib/datetime";
 
 const PAGE_SIZE = 20;
 
@@ -71,35 +72,6 @@ type TrendRangeKey = (typeof TREND_RANGES)[number]["key"];
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
-}
-
-function pad(n: number): string {
-  return String(n).padStart(2, "0");
-}
-
-function todayLocal(): string {
-  const d = new Date();
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
-
-function nowLocalInput(): string {
-  const d = new Date();
-  return `${todayLocal()}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-/** datetime-local → OffsetDateTime 字符串（Asia/Shanghai） */
-function toOffsetDateTime(localInput: string): string {
-  if (!localInput) return "";
-  const withSeconds = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(localInput) ? `${localInput}:00` : localInput;
-  return `${withSeconds}+08:00`;
-}
-
-function formatDateTime(value: string | null | undefined): string {
-  return value ? value.slice(0, 16).replace("T", " ") : "-";
-}
-
-function formatDate(value: string | null | undefined): string {
-  return value ? value.slice(0, 10) : "-";
 }
 
 function formatValue(value: number | null | undefined): string {
@@ -317,14 +289,11 @@ export default function HealthMonitorPage() {
     setTrendLoading(true);
     setTrendError("");
     try {
-      const now = new Date();
       const params: { date_from?: string; date_to?: string } = {};
       if (range === "7d") {
-        const from = new Date(now.getTime() - 7 * 86400000);
-        params.date_from = `${from.getFullYear()}-${pad(from.getMonth() + 1)}-${pad(from.getDate())}T00:00:00+08:00`;
+        params.date_from = dayBoundary(daysAgoLocal(7), "start");
       } else if (range === "30d") {
-        const from = new Date(now.getTime() - 30 * 86400000);
-        params.date_from = `${from.getFullYear()}-${pad(from.getMonth() + 1)}-${pad(from.getDate())}T00:00:00+08:00`;
+        params.date_from = dayBoundary(daysAgoLocal(30), "start");
       }
       const response = await getVitalSignTrend(patientId, type, params);
       setTrendPoints(response.records);
@@ -404,7 +373,7 @@ export default function HealthMonitorPage() {
     setEditing(record);
     setEditForm({
       value: String(record.value),
-      measured_at: record.measured_at.slice(0, 16),
+      measured_at: toInputValue(record.measured_at),
       note: record.note ?? "",
     });
     setEditError("");

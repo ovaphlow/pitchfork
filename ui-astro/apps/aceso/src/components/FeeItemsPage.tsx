@@ -10,6 +10,7 @@ import {
   type FeeItemInput,
   type FeeItemStatus,
 } from "@pitchfork/shared/aceso";
+import { formatDateTime } from "../lib/datetime";
 import { Badge, Button, Card, EmptyState, Input, Modal, Table, type Column } from "@pitchfork/ui";
 
 const PAGE_SIZE = 50;
@@ -39,14 +40,6 @@ const selectClass =
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
-}
-
-function formatDateTime(value: string | null | undefined): string {
-  if (!value) return "—";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 function formatUnitPrice(value: number | string | null | undefined): string {
@@ -328,7 +321,7 @@ export default function FeeItemsPage() {
       key: "updated_at",
       header: "更新时间",
       className: "min-w-[150px] font-mono text-xs",
-      render: (row) => formatDateTime(row.updated_at),
+      render: (row) => formatDateTime(row.updated_at, "—"),
     },
     {
       key: "actions",

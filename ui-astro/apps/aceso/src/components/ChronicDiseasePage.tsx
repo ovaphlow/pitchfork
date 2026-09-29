@@ -13,6 +13,7 @@ import {
   type ChronicDiseaseTimeline,
   type ChronicFollowupFrequency,
 } from "@pitchfork/shared/aceso";
+import { formatDate, todayLocal } from "../lib/datetime";
 
 const PAGE_SIZE = 20;
 
@@ -62,15 +63,6 @@ const createFormDefaults: CreateForm = {
   physician: "",
   remark: "",
 };
-
-function todayLocal(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-
-function formatDate(value: string | null | undefined): string {
-  if (!value) return "—";
-  return value.slice(0, 10);
-}
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
@@ -340,7 +332,7 @@ export default function ChronicDiseasePage() {
         </div>
       ),
     },
-    { key: "confirmed_date", header: "确诊日期", render: (row) => formatDate(row.confirmed_date) },
+    { key: "confirmed_date", header: "确诊日期", render: (row) => formatDate(row.confirmed_date, "—") },
     { key: "control_status", header: "控制状态", render: (row) => controlBadge(row.control_status) },
     { key: "followup_frequency", header: "随访频率", render: (row) => row.followup_frequency },
     {
@@ -349,7 +341,7 @@ export default function ChronicDiseasePage() {
       render: (row) => (
         <div>
           <div className={row.is_overdue ? "text-danger font-medium" : "text-fg"}>
-            {formatDate(row.next_followup_date)}
+            {formatDate(row.next_followup_date, "—")}
             {row.is_overdue && <span className="ml-1 text-xs">逾期</span>}
           </div>
           {row.recent_followup_result && (
@@ -513,7 +505,7 @@ export default function ChronicDiseasePage() {
                 <option value="">{admissionSelectDisabled ? "请先选择老人" : "请选择入住"}</option>
                 {patientAdmissions.map((option) => (
                   <option key={option.id} value={option.id}>
-                    {option.encounter_no ?? option.id}（{formatDate(option.admit_date)}入住）
+                    {option.encounter_no ?? option.id}（{formatDate(option.admit_date, "—")}入住）
                   </option>
                 ))}
               </select>
@@ -614,7 +606,7 @@ export default function ChronicDiseasePage() {
                 <span className="font-medium text-fg">{timeline.chronic_disease_id ? detail?.disease_name ?? "慢病档案" : ""}</span>
                 {detail && (
                   <>
-                    <span className="text-fg-muted">确诊 {formatDate(detail.confirmed_date)}</span>
+                    <span className="text-fg-muted">确诊 {formatDate(detail.confirmed_date, "—")}</span>
                     {detail.icd_code && <span className="text-fg-muted">ICD {detail.icd_code}</span>}
                     <span>{controlBadge(detail.control_status)}</span>
                     <span className="text-fg-muted">频率 {detail.followup_frequency}</span>
@@ -641,7 +633,7 @@ export default function ChronicDiseasePage() {
                   )}
                   {detail.next_followup_date && (
                     <span className="text-xs text-fg-dimmed self-center">
-                      下次随访 {formatDate(detail.next_followup_date)}
+                      下次随访 {formatDate(detail.next_followup_date, "—")}
                       {detail.is_overdue && <span className="text-danger">（逾期）</span>}
                     </span>
                   )}
@@ -659,7 +651,7 @@ export default function ChronicDiseasePage() {
                   {timeline.progress_notes.map((note) => (
                     <li key={note.id} className="rounded-md border border-border p-3 text-sm">
                       <div className="flex items-center justify-between text-xs text-fg-dimmed">
-                        <span>{formatDate(note.record_time ?? note.created_at)} {note.physician ? `· ${note.physician}` : ""}</span>
+                        <span>{formatDate(note.record_time ?? note.created_at, "—")} {note.physician ? `· ${note.physician}` : ""}</span>
                         <span>病程</span>
                       </div>
                       <p className="mt-1 whitespace-pre-wrap text-fg">{note.content}</p>
@@ -679,7 +671,7 @@ export default function ChronicDiseasePage() {
                   {timeline.followup_plans.map((plan) => (
                     <li key={plan.id} className="flex items-center justify-between rounded-md border border-border p-3 text-sm">
                       <div>
-                        <div className="text-fg">{formatDate(plan.planned_date)} · {plan.planned_way}</div>
+                        <div className="text-fg">{formatDate(plan.planned_date, "—")} · {plan.planned_way}</div>
                         <div className="text-xs text-fg-dimmed">
                           {plan.status === "已逾期" ? "已逾期" : ""}
                           {plan.metadata?.source ? ` · ${String(plan.metadata.source)}` : ""}
@@ -707,14 +699,14 @@ export default function ChronicDiseasePage() {
                   {timeline.followup_records.map((record) => (
                     <li key={record.id} className="rounded-md border border-border p-3 text-sm">
                       <div className="flex items-center justify-between text-xs text-fg-dimmed">
-                        <span>{formatDate(record.followup_date)} · {record.followup_way} · {record.operator}</span>
+                        <span>{formatDate(record.followup_date, "—")} · {record.followup_way} · {record.operator}</span>
                         <Badge variant={record.result === "正常" ? "success" : record.result === "异常" ? "danger" : "warning"}>
                           {record.result}
                         </Badge>
                       </div>
                       {record.condition_summary && <p className="mt-1 text-fg">{record.condition_summary}</p>}
                       {record.next_followup_date && (
-                        <p className="mt-1 text-xs text-fg-dimmed">下次随访 {formatDate(record.next_followup_date)}</p>
+                        <p className="mt-1 text-xs text-fg-dimmed">下次随访 {formatDate(record.next_followup_date, "—")}</p>
                       )}
                     </li>
                   ))}

@@ -32,6 +32,7 @@ import {
   type RosterItem,
   type WeeklyMenu,
 } from "@pitchfork/shared/aceso";
+import { addDays, formatDate, formatDateTime, todayLocal, weekStartOf } from "../lib/datetime";
 
 // ─── 业务常量（与服务端枚举一致，一律中文值） ────────────────────────
 
@@ -46,39 +47,6 @@ const PAGE_SIZE = 50;
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
-}
-
-function formatDate(value: string | null | undefined): string {
-  return value ? value.slice(0, 10) : "-";
-}
-
-function formatDateTime(value: string | null | undefined): string {
-  return value ? value.replace("T", " ").slice(0, 16) : "-";
-}
-
-function toISODate(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
-function today(): string {
-  return toISODate(new Date());
-}
-
-function addDays(date: string, days: number): string {
-  const d = new Date(`${date}T00:00:00`);
-  d.setDate(d.getDate() + days);
-  return toISODate(d);
-}
-
-/** 计算某日期所在周的周一（与服务端 weekStartOf 一致） */
-function weekStartOf(date: string): string {
-  const d = new Date(`${date}T00:00:00`);
-  const day = (d.getDay() + 6) % 7; // 周一=0
-  d.setDate(d.getDate() - day);
-  return toISODate(d);
 }
 
 function statusBadge(status: string): React.ReactNode {
@@ -727,7 +695,7 @@ function WeeklyMenusTab() {
   const [offset, setOffset] = useState(0);
 
   const [createOpen, setCreateOpen] = useState(false);
-  const [createWeek, setCreateWeek] = useState(today());
+  const [createWeek, setCreateWeek] = useState(todayLocal());
   const [createName, setCreateName] = useState("");
   const [createError, setCreateError] = useState("");
   const [creating, setCreating] = useState(false);
@@ -888,7 +856,7 @@ function WeeklyMenusTab() {
               <option value="启用">启用</option>
               <option value="停用">停用</option>
             </select>
-            <Button variant="primary" onClick={() => { setCreateWeek(today()); setCreateName(""); setCreateError(""); setCreateOpen(true); }}>新建周菜谱</Button>
+            <Button variant="primary" onClick={() => { setCreateWeek(todayLocal()); setCreateName(""); setCreateError(""); setCreateOpen(true); }}>新建周菜谱</Button>
           </div>
         }
       >
@@ -1023,7 +991,7 @@ function RostersTab() {
   const [loading, setLoading] = useState(true);
   const [pageError, setPageError] = useState("");
 
-  const [genDate, setGenDate] = useState(today());
+  const [genDate, setGenDate] = useState(todayLocal());
   const [genMeal, setGenMeal] = useState("午餐");
   const [genError, setGenError] = useState("");
   const [generating, setGenerating] = useState(false);
@@ -1264,7 +1232,7 @@ function RostersTab() {
 // ========================================================================
 
 function ExecutionsTab() {
-  const [date, setDate] = useState(today());
+  const [date, setDate] = useState(todayLocal());
   const [meal, setMeal] = useState("午餐");
   const [roster, setRoster] = useState<Roster | null>(null);
   const [loading, setLoading] = useState(false);
@@ -1432,8 +1400,8 @@ function ExecutionsTab() {
 // ========================================================================
 
 function StatisticsTab() {
-  const [dateFrom, setDateFrom] = useState(today());
-  const [dateTo, setDateTo] = useState(today());
+  const [dateFrom, setDateFrom] = useState(todayLocal());
+  const [dateTo, setDateTo] = useState(todayLocal());
   const [meal, setMeal] = useState("");
   const [stats, setStats] = useState<MealStatistics | null>(null);
   const [loading, setLoading] = useState(false);

@@ -31,6 +31,7 @@ import {
   type PharmacyReturn,
   type WarehouseOption,
 } from "@pitchfork/shared/aceso";
+import { formatDate, formatDateTime } from "../lib/datetime";
 
 type Tab = "orders" | "dispenses" | "returns" | "requisitions" | "purchase";
 
@@ -77,14 +78,6 @@ const DISPENSE_TYPE_LABEL: Record<string, string> = {
 };
 
 const selectClass = "h-10 rounded-md border border-border bg-surface px-3 text-sm text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent";
-
-function formatDate(value: string | null | undefined): string {
-  return value ? value.slice(0, 10) : "-";
-}
-
-function formatDateTime(value: string | null | undefined): string {
-  return value ? value.replace("T", " ").slice(0, 16) : "-";
-}
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;

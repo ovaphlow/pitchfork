@@ -9,6 +9,7 @@ import {
   type Patient,
   type PatientInput,
 } from "@pitchfork/shared/aceso";
+import { formatDate } from "../lib/datetime";
 
 const PAGE_SIZE = 20;
 
@@ -48,10 +49,6 @@ function errorMessage(error: unknown, fallback: string): string {
 
 function displayValue(value: string | null | undefined): string {
   return value?.trim() || "-";
-}
-
-function formatDate(value: string | null | undefined): string {
-  return value ? value.slice(0, 10) : "-";
 }
 
 function buildPatientInput(form: ElderForm, editing: boolean): PatientInput | null {

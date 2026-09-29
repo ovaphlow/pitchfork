@@ -5,22 +5,11 @@ import {
   type IdentitySubject,
   type NursingExecutionStatistics,
 } from "@pitchfork/shared/aceso";
+import { todayLocal, weekStartOf } from "../lib/datetime";
 
 // ========================================================================
 //  Helpers
 // ========================================================================
-
-function today(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-
-function thisMonday(): string {
-  const d = new Date();
-  const day = d.getDay();
-  const diff = d.getDate() - day + (day === 0 ? -6 : 1);
-  d.setDate(diff);
-  return d.toISOString().slice(0, 10);
-}
 
 function formatRate(value: number | null | undefined): string {
   if (value === null || value === undefined) return "暂无应完成任务";
@@ -52,14 +41,14 @@ interface Props {
 export default function NursingExecutionStatisticsPanel({ subjects, reloadKey = 0 }: Props) {
   // 编辑中的筛选条件（输入框直接绑定，不触发请求）
   const [draft, setDraft] = useState(() => ({
-    dateFrom: thisMonday(),
-    dateTo: today(),
+    dateFrom: weekStartOf(todayLocal()),
+    dateTo: todayLocal(),
     executor: "",
   }));
   // 已提交的查询条件：仅“查询”按钮或 reloadKey 刷新使用同一份快照
   const [submitted, setSubmitted] = useState(() => ({
-    dateFrom: thisMonday(),
-    dateTo: today(),
+    dateFrom: weekStartOf(todayLocal()),
+    dateTo: todayLocal(),
     executor: "",
   }));
   const [records, setRecords] = useState<NursingExecutionStatistics[]>([]);

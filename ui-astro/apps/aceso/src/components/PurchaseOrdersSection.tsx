@@ -17,6 +17,7 @@ import {
   type PharmacyPurchaseReceipt,
   type WarehouseOption,
 } from "@pitchfork/shared/aceso";
+import { formatDateTime } from "../lib/datetime";
 
 /**
  * 014 药房采购：采购订单（创建 → 审核 → 供应商收货 → 收讫/关闭/取消）
@@ -34,10 +35,6 @@ const ORDER_STATUS: Record<string, { label: string; variant: "default" | "succes
 };
 
 const selectClass = "h-10 rounded-md border border-border bg-surface px-3 text-sm text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent";
-
-function formatDateTime(value: string | null | undefined): string {
-  return value ? value.replace("T", " ").slice(0, 16) : "-";
-}
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;

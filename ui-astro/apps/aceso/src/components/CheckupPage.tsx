@@ -20,6 +20,7 @@ import {
   type HealthCheckupResultInput,
   type HealthCheckupStats,
 } from "@pitchfork/shared/aceso";
+import { addDays, formatDate, formatDateTime, todayLocal } from "../lib/datetime";
 
 const PAGE_SIZE = 20;
 
@@ -43,29 +44,6 @@ const NUMERIC_ITEM_PRESETS: { item_name: string; unit: string; ref_min: string; 
 function errorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message) return error.message;
   return fallback;
-}
-
-function todayLocal(): string {
-  const now = new Date();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
-}
-
-function formatDate(value: string | null | undefined): string {
-  if (!value) return "—";
-  return value.slice(0, 10);
-}
-
-function formatDateTime(value: string | null | undefined): string {
-  if (!value) return "—";
-  return value.slice(0, 16).replace("T", " ");
-}
-
-function addDays(date: string, days: number): string {
-  const d = new Date(`${date}T00:00:00`);
-  d.setDate(d.getDate() + days);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 function statusBadge(status: string) {
@@ -93,7 +71,7 @@ interface CreateForm {
 }
 
 const createFormDefaults: CreateForm = {
-  checkup_year: String(new Date().getFullYear()),
+  checkup_year: todayLocal().slice(0, 4),
   name: "",
   start_date: "",
   end_date: "",
@@ -326,7 +304,7 @@ export default function CheckupPage() {
   function openCreate() {
     setCreateForm({
       ...createFormDefaults,
-      checkup_year: String(new Date().getFullYear()),
+      checkup_year: todayLocal().slice(0, 4),
     });
     setCreateError("");
     setCreateOpen(true);
@@ -654,7 +632,7 @@ export default function CheckupPage() {
       header: "体检日期",
       render: (row) => (
         <span className="text-fg-muted">
-          {formatDate(row.start_date)} ~ {formatDate(row.end_date)}
+          {formatDate(row.start_date, "—")} ~ {formatDate(row.end_date, "—")}
         </span>
       ),
     },
@@ -678,7 +656,7 @@ export default function CheckupPage() {
       render: (row) =>
         row.checked ? <Badge variant="success">已检</Badge> : <Badge variant="warning">未检</Badge>,
     },
-    { key: "checked_at", header: "完成时间", render: (row) => <span className="text-fg-muted">{formatDateTime(row.checked_at)}</span> },
+    { key: "checked_at", header: "完成时间", render: (row) => <span className="text-fg-muted">{formatDateTime(row.checked_at, "—")}</span> },
     {
       key: "actions",
       header: "操作",
@@ -725,7 +703,7 @@ export default function CheckupPage() {
     {
       key: "exam_date",
       header: "体检日期",
-      render: (row) => <span className="text-fg-muted">{formatDate(row.exam_date)}</span>,
+      render: (row) => <span className="text-fg-muted">{formatDate(row.exam_date, "—")}</span>,
     },
     {
       key: "converted",

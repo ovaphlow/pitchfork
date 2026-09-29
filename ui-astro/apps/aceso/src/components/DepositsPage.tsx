@@ -11,6 +11,7 @@ import {
   type DepositType,
   type Encounter,
 } from "@pitchfork/shared/aceso";
+import { formatDateTime } from "../lib/datetime";
 import { billingErrorMessage } from "./billingMessages";
 
 const PAGE_SIZE = 50;
@@ -36,14 +37,6 @@ interface Admission extends Encounter {
 /** 收费域错误中文化（映射表见 ./billingMessages）；保留本地同名包装以减少调用点改动 */
 function errorMessage(error: unknown, fallback: string): string {
   return billingErrorMessage(error, fallback);
-}
-
-function formatDateTime(value: string | null | undefined): string {
-  if (!value) return "—";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 function formatAmount(value: number): string {
@@ -178,7 +171,7 @@ export default function DepositsPage() {
     {
       key: "created_at",
       header: "时间",
-      render: (row) => <span className="text-fg-muted text-sm">{formatDateTime(row.created_at)}</span>,
+      render: (row) => <span className="text-fg-muted text-sm">{formatDateTime(row.created_at, "—")}</span>,
     },
     {
       key: "type",
