@@ -220,8 +220,68 @@ class VitalSignServiceTest {
         ) as JsonObject
         val record = result.getJsonArray("records").getJsonObject(0)
         assertNull(record.getString("encounter_id"), "encounter_id 可空（居家/社区场景）")
+        assertNull(record.getString("encounter_no"), "无入住挂接时住院号保持 null")
         assertNotNull(record.getString("measured_at"), "未提供测量时间默认当前时间")
-        assertFalse(stub.queries.any { it.contains("from healthcare.encounters") }, "无 encounter_id 不校验归属")
+        // 028 D4：未提供 encounter_id 时不再按 id 校验归属，而是查一次「唯一的 ACTIVE 养老入住」；
+        // 该桩 encounters 为空 → 无自动挂接，语义与居家/社区一致。
+        assertFalse(stub.queries.any { it.contains("encounters.id = ") }, "无 encounter_id 不按 id 校验归属")
+    }
+
+    @Test
+    fun `显式encounter_id时创建响应回填住院号`() {
+        val stub = DatabaseStub(patients = rows(patientRow()), encounters = rows(encounterRow()))
+        val result = successOf(
+            VitalSignService(stub.pool).createVitalSigns(JsonArray().add(validRecord()), "user-1"),
+        ) as JsonObject
+
+        val record = result.getJsonArray("records").getJsonObject(0)
+        assertEquals("enc-1", record.getString("encounter_id"))
+        assertEquals("A20260801001", record.getString("encounter_no"), "028 D4：创建响应必须回填真实住院号")
+    }
+
+    @Test
+    fun `未提供encounter_id时自动挂接唯一的ACTIVE养老入住`() {
+        val stub = DatabaseStub(patients = rows(patientRow()), encounters = rows(encounterRow()))
+        val result = successOf(
+            VitalSignService(stub.pool).createVitalSigns(
+                JsonArray().add(validRecord(mapOf("encounter_id" to null))),
+                "user-1",
+            ),
+        ) as JsonObject
+
+        val record = result.getJsonArray("records").getJsonObject(0)
+        assertEquals("enc-1", record.getString("encounter_id"), "028 D4：唯一活动养老入住自动挂接")
+        assertEquals("A20260801001", record.getString("encounter_no"))
+        val insert = stub.queries.single { it.startsWith("insert into healthcare.vital_sign_records") }
+        assertTrue(
+            stub.tuples.any { it.first == insert && it.second.contains("enc-1") },
+            "自动挂接的 encounter_id 必须写入插入语句: ${stub.tuples}",
+        )
+    }
+
+    @Test
+    fun `未提供encounter_id且无在住养老入住时不挂接`() {
+        // 桩无法执行 WHERE 语义，因此「只有已离院记录」由 SQL 过滤条件断言保证：
+        // 自动挂接查询必须参数化 status='ACTIVE' 与 encounter_type='ELDERLY_CARE'。
+        val stub = DatabaseStub(patients = rows(patientRow()))
+        val result = successOf(
+            VitalSignService(stub.pool).createVitalSigns(
+                JsonArray().add(validRecord(mapOf("encounter_id" to null))),
+                "user-1",
+            ),
+        ) as JsonObject
+
+        val record = result.getJsonArray("records").getJsonObject(0)
+        assertNull(record.getString("encounter_id"), "无在住记录时保持 null（居家/社区语义）")
+        assertNull(record.getString("encounter_no"))
+
+        val lookup = stub.queries.single { it.contains("from healthcare.encounters") }
+        assertTrue(lookup.contains("encounters.status = \$"), "自动挂接必须按状态过滤: $lookup")
+        assertTrue(lookup.contains("encounters.encounter_type = \$"), "自动挂接必须限定养老入住: $lookup")
+        assertTrue(
+            stub.tuples.any { it.first == lookup && it.second.contains("ACTIVE") && it.second.contains("ELDERLY_CARE") },
+            "自动挂接取值必须是 ACTIVE + ELDERLY_CARE: ${stub.tuples}",
+        )
     }
 
     @Test

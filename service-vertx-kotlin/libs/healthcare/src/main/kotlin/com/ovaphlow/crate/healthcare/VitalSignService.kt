@@ -154,18 +154,36 @@ class VitalSignService(
                     Future.all(checks).map { Unit }
                 }
             }.compose {
-                val inserts = records.mapIndexed { index, record ->
-                    execute(
-                        connection,
-                        insertQuery(record, ids[index], recordedBy, now),
-                    )
+                // 028 D4：请求体未给 encounter_id 时，按「该长者唯一的 ACTIVE 养老入住」自动挂接。
+                // V501 部分唯一索引（`uq_encounters_active_elderly_care`）保证至多一条，故无歧义；
+                // 无入住（居家/社区/仅历史已离院）时保持 NULL，不改变既有可空语义。
+                resolveAutoAttachedEncounters(connection, records)
+            }.compose { autoAttached ->
+                val effectiveRecords = records.map { record ->
+                    val encounterId = record.encounterId ?: autoAttached[record.patientId]
+                    if (encounterId == null) record else record.copy(encounterId = encounterId)
                 }
-                Future.all(inserts).map {
-                    val created = records.mapIndexed { index, record ->
-                        createdJson(ids[index], record, recordedBy, now)
+                encounterNoMap(connection, effectiveRecords.mapNotNull { it.encounterId }.distinct())
+                    .compose { encounterNos ->
+                        val inserts = effectiveRecords.mapIndexed { index, record ->
+                            execute(
+                                connection,
+                                insertQuery(record, ids[index], recordedBy, now),
+                            )
+                        }
+                        Future.all(inserts).map {
+                            val created = effectiveRecords.mapIndexed { index, record ->
+                                createdJson(
+                                    ids[index],
+                                    record,
+                                    recordedBy,
+                                    now,
+                                    record.encounterId?.let { encounterNos[it] },
+                                )
+                            }
+                            JsonObject().put("records", JsonArray(created))
+                        }
                     }
-                    JsonObject().put("records", JsonArray(created))
-                }
             }
         }
     }
@@ -811,13 +829,15 @@ class VitalSignService(
         record: RecordFields,
         recordedBy: String,
         now: OffsetDateTime,
+        encounterNo: String?,
     ): JsonObject =
         JsonObject()
             .put("id", id)
             .put("patient_id", record.patientId)
             .put("patient_name", null as String?)
             .put("encounter_id", record.encounterId)
-            .put("encounter_no", null as String?)
+            // 028 D4：回填真实住院号（此前恒为 null，创建响应无法自证挂到了哪一段入住）
+            .put("encounter_no", encounterNo)
             .put("type", record.type)
             .put("value", record.value)
             .put("unit", record.unit)
@@ -867,6 +887,59 @@ class VitalSignService(
                 }
             } ?: Future.failedFuture(HealthcareNotFoundException("encounter not found: $encounterId"))
         }
+
+    /**
+     * 028 D4：为「请求体未给 `encounter_id`」的记录解析该长者唯一的 ACTIVE 养老入住 id。
+     *
+     * 返回 `patientId → encounterId`（查不到的患者不出现在 map 中，调用方据此保持 NULL）。
+     * 同一批内同一长者只查一次。
+     */
+    private fun resolveAutoAttachedEncounters(
+        client: SqlClient,
+        records: List<RecordFields>,
+    ): Future<Map<String, String?>> {
+        val pendingPatientIds = records.filter { it.encounterId == null }.map { it.patientId }.distinct()
+        if (pendingPatientIds.isEmpty()) return Future.succeededFuture(emptyMap())
+        val lookups: List<Future<Pair<String, String?>>> = pendingPatientIds.map { patientId ->
+            resolveActiveElderlyEncounterId(client, patientId).map { encounterId -> patientId to encounterId }
+        }
+        return Future.all(lookups).map { results ->
+            results.list<Pair<String, String?>>()
+                .filter { it.second != null }
+                .toMap()
+        }
+    }
+
+    /**
+     * 028 D4：该长者当前唯一的 ACTIVE 养老入住 id；无在住记录时返回 null。
+     *
+     * `V501` 的部分唯一索引 `uq_encounters_active_elderly_care` 保证同一长者至多一条
+     * ACTIVE 养老入住，因此这里无需在应用层消歧；`limit(1)` 只是让 SQL 意图显式。
+     */
+    private fun resolveActiveElderlyEncounterId(client: SqlClient, patientId: String): Future<String?> {
+        val query = ctx.select(ENCOUNTERS.ID)
+            .from(ENCOUNTERS)
+            .where(
+                ENCOUNTERS.PATIENT_ID.eq(patientId)
+                    .and(ENCOUNTERS.ENCOUNTER_TYPE.eq("ELDERLY_CARE"))
+                    .and(ENCOUNTERS.STATUS.eq("ACTIVE")),
+            )
+            .limit(1)
+        return execute(client, query).map { rows ->
+            rows.iterator().asSequence().firstOrNull()?.getString("id")
+        }
+    }
+
+    /** 028 D4：`id → encounter_no` 批量回填，供创建响应自证挂接的入住。 */
+    private fun encounterNoMap(client: SqlClient, encounterIds: List<String>): Future<Map<String, String?>> {
+        if (encounterIds.isEmpty()) return Future.succeededFuture(emptyMap())
+        val query = ctx.select(ENCOUNTERS.ID, ENCOUNTERS.ENCOUNTER_NO)
+            .from(ENCOUNTERS)
+            .where(ENCOUNTERS.ID.`in`(encounterIds))
+        return execute(client, query).map { rows ->
+            rows.iterator().asSequence().associate { it.getString("id") to it.getString("encounter_no") }
+        }
+    }
 
     private fun execute(client: SqlClient, query: Query): Future<RowSet<Row>> =
         client.preparedQuery(DatabaseConfig.sql(query)).execute(DatabaseConfig.tuple(query))
