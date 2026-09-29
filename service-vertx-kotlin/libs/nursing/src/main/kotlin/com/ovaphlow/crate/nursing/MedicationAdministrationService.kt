@@ -306,6 +306,7 @@ class MedicationAdministrationService(
             .join(taskTable).on(DSL.field("t.id").eq(DSL.field("e.task_id")))
             .leftJoin(periodTable).on(DSL.field("p.id").eq(DSL.field("t.period_id")))
             .leftJoin(patientTable).on(DSL.field("pat.id").eq(DSL.field("p.patient_id")))
+            .leftJoin(orderTable).on(DSL.field("mo.id").eq(DSL.field("t.order_item_id")))
             .leftJoin(dispenseItemTable).on(DSL.field("di.id").eq(fMaDispenseItemId))
             .leftJoin(materialsTable).on(DSL.field("mat.id").eq(DSL.field("di.material_id")))
             .leftJoin(lotsTable).on(DSL.field("lot.id").eq(DSL.field("di.lot_id")))
@@ -453,6 +454,10 @@ class MedicationAdministrationService(
             fMaUpdatedAt,
             DSL.field("e.planned_time").`as`("planned_time"),
             DSL.field("t.description").`as`("task_description"),
+            // 绑定医嘱的类型与结构化明细：任务描述是自由文本，给药/给药记录必须显示
+            // 这次给的是哪个药、多少剂量、什么途径。调用方的 FROM 必须 LEFT JOIN mo。
+            DSL.field("mo.order_details").`as`("order_details"),
+            DSL.field("mo.order_type").`as`("order_type"),
             DSL.field("pat.name").`as`("patient_name"),
             DSL.field("di.material_id").`as`("material_id"),
             DSL.field("mat.name").`as`("material_name"),
@@ -674,6 +679,7 @@ class MedicationAdministrationService(
             .join(taskTable).on(DSL.field("t.id").eq(DSL.field("e.task_id")))
             .leftJoin(periodTable).on(DSL.field("p.id").eq(DSL.field("t.period_id")))
             .leftJoin(patientTable).on(DSL.field("pat.id").eq(DSL.field("p.patient_id")))
+            .leftJoin(orderTable).on(DSL.field("mo.id").eq(DSL.field("t.order_item_id")))
             .leftJoin(dispenseItemTable).on(DSL.field("di.id").eq(fMaDispenseItemId))
             .leftJoin(materialsTable).on(DSL.field("mat.id").eq(DSL.field("di.material_id")))
             .leftJoin(lotsTable).on(DSL.field("lot.id").eq(DSL.field("di.lot_id")))
@@ -710,6 +716,8 @@ class MedicationAdministrationService(
             .put("reason", row.getValue("reason")?.toString())
             .put("planned_time", row.getValue("planned_time")?.toString())
             .put("task_description", row.getValue("task_description")?.toString())
+            .put("order_details", row.getValue("order_details") as? JsonObject)
+            .put("order_type", row.getValue("order_type")?.toString())
             .put("patient_name", row.getValue("patient_name")?.toString())
             .put("created_at", row.getValue("created_at")?.toString())
             .put("updated_at", row.getValue("updated_at")?.toString())

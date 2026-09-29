@@ -13,6 +13,7 @@ import io.vertx.sqlclient.RowSet
 import io.vertx.sqlclient.SqlConnection
 import io.vertx.sqlclient.Tuple
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -27,6 +28,7 @@ import java.util.function.Function as JavaFunction
  *   - 请求体解析与门禁：未知字段/结果白名单/数量与来源的必填/互斥/精度
  *   - 事务流程：执行状态联动（COMPLETED/SKIPPED）、医嘱/任务/发药门禁、
  *     数量对账（累计给药 ≤ 实发数量）、1:1 唯一冲突、失败整体回滚（不写给药与执行）
+ *   - 读模型：给药记录 / MAR 列表 LEFT JOIN 绑定医嘱，带出 order_details / order_type
  */
 class MedicationAdministrationServiceTest {
 
@@ -36,6 +38,7 @@ class MedicationAdministrationServiceTest {
             for ((key, value) in values) {
                 every { row.getValue(key) } returns value
             }
+            every { row.getLong(any<String>()) } answers { (values[firstArg<String>()] as? Number)?.toLong() }
             every { row.toJson() } returns JsonObject(values)
             return row
         }
@@ -62,6 +65,7 @@ class MedicationAdministrationServiceTest {
         var dispenseItems: RowSet<Row> = rowSet(),
         var adminSums: RowSet<Row> = rowSet(),
         var administrations: RowSet<Row> = rowSet(),
+        var adminCounts: RowSet<Row> = rowSet(),
     ) {
         val queries = mutableListOf<String>()
         val tuples = mutableListOf<Pair<String, List<Any?>>>()
@@ -83,6 +87,7 @@ class MedicationAdministrationServiceTest {
                 val branch = when {
                     sql.contains("insert into nursing.medication_administrations") -> "insert_admin"
                     sql.contains("update nursing.nursing_task_executions") -> "update_exec"
+                    sql.startsWith("select count") && sql.contains("medication_administrations") -> "admin_count"
                     sql.contains("sum(") -> "admin_sum"
                     sql.contains("medication_administrations") -> "admin_read"
                     sql.contains("pharmacy.pharmacy_dispense_items") -> "dispense"
@@ -107,6 +112,7 @@ class MedicationAdministrationServiceTest {
                         }
 
                     "update_exec" -> Future.succeededFuture(rowSet())
+                    "admin_count" -> Future.succeededFuture(adminCounts)
                     "admin_sum" -> Future.succeededFuture(adminSums)
                     "dispense" -> Future.succeededFuture(dispenseItems)
                     "orders" -> Future.succeededFuture(orders)
@@ -209,6 +215,14 @@ class MedicationAdministrationServiceTest {
             "reason" to null,
             "planned_time" to OffsetDateTime.parse("2026-08-01T09:00:00+08:00"),
             "task_description" to "阿司匹林 100mg 每日一次",
+            "order_details" to
+                JsonObject()
+                    .put("material_id", "mat-1")
+                    .put("drug_name", "阿司匹林")
+                    .put("dose", "100mg")
+                    .put("unit", "片")
+                    .put("route", "口服"),
+            "order_type" to "MEDICATION",
             "patient_name" to "张三",
             "created_at" to OffsetDateTime.parse("2026-08-01T11:00:00+08:00"),
             "updated_at" to OffsetDateTime.parse("2026-08-01T11:00:00+08:00"),
@@ -648,5 +662,55 @@ class MedicationAdministrationServiceTest {
 
         val getMissing = failureOf(service.getAdministrationByExecution("exec-1"))
         assertTrue(getMissing is NotFoundException && getMissing.message!!.contains("administration not found"))
+    }
+
+    // ========================================================================
+    //  3. 给药读模型带出绑定医嘱明细（记录给药 / 给药记录弹窗显示药品 · 剂量 · 途径）
+    // ========================================================================
+
+    private val leftJoinMedicalOrders = Regex("left( outer)? join healthcare\\.medical_orders as mo")
+
+    @Test
+    fun `给药记录读模型带出绑定医嘱明细与类型`() {
+        val stub = DatabaseStub(administrations = rowSet(adminRow()))
+        val record = MedicationAdministrationService(stub.pool).getAdministrationByExecution("exec-1")
+            .toCompletionStage().toCompletableFuture().get()
+
+        val sql = stub.queries.single()
+        assertTrue(leftJoinMedicalOrders.containsMatchIn(sql), "给药读模型必须 LEFT JOIN 绑定医嘱: $sql")
+        assertTrue(sql.contains("mo.order_details as order_details"), "必须投影医嘱明细: $sql")
+        assertTrue(sql.contains("mo.order_type as order_type"), "必须投影医嘱类型: $sql")
+        assertTrue(sql.contains("mo.id = t.order_item_id"), "必须按任务绑定的医嘱 ID 关联: $sql")
+
+        assertEquals("MEDICATION", record.getString("order_type"))
+        assertEquals("阿司匹林", record.getJsonObject("order_details").getString("drug_name"))
+        assertEquals("100mg", record.getJsonObject("order_details").getString("dose"))
+        // 既有字段语义不变
+        assertEquals("已服", record.getString("result"))
+        assertEquals("张三", record.getString("patient_name"))
+        assertEquals("阿司匹林 100mg 每日一次", record.getString("task_description"))
+    }
+
+    @Test
+    fun `MAR列表查询LEFT_JOIN医嘱且计数查询不加JOIN`() {
+        val stub =
+            DatabaseStub(
+                administrations = rowSet(adminRow()),
+                adminCounts = rowSet(row(mapOf("total" to 1L))),
+            )
+        val page = MedicationAdministrationService(stub.pool).listAdministrations()
+            .toCompletionStage().toCompletableFuture().get()
+
+        val countSql = stub.queries.first { it.startsWith("select count") }
+        assertFalse(countSql.contains("medical_orders"), "MAR 计数查询不得加入医嘱 JOIN: $countSql")
+
+        val dataSql = stub.queries.last()
+        assertTrue(leftJoinMedicalOrders.containsMatchIn(dataSql), "MAR 明细查询必须 LEFT JOIN 绑定医嘱: $dataSql")
+        assertTrue(dataSql.contains("mo.order_details as order_details"), "必须投影医嘱明细: $dataSql")
+
+        assertEquals(1L, page.getJsonObject("meta").getLong("total"))
+        val record = page.getJsonArray("records").getJsonObject(0)
+        assertEquals("MEDICATION", record.getString("order_type"))
+        assertEquals("阿司匹林", record.getJsonObject("order_details").getString("drug_name"))
     }
 }

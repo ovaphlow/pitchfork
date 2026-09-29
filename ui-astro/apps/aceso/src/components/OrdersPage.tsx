@@ -24,6 +24,7 @@ import {
   type ProgressNote,
 } from "@pitchfork/shared/aceso";
 import { formatDateTime, toOffsetDateTime, todayLocal } from "../lib/datetime";
+import { formatOrderDetailValue, formatOrderItemLabel } from "../lib/orderDetailDisplay";
 
 interface ActiveAdmission extends Encounter {
   patientName: string;
@@ -218,13 +219,7 @@ const ORDER_DETAIL_LABELS: Record<string, string> = {
   remark: "备注",
 };
 
-/** 各医嘱类型的主明细字段，与后端 REQUIRED_DETAIL_KEY 保持一致 */
-const ORDER_PRIMARY_DETAIL_KEY: Record<string, string> = {
-  MEDICATION: "drug_name",
-  THERAPY: "treatment_item",
-  EXAMINATION: "item_name",
-  LAB_TEST: "item_name",
-};
+/** 各医嘱类型的主明细字段见 `../lib/orderDetailDisplay`（与护理页共用同一推导规则） */
 
 const selectClass = "h-10 rounded-md border border-border bg-surface px-3 text-sm text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent";
 const textareaClass = "w-full resize-none rounded-md border border-border bg-surface px-3 py-2 text-sm text-fg placeholder:text-fg-dimmed focus:outline-none focus-visible:ring-2 focus-visible:ring-accent";
@@ -242,12 +237,6 @@ function readEncounterIdFromUrl(): string {
   } catch {
     return "";
   }
-}
-
-function formatDetailValue(value: unknown): string {
-  if (value === null || value === undefined) return "-";
-  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
-  return JSON.stringify(value);
 }
 
 function orderClassVariant(orderClass: string | null): "default" | "success" | "warning" {
@@ -696,23 +685,13 @@ export default function OrdersPage() {
     {
       // 列表原本只显示自由文本的医嘱正文，用药医嘱看上去「没有药」。这里补出各类型的
       // 主明细字段；用药医嘱额外带剂量与用法，因为只有药名的医嘱无法执行。
+      // 推导规则与护理页共用（`../lib/orderDetailDisplay`），避免两页口径漂移。
       key: "order_detail",
       header: "药品 / 项目",
       className: "min-w-[170px] max-w-[240px]",
       render: (row) => {
-        const primaryKey = ORDER_PRIMARY_DETAIL_KEY[row.order_type];
-        const primary = primaryKey ? row.order_details?.[primaryKey] : undefined;
-        if (primary === undefined || primary === null || primary === "") {
-          return <span className="text-fg-dimmed">-</span>;
-        }
-        const parts = [formatDetailValue(primary)];
-        if (row.order_type === "MEDICATION") {
-          for (const key of ["dose", "unit", "route"]) {
-            const value = row.order_details?.[key];
-            if (value !== undefined && value !== null && value !== "") parts.push(formatDetailValue(value));
-          }
-        }
-        const text = parts.join(" ");
+        const text = formatOrderItemLabel(row.order_type, row.order_details);
+        if (text === null) return <span className="text-fg-dimmed">-</span>;
         return (
           <span className="block truncate" title={text}>
             {text}
@@ -1485,7 +1464,7 @@ export default function OrdersPage() {
                   {Object.entries(detail.order_details).map(([key, value]) => (
                     <p key={key}>
                       <span className="text-fg-dimmed">{ORDER_DETAIL_LABELS[key] ?? key}：</span>
-                      {formatDetailValue(value)}
+                      {formatOrderDetailValue(value)}
                     </p>
                   ))}
                 </div>

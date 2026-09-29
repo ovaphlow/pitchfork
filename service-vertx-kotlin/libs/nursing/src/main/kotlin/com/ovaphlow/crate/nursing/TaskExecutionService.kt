@@ -103,6 +103,10 @@ class TaskExecutionService(
         json.put("task_period_id", row.getValue("task_period_id")?.toString())
         json.put("patient_id", row.getValue("patient_id")?.toString())
         json.put("patient_name", row.getValue("patient_name")?.toString())
+        // 绑定医嘱的结构化明细与类型：任务描述是医生手写的自由文本，护士执行用药时
+        // 必须能看到药品、剂量与途径（今日看板「药品 / 项目」列与执行弹窗使用）。
+        json.put("order_details", row.getValue("order_details") as? JsonObject)
+        json.put("order_type", row.getValue("order_type")?.toString())
 
         // 逾期派生字段
         val status = row.getValue("status")?.toString()
@@ -1137,6 +1141,9 @@ class TaskExecutionService(
                     DSL.field("t.period_id").`as`("task_period_id"),
                     DSL.field("p.patient_id").`as`("patient_id"),
                     DSL.field("pat.name").`as`("patient_name"),
+                    // 绑定医嘱的结构化明细与类型（LEFT JOIN，未绑定医嘱时为 null）
+                    DSL.field("mo.order_details").`as`("order_details"),
+                    DSL.field("mo.order_type").`as`("order_type"),
                 )
 
             val baseSelect =
@@ -1149,6 +1156,10 @@ class TaskExecutionService(
                     .on(DSL.field("t.period_id").eq(DSL.field("p.id")))
                     .leftJoin(DSL.table(DSL.name("healthcare", "patients")).`as`("pat"))
                     .on(DSL.field("p.patient_id").eq(DSL.field("pat.id")))
+                    // 绑定医嘱：medical_orders.id 是主键，至多 1:1，不改变行数。
+                    // count / overdue_total 查询不加此 JOIN，计数语义保持原样。
+                    .leftJoin(DSL.table(DSL.name("healthcare", "medical_orders")).`as`("mo"))
+                    .on(DSL.field("t.order_item_id").eq(DSL.field("mo.id")))
                     .where(conditions)
 
             val countQuery =
