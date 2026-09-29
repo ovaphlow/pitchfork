@@ -375,11 +375,22 @@ export interface NursingTodayExecution {
   /** 逾期派生字段 */
   is_overdue: boolean;
   overdue_minutes: number | null;
+  /** 长挂执行派生字段：status=IN_PROGRESS 且 actual_time 非空时的已进行分钟数，否则 null */
+  in_progress_minutes: number | null;
+  /** 长挂执行提醒：in_progress_minutes >= 1440（24 小时） */
+  is_stale: boolean;
 }
 
 interface NursingPage<T> {
   records: T[];
-  meta: { total: number; overdue_total?: number };
+  meta: {
+    total: number;
+    overdue_total?: number;
+    /** 跨日全量逾期总数（忽略日期窗口，保留周期/执行人/任务类型与参与条件） */
+    overdue_total_all?: number;
+    /** 各状态计数（忽略 status 与 overdue 筛选；五个键恒在） */
+    status_totals?: Record<string, number>;
+  };
 }
 
 function cookieValue(name: string): string | undefined {
@@ -1068,6 +1079,22 @@ export function listNursingTodayExecutions(params: {
   offset?: number;
 } = {}): Promise<NursingPage<NursingTodayExecution>> {
   return request<NursingPage<NursingTodayExecution>>(`/nursing/v1/executions/today${nursingQuery(params)}`);
+}
+
+/**
+ * 跨日期全量逾期执行队列（§4.3）：
+ * 返回全部 PENDING/IN_PROGRESS 且 planned_time < now 的执行，按 planned_time 升序，
+ * 不施加任何日期窗口，也不产生任何写副作用（不调用 ensureExecutionsForDate）。
+ */
+export function listNursingOverdueExecutions(params: {
+  period_id?: string;
+  executor?: string;
+  /** 按任务类型过滤（如 REHABILITATION 康复活动） */
+  task_type?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<NursingPage<NursingTodayExecution>> {
+  return request<NursingPage<NursingTodayExecution>>(`/nursing/v1/executions/overdue${nursingQuery(params)}`);
 }
 
 /** 批量生成指定日期范围的执行记录 */
@@ -1977,6 +2004,10 @@ export interface MedicalOrder {
   execution_summary?: MedicalOrderExecutionSummary;
   /** 给药汇总（医嘱侧只读）：无给药记录时为零值，未发药时 dispensed/remaining 为 null */
   administration_summary?: MedicalOrderAdministrationSummary;
+  /** 到期派生字段：status=ACTIVE 且 end_time < now；end_time 为空恒为 false */
+  is_expired: boolean;
+  /** 已到期分钟数：is_expired 为 false 时为 null */
+  expired_minutes: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -2036,6 +2067,26 @@ export function nurseCheckMedicalOrder(id: string): Promise<MedicalOrder> {
   return request<MedicalOrder>(`/healthcare/v1/orders/${encodeURIComponent(id)}/nurse-check`, {
     method: "PATCH",
     body: JSON.stringify({}),
+  });
+}
+
+/** 收束结果（§4.5）：closed 为本次收束条数；warnings 为不阻断收束的异常 */
+export interface CloseExpiredMedicalOrdersResult {
+  closed: number;
+  order_ids: string[];
+  warnings: { order_id: string; reason: string }[];
+  closed_at: string;
+}
+
+/**
+ * 显式收束已到期医嘱（§4.5，幂等）：
+ * 把 ACTIVE 且 end_time < now 的医嘱收束为 COMPLETED（保留 end_time，结束其护理任务，
+ * 写 metadata.convergence 审计）。传 encounter_id 时只收束该入住范围内的候选。
+ */
+export function closeExpiredMedicalOrders(input: { encounter_id?: string }): Promise<CloseExpiredMedicalOrdersResult> {
+  return request<CloseExpiredMedicalOrdersResult>("/healthcare/v1/orders/close-expired", {
+    method: "POST",
+    body: JSON.stringify(input.encounter_id ? { encounter_id: input.encounter_id } : {}),
   });
 }
 

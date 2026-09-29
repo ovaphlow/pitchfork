@@ -31,6 +31,7 @@ import {
   listNursingServicePeriods,
   listNursingTaskExecutions,
   listNursingTasks,
+  listNursingOverdueExecutions,
   listNursingTimeline,
   listNursingTodayExecutions,
   listMedicalOrders,
@@ -246,10 +247,24 @@ function executionStatusLabel(value: string): string {
 function formatOverdueMinutes(minutes: number | null | undefined): string {
   if (minutes === null || minutes === undefined) return "";
   if (minutes < 60) return `已逾期 ${minutes} 分钟`;
-  const hours = Math.floor(minutes / 60);
-  const remaining = minutes % 60;
-  if (remaining === 0) return `已逾期 ${hours} 小时`;
-  return `已逾期 ${hours} 小时 ${remaining} 分钟`;
+  if (minutes < 1440) {
+    const hours = Math.floor(minutes / 60);
+    const remaining = minutes % 60;
+    if (remaining === 0) return `已逾期 ${hours} 小时`;
+    return `已逾期 ${hours} 小时 ${remaining} 分钟`;
+  }
+  // 跨日逾期超过一天时改用天，避免出现「已逾期 1222 小时」这种难以阅读的跨度
+  const days = Math.floor(minutes / 1440);
+  const hours = Math.floor((minutes % 1440) / 60);
+  return hours === 0 ? `已逾期 ${days} 天` : `已逾期 ${days} 天 ${hours} 小时`;
+}
+
+/** 长挂执行提醒（§3.2）：只提醒不自动改写状态 */
+function formatStaleInProgress(minutes: number | null | undefined): string {
+  if (minutes === null || minutes === undefined) return "执行中长时间未结束";
+  if (minutes < 1440) return `执行中已 ${Math.floor(minutes / 60)} 小时未结束`;
+  const days = Math.floor(minutes / 1440);
+  return `执行中已 ${days} 天未结束`;
 }
 
 const assessmentDefaults = (): AssessmentForm => ({
@@ -402,8 +417,14 @@ export default function NursingPage() {
   const [todayExecutorFilter, setTodayExecutorFilter] = useState("");
   const [todayOverdueOnly, setTodayOverdueOnly] = useState(false);
   const [todayOverdueTotal, setTodayOverdueTotal] = useState(0);
+  /** 跨日全量逾期数（meta.overdue_total_all）；字段缺失时为 null，回退到当天口径 */
+  const [todayOverdueAllTotal, setTodayOverdueAllTotal] = useState<number | null>(null);
+  /** 服务端各状态计数（meta.status_totals）；字段缺失时为 null，回退到当前页内计数 */
+  const [todayStatusTotals, setTodayStatusTotals] = useState<Record<string, number> | null>(null);
   /** 进入逾期筛选前保存的状态筛选值，用于退出时恢复 */
   const [todayStatusFilterBeforeOverdue, setTodayStatusFilterBeforeOverdue] = useState("");
+  /** 跨日逾期队列的服务端总数与本次返回条数（meta.total > 返回条数 = 被 limit 截断） */
+  const [todayOverdueQueue, setTodayOverdueQueue] = useState<{ total: number; shown: number } | null>(null);
   const [actionTarget, setActionTarget] = useState<NursingTodayExecution | null>(null);
   const [actionNote, setActionNote] = useState("");
   const [actionSaving, setActionSaving] = useState(false);
@@ -584,18 +605,37 @@ export default function NursingPage() {
     setTodayLoading(true);
     setActionError("");
     try {
+      if (todayOverdueOnly) {
+        // 跨日逾期队列（§4.3）：不接受日期语义，只保留周期/执行人筛选；
+        // 状态筛选由服务端候选集（PENDING/IN_PROGRESS）决定，这里不改当天列表口径。
+        const queue = await listNursingOverdueExecutions({
+          period_id: period?.id || undefined,
+          executor: todayExecutorFilter || undefined,
+          limit: 200,
+        });
+        // /overdue 不接受 status 参数（候选集天然只有 PENDING/IN_PROGRESS），
+        // 为与界面上仍可见的状态筛选保持一致，这里按所选状态做本地过滤。
+        setTodayExecutions(
+          todayStatusFilter ? queue.records.filter((row) => row.status === todayStatusFilter) : queue.records,
+        );
+        // 保存队列总数与返回条数用于截断提示（meta.total 为全量，records 为本次分页结果）
+        setTodayOverdueQueue({ total: queue.meta.total ?? queue.records.length, shown: queue.records.length });
+        return;
+      }
       const response = await listNursingTodayExecutions({
         date: todayDate,
         status: todayStatusFilter || undefined,
         executor: todayExecutorFilter || undefined,
         period_id: period?.id || undefined,
-        overdue: todayOverdueOnly || undefined,
         limit: 100,
       });
       setTodayExecutions(response.records);
       setTodayOverdueTotal(response.meta.overdue_total ?? 0);
+      // 跨日口径与状态计数只在当天查询时更新；字段缺失时保留旧值/回退口径
+      if (response.meta.overdue_total_all !== undefined) setTodayOverdueAllTotal(response.meta.overdue_total_all);
+      if (response.meta.status_totals !== undefined) setTodayStatusTotals(response.meta.status_totals);
     } catch (error) {
-      setActionError(errorMessage(error, "无法加载今日执行记录"));
+      setActionError(errorMessage(error, todayOverdueOnly ? "无法加载跨日逾期队列" : "无法加载今日执行记录"));
     } finally {
       setTodayLoading(false);
     }
@@ -1195,6 +1235,11 @@ export default function NursingPage() {
               {formatOverdueMinutes(row.overdue_minutes)}
             </span>
           )}
+          {row.is_stale && (
+            <span title="该执行长时间停留在执行中，请人工确认后处理；系统不会自动改写状态">
+              <Badge variant="warning">{formatStaleInProgress(row.in_progress_minutes)}</Badge>
+            </span>
+          )}
         </div>
       ) },
       { key: "note", header: "备注", className: "min-w-[120px]", render: (row) => row.note ? <span className="text-xs text-fg-muted max-w-[120px] truncate block" title={row.note}>{row.note}</span> : "-" },
@@ -1564,6 +1609,13 @@ export default function NursingPage() {
     },
   ];
 
+  // ——— 今日执行计数与逾期入口（§4.2/§4.6） ———
+  /** 顶部状态计数优先取服务端 status_totals（不再只数当前页），字段缺失时回退页内计数 */
+  const todayStatusCount = (status: string): number =>
+    todayStatusTotals?.[status] ?? todayExecutions.filter((e) => e.status === status).length;
+  /** 逾期入口使用跨日口径 overdue_total_all；字段缺失时回退到当天 overdue_total */
+  const todayOverdueEntryTotal = todayOverdueAllTotal ?? todayOverdueTotal;
+
   return (
     <div className="flex flex-1 flex-col space-y-6">
       {/* ——— 顶部栏 + 视图切换 ——— */}
@@ -1627,23 +1679,19 @@ export default function NursingPage() {
               <Button variant="secondary" onClick={() => { void loadTodayExecutions(); }} loading={todayLoading}>刷新</Button>
             </div>
             <div className="flex flex-wrap items-center gap-2 text-xs text-fg-muted">
-              <span>待执行 <Badge variant="warning">{todayExecutions.filter(e => e.status === "PENDING").length}</Badge></span>
-              <span>执行中 <Badge variant="info">{todayExecutions.filter(e => e.status === "IN_PROGRESS").length}</Badge></span>
-              <span>已完成 <Badge variant="success">{todayExecutions.filter(e => e.status === "COMPLETED").length}</Badge></span>
-              <span>已跳过 <Badge variant="default">{todayExecutions.filter(e => e.status === "SKIPPED").length}</Badge></span>
-              <span>已取消 <Badge variant="default">{todayExecutions.filter(e => e.status === "CANCELLED").length}</Badge></span>
+              <span>待执行 <Badge variant="warning">{todayStatusCount("PENDING")}</Badge></span>
+              <span>执行中 <Badge variant="info">{todayStatusCount("IN_PROGRESS")}</Badge></span>
+              <span>已完成 <Badge variant="success">{todayStatusCount("COMPLETED")}</Badge></span>
+              <span>已跳过 <Badge variant="default">{todayStatusCount("SKIPPED")}</Badge></span>
+              <span>已取消 <Badge variant="default">{todayStatusCount("CANCELLED")}</Badge></span>
               <span className="mx-1 h-4 w-px bg-border" />
               {todayOverdueOnly ? (
-                <button type="button" onClick={() => { setTodayOverdueOnly(false); setTodayStatusFilter(todayStatusFilterBeforeOverdue); }} className="inline-flex items-center gap-1 rounded-md bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700 hover:bg-red-200 transition-colors">
+                <button type="button" onClick={() => { setTodayOverdueOnly(false); setTodayStatusFilter(todayStatusFilterBeforeOverdue); }} title="查看跨日期的全部逾期执行" className="inline-flex items-center gap-1 rounded-md bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700 hover:bg-red-200 transition-colors">
                   显示全部
                 </button>
-              ) : todayOverdueTotal === 0 ? (
-                <span className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium text-fg-dimmed opacity-50 cursor-not-allowed">
-                  无逾期
-                </span>
               ) : (
-                <button type="button" onClick={() => { setTodayStatusFilterBeforeOverdue(todayStatusFilter); setTodayOverdueOnly(true); if (["COMPLETED", "SKIPPED", "CANCELLED"].includes(todayStatusFilter)) setTodayStatusFilter(""); }} className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium transition-colors hover:bg-red-50">
-                  逾期 <Badge variant="danger">{todayOverdueTotal}</Badge>
+                <button type="button" onClick={() => { setTodayStatusFilterBeforeOverdue(todayStatusFilter); setTodayOverdueOnly(true); if (["COMPLETED", "SKIPPED", "CANCELLED"].includes(todayStatusFilter)) setTodayStatusFilter(""); }} title="查看跨日期的全部逾期执行" className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium transition-colors hover:bg-red-50">
+                  只看逾期 <Badge variant="danger">{todayOverdueEntryTotal}</Badge>
                 </button>
               )}
             </div>
@@ -1653,7 +1701,21 @@ export default function NursingPage() {
           <NursingExecutionStatisticsPanel subjects={subjects} reloadKey={statReloadKey} />
 
           <Card className="min-w-0 overflow-hidden">
-            <Table columns={todayColumns} data={todayExecutions} loading={todayLoading} emptyMessage="今日暂无待执行任务，所有照护任务已处理或尚未到计划时间。" />
+            {todayOverdueOnly && (
+              <p className="mb-3 rounded-md border border-warning/30 bg-warning-bg px-3 py-2 text-xs text-warning">
+                跨日期逾期队列（不受所选日期限制）：列出全部已过计划时间且未结束的执行，按计划时间由早到晚排列。
+                {todayOverdueQueue !== null && todayOverdueQueue.total > todayOverdueQueue.shown && (
+                  <> 仅显示最早的 {todayOverdueQueue.shown} 条，共 {todayOverdueQueue.total} 条逾期。</>
+                )}
+              </p>
+            )}
+            <Table columns={todayColumns} data={todayExecutions} loading={todayLoading} emptyMessage={
+              todayOverdueOnly
+                ? todayStatusFilter
+                  ? "当前状态筛选下没有匹配的逾期执行；可切换为「全部」查看跨日期逾期队列。"
+                  : "跨日期逾期队列为空，所有已到计划时间的执行均已处理。"
+                : "今日暂无待执行任务，所有照护任务已处理或尚未到计划时间。"
+            } />
           </Card>
         </div>
       )}
@@ -2045,6 +2107,11 @@ export default function NursingPage() {
                                     <h4 className="font-semibold text-fg-emphasis">{order.order_content}</h4>
                                     <Badge variant={checked ? "success" as const : "warning" as const}>{checked ? "已核对" : "待核对"}</Badge>
                                     <Badge variant={order.order_class === "TEMPORARY" ? "warning" as const : "info" as const}>{order.order_class === "LONG_TERM" ? "长期医嘱" : order.order_class === "TEMPORARY" ? "临时医嘱" : "-"}</Badge>
+                                    {order.is_expired && (
+                                      <span title="已过结束时间但状态仍为进行中，请在医生诊疗页执行「收束已到期医嘱」">
+                                        <Badge variant="danger">已到期</Badge>
+                                      </span>
+                                    )}
                                   </div>
                                   <div className="mt-2 grid gap-x-6 gap-y-1 text-sm sm:grid-cols-2">
                                     {details.dosage != null && details.dosage !== "" && <p><span className="text-fg-dimmed">剂量：</span>{String(details.dosage)}{details.unit != null && details.unit !== "" ? ` ${String(details.unit)}` : ""}</p>}

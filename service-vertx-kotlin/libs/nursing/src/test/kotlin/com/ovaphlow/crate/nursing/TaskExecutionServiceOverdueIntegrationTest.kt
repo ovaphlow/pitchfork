@@ -200,8 +200,26 @@ class TaskExecutionServiceOverdueIntegrationTest {
             stmt.execute("INSERT INTO nursing.nursing_task_executions (id, task_id, planned_time, status) VALUES ('${fixtureId("exec-cancelled")}', '$taskId', '${twoHoursAgo.minusSeconds(4)}', 'CANCELLED') ON CONFLICT (id) DO NOTHING")
             stmt.execute("INSERT INTO nursing.nursing_task_executions (id, task_id, planned_time, status) VALUES ('${fixtureId("exec-pending-future")}', '$taskId', '$oneHourLater', 'PENDING') ON CONFLICT (id) DO NOTHING")
             stmt.execute("INSERT INTO nursing.nursing_task_executions (id, task_id, planned_time, status) VALUES ('${fixtureId("exec-in-progress-1min")}', '$taskId', '$oneMinuteAgo', 'IN_PROGRESS') ON CONFLICT (id) DO NOTHING")
+            // 跨日逾期（§3.1/§4.3）：51 天前的待执行记录，只应出现在跨日逾期队列，不在今日窗口
+            stmt.execute("INSERT INTO nursing.nursing_task_executions (id, task_id, planned_time, status) VALUES ('${fixtureId("exec-pending-51d")}', '$taskId', '${now.minusDays(51)}', 'PENDING') ON CONFLICT (id) DO NOTHING")
+            // 长挂执行（§3.2）：IN_PROGRESS 且 actual_time 2 天前 → is_stale = true
+            stmt.execute("INSERT INTO nursing.nursing_task_executions (id, task_id, planned_time, status, actual_time) VALUES ('${fixtureId("exec-stale")}', '$taskId', '${now.minusDays(3)}', 'IN_PROGRESS', '${now.minusDays(2)}') ON CONFLICT (id) DO NOTHING")
+            // 刚开始的 IN_PROGRESS：actual_time 30 分钟前 → is_stale = false
+            stmt.execute("INSERT INTO nursing.nursing_task_executions (id, task_id, planned_time, status, actual_time) VALUES ('${fixtureId("exec-fresh")}', '$taskId', '${now.minusHours(1)}', 'IN_PROGRESS', '${now.minusMinutes(30)}') ON CONFLICT (id) DO NOTHING")
         }
     }
+
+    /** 统计 fixture 任务下的执行记录条数（用于断言 GET 类查询无写副作用） */
+    private fun countFixtureExecutions(): Long =
+        DriverManager.getConnection(jdbcUrl(), user, password).use { conn ->
+            conn.createStatement()
+                .executeQuery(
+                    "SELECT count(*) FROM nursing.nursing_task_executions WHERE task_id = '${fixtureId("task")}'",
+                ).use { rs ->
+                    rs.next()
+                    rs.getLong(1)
+                }
+        }
 
     private fun fixtureId(suffix: String): String = "${FIXTURE_PREFIX}${suffix}"
 
@@ -402,6 +420,207 @@ class TaskExecutionServiceOverdueIntegrationTest {
                     "不匹配执行人的 overdue_total 应为 0")
                 ctx.completeNow()
             }
+            .onFailure { ctx.failNow(it) }
+    }
+
+    // ========================================================================
+    //  027 跨日逾期队列与 /today meta 扩展（§4.2 / §4.3）
+    // ========================================================================
+
+    private val statusKeys = listOf("PENDING", "IN_PROGRESS", "COMPLETED", "SKIPPED", "CANCELLED")
+
+    private fun recordsById(result: JsonObject): Map<String, JsonObject> {
+        val records = result.getJsonArray("records") ?: return emptyMap()
+        val byId = mutableMapOf<String, JsonObject>()
+        for (i in 0 until records.size()) {
+            val record = records.getJsonObject(i)
+            byId[record.getString("id") ?: ""] = record
+        }
+        return byId
+    }
+
+    @Test
+    fun `跨日逾期队列返回五十一天前的待执行记录而今日窗口看不到`(ctx: VertxTestContext) {
+        insertFixtures()
+        val today = LocalDate.now()
+        val crossDayId = fixtureId("exec-pending-51d")
+
+        service.overdueExecutions(periodId = fixtureId("period"), limit = 100, offset = 0)
+            .compose { overdue ->
+                val byId = recordsById(overdue)
+                val crossDay = byId[crossDayId]
+                assertNotNull(crossDay, "51 天前的 PENDING 记录应出现在跨日逾期队列")
+                assertTrue(crossDay!!.getBoolean("is_overdue"), "跨日记录的 is_overdue 应为 true")
+                val minutes = crossDay.getInteger("overdue_minutes")
+                assertNotNull(minutes, "跨日记录的 overdue_minutes 应非 null")
+                assertTrue(minutes!! >= 51 * 24 * 60, "逾期分钟应 >= 51 天，实际 $minutes")
+
+                val meta = overdue.getJsonObject("meta")
+                assertNotNull(meta, "跨日逾期队列必须返回 meta")
+                val total = meta!!.getLong("total") ?: 0L
+                assertTrue(total >= 3L, "跨日逾期总数应 >= 3，实际 $total")
+                assertTrue(total >= overdue.getJsonArray("records").size().toLong(), "meta.total 为全量")
+
+                service.todayExecutions(date = today, periodId = fixtureId("period"), limit = 100, offset = 0)
+            }
+            .map { todayResult ->
+                assertFalse(
+                    recordsById(todayResult).containsKey(crossDayId),
+                    "51 天前的记录不应出现在今日窗口（/today 语义不变）",
+                )
+            }
+            .onSuccess { ctx.completeNow() }
+            .onFailure { ctx.failNow(it) }
+    }
+
+    @Test
+    fun `跨日逾期队列按计划时间升序且分页总数一致`(ctx: VertxTestContext) {
+        insertFixtures()
+
+        service.overdueExecutions(periodId = fixtureId("period"), limit = 1, offset = 0)
+            .compose { page1 ->
+                val records = page1.getJsonArray("records")
+                assertEquals(1, records.size(), "limit=1 应只返回一条记录")
+                assertEquals(
+                    fixtureId("exec-pending-51d"),
+                    records.getJsonObject(0).getString("id"),
+                    "最早的逾期记录（51 天前）应排在第一",
+                )
+                val totalPage1 = page1.getJsonObject("meta")?.getLong("total") ?: 0L
+                assertTrue(totalPage1 >= 3L, "全量逾期总数应 >= 3，实际 $totalPage1")
+                service.overdueExecutions(periodId = fixtureId("period"), limit = 200, offset = 0)
+                    .map { all -> Pair(totalPage1, all) }
+            }
+            .map { (totalPage1, all) ->
+                assertEquals(totalPage1, all.getJsonObject("meta")?.getLong("total"), "分页不影响 meta.total")
+                assertTrue(all.getJsonArray("records").size() <= 200, "limit 收敛上限为 200")
+            }
+            .onSuccess { ctx.completeNow() }
+            .onFailure { ctx.failNow(it) }
+    }
+
+    @Test
+    fun `跨日逾期队列不调用ensureExecutionsForDate也不写库`(ctx: VertxTestContext) {
+        insertFixtures()
+        val before = countFixtureExecutions()
+
+        service.overdueExecutions(periodId = fixtureId("period"), limit = 200, offset = 0)
+            .map { _ ->
+                assertEquals(before, countFixtureExecutions(), "overdueExecutions 不得写入 nursing_task_executions")
+            }
+            .onSuccess { ctx.completeNow() }
+            .onFailure { ctx.failNow(it) }
+    }
+
+    @Test
+    fun `长挂执行派生字段在跨日队列与今日窗口都生效`(ctx: VertxTestContext) {
+        insertFixtures()
+        val today = LocalDate.now()
+
+        service.overdueExecutions(periodId = fixtureId("period"), limit = 200, offset = 0)
+            .compose { overdue ->
+                val byId = recordsById(overdue)
+
+                val stale = byId[fixtureId("exec-stale")]
+                assertNotNull(stale, "IN_PROGRESS 且 actual_time 2 天前的记录应在逾期队列")
+                assertTrue(stale!!.getBoolean("is_stale"), "超过 1440 分钟应 is_stale=true")
+                val staleMinutes = stale.getInteger("in_progress_minutes")
+                assertNotNull(staleMinutes)
+                assertTrue(staleMinutes!! >= 2 * 24 * 60, "长挂分钟数应 >= 2880，实际 $staleMinutes")
+
+                val fresh = byId[fixtureId("exec-fresh")]
+                assertNotNull(fresh, "刚开始的 IN_PROGRESS 记录应在逾期队列")
+                assertFalse(fresh!!.getBoolean("is_stale"), "30 分钟不应 is_stale")
+                val freshMinutes = fresh.getInteger("in_progress_minutes")
+                assertNotNull(freshMinutes)
+                assertTrue(freshMinutes!! in 1..120, "刚开始的分钟数应为个位数级别，实际 $freshMinutes")
+
+                val pending = byId[fixtureId("exec-pending-overdue")]
+                assertNotNull(pending)
+                assertNull(pending!!.getInteger("in_progress_minutes"), "PENDING 的 in_progress_minutes 应为 null")
+                assertFalse(pending.getBoolean("is_stale"))
+
+                service.todayExecutions(date = today, periodId = fixtureId("period"), limit = 200, offset = 0)
+            }
+            .map { todayResult ->
+                val completed = recordsById(todayResult)[fixtureId("exec-completed")]
+                assertNotNull(completed, "COMPLETED fixture 应在今日窗口")
+                assertNull(completed!!.getInteger("in_progress_minutes"), "终态的 in_progress_minutes 应为 null")
+                assertFalse(completed.getBoolean("is_stale"), "终态恒不 stale")
+            }
+            .onSuccess { ctx.completeNow() }
+            .onFailure { ctx.failNow(it) }
+    }
+
+    @Test
+    fun `今日看板meta提供status_totals与overdue_total_all`(ctx: VertxTestContext) {
+        insertFixtures()
+        val today = LocalDate.now()
+
+        var fullStatusTotals: JsonObject? = null
+        var fullTotal: Long = -1L
+        var overdueTotalAll: Long = -1L
+
+        service.todayExecutions(date = today, periodId = fixtureId("period"), limit = 100, offset = 0)
+            .compose { full ->
+                val meta = full.getJsonObject("meta")
+                assertNotNull(meta, "meta 必须存在")
+                val statusTotals = meta!!.getJsonObject("status_totals")
+                assertNotNull(statusTotals, "meta 必须包含 status_totals")
+                assertEquals(
+                    statusKeys.toSet(),
+                    statusTotals!!.fieldNames().toSet(),
+                    "status_totals 五个键恒在",
+                )
+                var sum = 0L
+                for (key in statusKeys) {
+                    val value = statusTotals.getLong(key)
+                    assertNotNull(value, "$key 必须是整数且不为 null")
+                    assertTrue(value!! >= 0L, "$key 必须非负")
+                    sum += value
+                }
+                fullStatusTotals = statusTotals
+                fullTotal = meta.getLong("total") ?: -1L
+                assertEquals(fullTotal, sum, "无 status/overdue 筛选时 total 应等于各状态计数之和")
+
+                val overdueTotal = meta.getLong("overdue_total") ?: -1L
+                val all = meta.getLong("overdue_total_all")
+                assertNotNull(all, "meta 必须包含 overdue_total_all")
+                overdueTotalAll = all!!
+                assertTrue(all >= overdueTotal, "跨日逾期总数应不小于当日逾期数")
+                assertTrue(all >= 3L, "跨日逾期总数应至少包含 3 条 fixture，实际 $all")
+
+                // status 筛选不得改变 status_totals，也不得改变 overdue_total_all
+                service.todayExecutions(
+                    date = today,
+                    periodId = fixtureId("period"),
+                    status = "PENDING",
+                    limit = 1,
+                    offset = 0,
+                )
+            }
+            .compose { pendingFiltered ->
+                val meta = pendingFiltered.getJsonObject("meta")!!
+                assertEquals(
+                    fullStatusTotals,
+                    meta.getJsonObject("status_totals"),
+                    "status_totals 必须忽略 status 筛选",
+                )
+                assertEquals(overdueTotalAll, meta.getLong("overdue_total_all"), "overdue_total_all 必须忽略 status 筛选")
+
+                // 换日期：overdue_total_all 必须不变（忽略日期窗口），overdue_total 则随窗口变化
+                service.todayExecutions(date = today.plusDays(1), periodId = fixtureId("period"), limit = 1, offset = 0)
+            }
+            .map { nextDay ->
+                val meta = nextDay.getJsonObject("meta")!!
+                assertEquals(
+                    overdueTotalAll,
+                    meta.getLong("overdue_total_all"),
+                    "overdue_total_all 必须忽略日期窗口",
+                )
+                assertEquals(0L, meta.getLong("overdue_total"), "次日窗口内没有逾期记录，overdue_total 应为 0")
+            }
+            .onSuccess { ctx.completeNow() }
             .onFailure { ctx.failNow(it) }
     }
 }

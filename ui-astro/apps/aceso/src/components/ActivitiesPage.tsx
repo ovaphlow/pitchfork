@@ -8,6 +8,7 @@ import {
   listNursingServicePeriods,
   listNursingTaskExecutions,
   listNursingTasks,
+  listNursingOverdueExecutions,
   listNursingTodayExecutions,
   listPatients,
   updateNursingTaskExecutionStatus,
@@ -261,11 +262,29 @@ export default function ActivitiesPage() {
   const [todayStatusFilter, setTodayStatusFilter] = useState("");
   const [todayOverdueOnly, setTodayOverdueOnly] = useState(false);
   const [todayOverdueTotal, setTodayOverdueTotal] = useState(0);
+  /** 跨日全量逾期数（meta.overdue_total_all）；字段缺失时为 null，回退到当天口径 */
+  const [todayOverdueAllTotal, setTodayOverdueAllTotal] = useState<number | null>(null);
+  /** 进入逾期模式前的状态筛选（P1-1）：逾期模式下禁止终态筛选，退出时恢复原值 */
+  const [todayStatusFilterBeforeOverdue, setTodayStatusFilterBeforeOverdue] = useState("");
+  /** 跨日逾期队列的服务端总数与本次返回条数（meta.total > 返回条数 = 被 limit 截断） */
+  const [todayOverdueQueue, setTodayOverdueQueue] = useState<{ total: number; shown: number } | null>(null);
 
   const loadToday = useCallback(async () => {
     setTodayLoading(true);
     setTodayError("");
     try {
+      if (todayOverdueOnly) {
+        // §4.3 跨日逾期队列：与照护管理同源同口径（同一 /overdue 接口 + task_type 过滤），
+        // 不接受日期语义；分组展示与因果逻辑不变。
+        const queue = await listNursingOverdueExecutions({
+          task_type: "REHABILITATION",
+          limit: 200,
+        });
+        setTodayExecutions(queue.records);
+        // 保存队列总数用于截断提示（meta.total 为全量，records 为本次分页结果）
+        setTodayOverdueQueue({ total: queue.meta.total ?? queue.records.length, shown: queue.records.length });
+        return;
+      }
       const res = await listNursingTodayExecutions({
         date: todayDate,
         task_type: "REHABILITATION",
@@ -273,16 +292,20 @@ export default function ActivitiesPage() {
       });
       setTodayExecutions(res.records);
       setTodayOverdueTotal(res.meta.overdue_total ?? 0);
+      if (res.meta.overdue_total_all !== undefined) setTodayOverdueAllTotal(res.meta.overdue_total_all);
     } catch (error) {
-      setTodayError(errorMessage(error, "无法加载今日活动"));
+      setTodayError(errorMessage(error, todayOverdueOnly ? "无法加载跨日期逾期活动" : "无法加载今日活动"));
     } finally {
       setTodayLoading(false);
     }
-  }, [todayDate]);
+  }, [todayDate, todayOverdueOnly]);
 
   useEffect(() => {
     void loadToday();
   }, [loadToday]);
+
+  /** 逾期入口使用跨日口径 overdue_total_all；字段缺失时回退到当天 overdue_total */
+  const todayOverdueEntryTotal = todayOverdueAllTotal ?? todayOverdueTotal;
 
   /** Q2：按活动名聚合展示「一场多人」的打卡记录 */
   const todayGroups = useMemo(() => {
@@ -732,17 +755,23 @@ export default function ActivitiesPage() {
           今日活动看板（F5 / F6）
       ======================================================================== */}
       <Card
-        title="今日活动看板"
+        title={todayOverdueOnly ? "跨日期逾期活动队列" : "今日活动看板"}
         actions={
           <div className="flex items-center gap-2">
             <input type="date" value={todayDate} onChange={(event) => setTodayDate(event.target.value)} className={filterInputClass + " w-40"} />
-            <select id="today-status-filter" className={filterSelectClass + " w-28"} value={todayStatusFilter} onChange={(event) => setTodayStatusFilter(event.target.value)}>
+            <select id="today-status-filter" className={filterSelectClass + " w-28"} value={todayStatusFilter} onChange={(event) => {
+              // P1-1：逾期模式下候选集天然只有 PENDING/IN_PROGRESS，终态筛选会叠加出
+              // 「空列表 + 非零逾期徽标」的矛盾画面；与照护管理页同口径做双重守卫。
+              const nextStatus = event.target.value;
+              if (todayOverdueOnly && ["COMPLETED", "SKIPPED", "CANCELLED"].includes(nextStatus)) return;
+              setTodayStatusFilter(nextStatus);
+            }}>
               <option value="">全部状态</option>
               <option value="PENDING">待执行</option>
               <option value="IN_PROGRESS">执行中</option>
-              <option value="COMPLETED">已完成</option>
-              <option value="SKIPPED">已跳过</option>
-              <option value="CANCELLED">已取消</option>
+              <option value="COMPLETED" disabled={todayOverdueOnly}>已完成</option>
+              <option value="SKIPPED" disabled={todayOverdueOnly}>已跳过</option>
+              <option value="CANCELLED" disabled={todayOverdueOnly}>已取消</option>
             </select>
             <Button variant="secondary" size="sm" onClick={() => void loadToday()} loading={todayLoading}>
               刷新
@@ -760,22 +789,54 @@ export default function ActivitiesPage() {
           <span className="mx-1 h-4 w-px bg-border" />
           <button
             type="button"
-            onClick={() => setTodayOverdueOnly((v) => !v)}
+            onClick={() => {
+              // P1-1：进出逾期模式时保存/恢复状态筛选，终态筛选不得带进逾期模式
+              if (todayOverdueOnly) {
+                setTodayOverdueOnly(false);
+                setTodayStatusFilter(todayStatusFilterBeforeOverdue);
+                return;
+              }
+              setTodayStatusFilterBeforeOverdue(todayStatusFilter);
+              setTodayOverdueOnly(true);
+              if (["COMPLETED", "SKIPPED", "CANCELLED"].includes(todayStatusFilter)) setTodayStatusFilter("");
+            }}
+            title="逾期口径为跨日期全量（不受所选日期限制）"
             className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 font-medium transition-colors ${todayOverdueOnly ? "bg-red-100 text-red-700 hover:bg-red-200" : "hover:bg-surface-alt"}`}
           >
             {todayOverdueOnly ? "显示全部" : "只看逾期"}
-            <Badge variant="danger">{todayOverdueTotal}</Badge>
+            <Badge variant="danger">{todayOverdueEntryTotal}</Badge>
           </button>
           {todayError && <span className="text-danger">{todayError}</span>}
         </div>
+
+        {todayOverdueOnly && (
+          <p className="mb-4 rounded-md border border-warning/30 bg-warning-bg px-3 py-2 text-xs text-warning">
+            跨日期逾期队列（不受所选日期限制）：列出全部已过计划时间且未结束的康复活动，按计划时间由早到晚排列。
+            {todayOverdueQueue !== null && todayOverdueQueue.total > todayOverdueQueue.shown && (
+              <> 仅显示最早的 {todayOverdueQueue.shown} 条，共 {todayOverdueQueue.total} 条逾期。</>
+            )}
+          </p>
+        )}
 
         {todayLoading ? (
           <div className="py-12 text-center text-sm text-fg-dimmed">正在加载今日活动…</div>
         ) : todayGroups.length === 0 ? (
           <EmptyState
             icon="🎯"
-            title={todayOverdueOnly ? "今日无逾期活动" : "今日暂无康复活动"}
-            description={todayOverdueOnly ? "所有已到计划时间的活动均已处理。" : "请先创建活动并生成排期，今日的活动会出现在这里。"}
+            title={
+              todayOverdueOnly
+                ? todayStatusFilter
+                  ? "当前状态筛选下没有匹配的逾期活动"
+                  : "无跨日期逾期活动"
+                : "今日暂无康复活动"
+            }
+            description={
+              todayOverdueOnly
+                ? todayStatusFilter
+                  ? "跨日期逾期队列中不存在符合当前状态筛选的活动；可切换为「全部状态」查看逾期队列。"
+                  : "所有已到计划时间的康复活动均已处理。"
+                : "请先创建活动并生成排期，今日的活动会出现在这里。"
+            }
             action={
               <Button size="sm" onClick={() => { setCreateError(""); setCreateForm(formDefaults()); setCreateOpen(true); }}>
                 + 创建活动
