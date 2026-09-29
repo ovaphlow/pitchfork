@@ -62,10 +62,8 @@ class DiningServiceIntegrationTest {
         user = System.getProperty("integration.db.user", "ovaphlow")
         password = System.getenv("PITCHFORK_DB_PASSWORD") ?: ""
 
-        if (password.isBlank()) {
-            ctx.failNow(IllegalStateException("PITCHFORK_DB_PASSWORD must be set"))
-            return@setup
-        }
+        // 兜底门控：只给了 -Dintegration.db.host 而缺密码时，按 JUnit 假设失败 skip 整个类，不让模块变红。
+        Assumptions.assumeTrue(password.isNotBlank(), "integration test skipped: 需要 PITCHFORK_DB_PASSWORD 才会运行")
 
         try {
             // Drop and recreate test database to ensure clean Flyway state

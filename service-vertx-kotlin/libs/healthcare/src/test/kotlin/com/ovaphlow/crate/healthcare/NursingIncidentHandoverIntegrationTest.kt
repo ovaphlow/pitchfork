@@ -16,6 +16,7 @@ import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Assumptions
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.TestInstance
@@ -85,10 +86,10 @@ class NursingIncidentHandoverIntegrationTest {
         port = System.getProperty("integration.db.port", "5432")
         user = System.getProperty("integration.db.user", "ovaphlow")
         password = System.getenv("PITCHFORK_DB_PASSWORD") ?: ""
+        // 兜底门控：只给了 -Dintegration.db.host 而缺密码时，按 JUnit 假设失败 skip 整个类，不让模块变红。
+        Assumptions.assumeTrue(password.isNotBlank(), "integration test skipped: 需要 PITCHFORK_DB_PASSWORD 才会运行")
 
         try {
-            if (password.isBlank()) throw IllegalStateException("PITCHFORK_DB_PASSWORD must be set")
-
             val rootUrl = "jdbc:postgresql://$host:$port/postgres"
             DriverManager.getConnection(rootUrl, user, password).use { conn ->
                 conn.createStatement().execute("DROP DATABASE IF EXISTS $TEST_DB")

@@ -8,6 +8,7 @@ import io.vertx.junit5.VertxExtension
 import io.vertx.junit5.VertxTestContext
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.Assumptions
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.TestInstance
@@ -19,11 +20,20 @@ import java.sql.DriverManager
  * 共享的 Aceso 数据库集成测试基类。
  * 仅连接用户授权的独立 aceso_test，不 DROP/CREATE 数据库；
  * 每个测试类使用固定 prefix 的 fixture，并在每个测试前后清理和断言残差为零。
+ *
+ * 门控：JUnit 的条件注解不会从抽象基类继承到子类，因此每个具体子类都必须自带
+ * `@EnabledIfSystemProperty(named = "integration.db.host", matches = ".+")`。
+ * 基类 @BeforeAll 里另有一道 Assumptions 兜底，保证漏加注解时只 skip、不报错。
  */
 @ExtendWith(VertxExtension::class)
 @EnabledIfSystemProperty(named = "integration.db.host", matches = ".+")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 abstract class AcesoDbIntegrationTestBase {
+
+    companion object {
+        const val SKIP_REASON: String =
+            "integration test skipped: 需要 PITCHFORK_DB_PASSWORD 与 -Dintegration.db.host 才会运行"
+    }
 
     abstract val fixturePrefix: String
     abstract val serverPort: Int
@@ -43,8 +53,12 @@ abstract class AcesoDbIntegrationTestBase {
         port = System.getProperty("integration.db.port", "5432")
         user = System.getProperty("integration.db.user", "ovaphlow")
         password = System.getenv("PITCHFORK_DB_PASSWORD") ?: ""
+        // 兜底门控：即使将来新增的子类忘记加 @EnabledIfSystemProperty，
+        // 缺少密码时也只 skip 整个类，而不是让 :apps:aceso:test 变红。
+        // 注意必须放在 try 之前：TestAbortedException 是 RuntimeException，
+        // 放进 try 会被下面的 catch (e: Exception) 吞掉并转成失败。
+        Assumptions.assumeTrue(password.isNotBlank(), SKIP_REASON)
         try {
-            if (password.isBlank()) throw IllegalStateException("PITCHFORK_DB_PASSWORD must be set")
             val dbConfig = JsonObject()
                 .put("host", host)
                 .put("port", port.toInt())
@@ -72,9 +86,15 @@ abstract class AcesoDbIntegrationTestBase {
 
     @AfterAll
     fun teardown(ctx: VertxTestContext) {
+        // @BeforeAll 被 Assumptions 跳过（缺密码）时 JUnit 仍会调用 @AfterAll：
+        // 此时没有连接池与 fixture，直接结束，避免把 skip 变成失败。
+        if (!::pool.isInitialized) {
+            ctx.completeNow()
+            return
+        }
         cleanupFixtures()
         assertNoResidual()
-        if (::pool.isInitialized) pool.close()
+        pool.close()
         server?.close { ar ->
             if (ar.succeeded()) ctx.completeNow()
             else ctx.failNow(ar.cause())

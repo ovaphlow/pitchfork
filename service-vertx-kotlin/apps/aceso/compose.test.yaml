@@ -1,7 +1,23 @@
 # Aceso 集成测试专用 PostgreSQL，不连接或覆盖 compose.yaml 的业务数据库。
 # 默认映射到 localhost:55432，容器删除后临时数据库数据随之消失。
-# 启动：podman compose -f compose.test.yaml up   （前台运行，不加 -d；Ctrl+C 停止）
-# 关闭：podman compose -f compose.test.yaml down
+#
+# 启动（可用 -d/后台，但必须在结束时 down，不得跨会话留存；策略见根 AGENTS.md
+# 「服务与资源生命周期」）：
+#   podman compose -p pitchfork-aceso-test -f compose.test.yaml up -d
+#   # 想前台看日志时去掉 -d，Ctrl+C 即停；无论前台后台，本轮结束都要 down。
+# 关闭（不要加 -f/--force，不要加 remove-orphans）：
+#   podman compose -p pitchfork-aceso-test -f compose.test.yaml down
+#
+# ⚠️ 顶层的 name: 是安全护栏，不能删（2026-09-29 险情）：
+#   本文件与开发库的 compose.yaml 在同一个目录 apps/aceso。podman-compose 的项目名
+#   优先级是 -p/--project-name > COMPOSE_PROJECT_NAME > 本文件的 name: > 文件所在目录名。
+#   一旦本文件没有 name:、调用方又没带 -p，项目名就会退回目录名 'aceso'，与
+#   apps/aceso/compose.yaml（开发库 pitchfork-aceso-db，0.0.0.0:5432）撞成同一个项目：
+#   同一个 pod（pod_aceso）、同一个网络（aceso_default）。此时测试 compose 的 down
+#   会试图删掉用户开发库所在的 pod 与网络；上次只因为开发容器正在运行（无法在不加 -f 的
+#   情况下删除）才没有真的删掉。即使删除了这里的 name:，scripts/aceso-test.sh 也会用
+#   -p pitchfork-aceso-test 与 COMPOSE_PROJECT_NAME 兜底 —— 三层都指向同一个隔离项目名。
+name: pitchfork-aceso-test
 
 services:
   pitchfork-aceso-test-db:

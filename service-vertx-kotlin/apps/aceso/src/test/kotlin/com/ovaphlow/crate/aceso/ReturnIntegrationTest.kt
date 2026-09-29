@@ -7,7 +7,9 @@ import io.vertx.junit5.VertxTestContext
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty
 
+@EnabledIfSystemProperty(named = "integration.db.host", matches = ".+")
 class ReturnIntegrationTest : AcesoDbIntegrationTestBase() {
 
     override val fixturePrefix = "rt-"
