@@ -1,5 +1,6 @@
 package com.ovaphlow.crate.healthcare
 
+import com.ovaphlow.crate.nursing.ConflictException
 import io.mockk.every
 import io.mockk.mockk
 import io.vertx.core.Future
@@ -54,6 +55,9 @@ class FeeItemServiceTest {
         var transactionCalls = 0
             private set
 
+        /** 模拟 DB 部分唯一索引兜底：下一次 insert 直接以该错误失败（消费一次后清空）。 */
+        var insertFailure: Throwable? = null
+
         private var lastSql = ""
         private val conn = mockk<SqlConnection>()
         private val pq = mockk<PreparedQuery<RowSet<Row>>>()
@@ -68,32 +72,41 @@ class FeeItemServiceTest {
                 val sql = lastSql
                 val values = tupleValues(firstArg())
                 tuples.add(sql to values)
-                val result: RowSet<Row> = when {
-                    sql.contains("insert into healthcare.fee_items") -> {
-                        items.add(insertedRecord(sql, values))
-                        rowSet()
-                    }
-                    sql.contains("delete from healthcare.fee_items") -> {
-                        val id = boundId(sql, values) ?: ""
-                        val removed = items.removeIf { it["id"] == id }
-                        rowSet(rowCount = if (removed) 1 else 0)
-                    }
-                    sql.contains("update healthcare.fee_items") -> {
-                        val id = boundId(sql, values) ?: ""
-                        val target = items.firstOrNull { it["id"] == id }
-                        if (target != null) {
-                            applyUpdate(target, sql, values)
-                            rowSet(rowCount = 1)
-                        } else {
-                            rowSet(rowCount = 0)
+                val failure = insertFailure
+                if (failure != null && sql.contains("insert into healthcare.fee_items")) {
+                    insertFailure = null
+                    Future.failedFuture<RowSet<Row>>(failure)
+                } else {
+                    val result: RowSet<Row> = when {
+                        sql.contains("insert into healthcare.fee_items") -> {
+                            val record = insertedRecord(sql, values)
+                            deriveNursingLevel(record)
+                            items.add(record)
+                            rowSet()
                         }
+                        sql.contains("delete from healthcare.fee_items") -> {
+                            val id = boundId(sql, values) ?: ""
+                            val removed = items.removeIf { it["id"] == id }
+                            rowSet(rowCount = if (removed) 1 else 0)
+                        }
+                        sql.contains("update healthcare.fee_items") -> {
+                            val id = boundId(sql, values) ?: ""
+                            val target = items.firstOrNull { it["id"] == id }
+                            if (target != null) {
+                                applyUpdate(target, sql, values)
+                                deriveNursingLevel(target)
+                                rowSet(rowCount = 1)
+                            } else {
+                                rowSet(rowCount = 0)
+                            }
+                        }
+                        sql.contains("count(*)") && sql.contains("from healthcare.fee_items") ->
+                            rowSet(mockRow(mapOf("total" to filtered(sql, values).size.toLong())))
+                        sql.contains("from healthcare.fee_items") -> rows(*filtered(sql, values).toTypedArray())
+                        else -> rowSet()
                     }
-                    sql.contains("count(*)") && sql.contains("from healthcare.fee_items") ->
-                        rowSet(mockRow(mapOf("total" to filtered(sql, values).size.toLong())))
-                    sql.contains("from healthcare.fee_items") -> rows(*filtered(sql, values).toTypedArray())
-                    else -> rowSet()
+                    Future.succeededFuture(result)
                 }
-                Future.succeededFuture(result)
             }
             every { pool.withTransaction<Any>(any()) } answers {
                 transactionCalls++
@@ -124,12 +137,14 @@ class FeeItemServiceTest {
             return values.getOrNull(match.groupValues[1].toInt() - 1) as? String
         }
 
-        /** 按 where 子句中的 category/status 条件过滤。 */
+        /** 按 where 子句中的 id/category/status 条件过滤。 */
         private fun filtered(sql: String, values: List<Any?>): List<MutableMap<String, Any?>> {
+            val id = boundField(sql, values, "id")
             val category = boundField(sql, values, "category")
             val status = boundField(sql, values, "status")
             return items.filter { item ->
-                (category == null || item["category"] == category) &&
+                (id == null || item["id"] == id) &&
+                    (category == null || item["category"] == category) &&
                     (status == null || item["status"] == status)
             }.sortedWith(
                 compareByDescending<MutableMap<String, Any?>> { it["created_at"] as? OffsetDateTime }
@@ -138,8 +153,17 @@ class FeeItemServiceTest {
         }
 
         private fun boundField(sql: String, values: List<Any?>, field: String): String? {
-            val match = Regex("$field = \\$(\\d+)").find(sql) ?: return null
-            return values.getOrNull(match.groupValues[1].toInt() - 1) as? String
+            val match = Regex("(^|[\\s.(])$field = \\$(\\d+)").find(sql) ?: return null
+            return values.getOrNull(match.groupValues[2].toInt() - 1) as? String
+        }
+
+        /**
+         * 模拟 DB 的 `metadata ->> 'nursing_level'` 取值：
+         * 落库/更新后由 metadata 派生 `nursing_level` 列值（与 V520 索引口径同源）。
+         */
+        private fun deriveNursingLevel(record: MutableMap<String, Any?>) {
+            val metadata = record["metadata"] as? JsonObject
+            record["nursing_level"] = metadata?.getString("nursing_level")
         }
 
         /** 按 set 子句逐字段回填（setNull 渲染为 field = null；cast($n as ...) 取绑定值）。 */
@@ -174,6 +198,7 @@ class FeeItemServiceTest {
             "status" to "启用",
             "remark" to null,
             "metadata" to null,
+            "nursing_level" to null,
             "created_at" to OffsetDateTime.parse("2026-08-01T09:00:00+08:00"),
             "updated_at" to OffsetDateTime.parse("2026-08-01T09:00:00+08:00"),
         )
@@ -181,6 +206,24 @@ class FeeItemServiceTest {
         return base
     }
 
+    /** 护理费字典行 fixture：等级同时落 metadata 与派生的 nursing_level 列。 */
+    private fun nursingRow(id: String, level: String, unitPrice: String, status: String = "启用"): MutableMap<String, Any?> =
+        feeItemRow(
+            mapOf(
+                "id" to id,
+                "category" to "护理费",
+                "name" to "护理费-$level",
+                "unit_price" to BigDecimal(unitPrice),
+                "status" to status,
+                "metadata" to JsonObject().put("nursing_level", level),
+                "nursing_level" to level,
+            ),
+        )
+
+    /**
+     * 请求体 fixture：基础为护理费；未显式覆盖 `nursing_level` 时补默认「低风险」
+     * （护理费必填；非护理费场景覆盖 category 即自动不携带）。
+     */
     private fun feeItemBody(overrides: Map<String, Any?> = emptyMap()): JsonObject {
         val body = JsonObject()
             .put("category", "护理费")
@@ -188,6 +231,9 @@ class FeeItemServiceTest {
             .put("unit_price", 120)
             .put("remark", "按日计费")
         overrides.forEach { (key, value) -> body.put(key, value) }
+        if (body.getString("category") == "护理费" && !overrides.containsKey("nursing_level")) {
+            body.put("nursing_level", "低风险")
+        }
         return body
     }
 
@@ -217,12 +263,14 @@ class FeeItemServiceTest {
         assertEquals("一级护理费", created.getString("name"))
         assertEquals(0, BigDecimal("120.00").compareTo(created.getValue("unit_price") as BigDecimal))
         assertEquals(FeeItemService.STATUS_ENABLED, created.getString("status"), "新建项目状态必须默认 启用")
+        assertEquals("低风险", created.getString("nursing_level"), "响应必须顶层回显护理等级")
         assertTrue(created.getString("id").length == 26, "必须生成 26 位 ULID")
         assertNotNull(created.getString("created_at"))
         assertNotNull(created.getString("updated_at"))
 
         assertEquals(1, stub.items.size)
         assertEquals("启用", stub.items.single()["status"])
+        assertEquals("低风险", stub.items.single()["nursing_level"], "护理等级必须落 metadata.nursing_level")
     }
 
     @Test
@@ -254,6 +302,28 @@ class FeeItemServiceTest {
         expectCreateInvalid(feeItemBody(mapOf("id" to "hacked")), "unsupported fee item keys: id")
         expectCreateInvalid(feeItemBody(mapOf("remark" to "x".repeat(501))), "500")
         expectCreateInvalid(feeItemBody(mapOf("metadata" to JsonArray().add(1))), "metadata must be a JSON object")
+        // 护理等级（030 W1 契约冻结文案）：护理费必填、限四值枚举；非护理费不得携带
+        expectCreateInvalid(
+            feeItemBody().also { it.remove("nursing_level") },
+            "nursing_level is required for 护理费 fee item",
+        )
+        expectCreateInvalid(
+            feeItemBody(mapOf("nursing_level" to null)),
+            "nursing_level is required for 护理费 fee item",
+        )
+        expectCreateInvalid(
+            feeItemBody(mapOf("nursing_level" to "   ")),
+            "nursing_level is required for 护理费 fee item",
+        )
+        expectCreateInvalid(
+            feeItemBody(mapOf("nursing_level" to "特级护理")),
+            "nursing_level must be one of: 低风险, 中风险, 高风险, 无需干预",
+        )
+        expectCreateInvalid(feeItemBody(mapOf("nursing_level" to 1)), "nursing_level must be one of: 低风险")
+        expectCreateInvalid(
+            feeItemBody(mapOf("category" to "床位费", "nursing_level" to "低风险")),
+            "nursing_level is only allowed for 护理费 fee item",
+        )
 
         // 状态流转白名单：非法状态值/多余字段/类型错误
         fun expectStatusInvalid(body: JsonObject, vararg fragments: String) {
@@ -413,7 +483,196 @@ class FeeItemServiceTest {
         assertTrue(statusSql.all { it.first.contains("id = $") }, "状态流转必须按 id 定位: ${statusSql.map { it.first }}")
     }
 
-    // ——— 5. 嵌入式 HTTP 路由 ———
+    // ——— 5. 护理等级绑定（030 W1：落 metadata、顶层拉平、启用态同等级唯一） ———
+
+    @Test
+    fun `显式空metadata保留空对象不被归一为null`() {
+        // 030 评审 P2-6：客户端显式传 `{}` 必须原样保留（base 语义），
+        // 只有「未提供 metadata」才归一为 null。
+        val stub = DatabaseStub()
+        val service = FeeItemService(stub.pool)
+
+        val created = service.createItem(
+            feeItemBody(mapOf("category" to "床位费", "name" to "标准床位", "metadata" to JsonObject())),
+        ).toCompletionStage().toCompletableFuture().get()
+        assertEquals(0, created.getJsonObject("metadata")?.size() ?: -1, "显式 {} 必须回显空对象而不是 null")
+        assertEquals(0, (stub.items.single()["metadata"] as JsonObject).size(), "落库必须是空对象而不是 NULL")
+
+        val omitted = service.createItem(
+            feeItemBody(mapOf("category" to "床位费", "name" to "标准床位B")),
+        ).toCompletionStage().toCompletableFuture().get()
+        assertNull(omitted.getJsonObject("metadata"), "未提供 metadata 时保持 null")
+    }
+
+    @Test
+    fun `创建护理费落metadata等级且剥离客户端metadata写入`() {
+        val stub = DatabaseStub()
+        val service = FeeItemService(stub.pool)
+        val created = service.createItem(
+            feeItemBody(
+                mapOf(
+                    "nursing_level" to "高风险",
+                    "metadata" to JsonObject().put("billing", "daily").put("nursing_level", "低风险"),
+                ),
+            ),
+        ).toCompletionStage().toCompletableFuture().get()
+
+        assertEquals("高风险", created.getString("nursing_level"), "响应必须顶层回显 nursing_level")
+        val metadata = created.getJsonObject("metadata")
+        assertEquals("高风险", metadata.getString("nursing_level"), "等级必须落 metadata.nursing_level")
+        assertEquals("daily", metadata.getString("billing"), "metadata 其余键必须原样保留")
+
+        // 落库：客户端经 metadata 写入的等级被服务端剥离，以顶层键为准
+        val stored = stub.items.single()["metadata"] as JsonObject
+        assertEquals("高风险", stored.getString("nursing_level"))
+        assertEquals("daily", stored.getString("billing"))
+        assertEquals("高风险", stub.items.single()["nursing_level"])
+
+        // 非护理费：省略/ null 合法，顶层与 metadata 都不携带等级
+        for (omitted in listOf(true, false)) {
+            val overrides = mutableMapOf<String, Any?>("category" to "床位费", "name" to "标准床位")
+            if (!omitted) overrides["nursing_level"] = null
+            val bed = service.createItem(feeItemBody(overrides)).toCompletionStage().toCompletableFuture().get()
+            assertEquals("床位费", bed.getString("category"))
+            assertNull(bed.getValue("nursing_level"), "非护理费 nursing_level 必须为 null（omitted=$omitted）")
+            assertNull(bed.getValue("metadata"), "非护理费省略 metadata 时必须为 null（omitted=$omitted）")
+        }
+        assertTrue(stub.items.filter { it["category"] == "床位费" }.all { it["nursing_level"] == null })
+    }
+
+    @Test
+    fun `更新与状态流转响应回显护理等级`() {
+        val stub = DatabaseStub(mutableListOf(nursingRow("fee-nurse", "低风险", "30.00")))
+        val service = FeeItemService(stub.pool)
+
+        val detailed = service.getItem("fee-nurse").toCompletionStage().toCompletableFuture().get()
+        assertEquals("低风险", detailed.getString("nursing_level"), "详情必须顶层回显护理等级")
+
+        val updated = service.updateItem("fee-nurse", feeItemBody(mapOf("nursing_level" to "中风险")))
+            .toCompletionStage().toCompletableFuture().get()
+        assertEquals("中风险", updated.getString("nursing_level"), "更新响应必须回显新等级")
+        assertEquals("中风险", updated.getJsonObject("metadata").getString("nursing_level"))
+        assertEquals("中风险", stub.items.single()["nursing_level"])
+
+        val disabled = service.updateItemStatus("fee-nurse", JsonObject().put("status", "停用"))
+            .toCompletionStage().toCompletableFuture().get()
+        assertEquals(FeeItemService.STATUS_DISABLED, disabled.getString("status"))
+        assertEquals("中风险", disabled.getString("nursing_level"), "状态流转响应必须回显 nursing_level")
+
+        val reEnabled = service.updateItemStatus("fee-nurse", JsonObject().put("status", "启用"))
+            .toCompletionStage().toCompletableFuture().get()
+        assertEquals(FeeItemService.STATUS_ENABLED, reEnabled.getString("status"))
+        assertEquals("中风险", reEnabled.getString("nursing_level"))
+    }
+
+    @Test
+    fun `列表顶层回显护理等级且非护理费为null`() {
+        val stub = DatabaseStub(
+            mutableListOf(
+                nursingRow("fee-nurse", "高风险", "80.00"),
+                feeItemRow(mapOf("id" to "fee-bed", "category" to "床位费", "name" to "标准床位")),
+            ),
+        )
+        val page = FeeItemService(stub.pool).listItems()
+            .toCompletionStage().toCompletableFuture().get()
+
+        val records = page.getJsonArray("records").map { it as JsonObject }
+        assertEquals(2, records.size)
+        assertTrue(records.all { it.containsKey("nursing_level") }, "列表每条记录都必须带 nursing_level 键")
+        assertEquals("高风险", records.first { it.getString("id") == "fee-nurse" }.getString("nursing_level"))
+        assertNull(records.first { it.getString("id") == "fee-bed" }.getString("nursing_level"))
+    }
+
+    @Test
+    fun `同一等级第二条启用项返回409且不写入`() {
+        val stub = DatabaseStub(mutableListOf(nursingRow("fee-nurse-low", "低风险", "30.00")))
+        val service = FeeItemService(stub.pool)
+
+        // 同等级第二条启用项 → 409（服务端事务内检查）
+        val cause = causeOf(service.createItem(feeItemBody(mapOf("nursing_level" to "低风险"))))
+        assertInstanceOf(ConflictException::class.java, cause)
+        assertEquals("another enabled 护理费 item already bound to level 低风险", cause.message)
+        assertTrue(stub.tuples.none { it.first.contains("insert into healthcare.fee_items") }, "冲突不得写入")
+        assertTrue(
+            stub.queries.any { it.contains("from healthcare.fee_items") && it.contains("status = $") },
+            "必须按启用态查询同等级项: ${stub.queries}",
+        )
+    }
+
+    @Test
+    fun `同等级被其它启用项占用时更新与启用流转返回409`() {
+        val stub = DatabaseStub(
+            mutableListOf(
+                nursingRow("fee-nurse-low", "低风险", "30.00"),
+                nursingRow("fee-nurse-mid", "中风险", "50.00"),
+                nursingRow("fee-nurse-high", "高风险", "80.00", status = "停用"),
+                nursingRow("fee-nurse-high2", "高风险", "88.00"),
+            ),
+        )
+        val service = FeeItemService(stub.pool)
+
+        // 更新自身到被其它启用项占用的等级 → 409
+        val updateCause = causeOf(service.updateItem("fee-nurse-mid", feeItemBody(mapOf("nursing_level" to "低风险"))))
+        assertInstanceOf(ConflictException::class.java, updateCause)
+        assertEquals("another enabled 护理费 item already bound to level 低风险", updateCause.message)
+        assertEquals("中风险", stub.items.first { it["id"] == "fee-nurse-mid" }["nursing_level"], "冲突不得改动等级")
+
+        // 自身等级保持不变时更新成功（唯一性检查排除自身）
+        val kept = service.updateItem(
+            "fee-nurse-mid",
+            feeItemBody(mapOf("nursing_level" to "中风险", "name" to "护理费-中风险-改名")),
+        ).toCompletionStage().toCompletableFuture().get()
+        assertEquals("中风险", kept.getString("nursing_level"))
+
+        // 停用项启用流转到被占用的等级 → 409（且状态未变）
+        val statusCause = causeOf(service.updateItemStatus("fee-nurse-high", JsonObject().put("status", "启用")))
+        assertInstanceOf(ConflictException::class.java, statusCause)
+        assertEquals("another enabled 护理费 item already bound to level 高风险", statusCause.message)
+        assertEquals("停用", stub.items.first { it["id"] == "fee-nurse-high" }["status"], "冲突不得改动状态")
+    }
+
+    @Test
+    fun `不同等级可共存且已停用同等级不阻塞`() {
+        val stub = DatabaseStub(
+            mutableListOf(
+                nursingRow("fee-nurse-low", "低风险", "30.00"),
+                nursingRow("fee-nurse-high", "高风险", "80.00", status = "停用"),
+            ),
+        )
+        val service = FeeItemService(stub.pool)
+
+        // 未被占用的等级：新建成功（四个等级各一条）
+        val mid = service.createItem(feeItemBody(mapOf("nursing_level" to "中风险")))
+            .toCompletionStage().toCompletableFuture().get()
+        assertEquals("中风险", mid.getString("nursing_level"))
+        assertEquals(3, stub.items.size)
+
+        // 停用项不占用等级：同等级可再建启用项
+        val high = service.createItem(feeItemBody(mapOf("nursing_level" to "高风险")))
+            .toCompletionStage().toCompletableFuture().get()
+        assertEquals("高风险", high.getString("nursing_level"))
+        assertEquals(4, stub.items.size)
+    }
+
+    @Test
+    fun `唯一索引兜底冲突转409`() {
+        val stub = DatabaseStub()
+        stub.insertFailure = Exception(
+            "duplicate key value violates unique constraint \"uq_fee_items_nursing_level_enabled\"",
+        )
+        val cause = causeOf(FeeItemService(stub.pool).createItem(feeItemBody(mapOf("nursing_level" to "无需干预"))))
+        assertInstanceOf(ConflictException::class.java, cause)
+        assertEquals("another enabled 护理费 item already bound to level 无需干预", cause.message)
+        assertTrue(stub.items.isEmpty(), "唯一索引兜底冲突不得留下写入")
+
+        // 无关错误原样抛出（不得伪装成 409）
+        val other = DatabaseStub()
+        other.insertFailure = Exception("connection reset by peer")
+        val otherCause = causeOf(FeeItemService(other.pool).createItem(feeItemBody()))
+        assertTrue(otherCause !is ConflictException, "无关错误必须原样抛出: $otherCause")
+    }
+
+    // ——— 6. 嵌入式 HTTP 路由 ———
 
     private fun httpRequest(
         vertx: Vertx,
@@ -470,6 +729,7 @@ class FeeItemServiceTest {
                     assertEquals("护理费", body.getString("category"))
                     assertEquals("一级护理费", body.getString("name"))
                     assertEquals("启用", body.getString("status"), "新建项目状态必须默认 启用")
+                    assertEquals("低风险", body.getString("nursing_level"), "创建响应必须回显 nursing_level")
                 }
             }
         }.onComplete { ar ->
@@ -678,6 +938,72 @@ class FeeItemServiceTest {
                 ctx.verify {
                     assertEquals(400, missingStatus, "缺状态必须 400")
                     assertNotNull(missingBody.getString("error"))
+                }
+            }
+        }.onComplete { ar ->
+            if (ar.succeeded()) ctx.completeNow() else ctx.failNow(ar.cause())
+        }
+    }
+
+    @Test
+    fun `护理费等级缺失与非法路由返回400`(vertx: Vertx, ctx: VertxTestContext) {
+        val stub = DatabaseStub()
+        withServer(vertx, stub, userId = "billing-route-1") { port ->
+            httpRequest(
+                vertx, port, HttpMethod.POST,
+                "/healthcare/v1/fee-items",
+                feeItemBody().also { it.remove("nursing_level") },
+            ).compose { (missingStatus, missingBody) ->
+                ctx.verify {
+                    assertEquals(400, missingStatus, "护理费缺等级必须 400")
+                    assertEquals("nursing_level is required for 护理费 fee item", missingBody.getString("error"))
+                }
+                httpRequest(
+                    vertx, port, HttpMethod.POST,
+                    "/healthcare/v1/fee-items",
+                    feeItemBody(mapOf("nursing_level" to "特级护理")),
+                )
+            }.map { (invalidStatus, invalidBody) ->
+                ctx.verify {
+                    assertEquals(400, invalidStatus, "护理费等级非法值必须 400")
+                    assertTrue(
+                        invalidBody.getString("error")?.contains("nursing_level must be one of") == true,
+                        "got: ${invalidBody.getString("error")}",
+                    )
+                    assertTrue(stub.queries.isEmpty(), "校验失败不得触发任何 SQL: ${stub.queries}")
+                }
+            }
+        }.onComplete { ar ->
+            if (ar.succeeded()) ctx.completeNow() else ctx.failNow(ar.cause())
+        }
+    }
+
+    @Test
+    fun `护理费同等级第二条启用项路由返回409`(vertx: Vertx, ctx: VertxTestContext) {
+        val stub = DatabaseStub(mutableListOf(nursingRow("fee-nurse-low", "低风险", "30.00")))
+        withServer(vertx, stub, userId = "billing-route-1") { port ->
+            httpRequest(
+                vertx, port, HttpMethod.POST,
+                "/healthcare/v1/fee-items",
+                feeItemBody(mapOf("nursing_level" to "低风险")),
+            ).compose { (status, body) ->
+                ctx.verify {
+                    assertEquals(409, status, "同等级第二条启用项必须 409")
+                    assertEquals(
+                        "another enabled 护理费 item already bound to level 低风险",
+                        body.getString("error"),
+                    )
+                    assertEquals(1, stub.items.size, "409 不得插入新行")
+                }
+                httpRequest(
+                    vertx, port, HttpMethod.PATCH,
+                    "/healthcare/v1/fee-items/fee-nurse-low/status",
+                    JsonObject().put("status", "停用"),
+                )
+            }.map { (patchStatus, patchBody) ->
+                ctx.verify {
+                    assertEquals(200, patchStatus, "状态流转必须成功")
+                    assertEquals("低风险", patchBody.getString("nursing_level"), "状态流转必须回显 nursing_level")
                 }
             }
         }.onComplete { ar ->

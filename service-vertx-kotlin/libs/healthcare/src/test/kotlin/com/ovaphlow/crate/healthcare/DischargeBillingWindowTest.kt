@@ -455,13 +455,21 @@ class DischargeBillingWindowTest {
             "updated_at" to OffsetDateTime.parse("2026-08-01T09:00:00+08:00"),
         )
 
-    private fun feeItemRow(id: String, category: String, name: String, price: String): Map<String, Any?> =
+    private fun feeItemRow(
+        id: String,
+        category: String,
+        name: String,
+        price: String,
+        nursingLevel: String? = null,
+    ): Map<String, Any?> =
         mapOf(
             "id" to id,
             "category" to category,
             "name" to name,
             "unit_price" to BigDecimal(price),
             "status" to "启用",
+            // 030 W1：护理费按 metadata.nursing_level 匹配（名称只作描述文本）
+            "nursing_level" to nursingLevel,
         )
 
     private fun assessmentRow(date: String, level: String): Map<String, Any?> =
@@ -514,7 +522,7 @@ class DischargeBillingWindowTest {
             periods = mutableListOf(periodRow()),
             feeItems = mutableListOf(
                 feeItemRow("fee-bed", "床位费", "标准床位", "100"),
-                feeItemRow("fee-nurse", "护理费", "中度依赖", "80"),
+                feeItemRow("fee-nurse", "护理费", "中度依赖", "80", nursingLevel = "中度依赖"),
                 feeItemRow("fee-meal", "伙食费", "三餐", "30"),
                 feeItemRow("fee-other", "其他", "自费药", "200"),
             ),

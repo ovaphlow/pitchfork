@@ -35,7 +35,8 @@ class DuplicateBillException(message: String) : Exception(message)
  *     同日多份取最新 created_at），每区间 = 等级字典单价 × 天数；
  *     伙食费 = 账期内就餐执行折合餐次 × 单价（正常=全额、部分=半价、未就餐/拒食=0）。
  *  2. 计费单价取费用项目字典启用项：床位/伙食按分类取唯一启用项；
- *     护理按 分类=护理费 + 名称=result_level 取唯一启用项；
+ *     护理按 分类=护理费 + `metadata.nursing_level`=result_level 取唯一启用项
+ *     （030 W1 起不再按名称匹配，名称只是描述文本）；
  *     无对应启用字典单价 → 400。停用字典项不可用于新账单（自动）与加项（手工）→ 400。
  *  3. 同 encounter 同账期唯一：事务内按 encounter 行锁串行化 + 预检，重复生成 409。
  *  4. 明细为字典快照（item 编码/名称/单价），来源 自动/手工；
@@ -89,6 +90,13 @@ class BillService(
         private const val BLOCK_NO_ADMIT_DATE = "no_admit_date"
         private const val BLOCK_SETTLED = "settled"
         private const val BLOCK_NOT_ELDERLY_ADMISSION = "not_elderly_admission"
+
+        /**
+         * precheck 机器可读提示（notice，030 W2）：说明「某分类为什么本账期不计费」，
+         * **不阻断生成**（口径见 D3：无评估不计费但必须显式告知，保留手工加项补记通道）。
+         */
+        const val NOTICE_NURSING_NO_ASSESSMENT = "nursing_fee_not_billed_no_assessment"
+        const val NOTICE_MEAL_NO_DINING = "meal_fee_not_billed_no_dining_record"
 
         /**
          * 解析并校验结算请求体：只允许 `deposit_offset` 与 `write_off_reason` 两个键。
@@ -223,6 +231,10 @@ class BillService(
      *  8. 存在 `required && !satisfied` 的槽位 → `missing_fee_items`（生成 400 缺字典）；
      *     否则 `blocked_by = null`、`can_generate = true`。
      *
+     * `notices`（030 W2，契约冻结 D8）**始终返回数组**（无提示为 `[]`，早退阻断分支同样返回空数组），
+     * 元素形如 `{"code","category","level"}`；只表达「某分类本账期为什么不计费」的口径，
+     * **不参与阻断判定**（口径见 D3：无护理评估不计费但必须显式告知）。
+     *
      * 与生成路径的**唯一差异**：缺字典不抛异常，而是表达为 `requirements` 数据
      * （缺字典是被查询的业务状态，不是请求错误），因此恒为 200。非养老入住没有对应的
      * 生成守卫，precheck 按计划口径收紧（保守方向：宁可先挡）。
@@ -260,18 +272,18 @@ class BillService(
                     else -> null
                 }
                 if (blocked != null) {
-                    Future.succeededFuture(precheckJson(parsedMonth, interval, blocked, emptyList()))
+                    Future.succeededFuture(precheckJson(parsedMonth, interval, blocked, emptyList(), emptyList()))
                 } else {
                     // blocked == null 保证区间可裁剪（否则上面已判 not_overlapping）
                     val period = interval!!
                     exactBillExists(connection, encounterId, period.first, period.second).compose { exists ->
-                        precheckRequirements(connection, encounterId, period.first, period.second).map { requirements ->
+                        precheckRequirements(connection, encounterId, period.first, period.second).map { state ->
                             val reason = when {
                                 exists -> BLOCK_ALREADY_EXISTS
-                                requirements.any { it.required && !it.satisfied } -> BLOCK_MISSING_FEE_ITEMS
+                                state.requirements.any { it.required && !it.satisfied } -> BLOCK_MISSING_FEE_ITEMS
                                 else -> null
                             }
-                            precheckJson(parsedMonth, period, reason, requirements)
+                            precheckJson(parsedMonth, period, reason, state.requirements, state.notices)
                         }
                     }
                 }
@@ -285,6 +297,7 @@ class BillService(
         period: Pair<LocalDate, LocalDate>?,
         blockedBy: String?,
         requirements: List<PrecheckRequirement>,
+        notices: List<SlotNotice>,
     ): JsonObject {
         val json = JsonObject()
             .put("month", month)
@@ -292,6 +305,7 @@ class BillService(
             .put("period_end", period?.second?.toString())
             .put("can_generate", blockedBy == null)
             .put("requirements", JsonArray(requirements.map(::requirementJson)))
+            .put("notices", JsonArray(notices.map(::noticeJson)))
         if (blockedBy == null) json.putNull("blocked_by") else json.put("blocked_by", blockedBy)
         return json
     }
@@ -303,6 +317,15 @@ class BillService(
             .put("enabled_count", requirement.enabledCount)
             .put("satisfied", requirement.satisfied)
         if (requirement.level == null) json.putNull("level") else json.put("level", requirement.level)
+        return json
+    }
+
+    /** notice 元素（契约冻结 D8）：`{code, category, level}`，level 取不到时显式 null。 */
+    private fun noticeJson(notice: SlotNotice): JsonObject {
+        val json = JsonObject()
+            .put("code", notice.code)
+            .put("category", notice.category)
+        if (notice.level == null) json.putNull("level") else json.put("level", notice.level)
         return json
     }
 
@@ -891,7 +914,14 @@ class BillService(
         val amount: BigDecimal,
     )
 
-    private data class FeeItemRow(val id: String, val category: String, val name: String, val unitPrice: BigDecimal)
+    private data class FeeItemRow(
+        val id: String,
+        val category: String,
+        val name: String,
+        val unitPrice: BigDecimal,
+        /** 服务端业务字段 `metadata.nursing_level`（非护理费为 null）。 */
+        val nursingLevel: String?,
+    )
 
     /**
      * 本账期计费槽位（槽位推导结果）：`required = false` 表示本账期不会用到该分类
@@ -904,6 +934,12 @@ class BillService(
         val quantity: BigDecimal,
     )
 
+    /** precheck 提示（口径说明，不阻断生成）：契约冻结形状 `{code, category, level}`。 */
+    private data class SlotNotice(val code: String, val category: String?, val level: String?)
+
+    /** 槽位推导结果（唯一推导实现 [deriveBillingSlots] 的返回值）：槽位 + 口径提示。 */
+    private data class SlotDerivation(val slots: List<BillingSlot>, val notices: List<SlotNotice>)
+
     /** precheck 槽位结果：`satisfied = enabledCount == 1`（0 条与多条都不满足，由服务端判定）。 */
     private data class PrecheckRequirement(
         val category: String,
@@ -912,6 +948,9 @@ class BillService(
         val enabledCount: Int,
         val satisfied: Boolean,
     )
+
+    /** precheck 数据（同一份槽位推导结果派生）：槽位计数 + 口径提示。 */
+    private data class PrecheckState(val requirements: List<PrecheckRequirement>, val notices: List<SlotNotice>)
 
     /**
      * 启用费用项目字典（一次查询）：[computeAutoItems] 取项与 precheck 槽位计数**共用**。
@@ -922,6 +961,7 @@ class BillService(
             FEE_ITEMS.CATEGORY,
             FEE_ITEMS.NAME,
             FEE_ITEMS.UNIT_PRICE,
+            FeeItemService.nursingLevelColumn,
         ).from(FEE_ITEMS)
             .where(FEE_ITEMS.STATUS.eq(FeeItemService.STATUS_ENABLED))
 
@@ -931,28 +971,37 @@ class BillService(
             category = row.getString("category"),
             name = row.getString("name"),
             unitPrice = row.getBigDecimal("unit_price"),
+            nursingLevel = row.getString(FeeItemService.METADATA_NURSING_LEVEL),
         )
 
-    /** 槽位与启用字典项的匹配口径（取项与计数共用）：护理费按 `level` 匹配 `name`。 */
+    /**
+     * 槽位与启用字典项的匹配口径（取项与计数共用，030 W1 契约冻结）：
+     * 护理费按 `metadata.nursing_level == slot.level` 匹配（不再按 `name`）；
+     * 床位/伙食槽位 `level == null`，仍只按分类匹配。
+     */
     private fun FeeItemRow.matchesSlot(slot: BillingSlot): Boolean =
-        category == slot.category && (slot.level == null || name == slot.level)
+        category == slot.category && (slot.level == null || nursingLevel == slot.level)
 
     /**
      * 本账期需要哪些费用项目槽位（**唯一推导实现**，[computeAutoItems] 与 [precheckBillGeneration]
      * 共用，禁止各算一套）：
      * ```
      * 槽位 = [床位费] + [护理费(level) for 账期内每个生效等级] + ([伙食费] if 折合餐次 > 0)
+     * notice = (账期内无生效护理等级 → 护理费不计) + (折合餐次 = 0 → 伙食费不计)
      * ```
      * 生效等级取法完全沿用 [BillingEngine.nursingSegments]（同日多份取 `created_at` 最新、
      * 账期前最后一次评估决定首段、账期内每个变更点各成一段）；账期内无就餐时
      * 伙食费槽位 `required = false`（不参与计价、也不构成缺项）。
+     *
+     * `notices` 只表达口径（口径见 D3：无评估不计费但必须显式告知），**不参与阻断判定**；
+     * [generate] 只消费 `slots`（金额语义逐字不变）。
      */
     private fun deriveBillingSlots(
         client: SqlClient,
         encounterId: String,
         stayStart: LocalDate,
         stayEnd: LocalDate,
-    ): Future<List<BillingSlot>> {
+    ): Future<SlotDerivation> {
         val bedDays = BigDecimal.valueOf(BillingEngine.inclusiveDays(stayStart, stayEnd))
         val segmentsFuture = loadAssessments(client, encounterId, stayEnd).map { assessments ->
             BillingEngine.nursingSegments(
@@ -977,7 +1026,14 @@ class BillService(
                     required = mealQuantity.signum() > 0,
                     quantity = mealQuantity,
                 )
-                slots
+                val notices = mutableListOf<SlotNotice>()
+                if (segments.isEmpty()) {
+                    notices += SlotNotice(NOTICE_NURSING_NO_ASSESSMENT, CATEGORY_NURSING, null)
+                }
+                if (mealQuantity.signum() <= 0) {
+                    notices += SlotNotice(NOTICE_MEAL_NO_DINING, CATEGORY_MEAL, null)
+                }
+                SlotDerivation(slots, notices)
             }
         }
     }
@@ -994,20 +1050,21 @@ class BillService(
         )
     }
 
-    /** 槽位 → 启用字典项计数：一次查询取全部启用项，按 `(category, name/level)` 匹配计数。 */
+    /** 槽位 → 结果：一次查询取全部启用项，按 `category`（床位/伙食）或 `nursing_level`（护理）匹配计数。 */
     private fun precheckRequirements(
         client: SqlClient,
         encounterId: String,
         stayStart: LocalDate,
         stayEnd: LocalDate,
-    ): Future<List<PrecheckRequirement>> =
+    ): Future<PrecheckState> =
         execute(client, enabledFeeItemsQuery()).compose { rows ->
             val items = rows.map(::feeItemRowOf)
-            deriveBillingSlots(client, encounterId, stayStart, stayEnd).map { slots ->
-                slots.map { slot ->
+            deriveBillingSlots(client, encounterId, stayStart, stayEnd).map { derivation ->
+                val requirements = derivation.slots.map { slot ->
                     val count = items.count { it.matchesSlot(slot) }
                     PrecheckRequirement(slot.category, slot.level, slot.required, count, count == 1)
                 }
+                PrecheckState(requirements, derivation.notices)
             }
         }
 
@@ -1021,9 +1078,11 @@ class BillService(
         execute(connection, enabledFeeItemsQuery()).compose { rows ->
             val items = rows.map(::feeItemRowOf)
             // 取项基于同一份槽位推导结果；required = false 的槽位（账期内无就餐的伙食费）不参与计价
-            deriveBillingSlots(connection, encounterId, stayStart, stayEnd).compose { slots ->
+            deriveBillingSlots(connection, encounterId, stayStart, stayEnd).compose { derivation ->
                 try {
-                    Future.succeededFuture(slots.filter { it.required }.map { slot -> autoItemOf(items, slot) })
+                    Future.succeededFuture(
+                        derivation.slots.filter { it.required }.map { slot -> autoItemOf(items, slot) },
+                    )
                 } catch (error: IllegalArgumentException) {
                     Future.failedFuture(error)
                 }

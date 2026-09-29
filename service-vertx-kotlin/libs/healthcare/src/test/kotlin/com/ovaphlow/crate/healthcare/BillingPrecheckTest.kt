@@ -220,6 +220,7 @@ class BillingPrecheckTest {
         name: String,
         price: String,
         status: String = "启用",
+        nursingLevel: String? = null,
     ): Map<String, Any?> =
         mapOf(
             "id" to id,
@@ -227,6 +228,8 @@ class BillingPrecheckTest {
             "name" to name,
             "unit_price" to BigDecimal(price),
             "status" to status,
+            // 030 W1：护理费按 metadata.nursing_level 匹配（名称只作描述文本）
+            "nursing_level" to nursingLevel,
         )
 
     private fun assessmentRow(encounterId: String, date: String, createdAt: String, level: String): Map<String, Any?> =
@@ -255,23 +258,24 @@ class BillingPrecheckTest {
         )
 
     /**
-     * 标准满月 fixture：床位 100 / 护理 特级护理 & 中度依赖 / 伙食 30；
-     * 08-01 同日两份评估（09:00 低级护理被 10:00 特级护理取代）+ 09-10 中度依赖；
+     * 标准满月 fixture：床位 100 / 护理 高风险 & 中风险 / 伙食 30（护理字典名称与等级不同名，
+     * 用于锁定「按 metadata.nursing_level 匹配、名称不参与」）；
+     * 08-01 同日两份评估（09:00 低风险被 10:00 高风险取代）+ 09-10 中风险；
      * 账期内 2.5 折合餐次。
      */
     private fun fullStub(): DatabaseStub = DatabaseStub(
         encounters = rows(encounterRow()),
         feeItems = mutableListOf(
             feeItemRow("fee-bed", "床位费", "标准床位", "100"),
-            feeItemRow("fee-nurse-top", "护理费", "特级护理", "200"),
-            feeItemRow("fee-nurse-mid", "护理费", "中度依赖", "80"),
-            feeItemRow("fee-nurse-low", "护理费", "低级护理", "50"),
+            feeItemRow("fee-nurse-top", "护理费", "护理费·高风险", "200", nursingLevel = "高风险"),
+            feeItemRow("fee-nurse-mid", "护理费", "护理费·中风险", "80", nursingLevel = "中风险"),
+            feeItemRow("fee-nurse-low", "护理费", "护理费·低风险", "50", nursingLevel = "低风险"),
             feeItemRow("fee-meal", "伙食费", "三餐", "30"),
         ),
         assessments = mutableListOf(
-            assessmentRow("enc-1", "2026-08-01", "2026-08-01T09:00:00+08:00", "低级护理"),
-            assessmentRow("enc-1", "2026-08-01", "2026-08-01T10:00:00+08:00", "特级护理"),
-            assessmentRow("enc-1", "2026-09-10", "2026-09-10T08:00:00+08:00", "中度依赖"),
+            assessmentRow("enc-1", "2026-08-01", "2026-08-01T09:00:00+08:00", "低风险"),
+            assessmentRow("enc-1", "2026-08-01", "2026-08-01T10:00:00+08:00", "高风险"),
+            assessmentRow("enc-1", "2026-09-10", "2026-09-10T08:00:00+08:00", "中风险"),
         ),
         mealsByEncounter = mutableMapOf("enc-1" to listOf("正常", "正常", "部分")),
     )
@@ -285,6 +289,12 @@ class BillingPrecheckTest {
         requirementsOf(body).first {
             it.getString("category") == category && it.getString("level") == level
         }
+
+    private fun noticesOf(body: JsonObject): List<JsonObject> =
+        body.getJsonArray("notices").map { it as JsonObject }
+
+    private fun noticeOf(body: JsonObject, code: String): JsonObject =
+        noticesOf(body).first { it.getString("code") == code }
 
     private fun causeOf(future: Future<*>): Throwable {
         try {
@@ -323,8 +333,8 @@ class BillingPrecheckTest {
         assertEquals(
             listOf(
                 "床位费" to null,
-                "护理费" to "特级护理",
-                "护理费" to "中度依赖",
+                "护理费" to "高风险",
+                "护理费" to "中风险",
                 "伙食费" to null,
             ),
             categories,
@@ -341,14 +351,78 @@ class BillingPrecheckTest {
             }
         }
 
-        // 同日多份取 created_at 最新：09:00 的低级护理被 10:00 的特级护理取代，不产生槽位
+        // 同日多份取 created_at 最新：09:00 的低风险被 10:00 的高风险取代，不产生槽位
         assertTrue(
-            requirementsOf(body).none { it.getString("level") == "低级护理" },
+            requirementsOf(body).none { it.getString("level") == "低风险" },
             "被同日后一份评估取代的历史等级不得产生槽位",
         )
+
+        // notices：本账期护理有评估、伙食有餐次 → 口径提示必须为空数组（键仍必须存在）
+        assertTrue(body.containsKey("notices"), "notices 字段必须始终存在")
+        assertEquals(emptyList<String>(), noticesOf(body).map { it.getString("code") })
+
         assertTrue(
             stub.writeStatements().isEmpty(),
             "precheck 不得产生任何写入: ${stub.writeStatements()}",
+        )
+    }
+
+    // ——— 1b. 口径提示 notices（030 W2 契约冻结 D8） ———
+
+    @Test
+    fun `precheck无护理评估时给出未计费notice且不产生护理槽位`() {
+        val stub = DatabaseStub(
+            encounters = rows(encounterRow()),
+            feeItems = mutableListOf(
+                feeItemRow("fee-bed", "床位费", "标准床位", "100"),
+                feeItemRow("fee-meal", "伙食费", "三餐", "30"),
+            ),
+            mealsByEncounter = mutableMapOf("enc-1" to listOf("正常")),
+        )
+        val body = completed(BillService(stub.pool).precheckBillGeneration("enc-1", "2026-09"))
+
+        assertTrue(body.getBoolean("can_generate"), "无护理评估不阻断生成（D3：不计费但必须显式告知）")
+        assertNull(body.getString("blocked_by"))
+        assertEquals(
+            listOf("床位费" to null, "伙食费" to null),
+            requirementsOf(body).map { it.getString("category") to it.getString("level") },
+            "无评估时根本不产生护理费槽位（护理费静默消失必须由 notice 显式表达）",
+        )
+        assertEquals(
+            listOf("nursing_fee_not_billed_no_assessment"),
+            noticesOf(body).map { it.getString("code") },
+        )
+        val notice = noticeOf(body, "nursing_fee_not_billed_no_assessment")
+        assertEquals("护理费", notice.getString("category"))
+        assertTrue(notice.containsKey("level"), "notice 必须含 level 键（显式 null）")
+        assertNull(notice.getString("level"))
+        assertTrue(stub.writeStatements().isEmpty())
+    }
+
+    @Test
+    fun `precheck无评估且无就餐记录时两条notice同时给出`() {
+        val stub = DatabaseStub(
+            encounters = rows(encounterRow()),
+            feeItems = mutableListOf(feeItemRow("fee-bed", "床位费", "标准床位", "100")),
+        )
+        val body = completed(BillService(stub.pool).precheckBillGeneration("enc-1", "2026-09"))
+
+        assertTrue(body.getBoolean("can_generate"), "护理/伙食本账期不计费，缺字典也不阻断")
+        assertEquals(
+            listOf("床位费" to null, "伙食费" to null),
+            requirementsOf(body).map { it.getString("category") to it.getString("level") },
+            "无餐次时伙食费槽位仍存在但 required = false（不构成缺项）",
+        )
+        assertFalse(requirementOf(body, "伙食费").getBoolean("required"))
+        assertEquals(
+            listOf("nursing_fee_not_billed_no_assessment", "meal_fee_not_billed_no_dining_record"),
+            noticesOf(body).map { it.getString("code") },
+            "护理费提示在前、伙食费提示在后",
+        )
+        assertEquals("伙食费", noticeOf(body, "meal_fee_not_billed_no_dining_record").getString("category"))
+        assertTrue(
+            noticesOf(body).all { it.containsKey("code") && it.containsKey("category") && it.containsKey("level") },
+            "notice 元素形状必须为 {code, category, level}: ${noticesOf(body)}",
         )
     }
 
@@ -359,11 +433,11 @@ class BillingPrecheckTest {
         val stub = DatabaseStub(
             encounters = rows(encounterRow()),
             feeItems = mutableListOf(
-                feeItemRow("fee-nurse-mid", "护理费", "中度依赖", "80"),
+                feeItemRow("fee-nurse-mid", "护理费", "护理费·中风险", "80", nursingLevel = "中风险"),
                 feeItemRow("fee-meal", "伙食费", "三餐", "30"),
             ),
             assessments = mutableListOf(
-                assessmentRow("enc-1", "2026-08-01", "2026-08-01T09:00:00+08:00", "中度依赖"),
+                assessmentRow("enc-1", "2026-08-01", "2026-08-01T09:00:00+08:00", "中风险"),
             ),
             mealsByEncounter = mutableMapOf("enc-1" to listOf("正常")),
         )
@@ -382,6 +456,8 @@ class BillingPrecheckTest {
                     assertEquals(0, bed.getInteger("enabled_count"))
                     assertFalse(bed.getBoolean("satisfied"), "enabled_count = 0 必须不满足")
                     assertNull(bed.getString("level"), "非护理槽位 level 必须为 null")
+                    assertNotNull(body.getJsonArray("notices"), "notices 字段必须始终存在（可为空数组）")
+                    assertEquals(0, noticesOf(body).size, "有评估 + 有餐次 → 无口径提示")
                 }
             }
         }.onComplete { ar ->
@@ -402,7 +478,7 @@ class BillingPrecheckTest {
         assertEquals(2, bed.getInteger("enabled_count"), "两条启用必须计数为 2")
         assertFalse(bed.getBoolean("satisfied"), "多条启用同样不满足（后端只给数据）")
         // 其余槽位仍为满足状态，错误语义完全由该槽位承担
-        assertTrue(requirementOf(body, "护理费", "特级护理").getBoolean("satisfied"))
+        assertTrue(requirementOf(body, "护理费", "高风险").getBoolean("satisfied"))
         assertTrue(requirementOf(body, "伙食费").getBoolean("satisfied"))
     }
 
@@ -414,10 +490,10 @@ class BillingPrecheckTest {
             encounters = rows(encounterRow()),
             feeItems = mutableListOf(
                 feeItemRow("fee-bed", "床位费", "标准床位", "100"),
-                feeItemRow("fee-nurse-mid", "护理费", "中度依赖", "80"),
+                feeItemRow("fee-nurse-mid", "护理费", "护理费·中风险", "80", nursingLevel = "中风险"),
             ),
             assessments = mutableListOf(
-                assessmentRow("enc-1", "2026-08-01", "2026-08-01T09:00:00+08:00", "中度依赖"),
+                assessmentRow("enc-1", "2026-08-01", "2026-08-01T09:00:00+08:00", "中风险"),
             ),
         )
         val body = completed(BillService(stub.pool).precheckBillGeneration("enc-1", "2026-09"))
@@ -429,7 +505,17 @@ class BillingPrecheckTest {
         assertEquals(0, meal.getInteger("enabled_count"), "无启用伙食费项时计数为 0")
         assertFalse(meal.getBoolean("satisfied"), "satisfied 仍由 enabled_count == 1 判定")
         assertTrue(requirementOf(body, "床位费").getBoolean("satisfied"))
-        assertTrue(requirementOf(body, "护理费", "中度依赖").getBoolean("satisfied"))
+        assertTrue(requirementOf(body, "护理费", "中风险").getBoolean("satisfied"))
+
+        // 有评估（无护理提示）+ 无就餐记录 → 只给伙食费未计费提示
+        assertEquals(
+            listOf("meal_fee_not_billed_no_dining_record"),
+            noticesOf(body).map { it.getString("code") },
+            "无就餐登记必须显式告知伙食费不计（槽位 required = false 不足以让页面说明口径）",
+        )
+        val notice = noticeOf(body, "meal_fee_not_billed_no_dining_record")
+        assertEquals("伙食费", notice.getString("category"))
+        assertNull(notice.getString("level"))
     }
 
     // ——— 4. 各 blocked_by 分支（顺序与真实生成校验一致） ———
@@ -444,6 +530,7 @@ class BillingPrecheckTest {
         assertFalse(body.getBoolean("can_generate"))
         assertEquals("settled", body.getString("blocked_by"))
         assertEquals(0, requirementsOf(body).size, "早退阻断不推算槽位")
+        assertEquals(0, noticesOf(body).size, "早退阻断分支 notices 为空数组（键必须存在）")
         assertTrue(settled.writeStatements().isEmpty())
 
         // 同时缺 admit_date 时仍报 settled（与生成路径的 409 先于 400 一致）
@@ -674,9 +761,10 @@ class BillingPrecheckTest {
         val billItems = bill.getJsonArray("items").map { it as JsonObject }
         val matches = billItems.map { item ->
             val fixture = itemFixtures.getValue(item.getString("item_code"))
+            // 030 W1：护理槽位按字典 metadata.nursing_level 匹配（名称不参与）
             requirements.count { slot ->
                 slot.getString("category") == fixture["category"] &&
-                    (slot.getString("level") == null || slot.getString("level") == fixture["name"])
+                    (slot.getString("level") == null || slot.getString("level") == fixture["nursing_level"])
             }
         }
         assertTrue(matches.all { it == 1 }, "每个自动明细必须恰好命中一个 precheck 槽位: $matches")

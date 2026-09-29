@@ -439,6 +439,7 @@ class BillingSettlementTest {
         name: String,
         price: String,
         status: String = "启用",
+        nursingLevel: String? = null,
     ): Map<String, Any?> =
         mapOf(
             "id" to id,
@@ -446,6 +447,8 @@ class BillingSettlementTest {
             "name" to name,
             "unit_price" to BigDecimal(price),
             "status" to status,
+            // 030 W1：护理费按 metadata.nursing_level 匹配（名称只作描述文本）
+            "nursing_level" to nursingLevel,
         )
 
     private fun assessmentRow(encounterId: String, date: String, createdAt: String, level: String): Map<String, Any?> =
@@ -486,7 +489,7 @@ class BillingSettlementTest {
             periods = mutableListOf(periodRow()),
             feeItems = mutableListOf(
                 feeItemRow("fee-bed", "床位费", "标准床位", "100"),
-                feeItemRow("fee-nurse", "护理费", "中度依赖", "80"),
+                feeItemRow("fee-nurse", "护理费", "中度依赖", "80", nursingLevel = "中度依赖"),
                 feeItemRow("fee-meal", "伙食费", "三餐", "30"),
             ),
             assessments = mutableListOf(

@@ -206,6 +206,7 @@ class BillServiceTest {
         name: String,
         price: String,
         status: String = "启用",
+        nursingLevel: String? = null,
     ): Map<String, Any?> =
         mapOf(
             "id" to id,
@@ -213,6 +214,8 @@ class BillServiceTest {
             "name" to name,
             "unit_price" to BigDecimal(price),
             "status" to status,
+            // 030 W1：护理费按 metadata.nursing_level 匹配（名称只作描述文本）
+            "nursing_level" to nursingLevel,
         )
 
     private fun assessmentRow(encounterId: String, date: String, createdAt: String, level: String): Map<String, Any?> =
@@ -266,16 +269,16 @@ class BillServiceTest {
             "updated_at" to OffsetDateTime.parse("2026-08-01T10:00:00+08:00"),
         )
 
-    /** 标准满月计费环境：床位 100/天、护理 中度依赖 80/天、伙食 30/餐。 */
+    /** 标准满月计费环境：床位 100/天、护理 中风险 80/天、伙食 30/餐。 */
     private fun fullMonthStub(): DatabaseStub = DatabaseStub(
         encounters = rows(encounterRow()),
         feeItems = mutableListOf(
             feeItemRow("fee-bed", "床位费", "标准床位", "100"),
-            feeItemRow("fee-nurse", "护理费", "中度依赖", "80"),
+            feeItemRow("fee-nurse", "护理费", "护理费·中风险", "80", nursingLevel = "中风险"),
             feeItemRow("fee-meal", "伙食费", "三餐", "30"),
         ),
         assessments = mutableListOf(
-            assessmentRow("enc-1", "2026-08-01", "2026-08-01T09:00:00+08:00", "中度依赖"),
+            assessmentRow("enc-1", "2026-08-01", "2026-08-01T09:00:00+08:00", "中风险"),
         ),
         mealsByEncounter = mutableMapOf("enc-1" to listOf("正常", "正常", "部分")),
     )
@@ -409,7 +412,7 @@ class BillServiceTest {
                         val nursing = items.getJsonObject(1)
                         assertEquals("自动", nursing.getString("source"))
                         assertEquals("fee-nurse", nursing.getString("item_code"))
-                        assertEquals("中度依赖", nursing.getString("item_name"))
+                        assertEquals("护理费·中风险", nursing.getString("item_name"))
                         assertEquals(0, BigDecimal("31").compareTo(amount(nursing.getValue("quantity"))))
                         assertEquals(0, BigDecimal("2480.00").compareTo(amount(nursing.getValue("amount"))))
 
@@ -483,10 +486,10 @@ class BillServiceTest {
             encounters = rows(encounterRow()),
             feeItems = mutableListOf(
                 feeItemRow("fee-bed", "床位费", "标准床位", "100"),
-                feeItemRow("fee-nurse", "护理费", "中度依赖", "80"),
+                feeItemRow("fee-nurse", "护理费", "护理费·中风险", "80", nursingLevel = "中风险"),
             ),
             assessments = mutableListOf(
-                assessmentRow("enc-1", "2026-08-01", "2026-08-01T09:00:00+08:00", "中度依赖"),
+                assessmentRow("enc-1", "2026-08-01", "2026-08-01T09:00:00+08:00", "中风险"),
             ),
         )
         val bill = BillService(stub.pool)
@@ -530,7 +533,7 @@ class BillServiceTest {
             encounters = rows(encounterRow()),
             feeItems = mutableListOf(feeItemRow("fee-bed", "床位费", "标准床位", "100")),
             assessments = mutableListOf(
-                assessmentRow("enc-1", "2026-08-01", "2026-08-01T09:00:00+08:00", "特级护理"),
+                assessmentRow("enc-1", "2026-08-01", "2026-08-01T09:00:00+08:00", "无需干预"),
             ),
         )
         withServer(vertx, stub, userId = "cashier-route-1") { port ->
@@ -547,6 +550,82 @@ class BillServiceTest {
         }.onComplete { ar ->
             if (ar.succeeded()) ctx.completeNow() else ctx.failNow(ar.cause())
         }
+    }
+
+    // ——— 3b. 护理费按等级匹配（030 W1）：名称不再参与 ———
+
+    @Test
+    fun `护理费槽位按等级匹配改名后仍生效`() {
+        val stub = DatabaseStub(
+            encounters = rows(encounterRow()),
+            feeItems = mutableListOf(
+                feeItemRow("fee-bed", "床位费", "标准床位", "100"),
+                feeItemRow("fee-nurse", "护理费", "护理费·中风险（已改名）", "80", nursingLevel = "中风险"),
+            ),
+            assessments = mutableListOf(
+                assessmentRow("enc-1", "2026-08-01", "2026-08-01T09:00:00+08:00", "中风险"),
+            ),
+        )
+        val bill = BillService(stub.pool)
+            .generate("enc-1", generateBody(), "cashier-1")
+            .toCompletionStage().toCompletableFuture().get()
+
+        assertEquals(2, bill.getJsonArray("items").size(), "无就餐时只有床位与护理")
+        val nursing = bill.getJsonArray("items").getJsonObject(1)
+        assertEquals("fee-nurse", nursing.getString("item_code"), "字典改名后仍必须按等级命中")
+        assertEquals("护理费·中风险（已改名）", nursing.getString("item_name"))
+        assertEquals(0, BigDecimal("31").compareTo(amount(nursing.getValue("quantity"))))
+        assertEquals(0, BigDecimal("2480.00").compareTo(amount(nursing.getValue("amount"))))
+        assertEquals(0, BigDecimal("5580.00").compareTo(amount(bill.getValue("total_amount"))), "合计 = 3100 + 2480")
+    }
+
+    @Test
+    fun `护理费字典未绑定等级时不再按名称匹配`() {
+        val stub = DatabaseStub(
+            encounters = rows(encounterRow()),
+            feeItems = mutableListOf(
+                feeItemRow("fee-bed", "床位费", "标准床位", "100"),
+                // 名称恰好等于等级，但没有 nursing_level：030 W1 起不得命中（旧脆耦合）
+                feeItemRow("fee-nurse-legacy", "护理费", "中风险", "80"),
+            ),
+            assessments = mutableListOf(
+                assessmentRow("enc-1", "2026-08-01", "2026-08-01T09:00:00+08:00", "中风险"),
+            ),
+        )
+        val cause = causeOf(BillService(stub.pool).generate("enc-1", generateBody(), "cashier-1"))
+        assertInstanceOf(IllegalArgumentException::class.java, cause)
+        assertTrue(
+            cause.message?.contains("no enabled fee item for nursing level 中风险") == true,
+            "got: ${cause.message}",
+        )
+        assertTrue(stub.tuples.none { it.first.contains("insert into healthcare.bills") })
+    }
+
+    @Test
+    fun `非护理费槽位仍按分类匹配且名称不参与`() {
+        val stub = DatabaseStub(
+            encounters = rows(encounterRow()),
+            feeItems = mutableListOf(
+                feeItemRow("fee-bed", "床位费", "随便什么名字", "100"),
+                feeItemRow("fee-meal", "伙食费", "也不看名字", "30"),
+                feeItemRow("fee-nurse", "护理费", "中风险", "80", nursingLevel = "中风险"),
+            ),
+            assessments = mutableListOf(
+                assessmentRow("enc-1", "2026-08-01", "2026-08-01T09:00:00+08:00", "中风险"),
+            ),
+            mealsByEncounter = mutableMapOf("enc-1" to listOf("正常", "正常", "部分")),
+        )
+        val bill = BillService(stub.pool)
+            .generate("enc-1", generateBody(), "cashier-1")
+            .toCompletionStage().toCompletableFuture().get()
+
+        val codes = bill.getJsonArray("items").map { (it as JsonObject).getString("item_code") }
+        assertEquals(
+            listOf("fee-bed", "fee-nurse", "fee-meal"),
+            codes,
+            "床位/伙食按分类匹配、护理按等级匹配（字典名称不参与）",
+        )
+        assertEquals(0, BigDecimal("5655.00").compareTo(amount(bill.getValue("total_amount"))), "合计 = 3100 + 2480 + 75")
     }
 
     @Test
