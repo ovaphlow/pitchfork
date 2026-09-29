@@ -103,8 +103,9 @@ class DefaultAuthenticationTest {
         sessionAuthMountPoints.clear()
         businessCalls.clear()
         port = startServer(buildProductionShapedRouter(vertx, gateBeforeSubRouters = true))
-        // 关掉 keep-alive：每个请求走新连接，避免连接复用带来的偶发读响应体超时
-        // （测试关心的是闸门判定，不是连接池语义）。
+        // keepAlive=false 让每个请求走新连接（测试只关心闸门判定，不测连接复用语义）。
+        // 注意：**它不是**历史 flake 的修法——实测 keepAlive=true 的旧读法同样出现空 body
+        // 与读超时（诊断类里 300 次 51 空 + 50 超时）；flake 真因与修法见 [send]。
         client = vertx.createHttpClient(io.vertx.core.http.HttpClientOptions().setKeepAlive(false))
     }
 
@@ -203,7 +204,7 @@ class DefaultAuthenticationTest {
             val probe = send(port, method, path)
 
             assertEquals(401, probe.status, "$method $path 未认证必须 401，实际 ${probe.status}")
-            assertEquals("{\"error\":\"authentication required\"}", probe.body)
+            assertEquals("{\"error\":\"authentication required\"}", probe.body, "$method $path 的 401 响应体必须与既有认证一致")
             assertEquals(listOf(path), sessionAuthPaths, "$method $path 必须由总闸交给 sessionAuth")
             // 关键断言：不能只看状态码——用"业务处理器是否被调用"证明没进业务逻辑
             // （写路由尤其重要：未认证绝不能产生任何数据库写入）。
@@ -484,34 +485,73 @@ class DefaultAuthenticationTest {
             .get(10, TimeUnit.SECONDS)
             .actualPort()
 
+    /**
+     * 单次请求：**在事件循环上用 `compose` 串起**「建请求 → 收响应头 → 读响应体」，
+     * 只在最后一次性 `await`。关键点是 body handler 的注册时机：
+     *
+     * 旧形态把 `request.send()`（在响应头到达时完成）与 `response.body()` 分成两次
+     * `get()`，中间夹着测试线程的唤醒与调度。事件循环在测试线程醒来之前就可能把响应体
+     * 投递完（此时没有 body handler，数据被丢弃）或把响应结束掉，于是 `body()` 要么
+     * 立刻返回**空 Buffer**，要么**永不完成**——这正是历史 flake 的两种表现
+     * （`expected: <{"error":"authentication required"}> but was: <>` 与「读响应体超时」）。
+     *
+     * `compose` 的续体在响应头所在的**事件循环线程内联执行**（Vert.x `FutureImpl`
+     * 在当前 context 上直接回调，不做线程切换），所以 body handler 一定在后续
+     * `HttpContent` 消息被处理之前注册，与机器负载、测试线程调度无关。
+     *
+     * 实测（临时诊断类，300/50 次循环，最小 401 路由器）：
+     *   - 旧形态、keepAlive=false、不 sleep：300 次里 84 次空 body；
+     *   - 旧形态、keepAlive=false、sleep 30ms：50/50 读超时；
+     *   - 旧形态、keepAlive=true：300 次里 51 次空 body + 50 次超时（排除 keep-alive 因素）；
+     *   - `compose` 串联、keepAlive=false：300 次 0 失败；测试线程额外 sleep 5ms：300 次 0 失败。
+     */
     private fun send(port: Int, method: HttpMethod, path: String, cookie: String? = null): Probe {
-        val request =
-            await("建立 $method $path 请求", port, method, path) {
-                client
-                    .request(method, port, "127.0.0.1", path)
-                    .toCompletionStage()
-                    .toCompletableFuture()
+        val probe = client
+            .request(method, port, "127.0.0.1", path)
+            .compose { request ->
+                if (cookie != null) request.putHeader("Cookie", cookie)
+                request.send()
             }
-        if (cookie != null) {
-            request.putHeader("Cookie", cookie)
-        }
-        val response = await("等待 $method $path 响应头", port, method, path) { request.send().toCompletionStage().toCompletableFuture() }
-        val body =
-            if (response.statusCode() == 204) {
-                // 204 无响应体：Vert.x 客户端对 204 的 body() 不会完成，直接跳过读取。
-                ""
-            } else {
-                await("读取 $method $path 响应体", port, method, path) {
-                    response.body().toCompletionStage().toCompletableFuture()
-                }.toString()
+            .compose { response ->
+                if (response.statusCode() == 204) {
+                    // 204 无响应体：Vert.x 客户端对 204 的 body() 不会完成，直接跳过读取。
+                    io.vertx.core.Future.succeededFuture(
+                        Probe(response.statusCode(), "", response.getHeader("Access-Control-Allow-Origin")),
+                    )
+                } else {
+                    response.body().map { buffer ->
+                        Probe(
+                            response.statusCode(),
+                            buffer.toString(),
+                            response.getHeader("Access-Control-Allow-Origin"),
+                        )
+                    }
+                }
             }
-        return Probe(response.statusCode(), body, response.getHeader("Access-Control-Allow-Origin"))
+            .toCompletionStage()
+            .toCompletableFuture()
+
+        return await("$method $path 请求（含响应体）", port, method, path) { probe }
     }
 
+    /**
+     * 读响应体必须**在事件循环上一次性串联**（见 [send]），不能在测试线程上把
+     * 「等响应头」与「读响应体」拆成两段 await：`send()` 的 future 在**响应头**到达时
+     * 就完成，测试线程被唤醒前，事件循环可能已经把响应体投递完（无 handler → 丢弃），
+     * 或已经把响应结束掉；此后才注册 body handler 就会拿到**空 body**（401 响应体断言
+     * 变成 `<>`）或**永不完成**（10s 读超时）。这是测试自身的客户端用法问题，不是产品
+     * 缺陷：同一个最小 401 路由器在 `ZZScratchResponseBodyRaceTest`（诊断用，已删）里
+     * 旧形态 300 次出现 84 次空 body，串联形态 600 次 0 失败。
+     *
+     * 超时 30s 只是兜底：真因已按上述方式消除，放宽超时不再掩盖竞态。
+     */
     private fun <T> await(stage: String, port: Int, method: HttpMethod, path: String, block: () -> java.util.concurrent.CompletableFuture<T>): T =
         try {
-            block().get(10, TimeUnit.SECONDS)
+            block().get(30, TimeUnit.SECONDS)
         } catch (e: java.util.concurrent.TimeoutException) {
             throw AssertionError("$stage 超时（port=$port）", e)
+        } catch (e: java.util.concurrent.ExecutionException) {
+            // 保留阶段信息：连接/协议错误不能只抛裸 ExecutionException。
+            throw AssertionError("$stage 失败（port=$port）：${e.cause}", e.cause ?: e)
         }
 }

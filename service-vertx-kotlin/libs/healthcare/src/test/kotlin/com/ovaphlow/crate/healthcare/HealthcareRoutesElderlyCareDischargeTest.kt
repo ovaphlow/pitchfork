@@ -2,10 +2,12 @@ package com.ovaphlow.crate.healthcare
 
 import com.ovaphlow.crate.database.DatabaseConfig
 import com.ovaphlow.crate.nursing.TaskExecutionService
+import io.vertx.core.Handler
 import io.vertx.core.Vertx
 import io.vertx.core.http.HttpMethod
 import io.vertx.core.json.JsonObject
 import io.vertx.ext.web.Router
+import io.vertx.ext.web.RoutingContext
 import io.vertx.junit5.VertxExtension
 import io.vertx.junit5.VertxTestContext
 import org.junit.jupiter.api.*
@@ -20,6 +22,8 @@ import java.time.LocalDate
  *
  * 验证：
  *   - 养老入住创建在同一事务返回 encounter + nursing_period，周期开始日期等于入住日期
+ *   - 责任医生/照护师取自认证中间件写入的会话 userId，请求体伪造值不被采纳
+ *   - 未注入认证中间件时创建养老入住仍是 401 兜底，不产生任何落库
  *   - 养老入住缺少绑定周期时离院返回 409（不猜测关闭任意旧周期）
  *   - 存在 IN_PROGRESS 执行时离院返回 409，encounter 与周期均不变
  *   - 正常离院原子收束周期为 COMPLETED 并保留历史执行
@@ -38,6 +42,24 @@ class HealthcareRoutesElderlyCareDischargeTest {
         private const val TEST_PORT = 18424
         private const val FIXTURE_PREFIX = "hd-"
         private val BASE_PATH = "/healthcare/v1"
+        /** 对照挂载：不注入认证中间件，固定「缺会话 → 401 兜底」这条 020–023 契约。 */
+        private val NO_AUTH_BASE_PATH = "/healthcare-noauth/v1"
+    }
+
+    /**
+     * 会话里的操作人。020–023 起 `POST /encounters`、`POST /elderly-admissions` 的
+     * 责任医生/照护师只取认证中间件写入的 `userId`，不再接受请求体取值。
+     */
+    private val sessionUserId = "hd-session-doctor"
+
+    /**
+     * 假认证中间件：模拟 `Main.kt` 注入的 `idpSessionAuthHandler`
+     * （成功时 `ctx.put("userId", subjectId)` 后放行；失败时 401）。
+     * 与 `AcesoIntegrationTestSupport.fakeAuth()` 同形，但 healthcare lib 不能依赖 app。
+     */
+    private fun fakeEncounterAuth(): Handler<RoutingContext> = Handler { ctx ->
+        ctx.put("userId", sessionUserId)
+        ctx.next()
     }
 
     private lateinit var host: String
@@ -56,10 +78,10 @@ class HealthcareRoutesElderlyCareDischargeTest {
         port = System.getProperty("integration.db.port", "5432")
         user = System.getProperty("integration.db.user", "ovaphlow")
         password = System.getenv("PITCHFORK_DB_PASSWORD") ?: ""
+        // 兜底门控：只给了 -Dintegration.db.host 而缺密码时，按 JUnit 假设失败 skip 整个类，不让模块变红。
+        Assumptions.assumeTrue(password.isNotBlank(), "integration test skipped: 需要 PITCHFORK_DB_PASSWORD 才会运行")
 
         try {
-            if (password.isBlank()) throw IllegalStateException("PITCHFORK_DB_PASSWORD must be set")
-
             val rootUrl = "jdbc:postgresql://$host:$port/postgres"
             DriverManager.getConnection(rootUrl, user, password).use { conn ->
                 conn.createStatement().execute("DROP DATABASE IF EXISTS $TEST_DB")
@@ -75,9 +97,15 @@ class HealthcareRoutesElderlyCareDischargeTest {
             pool = DatabaseConfig.createPool(vertx, dbConfig)
             taskExecutionService = TaskExecutionService(pool)
 
-            val healthcareRouter = HealthcareRoutes.create(vertx, pool)
+            // `encounterAuthHandler` 是 `create(...)` 里 `pool` 之后的第 11 个形参（最后一个
+            // Handler 位），与 `Main.kt` 传 11 个 idpSessionAuthHandler 的位置一致；
+            // 用命名实参避免位置误配。它只覆盖 POST /encounters 与 POST /elderly-admissions。
+            val healthcareRouter =
+                HealthcareRoutes.create(vertx, pool, encounterAuthHandler = fakeEncounterAuth())
             val rootRouter = Router.router(vertx)
             rootRouter.route("/healthcare/v1/*").subRouter(healthcareRouter)
+            // 对照挂载：同一个库、同一套路由，只是没有认证中间件——用于固定 401 兜底。
+            rootRouter.route("$NO_AUTH_BASE_PATH/*").subRouter(HealthcareRoutes.create(vertx, pool))
             vertx.createHttpServer()
                 .requestHandler(rootRouter)
                 .listen(TEST_PORT)
@@ -107,12 +135,34 @@ class HealthcareRoutesElderlyCareDischargeTest {
 
     @AfterAll
     fun teardown(ctx: VertxTestContext) {
+        // @BeforeAll 被 Assumptions 跳过（缺密码）时 JUnit 仍会调用 @AfterAll：
+        // 此时没有连接池与 fixture，直接结束，避免把 skip 变成失败。
+        if (!::pool.isInitialized) {
+            ctx.completeNow()
+            return
+        }
         cleanupFixtures()
-        if (::pool.isInitialized) pool.close()
+        pool.close()
 
         server?.close { ar ->
             if (ar.succeeded()) ctx.completeNow()
             else ctx.failNow(ar.cause())
+        }
+    }
+
+    /** 直接查库取单个字符串标量：用于「落库证据」断言（响应回显不能替代写库结果）。 */
+    private fun queryString(sql: String): String? {
+        val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
+        return DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
+            conn.createStatement().executeQuery(sql).use { rs -> if (rs.next()) rs.getString(1) else null }
+        }
+    }
+
+    /** 直接查库取单个 long 标量（count 等）。 */
+    private fun queryLong(sql: String): Long {
+        val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
+        return DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
+            conn.createStatement().executeQuery(sql).use { rs -> if (rs.next()) rs.getLong(1) else -1L }
         }
     }
 
@@ -241,6 +291,13 @@ class HealthcareRoutesElderlyCareDischargeTest {
                 .put("patient_id", fixtureId("patient-5"))
                 .put("encounter_no", "HD-20260801-NEW")
                 .put("admit_date", "2026-08-01T00:00:00+08:00")
+                // 伪造操作人：020–023 起服务端必须忽略请求体里的同名取值，
+                // 责任人只能来自认证中间件写入的会话 userId。
+                .put("attending_physician", "forged-attacker")
+                .put("doctor_id", "forged-attacker")
+                .put("caregiver_id", "forged-attacker")
+                .put("operator_id", "forged-attacker")
+                .put("userId", "forged-attacker")
         ).onSuccess { (status, body) ->
             ctx.verify {
                 assertEquals(201, status)
@@ -250,6 +307,43 @@ class HealthcareRoutesElderlyCareDischargeTest {
                 assertEquals(body.getJsonObject("encounter").getString("id"), nursingPeriod.getString("encounter_id"))
                 assertEquals("2026-08-01", nursingPeriod.getString("start_date"), "周期开始日期必须从入住日期派生")
                 assertEquals("ACTIVE", nursingPeriod.getString("status"))
+                // 新契约：责任人取自会话，请求体伪造值一律不采纳。
+                assertEquals(
+                    sessionUserId,
+                    body.getJsonObject("encounter").getString("attending_physician"),
+                    "责任医生/照护师必须等于会话 userId，不得采纳请求体伪造值",
+                )
+            }
+            // 落库证据：响应可能只是回显请求，这里直接查库确认写入的是会话 userId。
+            val storedAttending = queryString(
+                "SELECT attending_physician FROM healthcare.encounters WHERE encounter_no = 'HD-20260801-NEW'",
+            )
+            ctx.verify {
+                assertEquals(sessionUserId, storedAttending, "落库的责任医生必须是会话 userId，而不是请求体伪造值")
+                ctx.completeNow()
+            }
+        }.onFailure { ctx.failNow(it) }
+    }
+
+    @Test
+    fun `未注入认证中间件时创建养老入住仍401兜底且不落库`(vertx: Vertx, ctx: VertxTestContext) {
+        request(
+            vertx,
+            HttpMethod.POST,
+            "$NO_AUTH_BASE_PATH/elderly-admissions",
+            JsonObject()
+                .put("patient_id", fixtureId("patient-5"))
+                .put("encounter_no", "HD-NOAUTH-20260801")
+                .put("admit_date", "2026-08-01T00:00:00+08:00")
+                .put("attending_physician", "forged-attacker")
+        ).onSuccess { (status, body) ->
+            ctx.verify {
+                assertEquals(401, status, "没有会话时必须 401 兜底，绝不能退化为匿名 201 入住")
+                assertEquals("authentication required", body.getString("error"))
+            }
+            val created = queryLong("SELECT count(*) FROM healthcare.encounters WHERE encounter_no = 'HD-NOAUTH-20260801'")
+            ctx.verify {
+                assertEquals(0L, created, "401 兜底不得产生任何落库")
                 ctx.completeNow()
             }
         }.onFailure { ctx.failNow(it) }
