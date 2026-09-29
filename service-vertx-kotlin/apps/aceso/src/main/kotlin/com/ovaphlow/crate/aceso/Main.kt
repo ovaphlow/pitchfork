@@ -122,6 +122,13 @@ fun main() {
     val apiRouter = Router.router(vertx)
     val nexusBaseUrl = config.getJsonObject("nexus", JsonObject()).getString("base-url", "http://127.0.0.1:8421")
     val idpBaseUrl = config.getJsonObject("identity", JsonObject()).getString("base-url", "http://127.0.0.1:8420")
+
+    // 默认拒绝：白名单（各模块 /health、Identity 代理子树、OPTIONS 预检）之外的一切
+    // /crate-api/* 都必须先通过 IdP 会话校验；新路由默认受保护，不再依赖逐路由挂载。
+    // 必须注册在任何模块子路由之前——Vert.x 按注册顺序匹配，注册晚了等于没注册。
+    val sessionAuth = idpSessionAuthHandler(vertx, idpBaseUrl)
+    apiRouter.route().handler(apiAuthenticationGate(sessionAuth))
+
     apiRouter.route("/identity/v1/*").subRouter(
         ServiceProxyRoutes.create(
             vertx,
