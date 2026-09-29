@@ -57,7 +57,9 @@ import io.vertx.core.json.JsonObject
 import java.net.URI
 import io.vertx.ext.web.Router
 import io.vertx.ext.web.RoutingContext
+import io.vertx.ext.web.handler.BodyHandler
 import io.vertx.ext.web.handler.CorsHandler
+import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.SqlClient
 import org.slf4j.LoggerFactory
 
@@ -96,10 +98,6 @@ fun main() {
     DatabaseConfig.migrate(dbConfig)
     val pool = DatabaseConfig.createPool(vertx, dbConfig)
 
-    val healthcareService = HealthcareService(pool)
-    val stockService = StockService(pool)
-    val materialService = MaterialService(pool)
-
     val mainRouter = Router.router(vertx)
 
     // --- CORS ---
@@ -126,9 +124,78 @@ fun main() {
             .allowedHeader("Idempotency-Key"),
     )
 
-    val apiRouter = Router.router(vertx)
     val nexusBaseUrl = config.getJsonObject("nexus", JsonObject()).getString("base-url", "http://127.0.0.1:8421")
     val idpBaseUrl = config.getJsonObject("identity", JsonObject()).getString("base-url", "http://127.0.0.1:8420")
+    mainRouter.route("/crate-api/*").subRouter(buildApiRouter(vertx, pool, idpBaseUrl, nexusBaseUrl))
+
+    mainRouter.route("/health").handler { ctx ->
+        ctx.json(JsonObject().put("status", "ok").put("app", "aceso"))
+    }
+
+    mainRouter.route().failureHandler { ctx ->
+        val statusCode = ctx.statusCode() ?: 500
+        val err = ctx.failure()
+        log.error(
+            "request exception: {} {} -> {}: {}",
+            ctx.request().method(),
+            ctx.request().path(),
+            statusCode,
+            err?.message ?: "unknown",
+            err,
+        )
+        if (!ctx.response().ended()) {
+            ctx.response().setStatusCode(statusCode).end(
+                JsonObject()
+                    .put("error", if (statusCode == 500) "internal error" else (err?.message ?: "unknown"))
+                    .encode(),
+            )
+        }
+    }
+
+    val port = config.getJsonObject("server", JsonObject()).getInteger("port", 8080)
+    val server =
+        vertx
+            .createHttpServer()
+            .requestHandler(mainRouter)
+            .listen(port)
+            .toCompletionStage()
+            .toCompletableFuture()
+            .get()
+    log.info("Server started on port {}", server.actualPort())
+}
+
+/**
+ * 构建 crate-api 子树（挂载点 `/crate-api`）的 API 路由树：请求体处理 → 默认拒绝认证总闸 → 各模块子路由。
+ *
+ * **顺序不可调换**：`BodyHandler` 必须在总闸之前（详见函数内的根因注释）；总闸必须在一切
+ * 模块子路由之前。`internal` 是为了让无数据库回归护栏 `ApiBodyHandlingTest` 能对
+ * **生产同款装配**断言，而不是对着手抄的镜像装配断言（本次 P0 正是因为只测了镜像装配才漏掉）。
+ */
+internal fun buildApiRouter(
+    vertx: Vertx,
+    pool: Pool,
+    idpBaseUrl: String,
+    nexusBaseUrl: String,
+): Router {
+    val healthcareService = HealthcareService(pool)
+    val stockService = StockService(pool)
+    val materialService = MaterialService(pool)
+
+    val apiRouter = Router.router(vertx)
+
+    // 请求体必须在总闸**之前**、于同步首轮路由里读完；不要依赖各模块子路由里的 BodyHandler。
+    //
+    // 根因（2026-09-29 P0「写操作全部挂起」）：Vert.x-Web 的 BodyHandler 用固定 handler id
+    // 在 RoutingContext 上去重，**只有首个生效**，后续实例只做 form 属性合并后 ctx.next()。
+    // 总闸是异步的（先发 IdP 会话校验，回调里才 ctx.next()）；让出事件循环期间请求体已被读完
+    // （小请求体与请求头在同一个事件循环任务内到达），路由恢复时 request.isEnded() 已为 true，
+    // 此时模块里的 BodyHandler 作为首个 BodyHandler 会走「请求已结束」分支**直接 return 且不调用
+    // ctx.next()** —— 于是没有任何处理器写响应：带请求体的写请求永久挂起（前端只剩 pending，
+    // 服务端无异常、无日志、无数据库写入），GET 无请求体故不受影响。
+    // 无数据库回归护栏见 apps/aceso/src/test/.../ApiBodyHandlingTest.kt。
+    // 上限 20MB 与应用内唯一既有自定义上限（ServiceProxyRoutes 的 Nexus 代理）一致；
+    // 各模块接口均为 JSON，载荷远小于该值。
+    apiRouter.route().handler(BodyHandler.create().setBodyLimit(20L * 1024 * 1024))
 
     // 默认拒绝：白名单（各模块 /health、Identity 代理子树、OPTIONS 预检）之外的一切
     // /crate-api/* 都必须先通过 IdP 会话校验；新路由默认受保护，不再依赖逐路由挂载。
@@ -198,42 +265,7 @@ fun main() {
             drugCatalogPort = pharmacyDrugCatalogPort(materialService),
         ),
     )
-    mainRouter.route("/crate-api/*").subRouter(apiRouter)
-
-    mainRouter.route("/health").handler { ctx ->
-        ctx.json(JsonObject().put("status", "ok").put("app", "aceso"))
-    }
-
-    mainRouter.route().failureHandler { ctx ->
-        val statusCode = ctx.statusCode() ?: 500
-        val err = ctx.failure()
-        log.error(
-            "request exception: {} {} -> {}: {}",
-            ctx.request().method(),
-            ctx.request().path(),
-            statusCode,
-            err?.message ?: "unknown",
-            err,
-        )
-        if (!ctx.response().ended()) {
-            ctx.response().setStatusCode(statusCode).end(
-                JsonObject()
-                    .put("error", if (statusCode == 500) "internal error" else (err?.message ?: "unknown"))
-                    .encode(),
-            )
-        }
-    }
-
-    val port = config.getJsonObject("server", JsonObject()).getInteger("port", 8080)
-    val server =
-        vertx
-            .createHttpServer()
-            .requestHandler(mainRouter)
-            .listen(port)
-            .toCompletionStage()
-            .toCompletableFuture()
-            .get()
-    log.info("Server started on port {}", server.actualPort())
+    return apiRouter
 }
 
 // ========================================================================
