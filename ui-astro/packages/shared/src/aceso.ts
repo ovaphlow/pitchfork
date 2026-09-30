@@ -4602,6 +4602,20 @@ export interface Bill {
   write_off_reason: string | null;
   /** 仅详情接口返回（列表接口为空数组） */
   items?: BillItem[];
+  /**
+   * 红冲（034 A2 反向单）字段，列表与详情接口一并返回：
+   *
+   * - 本单是**红字单**时：`reversal_of` 指向被冲销的原单，原因/操作人/时刻三列恒为 `null`；
+   * - 本单是**已红冲的原单**时：`reversal_reason` / `reversed_by` / `reversed_at` 为红冲留痕，
+   *   `reversal_of` 恒为 `null`（原单金额与状态保留不变，不删除、不重算）；
+   * - 普通账单：五项全为 `null`。
+   */
+  reversal_of: string | null;
+  reversal_reason: string | null;
+  reversed_by: string | null;
+  reversed_at: string | null;
+  /** 本单是「已红冲的原单」时指向冲销它的红字单（服务端 `LEFT JOIN` 计算，只读）；其余为 `null` */
+  reversal_bill_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -4634,6 +4648,24 @@ export function addBillItem(billId: string, input: BillItemInput): Promise<Bill>
   return request<Bill>(`/healthcare/v1/bills/${encodeURIComponent(billId)}/items`, {
     method: "POST",
     body: JSON.stringify(input),
+  });
+}
+
+/**
+ * 红冲（034 A2）：为原单新建一张 `total_amount` 取反的红字单并建立双向关联，
+ * 成功返回**新建的红字单**（201，与既有单条响应口径一致）；原单本身不改、不删，只写红冲留痕。
+ *
+ * 请求体白名单只有 `reason`：此处再 trim 一次（与 [settleEncounterBilling] 对 `write_off_reason`
+ * 的处理一致），调用方须保证 trim 后非空且不超过 500 字符，否则服务端 400。
+ *
+ * 失败消息由服务端给出、前端经 `billingMessages` 中文化：404 原单不存在；
+ * 400 目标本身是红字单或原因非法；409 原单已被红冲、原单不是「待缴费」、
+ * 该 encounter 已关账、原单已有缴费记录。
+ */
+export function reverseBill(billId: string, reason: string): Promise<Bill> {
+  return request<Bill>(`/healthcare/v1/bills/${encodeURIComponent(billId)}/reversal`, {
+    method: "POST",
+    body: JSON.stringify({ reason: reason.trim() }),
   });
 }
 
