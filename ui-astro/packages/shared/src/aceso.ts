@@ -1757,6 +1757,8 @@ export interface MedicationAdministrationSource {
   dispensed_quantity: string;
   administered_quantity: string;
   remaining_quantity: string;
+  /** 每次数量（基础单位，取自医嘱明细 `order_details.dose_quantity`，032 P4）；用于给药数量默认值，缺失为 null */
+  dose_quantity: string | null;
 }
 
 /** 记录给药：成功联动执行为 COMPLETED/SKIPPED 并写 actual_time；给药人与时间由服务端写入 */
@@ -2478,6 +2480,17 @@ export interface PharmacyMedicationOrder {
   dose: string | null;
   unit: string | null;
   route: string | null;
+  /** 每次数量（基础单位，医嘱明细 `order_details.dose_quantity`，032 P4）；未填写为 null */
+  dose_quantity: string | null;
+  /** 每日给药次数：服务端 FrequencyCalculator 由 frequency_code 推导；PRN/STAT/未知为 null */
+  daily_dose_count: number | null;
+  /** 疗程天数：医嘱明细 `order_details.duration_days`；缺失为 null */
+  duration_days: number | null;
+  /**
+   * 本疗程应发总量（基础单位）= 每次数量 × 每日次数 × 疗程天数；STAT 为每次数量；
+   * 无法可信推导时为 null（药房发药量不预填，交由药师手填）
+   */
+  prescribed_total_quantity: string | null;
   frequency_code: string | null;
   frequency_name: string | null;
   start_time: string | null;

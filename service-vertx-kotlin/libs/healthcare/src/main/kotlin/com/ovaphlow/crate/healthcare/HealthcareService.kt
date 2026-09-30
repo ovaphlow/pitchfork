@@ -1081,7 +1081,7 @@ class HealthcareService(
                             return@compose Future.failedFuture(error)
                         }
                         servicePeriodService
-                            .createElderlyCarePeriod(connection, residentId, encounterId, admitDate.toLocalDate(), OffsetDateTime.now())
+                            .createElderlyCarePeriod(connection, residentId, encounterId, businessDate(admitDate), OffsetDateTime.now())
                             .map<JsonObject> { (_, nursingPeriod) ->
                                 JsonObject()
                                     .put("patient", resident)
@@ -1498,7 +1498,7 @@ class HealthcareService(
             } else {
                 OffsetDateTime.now()
             }
-            val recordDate = recordTime.toLocalDate()
+            val recordDate = businessDate(recordTime)
             val recordKind = if (taskExecId != null) "EXECUTION" else "MANUAL"
             val author = body.getString("author")?.trim()?.takeIf { it.isNotBlank() } ?: ""
 
@@ -1637,7 +1637,7 @@ class HealthcareService(
             } else {
                 OffsetDateTime.now()
             }
-            val recordDate = recordTime.toLocalDate()
+            val recordDate = businessDate(recordTime)
 
             // 构建受控 metadata
             val meta = JsonObject()

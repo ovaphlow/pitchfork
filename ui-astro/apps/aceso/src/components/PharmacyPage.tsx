@@ -167,6 +167,21 @@ function returnStatusBadge(status: string | null | undefined): React.ReactNode {
   return <Badge variant={meta.variant}>{meta.label}</Badge>;
 }
 
+/**
+ * 选中批次后按可用库存下调发药数量（032 M4）：医嘱推导出的疗程总量（`prescribed_total_quantity`）
+ * 超过该批次可用库存、且输入框仍等于该预填值时，下调到可用库存，避免药师提交后才被拒。
+ * 药师手改过的值原样保留，提交时的库存上限校验不放松；医嘱未推导出疗程总量或可用库存未知时原样返回。
+ */
+function capDispenseQuantityToStock(
+  quantity: string,
+  prescribedTotal: string | null,
+  available: string | null,
+): string {
+  if (!prescribedTotal || !available) return quantity;
+  if (quantity.trim() !== prescribedTotal) return quantity;
+  return Number(prescribedTotal) > Number(available) ? available : quantity;
+}
+
 export default function PharmacyPage() {
   const [activeTab, setActiveTab] = useState<Tab>("orders");
 
@@ -440,7 +455,8 @@ export default function PharmacyPage() {
       stockId: "",
       materialId: order.material_id ?? "",
       lotId: "",
-      quantity: "1",
+      // 服务端能可信推导疗程总量时预填（032 P4）；推不出时维持 031 的默认 1，交药师手填
+      quantity: order.prescribed_total_quantity?.trim() || "1",
       operator: "",
     });
     setStocks([]);
@@ -518,6 +534,20 @@ export default function PharmacyPage() {
 
   const createAvailableQuantity = Number(selectedStock?.available_quantity ?? "0");
 
+  /**
+   * 医嘱推导出的疗程总量超出所选批次可用库存、且数量输入框仍为该上限值时（032 M4），
+   * 提示条要写清「应发多少 / 可用多少 / 已按可用库存预填」；与上面的下调判据同源。
+   * 药师手改过数量后不再声称「已按可用库存预填」，故一并要求输入框仍等于可用库存。
+   */
+  const createStockShortfall = useMemo(() => {
+    const prescribed = createTarget?.prescribed_total_quantity?.trim();
+    const available = selectedStock?.available_quantity?.trim();
+    if (!prescribed || !available) return null;
+    if (Number(prescribed) <= Number(available)) return null;
+    if (createForm.quantity.trim() !== available) return null;
+    return { prescribed, available };
+  }, [createTarget, selectedStock, createForm.quantity]);
+
   /** 已绑定药品的医嘱展示医嘱快照名；历史文本医嘱展示药房补选的目录药品名 */
   const createMaterialName = createTarget?.material_id
     ? createTarget.material_name || createTarget.drug_name || "已绑定药品"
@@ -534,6 +564,21 @@ export default function PharmacyPage() {
     const end = createTarget.end_time ? formatDate(createTarget.end_time) : null;
     if (!start && !end) return frequency;
     return `${frequency} · 疗程 ${start ?? "—"} 至 ${end ?? "—"}`;
+  }, [createTarget]);
+
+  /**
+   * 发药数量预填依据（032 P4）：只用服务端返回的字段拼展示文本，前端不做频次换算。
+   * `prescribed_total_quantity` 为空（医嘱未填每次数量 / 频次不可推导 / 缺疗程天数）时返回 null，
+   * 调用处沿用 031 的「默认 1 + 人工核对、系统不做自动换算」口径；缺失项显示 `—`。
+   */
+  const createQuantityPrefill = useMemo(() => {
+    const total = createTarget?.prescribed_total_quantity?.trim();
+    if (!total) return null;
+    if (createTarget?.frequency_code === "STAT") return `按医嘱预填 ${total}：一次性（STAT）`;
+    const dose = createTarget?.dose_quantity?.trim() || "—";
+    const daily = createTarget?.daily_dose_count != null ? String(createTarget.daily_dose_count) : "—";
+    const days = createTarget?.duration_days != null ? String(createTarget.duration_days) : "—";
+    return `按医嘱预填 ${total}：每次 ${dose} × 每日 ${daily} 次 × ${days} 天`;
   }, [createTarget]);
 
   const handleCreateDispense = async () => {
@@ -1512,11 +1557,18 @@ export default function PharmacyPage() {
                 disabled={!createForm.warehouse || !createForm.materialId || stocksLoading || stocks.length === 0}
                 onChange={(event) => {
                   const stock = stocks.find((item) => item.id === event.target.value);
+                  // 疗程总量超可用库存时按可用库存预填（032 M4）；手改过的数量不被覆盖
+                  const quantity = capDispenseQuantityToStock(
+                    createForm.quantity,
+                    createTarget?.prescribed_total_quantity?.trim() || null,
+                    stock?.available_quantity?.trim() || null,
+                  );
                   setCreateForm((current) => ({
                     ...current,
                     stockId: stock?.id ?? "",
                     materialId: stock?.material_id ?? current.materialId,
                     lotId: stock?.lot_id ?? "",
+                    quantity,
                   }));
                 }}
               >
@@ -1558,7 +1610,16 @@ export default function PharmacyPage() {
             )}
 
             <div className="rounded-md border border-border bg-surface-alt px-3 py-2 text-xs text-fg-muted">
-              医嘱频次 / 疗程：{createOrderCourse}。发药数量默认 1，请按医嘱频次与疗程核对后填写（系统不做自动换算）。
+              医嘱频次 / 疗程：{createOrderCourse}。
+              {createQuantityPrefill
+                ? `${createQuantityPrefill}；可手动修改，提交时仍以可用库存为上限（系统不做自动换算）。`
+                : "发药数量默认 1，请按医嘱频次与疗程核对后填写（系统不做自动换算）。"}
+              {createStockShortfall && (
+                <span className="mt-1 block text-warning">
+                  本疗程应发 {createStockShortfall.prescribed}，当前可用库存仅 {createStockShortfall.available}
+                  （已按可用库存预填，可手动下调）。
+                </span>
+              )}
             </div>
 
             <div className="grid gap-4 sm:grid-cols-2">

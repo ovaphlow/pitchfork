@@ -18,6 +18,7 @@ import java.time.temporal.ChronoUnit
  * - PRN（按需）和 STAT（立即/临时）不自动生成，返回空列表。
  * - 任务起止日期 (start_date / end_date) 和周期状态由调用方控制，
  *   本工具仅做频率 × 日期的纯计算。
+ * - 032 另提供 [dailyDoseCount]（每日给药次数），供服务端推导本疗程应发总量。
  */
 object FrequencyCalculator {
 
@@ -37,6 +38,17 @@ object FrequencyCalculator {
 
     /** 不允许自动生成的频次编码 */
     private val nonGeneratable: Set<String> = setOf("PRN", "STAT")
+
+    /**
+     * 每日给药频次 → 每日给药次数（032 P4）。只有「每日给药」口径的频次在此表内，
+     * 与 [defaultTimes] 中这些编码的日内时段条数一致（QD/BID/TID/QID）。
+     */
+    private val dailyDoseCounts: Map<String, Int> = mapOf(
+        "QD" to 1,
+        "BID" to 2,
+        "TID" to 3,
+        "QID" to 4,
+    )
 
     /**
      * 计算某个任务在目标日期应生成的计划时间列表。
@@ -67,6 +79,20 @@ object FrequencyCalculator {
             val lt = LocalTime.parse(timeStr)
             OffsetDateTime.of(targetDate, lt, zone)
         }
+    }
+
+    /**
+     * 每日给药次数（032 P4）：仅「每日给药」频次有值（QD=1、BID=2、TID=3、QID=4）。
+     *
+     * 非每日频次（QOD / QW / BIW / TIW）、PRN / STAT、空白与未知频次一律返回 null：
+     * 它们不能折算成「每日次数」，本方法也不代表疗程总给药次数。调用方必须按
+     * 「推不出来就不预填」处理，不得用 [scheduleTimes] 的时段条数冒充每日次数。
+     *
+     * 本方法不改动 [plannedTimesForDate] / [isGeneratable] 的语义。
+     */
+    fun dailyDoseCount(frequencyCode: String?): Int? {
+        val code = frequencyCode?.trim()?.uppercase() ?: return null
+        return dailyDoseCounts[code]
     }
 
     /**

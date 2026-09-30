@@ -51,10 +51,14 @@ import io.vertx.core.Handler
 import io.vertx.core.Vertx
 import io.vertx.core.buffer.Buffer
 import io.vertx.core.http.HttpClient
+import io.vertx.core.http.HttpClientOptions
+import io.vertx.core.http.HttpClientRequest
+import io.vertx.core.http.HttpClientResponse
 import io.vertx.core.http.HttpMethod
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
 import java.net.URI
+import java.util.concurrent.TimeUnit
 import io.vertx.ext.web.Router
 import io.vertx.ext.web.RoutingContext
 import io.vertx.ext.web.handler.BodyHandler
@@ -125,8 +129,12 @@ fun main() {
     )
 
     val nexusBaseUrl = config.getJsonObject("nexus", JsonObject()).getString("base-url", "http://127.0.0.1:8421")
-    val idpBaseUrl = config.getJsonObject("identity", JsonObject()).getString("base-url", "http://127.0.0.1:8420")
-    mainRouter.route("/crate-api/*").subRouter(buildApiRouter(vertx, pool, idpBaseUrl, nexusBaseUrl))
+    val identityConfig = config.getJsonObject("identity", JsonObject())
+    val idpBaseUrl = identityConfig.getString("base-url", "http://127.0.0.1:8420")
+    val idpSessionTimeoutMs = resolveIdpSessionTimeoutMs(identityConfig)
+    mainRouter.route("/crate-api/*").subRouter(
+        buildApiRouter(vertx, pool, idpBaseUrl, nexusBaseUrl, idpSessionTimeoutMs),
+    )
 
     mainRouter.route("/health").handler { ctx ->
         ctx.json(JsonObject().put("status", "ok").put("app", "aceso"))
@@ -176,6 +184,7 @@ internal fun buildApiRouter(
     pool: Pool,
     idpBaseUrl: String,
     nexusBaseUrl: String,
+    idpSessionTimeoutMs: Long = DEFAULT_IDP_SESSION_TIMEOUT_MS,
 ): Router {
     val healthcareService = HealthcareService(pool)
     val stockService = StockService(pool)
@@ -200,7 +209,7 @@ internal fun buildApiRouter(
     // 默认拒绝：白名单（各模块 /health、Identity 代理子树、OPTIONS 预检）之外的一切
     // /crate-api/* 都必须先通过 IdP 会话校验；新路由默认受保护，不再依赖逐路由挂载。
     // 必须注册在任何模块子路由之前——Vert.x 按注册顺序匹配，注册晚了等于没注册。
-    val sessionAuth = idpSessionAuthHandler(vertx, idpBaseUrl)
+    val sessionAuth = idpSessionAuthHandler(vertx, idpBaseUrl, idpSessionTimeoutMs)
     apiRouter.route().handler(apiAuthenticationGate(sessionAuth))
 
     apiRouter.route("/identity/v1/*").subRouter(
@@ -224,17 +233,17 @@ internal fun buildApiRouter(
         HealthcareRoutes.create(
             vertx,
             pool,
-            idpSessionAuthHandler(vertx, idpBaseUrl),
-            idpSessionAuthHandler(vertx, idpBaseUrl),
-            idpSessionAuthHandler(vertx, idpBaseUrl),
-            idpSessionAuthHandler(vertx, idpBaseUrl),
-            idpSessionAuthHandler(vertx, idpBaseUrl),
-            idpSessionAuthHandler(vertx, idpBaseUrl),
-            idpSessionAuthHandler(vertx, idpBaseUrl),
-            idpSessionAuthHandler(vertx, idpBaseUrl),
-            idpSessionAuthHandler(vertx, idpBaseUrl),
-            idpSessionAuthHandler(vertx, idpBaseUrl),
-            idpSessionAuthHandler(vertx, idpBaseUrl),
+            idpSessionAuthHandler(vertx, idpBaseUrl, idpSessionTimeoutMs),
+            idpSessionAuthHandler(vertx, idpBaseUrl, idpSessionTimeoutMs),
+            idpSessionAuthHandler(vertx, idpBaseUrl, idpSessionTimeoutMs),
+            idpSessionAuthHandler(vertx, idpBaseUrl, idpSessionTimeoutMs),
+            idpSessionAuthHandler(vertx, idpBaseUrl, idpSessionTimeoutMs),
+            idpSessionAuthHandler(vertx, idpBaseUrl, idpSessionTimeoutMs),
+            idpSessionAuthHandler(vertx, idpBaseUrl, idpSessionTimeoutMs),
+            idpSessionAuthHandler(vertx, idpBaseUrl, idpSessionTimeoutMs),
+            idpSessionAuthHandler(vertx, idpBaseUrl, idpSessionTimeoutMs),
+            idpSessionAuthHandler(vertx, idpBaseUrl, idpSessionTimeoutMs),
+            idpSessionAuthHandler(vertx, idpBaseUrl, idpSessionTimeoutMs),
             drugCatalogPort = healthcareDrugCatalogPort(materialService),
         ),
     )
@@ -242,14 +251,14 @@ internal fun buildApiRouter(
         NursingRoutes.create(
             vertx,
             pool,
-            idpSessionAuthHandler(vertx, idpBaseUrl),
+            idpSessionAuthHandler(vertx, idpBaseUrl, idpSessionTimeoutMs),
         ),
     )
     apiRouter.route("/dining/v1/*").subRouter(
         DiningRoutes.create(
             vertx,
             pool,
-            idpSessionAuthHandler(vertx, idpBaseUrl),
+            idpSessionAuthHandler(vertx, idpBaseUrl, idpSessionTimeoutMs),
         ),
     )
     apiRouter.route("/pharmacy/v1/*").subRouter(
@@ -261,7 +270,7 @@ internal fun buildApiRouter(
             inventoryInboundPort(stockService),
             inventoryRequisitionTransferPort(stockService),
             inventoryPurchaseReceiptPort(stockService),
-            idpSessionAuthHandler(vertx, idpBaseUrl),
+            idpSessionAuthHandler(vertx, idpBaseUrl, idpSessionTimeoutMs),
             drugCatalogPort = pharmacyDrugCatalogPort(materialService),
         ),
     )
@@ -633,8 +642,48 @@ private fun inventoryPurchaseReceiptPort(stockService: StockService): InventoryP
 
 private const val IDP_SESSION_COOKIE = "identityd_session"
 
-private fun idpSessionAuthHandler(vertx: Vertx, idpBaseUrl: String): Handler<RoutingContext> {
-    val client = vertx.createHttpClient()
+/**
+ * IdP 会话校验的上游超时（连接 + 整体，含读响应体）默认值，单位毫秒。
+ *
+ * 存在的理由：前端只对 `401` 跳登录（`ui-astro/packages/shared/src/aceso.ts`），
+ * 因此「IdP 抖动」必须既**有界返回**（不能永久挂起）又**不进 401**（不能假掉线）。
+ */
+internal const val DEFAULT_IDP_SESSION_TIMEOUT_MS = 3000L
+
+/** 依赖不可用时回给前端的重试提示秒数。 */
+private const val IDP_UNAVAILABLE_RETRY_AFTER_SECONDS = "5"
+
+/**
+ * 从 `identity` 配置节解析会话校验超时：缺失（或非长整数字面量以外的一切缺省场景）用
+ * [DEFAULT_IDP_SESSION_TIMEOUT_MS]。非法值（非正数/超出 Int 范围）由
+ * [idpSessionAuthHandler] 的 `require` 在**启动装配时**拒绝，而不是等请求到达才抛。
+ */
+internal fun resolveIdpSessionTimeoutMs(identityConfig: JsonObject): Long =
+    identityConfig.getLong("session-timeout-ms") ?: DEFAULT_IDP_SESSION_TIMEOUT_MS
+
+/**
+ * IdP 会话校验 handler。
+ *
+ * ## 失败分类（两类失败必须分开，否则依赖抖动会被前端当成会话失效）
+ *
+ * - 上游 `401` / `403` → 本地 `401 {"error":"authentication required"}`（会话无效，前端登出，行为不变）；
+ * - 上游 `200` 但取不到可用 `subject_id`（键缺失，或响应体不是含该键的 JSON 对象）→ 本地 `401`
+ *   （响应形状异常，按会话无效处理，与改动前一致）；
+ * - 上游 `5xx` / 连接失败 / 超时 / 无响应 → 本地 `503` + `Retry-After`
+ *   （依赖不可用，前端不登出，只报错）。
+ *
+ * `internal` 是为了让无数据库测试（`IdpSessionAuthHandlerTest`）能对**真实实现**断言，
+ * 而不是对着手抄的镜像实现断言。挂载方式与顺序仍由 [buildApiRouter] 决定，未变。
+ */
+internal fun idpSessionAuthHandler(
+    vertx: Vertx,
+    idpBaseUrl: String,
+    timeoutMs: Long = DEFAULT_IDP_SESSION_TIMEOUT_MS,
+): Handler<RoutingContext> {
+    require(timeoutMs in 1..Int.MAX_VALUE.toLong()) {
+        "identity.session-timeout-ms must be within 1..${Int.MAX_VALUE}, but was $timeoutMs"
+    }
+    val client = vertx.createHttpClient(HttpClientOptions().setConnectTimeout(timeoutMs.toInt()))
     val upstream = URI(idpBaseUrl)
     val host = requireNotNull(upstream.host) { "identity.base-url must include a host" }
     val port = if (upstream.port == -1) 80 else upstream.port
@@ -646,31 +695,61 @@ private fun idpSessionAuthHandler(vertx: Vertx, idpBaseUrl: String): Handler<Rou
             respondUnauthorized(ctx); return@Handler
         }
         client.request(HttpMethod.GET, port, host, target)
-            .compose { req: io.vertx.core.http.HttpClientRequest ->
+            .compose { req: HttpClientRequest ->
                 req.putHeader("Cookie", cookie)
-                req.send().compose { resp: io.vertx.core.http.HttpClientResponse ->
-                    resp.body().map { body: Buffer ->
-                        Pair(resp.statusCode(), body.toJsonObject())
+                req.send().compose { resp: HttpClientResponse ->
+                    // 一律读完响应体：只按状态码分类也要避免半读连接，且整体超时必须覆盖读体阶段。
+                    resp.body().map { body: Buffer -> Pair(resp.statusCode(), body) }
+                }
+            }
+            // 连接 + 请求（含读响应体）的整体超时：上游挂起时在这里有界结束，绝不无限挂起。
+            .timeout(timeoutMs, TimeUnit.MILLISECONDS)
+            .onSuccess { pair: Pair<Int, Buffer> ->
+                when (pair.first) {
+                    200 -> {
+                        val subjectId = subjectIdOrNull(pair.second)
+                        if (subjectId == null) {
+                            respondUnauthorized(ctx)
+                        } else {
+                            ctx.put("userId", subjectId)
+                            ctx.next()
+                        }
+                    }
+                    401, 403 -> respondUnauthorized(ctx)
+                    else -> {
+                        // 3xx 与其它 4xx（404 路径配错、429 限流…）仍归「依赖不可用」回 503：
+                        // 若按 401 处理会假掉线，是刻意选择。但排障必须能区分「目标配错」与「真实抖动」，
+                        // 故记录状态码与目标 URL —— **只记状态码与 URL，绝不记 cookie / 会话值**。
+                        log.warn(
+                            "idp session check upstream {}{} returned unexpected status {}; degrading to 503",
+                            idpBaseUrl.removeSuffix("/"),
+                            target,
+                            pair.first,
+                        )
+                        respondIdentityUnavailable(ctx)
                     }
                 }
             }
-            .onSuccess { pair: Pair<Int, JsonObject> ->
-                if (pair.first != 200) {
-                    respondUnauthorized(ctx); return@onSuccess
-                }
-                val subjectId = pair.second.getString("subject_id")
-                if (subjectId.isNullOrBlank()) {
-                    respondUnauthorized(ctx); return@onSuccess
-                }
-                ctx.put("userId", subjectId)
-                ctx.next()
-            }
-            .onFailure { respondUnauthorized(ctx) }
+            .onFailure { respondIdentityUnavailable(ctx) }
     }
 }
+
+/** 上游 `200` 响应里的 `subject_id`；缺失或响应体不是含该键的 JSON 对象时返回 `null`。 */
+private fun subjectIdOrNull(body: Buffer): String? =
+    runCatching { body.toJsonObject().getString("subject_id") }.getOrNull()?.takeIf { it.isNotBlank() }
 
 private fun respondUnauthorized(ctx: RoutingContext) {
     if (!ctx.response().ended()) {
         ctx.response().setStatusCode(401).end(JsonObject().put("error", "authentication required").encode())
+    }
+}
+
+/** 依赖不可用（上游 5xx / 连接失败 / 超时 / 无响应）：`503` + `Retry-After`，前端不登出、只报错。 */
+private fun respondIdentityUnavailable(ctx: RoutingContext) {
+    if (!ctx.response().ended()) {
+        ctx.response()
+            .setStatusCode(503)
+            .putHeader("Retry-After", IDP_UNAVAILABLE_RETRY_AFTER_SECONDS)
+            .end(JsonObject().put("error", "identity service unavailable").encode())
     }
 }

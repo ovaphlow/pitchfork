@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Badge, Button, Card, EmptyState, Input, Modal, Table, type Column } from "@pitchfork/ui";
 import {
   ApiRequestError,
@@ -256,6 +256,18 @@ function isConsumingResult(result: string): boolean {
   return result === "已服" || result === "部分服";
 }
 
+/**
+ * 实际给药数量的自动预填值：来源带「每次数量」（医嘱明细 `order_details.dose_quantity`）时取
+ * `min(每次数量, 该来源剩余数量)`（032 P4）；医嘱未填每次数量时返回 null，保持护士手填。
+ * 只做取值，不做任何频次换算。
+ */
+function autoAdministeredQuantity(source: MedicationAdministrationSource | undefined): string | null {
+  const dose = source?.dose_quantity?.trim();
+  if (!source || !dose) return null;
+  const remaining = source.remaining_quantity.trim();
+  return Number(dose) <= Number(remaining) ? dose : remaining;
+}
+
 function isReasonRequiredResult(result: string): boolean {
   return result === "部分服" || result === "拒服" || result === "漏服" || result === "暂缓";
 }
@@ -486,6 +498,8 @@ export default function NursingPage() {
   const [adminResult, setAdminResult] = useState("已服");
   const [adminSourceId, setAdminSourceId] = useState("");
   const [adminQuantity, setAdminQuantity] = useState("");
+  /** 上一次写入 adminQuantity 的自动预填值；仅当输入框为空或仍等于它时才允许再次自动覆盖（032 P4） */
+  const adminQuantityAutoRef = useRef("");
   const [adminReason, setAdminReason] = useState("");
   const [adminSources, setAdminSources] = useState<MedicationAdministrationSource[]>([]);
   const [adminSourcesLoading, setAdminSourcesLoading] = useState(false);
@@ -1214,6 +1228,7 @@ export default function NursingPage() {
     setAdminResult("已服");
     setAdminSourceId("");
     setAdminQuantity("");
+    adminQuantityAutoRef.current = "";
     setAdminReason("");
     setAdminSources([]);
     setAdminError("");
@@ -2527,7 +2542,25 @@ export default function NursingPage() {
                     id="admin-source"
                     className={selectClass}
                     value={adminSourceId}
-                    onChange={(event) => { setAdminSourceId(event.target.value); setAdminError(""); }}
+                    onChange={(event) => {
+                      const sourceId = event.target.value;
+                      setAdminSourceId(sourceId);
+                      setAdminError("");
+                      // 自动预填不覆盖护士手输的数量：仅当输入框为空、或仍等于上一次自动预填值时才更新
+                      const auto = autoAdministeredQuantity(adminSources.find((item) => item.id === sourceId));
+                      if (auto === null) {
+                        // 新来源没有「每次数量」（032 M3）：若输入框仍是上一条来源的自动预填值，必须清掉，
+                        // 否则会把 A 的来源数量当成 B 的数量记录；判据与下面的「不覆盖手输」一致，手改值不动。
+                        if (adminQuantity.trim() !== "" && adminQuantity.trim() === adminQuantityAutoRef.current) {
+                          setAdminQuantity("");
+                        }
+                        adminQuantityAutoRef.current = "";
+                        return;
+                      }
+                      const current = adminQuantity.trim();
+                      if (current === "" || current === adminQuantityAutoRef.current) setAdminQuantity(auto);
+                      adminQuantityAutoRef.current = auto;
+                    }}
                     disabled={adminSourcesLoading}
                   >
                     <option value="">

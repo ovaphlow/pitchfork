@@ -1080,12 +1080,12 @@ class MedicalOrderIntegrationTest {
                     // 医嘱已收束；end_time 保持 fixture 原临床终点，绝不被 now 覆盖
                     assertEquals("COMPLETED", queryText("SELECT status FROM healthcare.medical_orders WHERE id = '$orderId'"))
                     assertEquals(
-                        "t",
+                        "true",
                         queryText("SELECT (end_time = '${sqlTimestamp(endTime)}'::timestamptz)::text FROM healthcare.medical_orders WHERE id = '$orderId'"),
                         "end_time 必须逐瞬间保持原值 $endTime",
                     )
                     assertEquals(
-                        "t",
+                        "true",
                         queryText("SELECT (end_time < now() - interval '1 day')::text FROM healthcare.medical_orders WHERE id = '$orderId'"),
                         "end_time 不得被收束时刻覆盖",
                     )
@@ -1095,17 +1095,22 @@ class MedicalOrderIntegrationTest {
                         queryText("SELECT metadata->'convergence'->>'reason' FROM healthcare.medical_orders WHERE id = '$orderId'"),
                     )
                     assertEquals(
-                        "t",
+                        "true",
                         queryText("SELECT ((metadata->'convergence'->>'end_time')::timestamptz = '${sqlTimestamp(endTime)}'::timestamptz)::text FROM healthcare.medical_orders WHERE id = '$orderId'"),
                         "审计里的 end_time 必须是原临床终点",
                     )
+                    // 此处不能用 SQL_TIMESTAMP_FORMAT（秒级精度）：审计 at 与响应 closed_at 都是
+                    // `now.toString()`（含亚秒），秒级字面量必然不等，属断言缺陷而非产品缺陷；
+                    // 用 toString() 的原样字面量，比较仍是 timestamptz 的逐瞬间相等。
                     assertEquals(
-                        "t",
-                        queryText("SELECT ((metadata->'convergence'->>'at')::timestamptz = '${sqlTimestamp(OffsetDateTime.parse(closedAt))}'::timestamptz)::text FROM healthcare.medical_orders WHERE id = '$orderId'"),
+                        "true",
+                        queryText("SELECT ((metadata->'convergence'->>'at')::timestamptz = '${OffsetDateTime.parse(closedAt)}'::timestamptz)::text FROM healthcare.medical_orders WHERE id = '$orderId'"),
                         "审计 at 必须等于响应 closed_at",
                     )
+                    // 产品用 auditNow()（截断到微秒）同时写 updated_at 与 metadata.convergence.at，
+                    // 两种落库形态精度一致，故可逐瞬间严格相等；不得放宽为区间比较。
                     assertEquals(
-                        "t",
+                        "true",
                         queryText("SELECT (updated_at = (metadata->'convergence'->>'at')::timestamptz)::text FROM healthcare.medical_orders WHERE id = '$orderId'"),
                         "updated_at 必须与收束时刻同源",
                     )
@@ -1231,7 +1236,7 @@ class MedicalOrderIntegrationTest {
                         )
                     }
                     assertEquals(
-                        "t",
+                        "true",
                         queryText("SELECT (end_time = '${sqlTimestamp(nearPast)}'::timestamptz)::text FROM healthcare.medical_orders WHERE id = '$nearPastOrderId'"),
                         "刚刚过去的候选也必须保留原 end_time",
                     )
@@ -1246,12 +1251,12 @@ class MedicalOrderIntegrationTest {
                         "end_time 为空的医嘱永不到期",
                     )
                     assertEquals(
-                        "t",
+                        "true",
                         queryText("SELECT (end_time > now())::text FROM healthcare.medical_orders WHERE id = '$nearFutureOrderId'"),
                         "近未来终点不得被收束",
                     )
                     assertEquals(
-                        "t",
+                        "true",
                         queryText("SELECT (end_time > now())::text FROM healthcare.medical_orders WHERE id = '$farFutureOrderId'"),
                         "远未来终点不得被收束",
                     )
@@ -1502,7 +1507,7 @@ class MedicalOrderIntegrationTest {
                             queryText("SELECT metadata->'convergence'->>'reason' FROM healthcare.medical_orders WHERE id = '$orderId'"),
                         )
                         assertEquals(
-                            "t",
+                            "true",
                             queryText("SELECT (end_time = '${sqlTimestamp(past)}'::timestamptz)::text FROM healthcare.medical_orders WHERE id = '$orderId'"),
                             "$orderId 的 end_time 必须保持原值",
                         )

@@ -15,6 +15,7 @@ import org.jooq.impl.DSL
 import org.jooq.impl.DSL.count
 import java.time.LocalDate
 import java.time.OffsetDateTime
+import java.time.ZoneId
 
 class ServicePeriodService(
     private val pool: Pool,
@@ -44,6 +45,16 @@ class ServicePeriodService(
         )
 
         private val ELDERLY_CARE_OPEN_STATUSES = setOf("ACTIVE", "SUSPENDED")
+
+        private val businessZone: ZoneId = ZoneId.of("Asia/Shanghai")
+
+        /**
+         * 从 TIMESTAMPTZ 取业务日（机构时区 [businessZone] 的本地日期）。
+         * 库值以 UTC 解释（如 `2026-08-06T16:00:00Z` 即机构本地 `2026-08-07 00:00`），
+         * 因此**禁止**直接 `OffsetDateTime.toLocalDate()` —— 那会得到早一天的服务周期开始日。
+         */
+        private fun businessDate(value: OffsetDateTime): LocalDate =
+            value.atZoneSameInstant(businessZone).toLocalDate()
 
         fun toJson(row: Row): JsonObject {
             return JsonObject()
@@ -252,7 +263,7 @@ class ServicePeriodService(
             val patientId = encounter.getString("patient_id")
             val startDate = encounter.getString("admit_date")
                 ?.let { runCatching { OffsetDateTime.parse(it) }.getOrNull() }
-                ?.toLocalDate()
+                ?.let { businessDate(it) }
                 ?: return@compose Future.failedFuture(IllegalArgumentException("encounter has no admit_date"))
 
             getByEncounterId(pool, encounterId).compose { existing ->
