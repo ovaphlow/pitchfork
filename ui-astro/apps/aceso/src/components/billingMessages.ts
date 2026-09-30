@@ -207,6 +207,13 @@ export const BILLING_ERROR_MAPPINGS: BillingErrorMapping[] = [
     render: () => "要红冲的账单不存在或已被删除，请刷新账单列表后重试。",
   },
   {
+    // 0 元封口账单（合法形态：无可用字典单价时的空明细账单）金额非正，红冲与缴费都必须拒绝；
+    // 不加这条会落到下方兜底文案并把英文原句透出（R4 Minor #1）。
+    pattern: /^bill total must be positive/,
+    render: () =>
+      "该账单金额为 0（0 元封口账单），没有可冲销/可收的金额，不能红冲或缴费。如该账期仍需出账，请先补齐费用目录后重新生成。",
+  },
+  {
     // 兜底：任何提到 reason 的 400（缺 reason / 空原因 / 非字符串 / 超过 500 字符等措辞变体）。
     // 必须排在 `write_off_reason` 之后，否则会抢走减免原因的专属文案。
     pattern: /reason/,

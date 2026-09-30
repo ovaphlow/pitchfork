@@ -169,7 +169,6 @@ class PaymentServiceTest {
             queries.add(normalizedSql)
         }
 
-        /** 欠费口径：状态 待缴费 且 余额 > 0；余额 = 合计 − 累计缴费。 */
         /** 欠费口径：状态 待缴费 且 余额 > 0；余额 = 合计 − 累计缴费。
          *  034：SQL 带 reversed_at is null 时排除已红冲原单（红字单靠余额非正天然排除）。 */
         private fun arrearsList(sql: String): List<MutableMap<String, Any?>> {

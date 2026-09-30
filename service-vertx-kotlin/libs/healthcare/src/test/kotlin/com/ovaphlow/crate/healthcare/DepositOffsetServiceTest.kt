@@ -317,11 +317,13 @@ class DepositOffsetServiceTest {
                         )
                     }
                     // ——— 核销目标账单：待缴费 且 余额 > 0，按账期升序 ———
-                    // 034：已红冲原单不是核销目标（生产 SQL 已带 reversed_at is null，本 stub 同口径模拟）
+                    // 034：已红冲原单不是核销目标。与 PaymentServiceTest 同口径：按 SQL 是否真的带
+                    // `reversed_at is null` 决定是否排除，避免生产删掉谓词时本 stub 掩盖回归（R4 Minor #2）。
                     sql.contains("from healthcare.bills") && sql.contains("left outer join") -> {
+                        val excludesReversed = sql.contains("reversed_at is null")
                         val scoped = bills
                             .filter { it["encounter_id"] == values.getOrNull(2) && it["status"] == values.getOrNull(3) }
-                            .filter { it["reversed_at"] == null }
+                            .filter { !excludesReversed || it["reversed_at"] == null }
                             .mapNotNull { bill ->
                                 val paid = payments
                                     .filter { it["bill_id"] == bill["id"] }

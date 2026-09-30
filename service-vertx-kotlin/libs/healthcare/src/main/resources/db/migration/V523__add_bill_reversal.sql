@@ -44,6 +44,10 @@ COMMENT ON COLUMN bills.reversed_by IS '红冲操作人（写在原单上），�
 COMMENT ON COLUMN bills.reversed_at IS '红冲时刻（写在原单上）；非空 = 本单已被红冲，让出「有效原单」唯一性并可重新生成同账期账单';
 
 -- 唯一性重排：表约束 → 部分唯一索引（同 encounter 同账期至多一张「有效原单」）
+-- 本语句依赖 V515 声明的约束名 `uq_bills_encounter_period`（全仓仅 V515 定义、无其它迁移改名）。
+-- 用 IF EXISTS 保证重复执行安全；若某环境该约束换过名字，旧的全量唯一约束会残留在位，
+-- 红字单（与原单同账期）插入会撞 23505 且 reverseBill 无 recover 兜底 → 以 500 呈现，
+-- 那属于环境迁移问题，需人工对齐（R4 Minor #3，生产库无此情况）。
 ALTER TABLE healthcare.bills DROP CONSTRAINT IF EXISTS uq_bills_encounter_period;
 CREATE UNIQUE INDEX uq_bills_encounter_period
     ON healthcare.bills (encounter_id, period_start, period_end)
