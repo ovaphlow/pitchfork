@@ -2,6 +2,7 @@ package com.ovaphlow.crate.nursing
 
 import io.vertx.core.json.JsonObject
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.time.LocalDate
@@ -136,5 +137,39 @@ class FrequencyCalculatorTest {
         val date2 = LocalDate.of(2026, 7, 2)
         assertTrue(FrequencyCalculator.plannedTimesForDate("QOD", null, date1, null).isNotEmpty())
         assertTrue(FrequencyCalculator.plannedTimesForDate("QOD", null, date2, null).isNotEmpty())
+    }
+
+    // ——— 032 P4：每日给药次数（dailyDoseCount） ———
+
+    @Test
+    fun `dailyDoseCount 对每日频次返回每日给药次数`() {
+        assertEquals(1, FrequencyCalculator.dailyDoseCount("QD"))
+        assertEquals(2, FrequencyCalculator.dailyDoseCount("BID"))
+        assertEquals(3, FrequencyCalculator.dailyDoseCount("TID"))
+        assertEquals(4, FrequencyCalculator.dailyDoseCount("QID"))
+        // 频次编码大小写与空白不影响判定（与 plannedTimesForDate 一致的规范化口径）
+        assertEquals(2, FrequencyCalculator.dailyDoseCount(" bid "))
+    }
+
+    /**
+     * 非每日频次不能折算为「每日次数」：返回 null 而不是 scheduleTimes 的时段条数，
+     * 否则「每次数量 × 每日次数 × 疗程天数」会把每周一次高估成每天一次。
+     */
+    @Test
+    fun `dailyDoseCount 对非每日频次返回 null`() {
+        assertNull(FrequencyCalculator.dailyDoseCount("QOD"))
+        assertNull(FrequencyCalculator.dailyDoseCount("QW"))
+        assertNull(FrequencyCalculator.dailyDoseCount("BIW"))
+        assertNull(FrequencyCalculator.dailyDoseCount("TIW"))
+    }
+
+    @Test
+    fun `dailyDoseCount 对 PRN STAT 空白与未知频次返回 null`() {
+        assertNull(FrequencyCalculator.dailyDoseCount("PRN"))
+        assertNull(FrequencyCalculator.dailyDoseCount("STAT"))
+        assertNull(FrequencyCalculator.dailyDoseCount(null))
+        assertNull(FrequencyCalculator.dailyDoseCount(""))
+        assertNull(FrequencyCalculator.dailyDoseCount("   "))
+        assertNull(FrequencyCalculator.dailyDoseCount("UNKNOWN"))
     }
 }

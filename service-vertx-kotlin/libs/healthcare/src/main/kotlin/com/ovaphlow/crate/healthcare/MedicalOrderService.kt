@@ -9,6 +9,7 @@ import com.ovaphlow.crate.database.gen.nursing.tables.NursingServicePeriods.NURS
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingTaskExecutions.NURSING_TASK_EXECUTIONS
 import com.ovaphlow.crate.database.gen.nursing.tables.NursingTasks.NURSING_TASKS
 import com.ovaphlow.crate.nursing.ConflictException
+import com.ovaphlow.crate.nursing.FrequencyCalculator
 import com.ovaphlow.crate.nursing.TaskService
 import com.ovaphlow.crate.nursing.TaskService.OrderTaskInput
 import io.vertx.core.Future
@@ -36,6 +37,29 @@ import java.time.ZoneId
  */
 private fun medicalOrderDecimalText(value: java.math.BigDecimal?): String? =
     value?.stripTrailingZeros()?.toPlainString()
+
+/**
+ * 032 P4 本疗程应发总量（基础单位）：仅当「每次数量 × 每日次数 × 疗程天数」三者齐备时求积；
+ * `STAT` 为一次性（等于每次数量，不乘天数）；其余情形（缺每次数量 / 频次不可折算为每日次数 /
+ * 非 STAT 缺疗程天数）一律 null —— 药房发药量不猜、不预填。
+ *
+ * 全程 [java.math.BigDecimal]（频次与天数经精确整数乘法加入），输出与 [medicalOrderDecimalText] 同口径。
+ */
+private fun prescribedTotalQuantityText(
+    doseQuantity: java.math.BigDecimal?,
+    dailyDoseCount: Int?,
+    durationDays: Int?,
+    frequencyCode: String?,
+): String? {
+    val dose = doseQuantity ?: return null
+    if (frequencyCode?.trim()?.uppercase() == "STAT") return medicalOrderDecimalText(dose)
+    val daily = dailyDoseCount ?: return null
+    val days = durationDays ?: return null
+    val total = dose
+        .multiply(java.math.BigDecimal.valueOf(daily.toLong()))
+        .multiply(java.math.BigDecimal.valueOf(days.toLong()))
+    return medicalOrderDecimalText(total)
+}
 
 class MedicalOrderService(
     private val pool: Pool,
@@ -78,6 +102,8 @@ class MedicalOrderService(
             "MEDICATION" to setOf(
                 "material_id", "material_code", "material_name", "material_bound_by", "material_bound_at",
                 "drug_name", "dose", "unit", "route", "frequency_code", "frequency_name", "duration_days", "remark",
+                // 032 P4：每次数量（基础单位）；仅 MEDICATION 开放，其它医嘱类型不顺手放开
+                "dose_quantity",
             ),
             "THERAPY" to setOf("treatment_item", "frequency_code", "frequency_name", "duration_days", "remark"),
             "EXAMINATION" to setOf("item_name", "body_part", "priority", "clinical_note", "frequency_code", "frequency_name", "duration_days", "remark"),
@@ -1013,6 +1039,13 @@ class MedicalOrderService(
         val orderType = row.getString("order_type")
         val orderClass = row.getString("order_class")
         val details = row.getValue("order_details") as? JsonObject
+        // 032 P4：每次数量（基础单位）与「本疗程应发总量」由服务端推导，前端不得复制频次规则。
+        // 存量医嘱（无 dose_quantity）一律为 null —— 行为与改动前一致，药房量保持手填。
+        val doseQuantity = (details?.getValue("dose_quantity") as? String)
+            ?.trim()?.takeIf(String::isNotBlank)?.toBigDecimalOrNull()
+        val frequencyCode = details?.getString("frequency_code")
+        val dailyDoseCount = FrequencyCalculator.dailyDoseCount(frequencyCode)
+        val durationDays = (details?.getValue("duration_days") as? Number)?.toInt()
         return JsonObject()
             .put("order_id", row.getString("order_id"))
             .put("encounter_id", row.getString("encounter_id"))
@@ -1034,6 +1067,13 @@ class MedicalOrderService(
             .put("route", details?.getString("route"))
             .put("frequency_code", details?.getString("frequency_code"))
             .put("frequency_name", details?.getString("frequency_name"))
+            .put("dose_quantity", medicalOrderDecimalText(doseQuantity))
+            .put("daily_dose_count", dailyDoseCount)
+            .put("duration_days", durationDays)
+            .put(
+                "prescribed_total_quantity",
+                prescribedTotalQuantityText(doseQuantity, dailyDoseCount, durationDays, frequencyCode),
+            )
             .put("start_time", row.getOffsetDateTime("start_time")?.toString())
             .put("end_time", row.getOffsetDateTime("end_time")?.toString())
             .put("doctor", row.getString("doctor"))
@@ -1643,6 +1683,22 @@ class MedicalOrderService(
                 val duration = (fieldValue as Number).toLong()
                 if (duration <= 0) throw IllegalArgumentException("duration_days must be a positive integer")
                 normalized.put(key, fieldValue)
+                continue
+            }
+            if (key == "dose_quantity") {
+                // 032 P4：只接受十进制文本（拒绝 JSON number，避免 Double 精度损失），
+                // 与全仓数量口径一致：正数、最多 6 位小数；不静默进位或截断。
+                val text = (fieldValue as? String)?.trim()
+                    ?: throw IllegalArgumentException("dose_quantity must be decimal text")
+                val quantity = text.toBigDecimalOrNull()
+                    ?: throw IllegalArgumentException("dose_quantity must be decimal text")
+                if (quantity <= java.math.BigDecimal.ZERO) {
+                    throw IllegalArgumentException("dose_quantity must be positive")
+                }
+                if (quantity.stripTrailingZeros().scale() > 6) {
+                    throw IllegalArgumentException("dose_quantity exceeds precision of 6 decimals")
+                }
+                normalized.put(key, text)
                 continue
             }
             if (fieldValue !is String && fieldValue !is Boolean) {

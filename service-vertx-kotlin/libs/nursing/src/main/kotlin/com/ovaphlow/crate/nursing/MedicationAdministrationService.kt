@@ -389,6 +389,8 @@ class MedicationAdministrationService(
                     DSL.field("lot.batch_no").`as`("batch_no"),
                     DSL.field("d.warehouse").`as`("warehouse"),
                     DSL.field("mo.order_details ->> 'unit'").`as`("unit"),
+                    // 032 P4：每次数量（基础单位）随来源行返回，给药弹窗据此预填实际给药数量
+                    DSL.field("mo.order_details ->> 'dose_quantity'").`as`("dose_quantity"),
                     DSL.field("di.dispensed_quantity").`as`("dispensed_quantity"),
                     DSL.field("a.administered_sum").`as`("administered_quantity"),
                 )
@@ -423,6 +425,10 @@ class MedicationAdministrationService(
                                     .put("batch_no", row.getValue("batch_no")?.toString())
                                     .put("warehouse", row.getValue("warehouse")?.toString())
                                     .put("unit", row.getValue("unit")?.toString())
+                                    .put(
+                                        "dose_quantity",
+                                        decimalApi(decimalText(row.getValue("dose_quantity"))),
+                                    )
                                     .put("dispensed_quantity", decimalApi(dispensed))
                                     .put("administered_quantity", decimalApi(administered))
                                     .put("remaining_quantity", decimalApi(remaining)),
