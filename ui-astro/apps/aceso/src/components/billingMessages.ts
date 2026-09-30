@@ -176,6 +176,42 @@ export const BILLING_ERROR_MAPPINGS: BillingErrorMapping[] = [
     pattern: /^write_off_reason/,
     render: () => "减免原因不合法（须为不超过 500 字符的文本），请重新填写。",
   },
+
+  // ─── 红冲（034 A2：POST /healthcare/v1/bills/{id}/reversal） ───────────
+  // 后端原句按同一风格给英文可映射消息；这里沿用本文件既有做法——按**关键字子串**匹配
+  // （同 `/already exists/`），因此对「同一条件的不同后缀」（如 `, cannot reverse bills`、
+  // 已红冲后附账单 ID）同样命中；未命中的变体仍走中文兜底 + 原文附注。
+  {
+    pattern: /cannot reverse a reversal bill/,
+    render: () =>
+      "该账单本身是红冲生成的「红冲单」，不能再被红冲。请对它的原始账单操作，或在需要时重新生成该账期账单。",
+  },
+  {
+    pattern: /already reversed|has been reversed|is reversed/,
+    render: () => "该账单已被红冲过，不能重复红冲。刷新账单列表可看到冲销它的红字单。",
+  },
+  {
+    pattern: /bill is not payable|bill status is not 待缴费/,
+    render: () => "该账单不是「待缴费」状态，不能红冲（已结清/已结算说明已发生收款或已关账）。",
+  },
+  {
+    pattern: /encounter (?:billing )?is settled/,
+    render: () => "该入住已关账，账单已冻结，不能红冲。",
+  },
+  {
+    pattern: /bill (?:already )?has payments/,
+    render: () => "该账单已有缴费记录，不能红冲。请先退款或冲正缴费流水，再红冲原单。",
+  },
+  {
+    pattern: /^bill not found/,
+    render: () => "要红冲的账单不存在或已被删除，请刷新账单列表后重试。",
+  },
+  {
+    // 兜底：任何提到 reason 的 400（缺 reason / 空原因 / 非字符串 / 超过 500 字符等措辞变体）。
+    // 必须排在 `write_off_reason` 之后，否则会抢走减免原因的专属文案。
+    pattern: /reason/,
+    render: () => "红冲原因不合法（必填，且 trim 后不超过 500 字符的文本），请重新填写。",
+  },
 ];
 
 /** 是否含中文字符（说明 message 已是本地文案，例如前端自校验抛错） */
