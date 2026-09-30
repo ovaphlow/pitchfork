@@ -102,6 +102,9 @@ class TextOrderRebindAdministrationIntegrationTest : AcesoDbIntegrationTestBase(
         )
     }
 
+    /** 本次用例经真实生成接口创建的执行 id（ULID，不带 fixture 前缀），供 `assertNoResidual` 按 id 断言。 */
+    private var createdExecutionId: String? = null
+
     /**
      * 本用例的执行记录由真实生成接口创建（主键是服务端 ULID，不带 fixture 前缀），
      * 所以给药记录只能经「任务/执行 → 本用例 fixture」回溯定位；medication_administrations
@@ -123,7 +126,15 @@ class TextOrderRebindAdministrationIntegrationTest : AcesoDbIntegrationTestBase(
         check(countRows("SELECT count(*) FROM healthcare.patients WHERE id LIKE '$fixturePrefix%'") == 0L)
         check(countRows("SELECT count(*) FROM healthcare.medical_orders WHERE id LIKE '$fixturePrefix%'") == 0L)
         check(countRows("SELECT count(*) FROM nursing.nursing_tasks WHERE id LIKE '$fixturePrefix%'") == 0L)
-        check(countRows("SELECT count(*) FROM nursing.nursing_task_executions WHERE id LIKE '$fixturePrefix%'") == 0L)
+        // 执行行的主键是服务端 ULID，`LIKE 'tr-%'` 恒为 0（R3 P2-4）；必须按真实 id 断言，否则漏检残留。
+        createdExecutionId?.let { id ->
+            check(countRows("SELECT count(*) FROM nursing.nursing_task_executions WHERE id = '$id'") == 0L) {
+                "执行行残留：$id"
+            }
+            check(countRows("SELECT count(*) FROM nursing.medication_administrations WHERE task_execution_id = '$id'") == 0L) {
+                "给药记录残留：$id"
+            }
+        }
         check(countRows("SELECT count(*) FROM nursing.medication_administrations WHERE $fixtureAdministrationFilter") == 0L)
         check(countRows("SELECT count(*) FROM pharmacy.pharmacy_dispenses WHERE encounter_id LIKE '$fixturePrefix%'") == 0L)
         check(countRows("SELECT count(*) FROM public.materials WHERE id LIKE '$fixturePrefix%'") == 0L)
@@ -191,6 +202,7 @@ class TextOrderRebindAdministrationIntegrationTest : AcesoDbIntegrationTestBase(
                     ctx.verify {
                         assertNotNull(generatedId, "MEDICATION 任务必须生成执行记录: ${body.encode()}")
                         executionId = generatedId
+                        createdExecutionId = generatedId
                     }
                     promise.complete()
                 }
