@@ -942,7 +942,8 @@ export default function BillingPage() {
         </li>
         <li>
           · 伙食费 = 账期内就餐登记折合餐次 × 单价（正常=1、部分=0.5、未就餐/拒食=0）；
-          <span className="text-fg">没有就餐登记不计伙食费</span>。
+          <span className="text-fg">没有就餐登记不计伙食费</span>
+          （含请假、外出、住院期间未登记就餐）。
         </li>
       </ul>
       {precheckNotices.length > 0 && (
