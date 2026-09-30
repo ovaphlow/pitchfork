@@ -28,6 +28,7 @@ import java.time.Duration
 import java.time.LocalDate
 import java.time.OffsetDateTime
 import java.time.ZoneId
+import java.time.temporal.ChronoUnit
 
 /**
  * 数量响应文本（D5）：去尾零后以十进制文本输出，前端不再格式化。
@@ -60,6 +61,17 @@ private fun prescribedTotalQuantityText(
         .multiply(java.math.BigDecimal.valueOf(days.toLong()))
     return medicalOrderDecimalText(total)
 }
+
+/**
+ * 审计时刻来源：同一瞬间只允许以一种精度落库。
+ *
+ * PostgreSQL `TIMESTAMPTZ` 的存储精度是**微秒**，而 [OffsetDateTime] 默认带纳秒（9 位）。
+ * 若同一个 `now` 既经 JDBC 绑定写进 TIMESTAMPTZ 列（第 7 位起被截断），又序列化成 ISO-8601
+ * 文本写进 JSON/metadata（保留纳秒），则读取端对该文本做 `::timestamptz` 时 PostgreSQL 是
+ * **四舍五入**而非截断：亚微秒部分 ≥ 500ns 时得到的时间比列值大 1µs，同一个瞬间被读成两个值
+ * （约一半概率触发）。这里统一先截断到微秒，使两种落库形态逐位一致。
+ */
+private fun auditNow(): OffsetDateTime = OffsetDateTime.now().truncatedTo(ChronoUnit.MICROS)
 
 class MedicalOrderService(
     private val pool: Pool,
@@ -631,7 +643,9 @@ class MedicalOrderService(
             return Future.failedFuture(error)
         }
         return pool.withTransaction<JsonObject> { connection ->
-            val now = OffsetDateTime.now()
+            // 收束时刻同时写 metadata.convergence.at（JSON 文本）与 updated_at（TIMESTAMPTZ），
+            // 必须同精度：见 [auditNow]。
+            val now = auditNow()
             val encounterGate: Future<Void> = if (encounterId == null) {
                 Future.succeededFuture()
             } else {
@@ -1118,7 +1132,9 @@ class MedicalOrderService(
                     ConflictException("order already bound to a drug material: $existing"),
                 )
             }
-            val now = OffsetDateTime.now()
+            // 补绑时刻同时写 order_details.material_bound_at（JSON 文本）与 updated_at（TIMESTAMPTZ），
+            // 必须同精度：见 [auditNow]。
+            val now = auditNow()
             val merged = details.copy()
             merged.put("material_id", materialId)
             if (materialCode.isNullOrBlank()) {

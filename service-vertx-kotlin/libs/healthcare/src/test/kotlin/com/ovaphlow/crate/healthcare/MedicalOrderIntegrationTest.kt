@@ -1107,6 +1107,8 @@ class MedicalOrderIntegrationTest {
                         queryText("SELECT ((metadata->'convergence'->>'at')::timestamptz = '${OffsetDateTime.parse(closedAt)}'::timestamptz)::text FROM healthcare.medical_orders WHERE id = '$orderId'"),
                         "审计 at 必须等于响应 closed_at",
                     )
+                    // 产品用 auditNow()（截断到微秒）同时写 updated_at 与 metadata.convergence.at，
+                    // 两种落库形态精度一致，故可逐瞬间严格相等；不得放宽为区间比较。
                     assertEquals(
                         "true",
                         queryText("SELECT (updated_at = (metadata->'convergence'->>'at')::timestamptz)::text FROM healthcare.medical_orders WHERE id = '$orderId'"),
