@@ -18,6 +18,7 @@ import io.vertx.sqlclient.RowSet
 import io.vertx.sqlclient.SqlConnection
 import io.vertx.sqlclient.Tuple
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertInstanceOf
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -316,9 +317,13 @@ class DepositOffsetServiceTest {
                         )
                     }
                     // ——— 核销目标账单：待缴费 且 余额 > 0，按账期升序 ———
+                    // 034：已红冲原单不是核销目标。与 PaymentServiceTest 同口径：按 SQL 是否真的带
+                    // `reversed_at is null` 决定是否排除，避免生产删掉谓词时本 stub 掩盖回归（R4 Minor #2）。
                     sql.contains("from healthcare.bills") && sql.contains("left outer join") -> {
+                        val excludesReversed = sql.contains("reversed_at is null")
                         val scoped = bills
                             .filter { it["encounter_id"] == values.getOrNull(2) && it["status"] == values.getOrNull(3) }
+                            .filter { !excludesReversed || it["reversed_at"] == null }
                             .mapNotNull { bill ->
                                 val paid = payments
                                     .filter { it["bill_id"] == bill["id"] }
@@ -373,6 +378,7 @@ class DepositOffsetServiceTest {
         periodEnd: String,
         total: String,
         status: String = BillingEngine.STATUS_PENDING,
+        reversedAt: String? = null,
     ): MutableMap<String, Any?> =
         mutableMapOf(
             "id" to id,
@@ -381,6 +387,7 @@ class DepositOffsetServiceTest {
             "period_end" to LocalDate.parse(periodEnd),
             "status" to status,
             "total_amount" to BigDecimal(total),
+            "reversed_at" to reversedAt?.let(OffsetDateTime::parse),
             "settled_at" to null,
             "created_at" to OffsetDateTime.parse("2026-08-01T10:00:00+08:00"),
             "updated_at" to OffsetDateTime.parse("2026-08-01T10:00:00+08:00"),
@@ -468,6 +475,45 @@ class DepositOffsetServiceTest {
     // ========================================================================
     //  5. 核销资格
     // ========================================================================
+
+    // ——— 034：已红冲原单不再是核销目标 ———
+
+    @Test
+    fun `已红冲原单不再是押金核销目标`() {
+        // 原单已被红冲（reversed_at 非空）且有正余额：它不应构成可核销欠费，
+        // 否则操作为已经冲销的金额搬押金，并掩盖红冲事实。
+        val stub = OffsetStub(
+            bills = mutableListOf(
+                billRow("bill-1", "2026-08-01", "2026-08-31", "1000.00", reversedAt = "2026-09-30T10:00:00+08:00"),
+            ),
+            deposits = mutableListOf(depositRow("登记", "5000.00")),
+        )
+        val cause = causeOf(
+            DepositOffsetService().offsetArrears(
+                stub.connection,
+                "enc-1",
+                BigDecimal("1000.00"),
+                "cashier-1",
+                OffsetDateTime.now(),
+            ),
+        )
+        assertInstanceOf(IllegalArgumentException::class.java, cause)
+        assertTrue(
+            cause.message?.contains("exceeds available") == true,
+            "已红冲原单不得构成可核销欠费: ${cause.message}",
+        )
+        assertTrue(stub.payments.isEmpty(), "不得写缴费流水")
+        assertTrue(stub.insertsOf("deposit_records").isEmpty(), "不得写押金核销台账")
+        val targetSql = stub.queries.first { it.contains("left outer join") }
+        assertTrue(
+            targetSql.contains("reversed_at is null"),
+            "核销目标查询必须排除已红冲原单: $targetSql",
+        )
+        assertFalse(
+            targetSql.contains("reversal_of is null"),
+            "红字单靠余额非正天然排除，不得额外加 reversal_of 谓词: $targetSql",
+        )
+    }
 
     @Test
     fun `encounter不存在返回404且不写入`() {

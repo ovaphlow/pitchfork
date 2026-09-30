@@ -34,6 +34,8 @@ import java.time.OffsetDateTime
  *     它只由结算收束的押金核销（[DepositOffsetService]）写入，客户端无法伪造。
  *  5. 欠费列表 = 状态待缴费且余额 > 0 的账单，分页返回
  *     {records, meta:{total}}，记录含 paid_amount（累计缴费）与 balance（余额）。
+ *     034 起排除已红冲原单（`reversed_at` 非空）：它已被红字单抵消，不该再显示为欠费；
+ *     红字单（负的 total_amount）靠「余额 > 0」判定天然排除。
  *  6. summary 三口径 + 减免单项：
  *     应缴 = Σ账单合计、已缴 = Σ缴费金额、欠费 = Σ待缴费账单余额，
  *     满足 应缴 − 已缴 = 欠费（已结清账单余额恒为 0，由状态机保证）。
@@ -41,6 +43,8 @@ import java.time.OffsetDateTime
  *     此处的「已缴」意为「已收妥，含押金抵扣」，并非现金流入。
  *     减免 = Σ(已结算账单的 outstanding_amount)：收束时被放弃的未结余额快照（021 新增），
  *     减免是收束动作产生的第三项，**不并入欠费**、不改变上面的恒等式。
+ *     红冲后应缴靠正负相抵归零（原单 + 红字单），欠费靠排除已红冲原单归零，
+ *     两者一致，恒等式仍成立（034 §2.2/§2.6）。
  *  7. 冻结守卫：结算收束后（encounters.settled_at 非空）缴费一律 409。
  */
 class PaymentService(
@@ -93,6 +97,27 @@ class PaymentService(
     }
 
     // ========================================================================
+    //  V523 账单红冲列（未重跑 jOOQ codegen：按列名引用，SELECT 带表名限定）
+    // ========================================================================
+
+    private val sReversalOf = DSL.field(DSL.name("bills", "reversal_of"), String::class.java)
+    private val sReversedAt = DSL.field(DSL.name("bills", "reversed_at"), OffsetDateTime::class.java)
+
+    /**
+     * 034 §2.6 守卫：红字单与已红冲原单一律不可缴费，非正金额账单（0 元封口）
+     * 无可收金额也拒绝；返回 null 表示可缴费。
+     * 三类用**同一个错误码与异常类型**（400 IllegalArgumentException，与同方法
+     * 既有的「非待缴费 400」同口径），逐条消息独立可映射。
+     */
+    private fun paymentBarrierMessage(bill: Row): String? {
+        if (bill.getString("reversal_of") != null) return "bill is a reversal bill, cannot pay"
+        if (bill.getOffsetDateTime("reversed_at") != null) return "bill is already reversed, cannot pay"
+        val total = bill.getBigDecimal("total_amount")
+        if (total != null && total.signum() <= 0) return "bill total must be positive, cannot pay"
+        return null
+    }
+
+    // ========================================================================
     //  缴费
     // ========================================================================
 
@@ -123,6 +148,11 @@ class PaymentService(
                         return@compose Future.failedFuture(
                             IllegalArgumentException("bill status is not ${BillingEngine.STATUS_PENDING}, cannot pay"),
                         )
+                    }
+                    // 034 §2.6：红字单 / 已红冲原单 / 非正金额账单不可缴费（400，不写流水）
+                    val barrier = paymentBarrierMessage(bill)
+                    if (barrier != null) {
+                        return@compose Future.failedFuture(IllegalArgumentException(barrier))
                     }
                     val total = bill.getBigDecimal("total_amount")
                     paymentAmounts(connection, billId).compose { amounts ->
@@ -316,6 +346,8 @@ class PaymentService(
                 BILLS.ENCOUNTER_ID,
                 BILLS.STATUS,
                 BILLS.TOTAL_AMOUNT,
+                sReversalOf,
+                sReversedAt,
             ).from(BILLS)
                 .where(BILLS.ID.eq(billId))
                 .forUpdate(),
@@ -354,7 +386,11 @@ class PaymentService(
     private val ppbBillId = DSL.field(DSL.name("ppb", "bill_id"), String::class.java)
     private val ppbPaid = DSL.field(DSL.name("ppb", "paid"), BigDecimal::class.java)
 
-    /** 欠费基数（数据与计数共用）：可选 encounter_id 过滤条件对两者同源生效。 */
+    /**
+     * 欠费基数（数据与计数共用）：可选 encounter_id 过滤条件对两者同源生效。
+     * 034：排除已红冲原单（`reversed_at` 非空）——它已被红字单抵消，不再是欠费；
+     * 红字单（负的 total_amount）靠 `total_amount > paid` 天然排除，不另加谓词。
+     */
     private fun arrearsBase(encounterId: String?) =
         ctx.select(
             BILLS.ID,
@@ -373,6 +409,7 @@ class PaymentService(
                 listOfNotNull(
                     BILLS.STATUS.eq(BillingEngine.STATUS_PENDING),
                     BILLS.TOTAL_AMOUNT.gt(DSL.coalesce(ppbPaid, BigDecimal.ZERO)),
+                    sReversedAt.isNull(),
                     encounterId?.let { BILLS.ENCOUNTER_ID.eq(it) },
                 ),
             )
@@ -392,6 +429,11 @@ class PaymentService(
     private fun summaryPaidQuery(): Query =
         ctx.select(DSL.coalesce(DSL.sum(PAYMENTS.AMOUNT), BigDecimal.ZERO).`as`("paid_amount")).from(PAYMENTS)
 
+    /**
+     * 欠费合计 = Σ(待缴费且余额 > 0 的账单余额)；034 起排除已红冲原单，
+     * 与 [arrearsBase]（欠费列表）同口径；红字单靠 `total_amount > paid` 天然排除。
+     * 这样红冲后 due = A + (−A) = 0、arrears = 0，恒等式 应缴 − 已缴 = 欠费 不被破坏。
+     */
     private fun summaryArrearsQuery(): Query =
         ctx.select(
             DSL.coalesce(
@@ -402,6 +444,7 @@ class PaymentService(
             .leftJoin(paidPerBill).on(ppbBillId.eq(BILLS.ID))
             .where(BILLS.STATUS.eq(BillingEngine.STATUS_PENDING))
             .and(BILLS.TOTAL_AMOUNT.gt(DSL.coalesce(ppbPaid, BigDecimal.ZERO)))
+            .and(sReversedAt.isNull())
 
     /** 减免合计 = Σ(已结算账单的 outstanding_amount)：收束时被放弃的未结余额快照。 */
     private fun summaryWriteOffQuery(): Query =

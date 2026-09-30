@@ -47,9 +47,15 @@ class DuplicateBillException(message: String) : Exception(message)
  *     离院/去世不再收束账单）分三步组合：阶段一 资格校验 + 按需生成区间最终账单
  *     （状态 待缴费，创建时不写 settled_at）→ 押金核销 → 阶段二 未结余额合计 →
  *     阶段三 冻结（全部账单置 已结算 + settled_at，逐张写 outstanding_amount 与
- *     write_off_reason）。冻结（encounters.settled_at 非空）后生成/加项一律 409；
- *     不做撤销/重算/红冲。收束时仍有未结余额必须由调用方显式提供减免原因，
+ *     write_off_reason）。冻结（encounters.settled_at 非空）后生成/加项一律 409。
+ *     收束时仍有未结余额必须由调用方显式提供减免原因，
  *     否则拒绝（见 `HealthcareService.settleEncounterBilling`）。
+ *  7. 红冲（034 决策 A2 反向单，见 [reverseBill]）：既有凭证永不修改/删除，
+ *     改为新建一张金额取反的红字账单抵消原单并双向关联；原单只加
+ *     reversal_reason/reversed_by/reversed_at 留痕，total_amount 与 status 不变。
+ *     红字单与已红冲原单都不可再缴费/加项/红冲。**不做自动重算**：不自动生成
+ *     替代账单，由用户自行对同账期重新生成（唯一性已放开为部分唯一索引，
+ *     见 034 §2）。
  */
 class BillService(
     private val pool: Pool,
@@ -70,6 +76,9 @@ class BillService(
 
         private const val KEY_DEPOSIT_OFFSET = "deposit_offset"
         private const val KEY_WRITE_OFF_REASON = "write_off_reason"
+
+        /** 红冲请求体唯一允许的键（reason）；operator/reversal_of/total_amount 等一律 400 */
+        private val reversalKeys = setOf("reason")
 
         /** NUMERIC(12,2) 上限：10 位整数 + 2 位小数 */
         val maxAmount = BigDecimal("9999999999.99")
@@ -135,6 +144,28 @@ class BillService(
             return SettlementRequest(depositOffset, writeOffReason)
         }
 
+        /**
+         * 解析并校验红冲请求体（034 §2.5）：白名单只有 `reason`，返回 trim 后的原因。
+         *
+         *  - 其他键（含 operator/reversal_of/total_amount/status）→
+         *    `unsupported bill reversal keys: <排序后 joinToString>`（400）；
+         *  - `reason` 缺失 → `reason is required`；非字符串 → `reason must be a string`；
+         *    trim 后为空 → `reason must not be blank`；trim 后超过 500 字符 →
+         *    `reason must not exceed 500 characters`（全部 400）。
+         */
+        fun parseReversalRequest(body: JsonObject): String {
+            val extra = body.fieldNames().filter { it !in reversalKeys }.sorted()
+            if (extra.isNotEmpty()) {
+                throw IllegalArgumentException("unsupported bill reversal keys: ${extra.joinToString(", ")}")
+            }
+            val raw = body.getValue("reason") ?: throw IllegalArgumentException("reason is required")
+            val reason = raw as? String ?: throw IllegalArgumentException("reason must be a string")
+            val trimmed = reason.trim()
+            if (trimmed.isEmpty()) throw IllegalArgumentException("reason must not be blank")
+            if (trimmed.length > 500) throw IllegalArgumentException("reason must not exceed 500 characters")
+            return trimmed
+        }
+
         private fun billJson(row: Row, items: List<JsonObject>): JsonObject =
             JsonObject()
                 .put("id", row.getString("id"))
@@ -146,6 +177,11 @@ class BillService(
                 .put("outstanding_amount", row.getBigDecimal("outstanding_amount"))
                 .put("write_off_reason", row.getString("write_off_reason"))
                 .put("total_amount", row.getBigDecimal("total_amount"))
+                .put("reversal_of", row.getString("reversal_of"))
+                .put("reversal_reason", row.getString("reversal_reason"))
+                .put("reversed_by", row.getString("reversed_by"))
+                .put("reversed_at", row.getOffsetDateTime("reversed_at")?.toString())
+                .put("reversal_bill_id", row.getString("reversal_bill_id"))
                 .put("items", JsonArray(items))
                 .put("created_at", row.getOffsetDateTime("created_at")?.toString())
                 .put("updated_at", row.getOffsetDateTime("updated_at")?.toString())
@@ -172,6 +208,35 @@ class BillService(
      */
     private fun businessDate(value: OffsetDateTime): LocalDate =
         value.atZoneSameInstant(businessZone).toLocalDate()
+
+    // ========================================================================
+    //  V523 账单红冲列（未重跑 jOOQ codegen：按列名引用）
+    //  jOOQ 生成代码由 DB 反向生成；本车道无 DB 授权，故新列一律用 `DSL.field`
+    //  按名引用（与仓库既有的跨 schema 写法一致）。
+    //  注意两种拼法不能混：
+    //   - SELECT 必须带表名限定（红字单自连接会引入同名列，裸列名会 ambiguous）；
+    //   - INSERT 列清单 / UPDATE SET 子句必须用裸列名（PostgreSQL 不接受表名前缀）。
+    // ========================================================================
+
+    /** 主表（bills）红冲列，仅用于 SELECT。 */
+    private val sReversalOf = DSL.field(DSL.name("bills", "reversal_of"), String::class.java)
+    private val sReversalReason = DSL.field(DSL.name("bills", "reversal_reason"), String::class.java)
+    private val sReversedBy = DSL.field(DSL.name("bills", "reversed_by"), String::class.java)
+    private val sReversedAt = DSL.field(DSL.name("bills", "reversed_at"), OffsetDateTime::class.java)
+
+    /** 写入用裸列名（INSERT 列清单 / UPDATE SET 子句）。 */
+    private val wReversalOf = DSL.field(DSL.name("reversal_of"), String::class.java)
+    private val wReversalReason = DSL.field(DSL.name("reversal_reason"), String::class.java)
+    private val wReversedBy = DSL.field(DSL.name("reversed_by"), String::class.java)
+    private val wReversedAt = DSL.field(DSL.name("reversed_at"), OffsetDateTime::class.java)
+
+    /** 红字单自连接：`reversal_bill_id` = 冲销本单的红字单（LEFT JOIN 只读派生）。 */
+    private val redBillAlias = DSL.table(DSL.name("healthcare", "bills")).`as`("red_bill")
+    private val sRedBillId = DSL.field(DSL.name("red_bill", "id"), String::class.java)
+    private val sRedBillReversalOf = DSL.field(DSL.name("red_bill", "reversal_of"), String::class.java)
+
+    /** 「有效原单」谓词（与 V523 的部分唯一索引同口径）：未被红冲且非红字单。 */
+    private val effectiveOriginalFilter = sReversalOf.isNull.and(sReversedAt.isNull)
 
     /**
      * 账期是否晚于机构时区当前月。
@@ -256,7 +321,8 @@ class BillService(
      *  5. 已收束（`encounters.settled_at` 非空）→ `settled`（生成 409）；
      *  6. 缺 `admit_date` → `no_admit_date`（生成 400）；
      *  7. 账期与在院区间无重合 → `not_overlapping`（生成 400）；
-     *  8. 该账期账单已存在（[exactBillExists] 同一语义）→ `already_exists`（生成 409）；
+     *  8. 该账期已有「有效原单」（[effectiveBillExists]，与 generate 的重复预检同口径）→ `already_exists`（生成 409）；
+     *     已被红冲的原单与红字单不算已存在（034 §2.4：红冲后允许同账期重新生成）；
      *  9. 存在 `required && !satisfied` 的槽位 → `missing_fee_items`（生成 400 缺字典）；
      *     否则 `blocked_by = null`、`can_generate = true`。
      *
@@ -309,7 +375,7 @@ class BillService(
                 } else {
                     // blocked == null 保证区间可裁剪（否则上面已判 not_overlapping）
                     val period = interval!!
-                    exactBillExists(connection, encounterId, period.first, period.second).compose { exists ->
+                    effectiveBillExists(connection, encounterId, period.first, period.second).compose { exists ->
                         precheckRequirements(connection, encounterId, period.first, period.second).map { state ->
                             val reason = when {
                                 exists -> BLOCK_ALREADY_EXISTS
@@ -369,7 +435,7 @@ class BillService(
     /**
      * 手工加项（自费药/检查费等）：体 {item_id, unit_price?, quantity?, remark?}。
      * 字典项必须存在（404）且启用（400）；unit_price 缺省取字典单价，可覆盖；
-     * 加项后重算账单合计。
+     * 加项后重算账单合计。红字单与已红冲原单都不可加项（034 §2.6，400）。
      */
     fun addItem(billId: String, body: JsonObject, operator: String): Future<JsonObject> {
         val fields = try {
@@ -386,6 +452,10 @@ class BillService(
                         return@compose Future.failedFuture(
                             ConflictException("encounter billing is settled, cannot add items"),
                         )
+                    }
+                    val barrier = billOperationBarrier(bill, "add items")
+                    if (barrier != null) {
+                        return@compose Future.failedFuture(IllegalArgumentException(barrier))
                     }
                     when (bill.getString("status")) {
                         BillingEngine.STATUS_SETTLED -> Future.failedFuture(
@@ -425,6 +495,157 @@ class BillService(
             }
         }
     }
+
+    // ========================================================================
+    //  红冲（034 A2 反向单）
+    // ========================================================================
+
+    /**
+     * 红冲：体 `{reason}`（白名单严格，其他键 400）；operator 取认证主体。
+     *
+     * 语义（034 §2，永不修改/删除既有凭证，而是新建一张金额取反的冲销凭证）：
+     *  - 新建红字单：`total_amount = −原单合计`（严格 < 0，精确到分，绝不经 Double）、
+     *    `period_start/period_end` 复制原单、`status = 待缴费`、`reversal_of = 原单id`；
+     *  - 原单不动：`total_amount` 与 `status` 不变，只写
+     *    `reversal_reason/reversed_by/reversed_at` 留痕；
+     *  - 成功 201 直接返回红字单对象（与既有 single-response 口径一致）。
+     *
+     * 全部校验与写入在**同一事务**内（requireBill/requireEncounter 行锁串行化，
+     * 防并发重复红冲）；任一失败整笔回滚，不留半成品。校验顺序稳定（单测锁定）：
+     *  1. 请求体白名单/`reason` 合法性 → 400（不触发任何 SQL）；
+     *  2. 原单不存在 → 404；
+     *  3. 目标本身是红字单（`reversal_of` 非空）→ 400 `cannot reverse a reversal bill`；
+     *  4. 原单合计非正（0 元封口账单没有可冲销金额，且会被 V523 的
+     *     `reversal_of IS NULL OR total_amount < 0` CHECK 判为非法红字单）→ 400；
+     *  5. 原单已被红冲（`reversed_at` 非空）→ 409；
+     *  6. 原单状态非 待缴费（已结清/已结算 = 已发生收款或已关账）→ 409；
+     *  7. 该 encounter 已关账（`encounters.settled_at` 非空）→ 409；
+     *  8. 原单已存在缴费记录（`payments.bill_id = 原单`）→ 409（先退款/冲正）。
+     *
+     * **不做自动重算**：不自动生成替代账单；重新出账由用户对同账期再调生成接口
+     * （唯一性已放开为部分唯一索引，见 [effectiveBillExists]）。
+     */
+    fun reverseBill(billId: String, body: JsonObject, operator: String): Future<JsonObject> {
+        val reason = try {
+            parseReversalRequest(body)
+        } catch (error: IllegalArgumentException) {
+            return Future.failedFuture(error)
+        }
+        val redBillId = Ulid.generate()
+        val now = OffsetDateTime.now()
+        return pool.withTransaction<JsonObject> { connection ->
+            requireBill(connection, billId).compose { bill ->
+                if (bill.getString("reversal_of") != null) {
+                    return@compose Future.failedFuture(
+                        IllegalArgumentException("cannot reverse a reversal bill"),
+                    )
+                }
+                val total = bill.getBigDecimal("total_amount")
+                if (total == null || total.signum() <= 0) {
+                    return@compose Future.failedFuture(
+                        IllegalArgumentException("bill total must be positive, cannot reverse"),
+                    )
+                }
+                if (bill.getOffsetDateTime("reversed_at") != null) {
+                    return@compose Future.failedFuture(
+                        ConflictException("bill is already reversed, cannot reverse"),
+                    )
+                }
+                if (bill.getString("status") != BillingEngine.STATUS_PENDING) {
+                    return@compose Future.failedFuture(
+                        ConflictException(
+                            "bill status is not ${BillingEngine.STATUS_PENDING}, cannot reverse",
+                        ),
+                    )
+                }
+                requireEncounter(connection, bill.getString("encounter_id")).compose { encounter ->
+                    if (encounter.getOffsetDateTime("settled_at") != null) {
+                        return@compose Future.failedFuture(
+                            ConflictException("encounter billing is settled, cannot reverse"),
+                        )
+                    }
+                    requireNoPayments(connection, billId).compose {
+                        execute(
+                            connection,
+                            insertReversalBill(
+                                redBillId = redBillId,
+                                originalId = billId,
+                                encounterId = bill.getString("encounter_id"),
+                                periodStart = bill.getLocalDate("period_start"),
+                                periodEnd = bill.getLocalDate("period_end"),
+                                total = BillingEngine.reversalTotal(total),
+                                now = now,
+                            ),
+                        ).compose {
+                            execute(connection, markBillReversed(billId, reason, operator, now))
+                        }.compose {
+                            billDetail(connection, redBillId)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 034 §2.6 守卫：红字单与已红冲原单都不可再操作，返回 null 表示可操作；
+     * `action` 由调用方给（`add items`）。缴费侧同一条件另在
+     * `PaymentService.paymentBarrierMessage`（多一条非正金额，错误码同口径）。
+     * 错误码统一为 400（IllegalArgumentException），与既有「非待缴费」守卫同口径。
+     */
+    private fun billOperationBarrier(bill: Row, action: String): String? = when {
+        bill.getString("reversal_of") != null -> "bill is a reversal bill, cannot $action"
+        bill.getOffsetDateTime("reversed_at") != null -> "bill is already reversed, cannot $action"
+        else -> null
+    }
+
+    /** 红字单：金额取反、账期复制原单、状态 待缴费、`reversal_of` 指向原单。 */
+    private fun insertReversalBill(
+        redBillId: String,
+        originalId: String,
+        encounterId: String,
+        periodStart: LocalDate,
+        periodEnd: LocalDate,
+        total: BigDecimal,
+        now: OffsetDateTime,
+    ): Query =
+        ctx.insertInto(BILLS)
+            .set(BILLS.ID, redBillId)
+            .set(BILLS.ENCOUNTER_ID, encounterId)
+            .set(BILLS.PERIOD_START, periodStart)
+            .set(BILLS.PERIOD_END, periodEnd)
+            .set(BILLS.STATUS, BillingEngine.STATUS_PENDING)
+            .set(BILLS.TOTAL_AMOUNT, total)
+            .set(BILLS.CREATED_AT, now)
+            .set(BILLS.UPDATED_AT, now)
+            .set(wReversalOf, originalId)
+
+    /** 原单留痕：只写红冲三列 + updated_at（**不碰** total_amount/status）。 */
+    private fun markBillReversed(
+        billId: String,
+        reason: String,
+        operator: String,
+        now: OffsetDateTime,
+    ): Query =
+        ctx.update(BILLS)
+            .set(wReversalReason, reason)
+            .set(wReversedBy, operator)
+            .set(wReversedAt, now)
+            .set(BILLS.UPDATED_AT, now)
+            .where(BILLS.ID.eq(billId))
+
+    /** 原单已存在缴费记录（已发生收款）→ 409，必须先退款/冲正（034 §2.5 第 6 条）。 */
+    private fun requireNoPayments(client: SqlClient, billId: String): Future<Unit> =
+        execute(
+            client,
+            ctx.select(DSL.count().`as`("total")).from(PAYMENTS).where(PAYMENTS.BILL_ID.eq(billId)),
+        ).map { rows ->
+            val total = rows.iterator().asSequence().firstOrNull()?.getLong("total") ?: 0L
+            if (total > 0) {
+                throw ConflictException("bill has payments, cannot reverse")
+            }
+            Unit
+        }
 
     // ========================================================================
     //  结算收束（账单收尾的唯一入口：HealthcareService.settleEncounterBilling）
@@ -495,6 +716,9 @@ class BillService(
             .leftJoin(PAYMENTS).on(PAYMENTS.BILL_ID.eq(BILLS.ID))
             .where(BILLS.ENCOUNTER_ID.eq(encounterId))
             .and(BILLS.STATUS.eq(BillingEngine.STATUS_PENDING))
+            // 034：已红冲原单不是未结（否则收束/预览把已冲销金额算成欠费）；
+            // 红字单余额为负，靠下方 `signum() <= 0` 判定天然排除，不另加谓词。
+            .and(sReversedAt.isNull())
             .groupBy(BILLS.ID, BILLS.PERIOD_START, BILLS.PERIOD_END, BILLS.TOTAL_AMOUNT)
             .orderBy(BILLS.PERIOD_START.asc(), BILLS.ID.asc())
         return execute(client, query).map { rows ->
@@ -825,7 +1049,7 @@ class BillService(
     //  查询
     // ========================================================================
 
-    /** 账单详情（含明细）：不存在 404。 */
+    /** 账单详情（含明细）：不存在 404；含红冲字段与派生的 reversal_bill_id。 */
     fun getBill(billId: String): Future<JsonObject> =
         execute(pool, selectBill(billId)).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { billRow ->
@@ -839,19 +1063,7 @@ class BillService(
     fun listBills(encounterId: String, limit: Int = 50, offset: Int = 0): Future<JsonObject> {
         val countQuery = ctx.select(DSL.count().`as`("total")).from(BILLS)
             .where(BILLS.ENCOUNTER_ID.eq(encounterId))
-        val dataQuery = ctx.select(
-            BILLS.ID,
-            BILLS.ENCOUNTER_ID,
-            BILLS.PERIOD_START,
-            BILLS.PERIOD_END,
-            BILLS.STATUS,
-            BILLS.SETTLED_AT,
-            BILLS.OUTSTANDING_AMOUNT,
-            BILLS.WRITE_OFF_REASON,
-            BILLS.TOTAL_AMOUNT,
-            BILLS.CREATED_AT,
-            BILLS.UPDATED_AT,
-        ).from(BILLS)
+        val dataQuery = selectBillsWithReversal()
             .where(BILLS.ENCOUNTER_ID.eq(encounterId))
             .orderBy(BILLS.PERIOD_START.desc(), BILLS.ID.desc())
             .limit(limit)
@@ -1150,27 +1362,47 @@ class BillService(
                 ?: Future.failedFuture(HealthcareNotFoundException("encounter not found: $encounterId"))
         }
 
-    /** 同账期重复预检：行锁已串行化，命中即 409。 */
+    /**
+     * 同账期「有效原单」预检（034 §2.4）：已被红冲的原单与红字单都不算已存在，
+     * 因此红冲后可对同账期重新生成；与 V523 部分唯一索引
+     * `uq_bills_encounter_period ... WHERE reversal_of IS NULL AND reversed_at IS NULL` 同口径，
+     * 行锁已串行化，命中即 409。precheck 的存在性判定必须用同一谓词。
+     */
     private fun requireNoDuplicate(
         client: SqlClient,
         encounterId: String,
         periodStart: LocalDate,
         periodEnd: LocalDate,
     ): Future<Unit> =
-        execute(
-            client,
-            ctx.select(DSL.count().`as`("total")).from(BILLS)
-                .where(BILLS.ENCOUNTER_ID.eq(encounterId))
-                .and(BILLS.PERIOD_START.eq(periodStart))
-                .and(BILLS.PERIOD_END.eq(periodEnd)),
-        ).map { rows ->
-            val total = rows.iterator().next().getLong("total") ?: 0L
-            if (total > 0) {
+        effectiveBillExists(client, encounterId, periodStart, periodEnd).map { exists ->
+            if (exists) {
                 throw DuplicateBillException(
                     "bill for encounter $encounterId and period $periodStart ~ $periodEnd already exists",
                 )
             }
             Unit
+        }
+
+    /**
+     * 该账期是否已有「有效原单」（未被红冲且非红字单）：与部分唯一索引同口径。
+     * 生成重复预检与 precheck 共用，禁止两处各算一套。
+     */
+    private fun effectiveBillExists(
+        client: SqlClient,
+        encounterId: String,
+        periodStart: LocalDate,
+        periodEnd: LocalDate,
+    ): Future<Boolean> =
+        execute(
+            client,
+            ctx.select(DSL.count().`as`("total")).from(BILLS)
+                .where(BILLS.ENCOUNTER_ID.eq(encounterId))
+                .and(BILLS.PERIOD_START.eq(periodStart))
+                .and(BILLS.PERIOD_END.eq(periodEnd))
+                .and(effectiveOriginalFilter),
+        ).map { rows ->
+            val total = rows.iterator().asSequence().firstOrNull()?.getLong("total") ?: 0L
+            total > 0
         }
 
     /** 唯一约束兜底（并发竞态）：23505 / 约束名 → 409。 */
@@ -1295,9 +1527,30 @@ class BillService(
         }
     }
 
-    /** 账单头（不存在 404）——加项前确认。 */
+    /**
+     * 账单头行锁读（事务内串行化；加项与红冲共用，红冲靠它防并发重复红冲）：
+     * 不存在 404；含 V523 红冲列供 [billOperationBarrier] / [reverseBill] 判定。
+     *
+     * 这个查询**不**用 [selectBillsWithReversal] 的 `reversal_bill_id` LEFT JOIN：
+     * PostgreSQL 的 `FOR UPDATE` 不能作用于外连接的 NULL 侧（会报
+     * `FOR UPDATE cannot be applied to the nullable side of an outer join`）。
+     */
     private fun requireBill(client: SqlClient, billId: String): Future<Row> =
-        execute(client, selectBill(billId)).compose { rows ->
+        execute(
+            client,
+            ctx.select(
+                BILLS.ID,
+                BILLS.ENCOUNTER_ID,
+                BILLS.PERIOD_START,
+                BILLS.PERIOD_END,
+                BILLS.STATUS,
+                BILLS.TOTAL_AMOUNT,
+                sReversalOf,
+                sReversedAt,
+            ).from(BILLS)
+                .where(BILLS.ID.eq(billId))
+                .forUpdate(),
+        ).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(it) }
                 ?: Future.failedFuture(HealthcareNotFoundException("bill not found: $billId"))
         }
@@ -1328,21 +1581,36 @@ class BillService(
             } ?: Future.failedFuture(HealthcareNotFoundException("bill not found: $billId"))
         }
 
-    private fun selectBill(id: String): Query =
-        ctx.select(
-            BILLS.ID,
-            BILLS.ENCOUNTER_ID,
-            BILLS.PERIOD_START,
-            BILLS.PERIOD_END,
-            BILLS.STATUS,
-            BILLS.SETTLED_AT,
-            BILLS.OUTSTANDING_AMOUNT,
-            BILLS.WRITE_OFF_REASON,
-            BILLS.TOTAL_AMOUNT,
-            BILLS.CREATED_AT,
-            BILLS.UPDATED_AT,
-        ).from(BILLS)
-            .where(BILLS.ID.eq(id))
+    /**
+     * 账单查询公共列：账头全部列 + V523 红冲列 + 只读派生的 `reversal_bill_id`
+     * （LEFT JOIN 红字单：`red_bill.reversal_of = bills.id`）。
+     * 详情与列表共用同一份选择列表，避免两处字段不一致（契约：034 §4 字段名）。
+     */
+    private fun billSelectFields(): List<org.jooq.Field<*>> = listOf(
+        BILLS.ID,
+        BILLS.ENCOUNTER_ID,
+        BILLS.PERIOD_START,
+        BILLS.PERIOD_END,
+        BILLS.STATUS,
+        BILLS.SETTLED_AT,
+        BILLS.OUTSTANDING_AMOUNT,
+        BILLS.WRITE_OFF_REASON,
+        BILLS.TOTAL_AMOUNT,
+        BILLS.CREATED_AT,
+        BILLS.UPDATED_AT,
+        sReversalOf,
+        sReversalReason,
+        sReversedBy,
+        sReversedAt,
+        sRedBillId.`as`("reversal_bill_id"),
+    )
+
+    private fun selectBillsWithReversal(): org.jooq.SelectOnConditionStep<org.jooq.Record> =
+        ctx.select(billSelectFields())
+            .from(BILLS)
+            .leftJoin(redBillAlias).on(sRedBillReversalOf.eq(BILLS.ID))
+
+    private fun selectBill(id: String): Query = selectBillsWithReversal().where(BILLS.ID.eq(id))
 
     private fun selectItems(billId: String): Query =
         ctx.select(

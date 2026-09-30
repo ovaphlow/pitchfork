@@ -42,6 +42,9 @@ import java.time.OffsetDateTime
 class DepositOffsetService(
     private val ctx: org.jooq.DSLContext = DatabaseConfig.createDSL(),
 ) {
+    /** V523 账单红冲列（未重跑 jOOQ codegen：按列名引用，SELECT 带表名限定）。 */
+    private val sReversedAt = DSL.field(DSL.name("bills", "reversed_at"), OffsetDateTime::class.java)
+
     companion object {
         /** deposit_records.type：押金核销减项 */
         const val TYPE_OFFSET = "核销"
@@ -173,6 +176,9 @@ class DepositOffsetService(
     /**
      * 该 encounter 全部 `待缴费` 账单及其累计缴费与余额，一次查询取回；
      * 只保留余额 > 0 的行，按 period_start 升序、同账期按 id 升序。
+     *
+     * 034 §2.6：排除已红冲原单（`reversed_at` 非空）——它已被红字单抵消，不该再被押金核销；
+     * 红字单余额为负，靠下方 `signum() <= 0` 判定天然排除，**不另加谓词**（保留既有逻辑）。
      */
     private fun targetBills(client: SqlClient, encounterId: String): Future<List<TargetBill>> {
         val paid = DSL.coalesce(DSL.sum(PAYMENTS.AMOUNT), BigDecimal.ZERO)
@@ -187,6 +193,7 @@ class DepositOffsetService(
             .leftJoin(PAYMENTS).on(PAYMENTS.BILL_ID.eq(BILLS.ID))
             .where(BILLS.ENCOUNTER_ID.eq(encounterId))
             .and(BILLS.STATUS.eq(BillingEngine.STATUS_PENDING))
+            .and(sReversedAt.isNull())
             .groupBy(BILLS.ID, BILLS.PERIOD_START, BILLS.PERIOD_END, BILLS.TOTAL_AMOUNT)
             .orderBy(BILLS.PERIOD_START.asc(), BILLS.ID.asc())
         return execute(client, query).map { rows ->

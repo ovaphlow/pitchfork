@@ -15,6 +15,7 @@ import {
   listPayments,
   precheckBillGeneration,
   previewEncounterBilling,
+  reverseBill,
   settleEncounterBilling,
   type Arrear,
   type Bill,
@@ -44,6 +45,9 @@ const ENCOUNTER_ARREARS_LIMIT = 500;
 /** 减免原因的服务端上限（trim 后字符数），与 POST billing-settlement 契约一致 */
 const WRITE_OFF_REASON_MAX_LENGTH = 500;
 
+/** 红冲原因的服务端上限（trim 后字符数），与 POST /bills/{id}/reversal 契约一致 */
+const REVERSAL_REASON_MAX_LENGTH = 500;
+
 /** 「系统设置 → 费用项目」在页面文案里的统一写法 */
 const FEE_ITEMS_LOCATION = "「系统设置 → 费用项目」";
 
@@ -68,6 +72,30 @@ const BILL_STATUS_VARIANT: Record<string, "success" | "default" | "warning"> = {
 };
 
 const PAYMENT_METHODS: PaymentMethod[] = ["现金", "转账", "银行卡", "微信", "支付宝"];
+
+/**
+ * 红冲（034 A2 反向单）的行判据：只读列表/详情已返回的红冲字段，与后端守卫互补。
+ *
+ * - [billIsActionable]：「加项」「缴费」「红冲」三个入口的**共同**显示条件 ——
+ *   仅「待缴费」且**未被红冲**（`reversed_at` 为空）且**本身不是红字单**（`reversal_of` 为空）。
+ *   红字单与已红冲原单都不满足，故两类的三个入口一并隐藏（后端另有 400/409 守卫兜底）。
+ * - [billIsReversal]：本行是红字单（由红冲生成、金额为负，用于抵销原单）；
+ * - [billIsReversed]：本行是已被红冲的原单（金额与状态保留不变，仅留痕）。
+ *
+ * 红冲三列同生同灭，故两判据互斥；`null`/空串/缺字段一律按「未红冲」处理：
+ * 接口尚未实现时（字段缺失）按普通账单渲染，入口照常显示，提交后由后端报错兜底。
+ */
+function billIsActionable(bill: Bill): boolean {
+  return bill.status === "待缴费" && !bill.reversal_of && !bill.reversed_at;
+}
+
+function billIsReversal(bill: Bill): boolean {
+  return Boolean(bill.reversal_of);
+}
+
+function billIsReversed(bill: Bill): boolean {
+  return Boolean(bill.reversed_at);
+}
 
 interface Admission extends Encounter {
   patientName: string;
@@ -193,6 +221,11 @@ export default function BillingPage() {
 
   // 账单明细
   const [detail, setDetail] = useState<{ bill: Bill; items: BillItem[]; payments: Payment[] } | null>(null);
+
+  // 红冲（A2 反向单）
+  const [reverseTarget, setReverseTarget] = useState<Bill | null>(null);
+  const [reversalReason, setReversalReason] = useState("");
+  const [reversing, setReversing] = useState(false);
 
   // 生成账单前置校验：由服务端 precheck 判定（前端只渲染，不再复刻计价/取级规则）。
   // null 表示尚未拿到结果或请求失败，两种情况都走刻意降级（不禁用生成）。
@@ -772,6 +805,45 @@ export default function BillingPage() {
     }
   }
 
+  // ─── 红冲（A2 反向单） ──────────────────────────────────────────────
+
+  /** 红冲原因（trim 后）：必填且 ≤ [REVERSAL_REASON_MAX_LENGTH] 字符才算有效 */
+  const reversalReasonTrimmed = reversalReason.trim();
+  const reversalReasonValid =
+    reversalReasonTrimmed !== "" && reversalReasonTrimmed.length <= REVERSAL_REASON_MAX_LENGTH;
+
+  function openReverse(bill: Bill) {
+    setReversalReason("");
+    setActionError("");
+    setReverseTarget(bill);
+  }
+
+  /**
+   * 红冲提交：成功（201）后刷新账单列表、欠费汇总与欠费列表（同 [refreshAfterChange]），
+   * 并重取结算预览 —— 它是只读快照，「关账弹窗打开时重取」是权威路径，这里顺带保持缓存同源。
+   */
+  async function handleReverse() {
+    if (!reverseTarget) return;
+    // 提交守卫（第二道；第一道是确认按钮 disabled）：原因必填且不超上限
+    if (!reversalReasonValid) {
+      setActionError(`红冲原因必填，且 trim 后不超过 ${REVERSAL_REASON_MAX_LENGTH} 字符`);
+      return;
+    }
+    setReversing(true);
+    setActionError("");
+    try {
+      await reverseBill(reverseTarget.id, reversalReasonTrimmed);
+      setReverseTarget(null);
+      setReversalReason("");
+      refreshAfterChange();
+      void loadSettlePreview(selectedEncounterId);
+    } catch (error) {
+      setActionError(errorMessage(error, "红冲失败"));
+    } finally {
+      setReversing(false);
+    }
+  }
+
   // ─── 表格列 ─────────────────────────────────────────────────────────
 
   const billColumns: Column<Bill>[] = [
@@ -796,13 +868,44 @@ export default function BillingPage() {
               </span>
             </Badge>
           )}
+          {/* 红字单（红冲生成、金额为负）：info 中性色，与「欠费」的红色语义区分 */}
+          {billIsReversal(row) && (
+            <Badge variant="info" className="cursor-help">
+              <span title={`本单由原单 ${row.reversal_of ?? "—"} 红冲生成，金额为负（−¥ ${formatAmount(-row.total_amount)}）`}>
+                红冲单
+              </span>
+            </Badge>
+          )}
+          {/* 已红冲的原单：金额与状态保留不变，只留痕 */}
+          {billIsReversed(row) && (
+            <Badge variant="default" className="cursor-help">
+              <span
+                title={`红冲时刻 ${formatDateTime(row.reversed_at, "—")}｜操作人 ${row.reversed_by ?? "—"}｜原因 ${row.reversal_reason ?? "—"}`}
+              >
+                已红冲
+              </span>
+            </Badge>
+          )}
+          {billIsReversed(row) && (
+            <span className="w-full text-xs text-fg-dimmed" title="冲销本单的红字单 ID（服务端只读关联）">
+              红冲单 {row.reversal_bill_id ?? "—"}
+            </span>
+          )}
         </div>
       ),
     },
     {
       key: "total_amount",
       header: "合计（元）",
-      render: (row) => <span className="font-medium">{formatAmount(row.total_amount)}</span>,
+      render: (row) =>
+        row.total_amount < 0 ? (
+          // 红字单：金额为负、用于抵销原单，用中性（info）色而非欠费红
+          <span className="font-medium text-info" title="红字单金额为负，用于抵销原单合计">
+            −{formatAmount(-row.total_amount)}
+          </span>
+        ) : (
+          <span className="font-medium">{formatAmount(row.total_amount)}</span>
+        ),
     },
     {
       key: "actions",
@@ -810,10 +913,12 @@ export default function BillingPage() {
       render: (row) => (
         <div className="flex items-center gap-1">
           <Button variant="link" size="sm" onClick={() => void openDetail(row)}>明细</Button>
-          {row.status === "待缴费" && (
+          {/* 三个入口共用 [billIsActionable]：红字单与已红冲原单全部隐藏（后端另有守卫兜底） */}
+          {billIsActionable(row) && (
             <>
               <Button variant="link" size="sm" onClick={() => openAddItem(row)}>加项</Button>
               <Button variant="link" size="sm" onClick={() => void openPayment(row)}>缴费</Button>
+              <Button variant="link" size="sm" onClick={() => openReverse(row)}>红冲</Button>
             </>
           )}
         </div>
@@ -1022,7 +1127,7 @@ export default function BillingPage() {
           <EmptyState icon="🧾" title="请先选择入住" description="选择入住后展示账单，并可生成账单、手工加项、缴费" />
         ) : (
           <>
-            {actionError && !generateOpen && !addItemBill && !payTarget && !settleOpen && !detail && (
+            {actionError && !generateOpen && !addItemBill && !payTarget && !settleOpen && !detail && !reverseTarget && (
               <div className="mb-4 rounded-md border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">{actionError}</div>
             )}
             {selectedAdmission?.settled_at && (
@@ -1289,17 +1394,90 @@ export default function BillingPage() {
         )}
       </Modal>
 
+      {/* 红冲（A2 反向单）：为原单新建一张金额取反的红字单并双向关联，原单只留痕、不改不删 */}
+      <Modal open={reverseTarget !== null} onClose={() => setReverseTarget(null)} title="红冲账单">
+        {reverseTarget && (
+          <div className="space-y-4">
+            <div className="rounded-md border border-warning/30 bg-warning-bg px-4 py-3 text-sm text-warning">
+              <p className="font-medium">
+                将对账单 {formatDate(reverseTarget.period_start, "—")} ~ {formatDate(reverseTarget.period_end, "—")}
+                （合计 ¥ {formatAmount(reverseTarget.total_amount)}）红冲出红字单 −¥ {formatAmount(reverseTarget.total_amount)}。
+              </p>
+              <p className="mt-1">
+                原单合计与状态保留不变，不删除、不重算，只记录红冲原因、操作人与时刻；红字单自动抵减欠费汇总。
+                该操作不可撤销；若该账期仍需账单，可在红冲后重新生成（原单已让出同账期唯一性）。
+              </p>
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <label className="text-sm font-medium text-fg-muted">
+                红冲原因（必填，最多 {REVERSAL_REASON_MAX_LENGTH} 字符）
+              </label>
+              <textarea
+                value={reversalReason}
+                maxLength={REVERSAL_REASON_MAX_LENGTH}
+                rows={3}
+                onChange={(event) => setReversalReason(event.target.value)}
+                placeholder="如：重复计费，按实际在院区间重算"
+                className="px-3 py-2 rounded-md bg-surface border border-border text-sm text-fg placeholder:text-fg-dimmed transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              />
+              {!reversalReasonValid && (
+                <p className="text-xs text-danger">
+                  红冲原因必填（trim 后不能为空），且不超过 {REVERSAL_REASON_MAX_LENGTH} 字符
+                </p>
+              )}
+            </div>
+            {modalError}
+            <div className="flex justify-end gap-2 pt-2">
+              <Button variant="ghost" onClick={() => setReverseTarget(null)}>取消</Button>
+              <Button
+                variant="danger"
+                loading={reversing}
+                disabled={!reversalReasonValid}
+                onClick={() => void handleReverse()}
+              >
+                确认红冲
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
       {/* 账单明细 */}
       <Modal open={detail !== null} onClose={() => setDetail(null)} title="账单明细" width="48rem">
         {detail && (
           <div className="space-y-5">
             <div className="flex flex-wrap items-center gap-3">
               <Badge variant={BILL_STATUS_VARIANT[detail.bill.status] ?? "default"}>{detail.bill.status}</Badge>
+              {billIsReversal(detail.bill) && <Badge variant="info">红冲单</Badge>}
+              {billIsReversed(detail.bill) && <Badge variant="default">已红冲</Badge>}
               <span className="text-sm text-fg-muted">
-                {formatDate(detail.bill.period_start, "—")} ~ {formatDate(detail.bill.period_end, "—")} · 合计 ¥ {formatAmount(detail.bill.total_amount)}
+                {formatDate(detail.bill.period_start, "—")} ~ {formatDate(detail.bill.period_end, "—")} · 合计 ¥
+                {" "}
+                <span className={detail.bill.total_amount < 0 ? "font-medium text-info" : "font-medium text-fg"}>
+                  {formatAmount(detail.bill.total_amount)}
+                </span>
               </span>
               {detail.bill.settled_at && <Badge variant="default">已关账 {formatDateTime(detail.bill.settled_at, "—")}</Badge>}
             </div>
+            {/* 红冲留痕（A2）：红字单说明它抵销哪张原单；已红冲原单说明「谁在何时因为什么」冲销了它 */}
+            {billIsReversal(detail.bill) && (
+              <div className="rounded-md border border-info/30 bg-info-bg px-4 py-3 text-sm text-info">
+                <p className="font-medium">红冲单（红字单）：−¥ {formatAmount(-detail.bill.total_amount)}</p>
+                <p className="mt-1">本单由原单 {detail.bill.reversal_of ?? "—"} 红冲生成，金额为负，用于全额抵销原单合计。</p>
+                <p className="mt-1 text-xs">原单本身不被修改、不删除；该抵销额已计入欠费汇总。红字单不可缴费、不可加项、不可再被红冲。</p>
+              </div>
+            )}
+            {billIsReversed(detail.bill) && (
+              <div className="rounded-md border border-border bg-surface-alt px-4 py-3 text-sm text-fg-muted">
+                <p className="font-medium text-fg">已红冲</p>
+                <p className="mt-1">
+                  本单已于 {formatDateTime(detail.bill.reversed_at, "—")} 被 {detail.bill.reversed_by ?? "—"} 红冲，
+                  红冲原因：{detail.bill.reversal_reason ?? "—"}。
+                </p>
+                <p className="mt-1">冲销本单的红字单：{detail.bill.reversal_bill_id ?? "—"}</p>
+                <p className="mt-1 text-xs">原单合计与状态保留不变（仅留痕）；本单不可再缴费、不可加项、不可重复红冲。</p>
+              </div>
+            )}
             {/* 关账时未结（减免）留痕：仅 outstanding_amount > 0 的已结算账单显示 */}
             {detail.bill.status === "已结算" && detail.bill.outstanding_amount > 0 && (
               <div className="rounded-md border border-warning/30 bg-warning-bg px-4 py-3 text-sm text-warning">
@@ -1316,7 +1494,8 @@ export default function BillingPage() {
               <h4 className="text-sm font-semibold text-fg-muted mb-2">缴费流水（{detail.payments.length}）</h4>
               <Table columns={paymentColumns} data={detail.payments} keyField="id" emptyMessage="暂无缴费记录" />
             </div>
-            {detail.bill.status === "待缴费" && (
+            {/* 红字单与已红冲原单一律不显示「加项」「缴费」「红冲」入口（同 [billIsActionable]） */}
+            {billIsActionable(detail.bill) && (
               <div className="flex justify-end gap-2 pt-1">
                 <Button
                   variant="ghost"
@@ -1327,6 +1506,16 @@ export default function BillingPage() {
                   }}
                 >
                   手工加项
+                </Button>
+                <Button
+                  variant="secondary"
+                  onClick={() => {
+                    const bill = detail.bill;
+                    setDetail(null);
+                    openReverse(bill);
+                  }}
+                >
+                  红冲
                 </Button>
                 <Button
                   variant="primary"

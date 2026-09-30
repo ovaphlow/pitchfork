@@ -68,6 +68,19 @@ object BillingEngine {
     fun totalOf(amounts: List<BigDecimal>): BigDecimal =
         amounts.fold(BigDecimal.ZERO) { acc, amount -> acc.add(amount) }
 
+    /**
+     * 红字单合计 = 原单合计取反（严格 < 0），与 V523 的
+     * `CHECK (reversal_of IS NULL OR total_amount < 0)` 同一口径；
+     * 金额全程 BigDecimal，禁止经 Double（与 [money]/[totalOf] 同一条纪律）。
+     *
+     * 原单合计必须为正：0 元封口账单（结算路径无可用字典单价时落库的空明细账单）
+     * 没有可冲销的金额，服务层在调用本函数之前以 400 拒绝。
+     */
+    fun reversalTotal(total: BigDecimal): BigDecimal {
+        require(total.signum() > 0) { "reversal total requires a positive bill total" }
+        return total.negate()
+    }
+
     /** 伙食折合餐次：正常=1、部分=0.5、未就餐/拒食=0；未知状态按 0 计。 */
     fun mealQuantity(statuses: List<String>): BigDecimal =
         statuses.fold(BigDecimal.ZERO) { acc, status -> acc.add(mealRates[status] ?: BigDecimal.ZERO) }
