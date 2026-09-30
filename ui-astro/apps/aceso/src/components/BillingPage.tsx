@@ -142,12 +142,10 @@ function precheckNoticeText(notice: BillPrecheckNotice): string {
 }
 
 /**
- * `blocked_by` → 中文提示。既有 `billingMessages` 的映射表覆盖已进 shared 类型联合的枚举；
- * 这里补上 L2 新增、尚未进联合的 `future_month`（若合并后字段名不同，以合并后的实际字段为准），
- * 并对任何未知 code 给中文兜底，避免直接透出英文机器码。
+ * `blocked_by` → 中文提示。原因码已全部进 shared 类型联合，文案统一由 `billingMessages` 的映射表提供；
+ * 未知 code（后端新增但前端未同步）给中文兜底，避免直接透出英文机器码或 `undefined`。
  */
 function blockedByText(blockedBy: string): string {
-  if (blockedBy === "future_month") return "该账期尚未开始，不能提前生成。";
   const known = BILLING_BLOCKED_REASONS as Record<string, string>;
   return known[blockedBy] ?? `当前账期不能生成账单（原因码 ${blockedBy}）。`;
 }
