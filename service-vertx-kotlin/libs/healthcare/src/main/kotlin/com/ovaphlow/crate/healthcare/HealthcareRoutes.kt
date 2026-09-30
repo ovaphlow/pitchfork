@@ -955,14 +955,17 @@ object HealthcareRoutes {
         }
 
         // ========================================================================
-        //  账单生成与手工加项 (Bills) — 按月自动计费（床位/护理/伙食）+ 手工加项
+        //  账单生成、手工加项与红冲 (Bills) — 按月自动计费（床位/护理/伙食）+ 手工加项
         //  写路由的认证中间件由 App 编排层注入；未注入时业务处理器保持 401 兜底。
-        //  同 encounter 同账期唯一，重复生成 409；停用字典项不可用于新账单/加项 400；
-        //  结算收束冻结（encounters.settled_at 非空）后生成/加项/补结算 409。
+        //  同 encounter 同账期唯一（034 起仅约束「有效原单」），重复生成 409；
+        //  停用字典项不可用于新账单/加项 400；
+        //  结算收束冻结（encounters.settled_at 非空）后生成/加项/红冲/补结算 409。
+        //  红冲沿用本块会话鉴权（`libs/permissions` 无 bill 资源权限点，不新建权限点）。
         // ========================================================================
         if (billAuthHandler != null) {
             router.post("/encounters/:id/bills").handler(billAuthHandler)
             router.post("/bills/:id/items").handler(billAuthHandler)
+            router.post("/bills/:id/reversal").handler(billAuthHandler)
             router.post("/encounters/:id/billing-settlement").handler(billAuthHandler)
             // 只读预览与收束同级暴露金额，挂同一个认证中间件；路径比 /encounters/:id 多两段，
             // 不会被泛型 encounter 读路由吞掉（由路由测试断言实际命中本处理器）
@@ -982,6 +985,17 @@ object HealthcareRoutes {
         router.post("/bills/:id/items").handler { ctx ->
             val userId = userId(ctx) ?: return@handler
             billService.addItem(requiredId(ctx), body(ctx), userId)
+                .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                .onFailure { respondFailure(ctx, it) }
+        }
+        // 红冲（034 A2 反向单）：体 {reason} —— 白名单严格，含 operator/reversal_of/
+        // total_amount 等任何其它键 400；成功后同事务内建红字单 + 原单留痕，
+        // 201 直接返回红字单对象。
+        // 失败：原单不存在 404；目标本身是红字单 / 合计非正 / reason 非法 400；
+        // 已被红冲 / 非待缴费 / encounter 已关账 / 已有缴费记录 409。未认证 401。
+        router.post("/bills/:id/reversal").handler { ctx ->
+            val userId = userId(ctx) ?: return@handler
+            billService.reverseBill(requiredId(ctx), body(ctx), userId)
                 .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
                 .onFailure { respondFailure(ctx, it) }
         }

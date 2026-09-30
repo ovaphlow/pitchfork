@@ -114,7 +114,7 @@ class PaymentServiceTest {
                         Future.succeededFuture(row?.let { rowSet(it) } ?: rowSet())
                     }
                     sql.contains("arrears_amount") -> {
-                        val arrears = arrearsList()
+                        val arrears = arrearsList(sql)
                         val total = arrears.fold(BigDecimal.ZERO) { acc, b ->
                             acc.add((b["total_amount"] as BigDecimal).subtract(b["paid_amount"] as BigDecimal))
                         }
@@ -170,9 +170,13 @@ class PaymentServiceTest {
         }
 
         /** 欠费口径：状态 待缴费 且 余额 > 0；余额 = 合计 − 累计缴费。 */
-        private fun arrearsList(): List<MutableMap<String, Any?>> =
-            bills.mapNotNull { b ->
+        /** 欠费口径：状态 待缴费 且 余额 > 0；余额 = 合计 − 累计缴费。
+         *  034：SQL 带 reversed_at is null 时排除已红冲原单（红字单靠余额非正天然排除）。 */
+        private fun arrearsList(sql: String): List<MutableMap<String, Any?>> {
+            val excludesReversed = sql.contains("reversed_at is null")
+            return bills.mapNotNull { b ->
                 if (b["status"] != BillingEngine.STATUS_PENDING) return@mapNotNull null
+                if (excludesReversed && b["reversed_at"] != null) return@mapNotNull null
                 val paid = payments
                     .filter { it["bill_id"] == b["id"] }
                     .fold(BigDecimal.ZERO) { acc, p -> acc.add(p["amount"] as BigDecimal) }
@@ -191,13 +195,14 @@ class PaymentServiceTest {
                     "updated_at" to b["updated_at"],
                 )
             }
+        }
 
         /**
          * 欠费查询结果：SQL 带 `encounter_id = $N` 条件时按该绑定值过滤（数据与计数同源），
          * 否则与改动前一致返回全部欠费行。
          */
         private fun filteredArrears(sql: String, values: List<Any?>): List<MutableMap<String, Any?>> {
-            val all = arrearsList()
+            val all = arrearsList(sql)
             val match = Regex("""encounter_id = \$(\d+)""").find(sql) ?: return all
             val position = match.groupValues[1].toIntOrNull() ?: return all
             val encounterId = values.getOrNull(position - 1) as? String
@@ -971,6 +976,105 @@ class PaymentServiceTest {
         }.onComplete { ar ->
             if (ar.succeeded()) ctx.completeNow() else ctx.failNow(ar.cause())
         }
+    }
+    // ========================================================================
+    //  034 红冲守卫：红字单 / 已红冲原单 / 非正金额一律 400
+    // ========================================================================
+
+    @Test
+    fun `红字单缴费返回400且不写流水`() {
+        val stub = DatabaseStub(
+            bills = mutableListOf(
+                billRow(
+                    mapOf(
+                        "id" to "bill-red",
+                        "total_amount" to BigDecimal("-1000.00"),
+                        "reversal_of" to "bill-1",
+                    ),
+                ),
+            ),
+        )
+        val cause = causeOf(PaymentService(stub.pool).createPayment("bill-red", paymentBody(), "cashier-1"))
+        assertInstanceOf(IllegalArgumentException::class.java, cause)
+        assertTrue(cause.message?.contains("bill is a reversal bill, cannot pay") == true, "got: ${cause.message}")
+        assertTrue(stub.payments.isEmpty(), "红字单不得产生缴费流水")
+        assertTrue(stub.tuples.none { it.first.contains("insert into healthcare.payments") })
+    }
+
+    @Test
+    fun `已红冲原单缴费返回400且不写流水`() {
+        val stub = DatabaseStub(
+            bills = mutableListOf(
+                billRow(
+                    mapOf(
+                        "reversed_at" to OffsetDateTime.parse("2026-09-30T10:00:00+08:00"),
+                        "reversed_by" to "cashier-1",
+                        "reversal_reason" to "重复计费",
+                    ),
+                ),
+            ),
+        )
+        val cause = causeOf(PaymentService(stub.pool).createPayment("bill-1", paymentBody(), "cashier-1"))
+        assertInstanceOf(IllegalArgumentException::class.java, cause)
+        assertTrue(cause.message?.contains("bill is already reversed, cannot pay") == true, "got: ${cause.message}")
+        assertTrue(stub.tuples.none { it.first.contains("insert into healthcare.payments") })
+    }
+
+    @Test
+    fun `非正金额账单缴费返回400`() {
+        val stub = DatabaseStub(
+            bills = mutableListOf(billRow(mapOf("id" to "bill-zero", "total_amount" to BigDecimal("0.00")))),
+        )
+        val cause = causeOf(PaymentService(stub.pool).createPayment("bill-zero", paymentBody(), "cashier-1"))
+        assertInstanceOf(IllegalArgumentException::class.java, cause)
+        assertTrue(cause.message?.contains("bill total must be positive, cannot pay") == true, "got: ${cause.message}")
+        assertTrue(stub.tuples.none { it.first.contains("insert into healthcare.payments") })
+    }
+
+    @Test
+    fun `红冲后欠费与汇总净额为0且恒等式成立`() {
+        // 原单 +A（待缴费、已被红冲）+ 红字单 −A（待缴费）：
+        // 应缴靠正负相抵归零，欠费靠排除已红冲原单归零，两者一致
+        val stub = DatabaseStub(
+            bills = mutableListOf(
+                billRow(
+                    mapOf(
+                        "id" to "bill-1",
+                        "total_amount" to BigDecimal("1000.00"),
+                        "reversal_reason" to "重复计费",
+                        "reversed_by" to "cashier-1",
+                        "reversed_at" to OffsetDateTime.parse("2026-09-30T10:00:00+08:00"),
+                    ),
+                ),
+                billRow(
+                    mapOf(
+                        "id" to "bill-red",
+                        "total_amount" to BigDecimal("-1000.00"),
+                        "reversal_of" to "bill-1",
+                    ),
+                ),
+            ),
+        )
+        val service = PaymentService(stub.pool)
+
+        val arrears = service.listArrears().toCompletionStage().toCompletableFuture().get()
+        assertEquals(0, arrears.getJsonArray("records").size(), "已红冲原单与红字单都不得出现在欠费列表: $arrears")
+        assertEquals(0L, arrears.getJsonObject("meta").getLong("total"), "计数与数据必须同源过滤")
+
+        val summary = service.summary().toCompletionStage().toCompletableFuture().get()
+        val due = summary.getValue("due_amount") as BigDecimal
+        val paid = summary.getValue("paid_amount") as BigDecimal
+        val arrearsAmount = summary.getValue("arrears_amount") as BigDecimal
+        assertEquals(0, BigDecimal.ZERO.compareTo(due), "应缴 = 原单 + 红字单 = 0，实际 $due")
+        assertEquals(0, BigDecimal.ZERO.compareTo(paid))
+        assertEquals(0, BigDecimal.ZERO.compareTo(arrearsAmount), "欠费不得把已红冲原单算进去，实际 $arrearsAmount")
+        assertEquals(0, due.subtract(paid).compareTo(arrearsAmount), "恒等式 应缴 − 已缴 = 欠费 必须成立")
+
+        // 对照：未被红冲的待缴费账单照常进欠费列表
+        val payable = DatabaseStub(bills = mutableListOf(billRow(mapOf("total_amount" to BigDecimal("1000.00")))))
+        val listed = PaymentService(payable.pool).listArrears().toCompletionStage().toCompletableFuture().get()
+        assertEquals(1, listed.getJsonArray("records").size())
+        assertEquals(1L, listed.getJsonObject("meta").getLong("total"))
     }
 }
 

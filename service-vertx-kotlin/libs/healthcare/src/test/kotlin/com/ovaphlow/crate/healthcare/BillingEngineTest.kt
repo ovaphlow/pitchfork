@@ -285,4 +285,20 @@ class BillingEngineTest {
         assertEquals("重度依赖", segments[1].level)
         assertEquals(21L, segments[1].days)
     }
+
+    // ——— 034 红冲：红字单金额（纯函数） ———
+
+    @Test
+    fun `红冲金额为原单取反且保留精度`() {
+        assertEquals(0, BigDecimal("-3100.00").compareTo(BillingEngine.reversalTotal(BigDecimal("3100.00"))))
+        assertEquals(0, BigDecimal("-0.01").compareTo(BillingEngine.reversalTotal(BigDecimal("0.01"))))
+        assertEquals(2, BillingEngine.reversalTotal(BigDecimal("3100.00")).scale(), "不得丢掉分的精度")
+        // 0 元封口账单没有可冲销金额（V523 的 CHECK 也不允许 0 元红字单）
+        assertThrows(IllegalArgumentException::class.java) {
+            BillingEngine.reversalTotal(BigDecimal.ZERO)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            BillingEngine.reversalTotal(BigDecimal("-1.00"))
+        }
+    }
 }
