@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Badge, Button, Card, EmptyState, Input, Modal, Table, type Column } from "@pitchfork/ui";
 import {
+  ApiRequestError,
   appendShiftHandoverItem,
   closeNursingIncident,
   convergeOverdueExecutions,
@@ -84,6 +85,7 @@ import {
   todayLocal,
 } from "../lib/datetime";
 import { formatOrderItemLabel } from "../lib/orderDetailDisplay";
+import { nursingErrorMessage } from "./nursingMessages";
 import NursingExecutionStatisticsPanel from "./NursingExecutionStatisticsPanel";
 
 type Tab = "overview" | "assessments" | "plans" | "tasks" | "orders" | "incidents" | "handovers" | "timeline";
@@ -487,6 +489,7 @@ export default function NursingPage() {
   const [adminReason, setAdminReason] = useState("");
   const [adminSources, setAdminSources] = useState<MedicationAdministrationSource[]>([]);
   const [adminSourcesLoading, setAdminSourcesLoading] = useState(false);
+  const [adminSourcesError, setAdminSourcesError] = useState<string | null>(null);
   const [adminSaving, setAdminSaving] = useState(false);
   const [adminError, setAdminError] = useState("");
   // ——— 给药记录查看 ———
@@ -1189,8 +1192,24 @@ export default function NursingPage() {
   //  给药记录（MAR）：MEDICATION 任务的完成/跳过升级为记录给药
   // ========================================================================
 
-  /** 打开记录给药弹窗：重置表单并加载该医嘱已发药且未给完的来源（静默失败，未发药时列表为空） */
-  async function openAdminModal(execution: NursingTodayExecution) {
+  /** 加载该执行所属医嘱已发药且未给完的来源；失败时保留可见错误，绝不伪装成「暂无来源」 */
+  const loadAdminSources = useCallback(async (execution: NursingTodayExecution) => {
+    setAdminSourcesLoading(true);
+    setAdminSourcesError(null);
+    setAdminSources([]);
+    try {
+      const response = await listMedicationAdministrationSources(execution.id);
+      setAdminSources(response.records);
+    } catch (error) {
+      setAdminSources([]);
+      setAdminSourcesError(nursingErrorMessage(error, "发药来源加载失败，请重试；仍失败请联系运维"));
+    } finally {
+      setAdminSourcesLoading(false);
+    }
+  }, []);
+
+  /** 打开记录给药弹窗：重置表单并加载来源；加载失败与「真无来源」在弹窗内明确区分 */
+  function openAdminModal(execution: NursingTodayExecution) {
     setAdminTarget(execution);
     setAdminResult("已服");
     setAdminSourceId("");
@@ -1198,21 +1217,14 @@ export default function NursingPage() {
     setAdminReason("");
     setAdminSources([]);
     setAdminError("");
-    setAdminSourcesLoading(true);
-    try {
-      const response = await listMedicationAdministrationSources(execution.id);
-      setAdminSources(response.records);
-    } catch {
-      setAdminSources([]);
-    } finally {
-      setAdminSourcesLoading(false);
-    }
+    void loadAdminSources(execution);
   }
 
   function closeAdminModal() {
     if (adminSaving) return;
     setAdminTarget(null);
     setAdminError("");
+    setAdminSourcesError(null);
   }
 
   async function handleRecordAdministration() {
@@ -1258,7 +1270,7 @@ export default function NursingPage() {
       setStatReloadKey((k) => k + 1);
     } catch (error) {
       // 失败保留输入，仅展示错误
-      setAdminError(errorMessage(error, "记录给药失败"));
+      setAdminError(nursingErrorMessage(error, "记录给药失败，请重试；仍失败请联系运维"));
     } finally {
       setAdminSaving(false);
     }
@@ -1274,7 +1286,11 @@ export default function NursingPage() {
       const record = await getMedicationAdministration(execution.id);
       setAdminViewRecord(record);
     } catch (error) {
-      setAdminViewError(errorMessage(error, "暂无给药记录"));
+      if (error instanceof ApiRequestError && error.status === 404) {
+        setAdminViewError("该执行暂无给药记录。");
+      } else {
+        setAdminViewError(nursingErrorMessage(error, "无法加载给药记录，请刷新后重试"));
+      }
     } finally {
       setAdminViewLoading(false);
     }
@@ -1332,7 +1348,7 @@ export default function NursingPage() {
     const columns: Column<NursingTodayExecution>[] = [
       { key: "planned_time", header: "计划时间", className: "min-w-[140px]", render: (row) => formatDateTime(row.planned_time) },
       { key: "patient_name", header: "长者", className: "min-w-[80px]", render: (row) => row.patient_name ?? row.patient_id ?? "-" },
-      { key: "task_description", header: "任务", className: "min-w-[180px]", render: (row) => row.task_description ?? "-" },
+      { key: "task_description", header: "任务说明", className: "min-w-[180px]", render: (row) => row.task_description ?? "-" },
       {
         // 医嘱任务只显示自由文本的正文时，护士看不出是什么药。这里按护理页与医生页
         // 共用的推导规则补出绑定医嘱的「药品 / 项目」（剂量 + 单位 + 途径）。
@@ -1714,7 +1730,7 @@ export default function NursingPage() {
 
   const taskColumns: Column<NursingTask>[] = [
     { key: "task_type", header: "类型", className: "min-w-[110px]", render: (row) => taskTypeLabel(row.task_type) },
-    { key: "description", header: "任务", className: "min-w-[220px]" },
+    { key: "description", header: "任务说明", className: "min-w-[220px]" },
     {
       // 与今日执行同一推导规则：医嘱派生任务的描述是医生手写正文，需补出结构化明细。
       key: "order_detail",
@@ -2494,28 +2510,42 @@ export default function NursingPage() {
             <>
               <div className="flex flex-col gap-1.5">
                 <label className="text-sm font-medium text-fg-muted" htmlFor="admin-source">发药来源 <span className="text-danger">*</span></label>
-                <select
-                  id="admin-source"
-                  className={selectClass}
-                  value={adminSourceId}
-                  onChange={(event) => { setAdminSourceId(event.target.value); setAdminError(""); }}
-                  disabled={adminSourcesLoading}
-                >
-                  <option value="">
-                    {adminSourcesLoading
-                      ? "加载发药来源…"
-                      : adminSources.length === 0
-                        ? "暂无已发药且未给完的来源"
-                        : "选择发药明细"}
-                  </option>
-                  {adminSources.map((source) => (
-                    <option key={source.id} value={source.id}>
-                      {source.material_name ?? source.material_id}
-                      {source.batch_no ? ` · ${source.batch_no}` : ""}
-                      {` · ${source.warehouse ?? "-"} · 已发 ${source.dispensed_quantity} / 剩余 ${source.remaining_quantity} ${source.unit ?? ""}`}
+                {adminSourcesError ? (
+                  <div className="rounded-md border border-danger/30 bg-danger-bg px-3 py-2 text-sm text-danger">
+                    <p>{adminSourcesError}</p>
+                    <button
+                      type="button"
+                      className="mt-1.5 text-accent hover:underline"
+                      disabled={adminSourcesLoading}
+                      onClick={() => { if (adminTarget) void loadAdminSources(adminTarget); }}
+                    >
+                      重新加载来源
+                    </button>
+                  </div>
+                ) : (
+                  <select
+                    id="admin-source"
+                    className={selectClass}
+                    value={adminSourceId}
+                    onChange={(event) => { setAdminSourceId(event.target.value); setAdminError(""); }}
+                    disabled={adminSourcesLoading}
+                  >
+                    <option value="">
+                      {adminSourcesLoading
+                        ? "加载发药来源…"
+                        : adminSources.length === 0
+                          ? "暂无已发药且未给完的来源"
+                          : "选择发药明细"}
                     </option>
-                  ))}
-                </select>
+                    {adminSources.map((source) => (
+                      <option key={source.id} value={source.id}>
+                        {source.material_name ?? source.material_id}
+                        {source.batch_no ? ` · ${source.batch_no}` : ""}
+                        {` · ${source.warehouse ?? "-"} · 已发 ${source.dispensed_quantity} / 剩余 ${source.remaining_quantity} ${source.unit ?? ""}`}
+                      </option>
+                    ))}
+                  </select>
+                )}
                 <p className="text-xs text-fg-dimmed">仅显示该医嘱已发药（DISPENSED）且未给完的发药明细；未发药时不可记录已服/部分服。</p>
               </div>
               <div className="flex flex-col gap-1.5">
@@ -2565,7 +2595,7 @@ export default function NursingPage() {
 
           <div className="flex justify-end gap-3">
             <Button type="button" variant="ghost" onClick={closeAdminModal} disabled={adminSaving}>取消</Button>
-            <Button type="submit" loading={adminSaving}>确认记录</Button>
+            <Button type="submit" loading={adminSaving} disabled={adminSaving || (isConsumingResult(adminResult) && adminSourcesError !== null)}>确认记录</Button>
           </div>
           {adminError && <p className="text-sm text-danger">{adminError}</p>}
         </form>
