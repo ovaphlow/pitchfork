@@ -44,6 +44,8 @@ interface OrderForm {
   drugName: string;
   dose: string;
   unit: string;
+  /** 每次数量（基础单位个数，如 1 片）；可留空，留空时提交维持现状（032 P4） */
+  doseQuantity: string;
   route: string;
   frequencyCode: string;
   frequencyName: string;
@@ -79,6 +81,7 @@ const orderFormDefaults: OrderForm = {
   drugName: "",
   dose: "",
   unit: "",
+  doseQuantity: "",
   route: "",
   frequencyCode: "",
   frequencyName: "",
@@ -87,6 +90,11 @@ const orderFormDefaults: OrderForm = {
   treatmentItem: "",
   itemName: "",
 };
+
+/** 十进制正数校验（每次数量）：非空时必须是正数；空值表示不填、提交时维持现状 */
+function isPositiveDecimalText(value: string): boolean {
+  return /^\d+(\.\d+)?$/.test(value) && Number(value) > 0;
+}
 
 function hasOrderFieldError(form: OrderForm, field: string): boolean {
   switch (field) {
@@ -111,6 +119,11 @@ function hasOrderFieldError(form: OrderForm, field: string): boolean {
     }
     case "endTime":
       return form.orderClass === "TEMPORARY" && !form.endTime.trim() && !form.durationDays.trim() && form.frequencyCode !== "STAT";
+    case "doseQuantity": {
+      const value = form.doseQuantity.trim();
+      if (value === "") return false;
+      return !isPositiveDecimalText(value);
+    }
     default:
       return false;
   }
@@ -205,6 +218,7 @@ const ORDER_DETAIL_LABELS: Record<string, string> = {
   material_bound_by: "补绑操作人",
   material_bound_at: "补绑时间",
   dose: "剂量",
+  dose_quantity: "每次数量（基础单位）",
   unit: "单位",
   route: "途径",
   treatment_item: "诊疗项目",
@@ -575,6 +589,12 @@ export default function OrdersPage() {
       details.drug_name = drugCatalog.find((item) => item.id === materialId)?.name ?? form.drugName.trim();
       if (form.dose.trim()) details.dose = form.dose.trim();
       if (form.unit.trim()) details.unit = form.unit.trim();
+      const doseQuantity = form.doseQuantity.trim();
+      if (doseQuantity) {
+        // 仅在非空时写入 dose_quantity；正数小校验在前，权威精度校验在服务端
+        if (!isPositiveDecimalText(doseQuantity)) return null;
+        details.dose_quantity = doseQuantity;
+      }
       if (form.route.trim()) details.route = form.route.trim();
     } else if (form.orderType === "THERAPY") {
       details.treatment_item = form.treatmentItem.trim();
@@ -625,6 +645,8 @@ export default function OrdersPage() {
         setFormError("检查/检验医嘱必须填写项目名称");
       } else if (form.orderClass === "TEMPORARY" && !form.endTime.trim() && !form.durationDays.trim() && form.frequencyCode !== "STAT") {
         setFormError("临时医嘱必须填写结束时间、持续天数，或选择立即执行（STAT）");
+      } else if (form.orderType === "MEDICATION" && form.doseQuantity.trim() && !isPositiveDecimalText(form.doseQuantity.trim())) {
+        setFormError("每次数量（基础单位）必须为正数");
       } else {
         setFormError("时长必须是正整数");
       }
@@ -1436,11 +1458,23 @@ export default function OrdersPage() {
                   placeholder="如 片/次"
                 />
                 <Input
+                  label="每次数量（基础单位）"
+                  value={form.doseQuantity}
+                  onChange={(event) => setForm((current) => ({ ...current, doseQuantity: event.target.value }))}
+                  placeholder="如 1 或 1.5（可留空）"
+                  inputMode="decimal"
+                  aria-invalid={formError && hasOrderFieldError(form, "doseQuantity") ? true : undefined}
+                  aria-describedby={formError && hasOrderFieldError(form, "doseQuantity") ? "order-form-error" : undefined}
+                />
+                <Input
                   label="途径"
                   value={form.route}
                   onChange={(event) => setForm((current) => ({ ...current, route: event.target.value }))}
                   placeholder="如 口服"
                 />
+                <p className="text-xs text-fg-dimmed sm:col-span-2">
+                  三者区别：剂量 = 单剂强度（如 500mg）；每次数量 = 每次给药的基础单位个数（如 1 片）；单位 = 每次给药的计量单位（如 片/次）。每次数量可留空，留空时开嘱与药房发药行为不变。
+                </p>
               </>
             )}
 
