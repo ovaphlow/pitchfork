@@ -309,6 +309,40 @@ function formatStaleInProgress(minutes: number | null | undefined): string {
   return `执行中已 ${days} 天未结束`;
 }
 
+/**
+ * 提前给药提示的阈值（计划 033 §7 L-UI-B）：提前超过 2 小时才提示。
+ * 这只是提示阈值，不是校验：后端不读 `planned_time`，本页也不拦截提交。
+ */
+const EARLY_ADMINISTRATION_NOTICE_MINUTES = 120;
+
+/**
+ * 提前给药提示（计划 033 §7 L-UI-B）：非阻断，仅在「有计划时间且当前时间早于计划时间
+ * 超过 `EARLY_ADMINISTRATION_NOTICE_MINUTES` 分钟」时返回中文警示；
+ * 无计划时间、计划时间不可解析、未提前、提前未超阈值一律返回 null —— 既不提示也不阻断。
+ *
+ * 时间口径复用 `../lib/datetime`：`planned_time` 与 `formatDateTime` 同一来源（后端 OffsetDateTime 串）。
+ * 解析必须走 `toOffsetDateTime`（与同文件其它时间解析一致）：它给「无偏移的墙上时间串」补 `+08:00`，
+ * 而裸 `new Date("2026-08-01T09:00")` 会按**浏览器本地时区**解释，非 +08:00 环境会出现
+ * 「显示 09:00 却提示提前 8 小时」的自相矛盾提示（R3 P2-2）。
+ */
+function earlyAdministrationNotice(plannedTime: string | null, now: Date): string | null {
+  if (!plannedTime) return null;
+  const planned = new Date(toOffsetDateTime(plannedTime));
+  if (Number.isNaN(planned.getTime())) return null;
+  const leadMinutes = Math.floor((planned.getTime() - now.getTime()) / 60_000);
+  if (leadMinutes <= EARLY_ADMINISTRATION_NOTICE_MINUTES) return null;
+  const hours = Math.floor(leadMinutes / 60);
+  const remainingMinutes = leadMinutes % 60;
+  const leadText =
+    hours === 0
+      ? `提前 ${remainingMinutes} 分`
+      : remainingMinutes === 0
+        ? `提前 ${hours} 小时`
+        : `提前 ${hours} 小时 ${remainingMinutes} 分`;
+  return `本次给药${leadText}：计划时间 ${formatDateTime(plannedTime)}，当前时间 ${formatDateTime(now.toISOString())}。` +
+    "系统暂不阻断，请核对后提交；若确需提前，请在备注中说明原因。";
+}
+
 const assessmentDefaults = (): AssessmentForm => ({
   assessType: "BARTHEL",
   assessDate: "",
@@ -1790,6 +1824,9 @@ export default function NursingPage() {
   const adminOrderLabel = formatOrderItemLabel(adminTarget?.order_type, adminTarget?.order_details);
   const adminViewOrderLabel = formatOrderItemLabel(adminViewRecord?.order_type, adminViewRecord?.order_details);
 
+  // ——— 提前给药提示（计划 033 §7 L-UI-B）：仅影响弹窗展示，不参与提交路径 ———
+  const earlyAdminNotice = adminTarget ? earlyAdministrationNotice(adminTarget.planned_time, new Date()) : null;
+
   // ——— 今日执行计数与逾期入口（§4.2/§4.6） ———
   /** 顶部状态计数优先取服务端 status_totals（不再只数当前页），字段缺失时回退页内计数 */
   const todayStatusCount = (status: string): number =>
@@ -2493,6 +2530,13 @@ export default function NursingPage() {
             {adminTarget?.patient_name && <span className="ml-2 text-fg-dimmed">— {adminTarget.patient_name}</span>}
             {adminOrderLabel && <div className="mt-0.5 text-fg-dimmed">药品 / 项目：{adminOrderLabel}</div>}
           </div>
+
+          {/* 提前给药提示：只提醒不阻断，计划时间由行数据传入，不额外请求 */}
+          {earlyAdminNotice && (
+            <div className="rounded-md border border-warning/30 bg-warning-bg px-3 py-2 text-sm text-warning" role="status">
+              {earlyAdminNotice}
+            </div>
+          )}
 
           <div className="flex flex-col gap-1.5">
             <label className="text-sm font-medium text-fg-muted">给药结果 <span className="text-danger">*</span></label>

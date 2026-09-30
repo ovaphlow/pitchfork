@@ -44,7 +44,10 @@ interface OrderForm {
   drugName: string;
   dose: string;
   unit: string;
-  /** 每次数量（基础单位个数，如 1 片）；可留空，留空时提交维持现状（032 P4） */
+  /**
+   * 每次数量（基础单位个数，如 1 片）；默认 `1`（计划 033 §7 C），可清空、可改。
+   * 留空时提交维持现状（032 P4：不写 dose_quantity → 药房不做数量预填）。
+   */
   doseQuantity: string;
   route: string;
   frequencyCode: string;
@@ -70,6 +73,13 @@ interface DiagnosisForm {
   remark: string;
 }
 
+/**
+ * 新建医嘱表单的初值。`doseQuantity` 默认为 `1`（033 C）：开嘱侧不默认时，后端按 032 P4 契约
+ * 返回 `prescribed_total_quantity = null`，药房发药数量会回退成 1（用户报告的缺陷）。
+ *
+ * ⚠️ 本对象**仅供新建**。任何「编辑既有医嘱」的表单不得复用它，否则会把 `dose_quantity = 1`
+ * 凭空写回从未填写过该字段的既有医嘱（R3 P2-1）；当前仓库不存在编辑医嘱表单，此约束靠本注释维持。
+ */
 const orderFormDefaults: OrderForm = {
   orderType: "MEDICATION",
   orderClass: "LONG_TERM",
@@ -81,7 +91,7 @@ const orderFormDefaults: OrderForm = {
   drugName: "",
   dose: "",
   unit: "",
-  doseQuantity: "",
+  doseQuantity: "1",
   route: "",
   frequencyCode: "",
   frequencyName: "",
@@ -1461,7 +1471,7 @@ export default function OrdersPage() {
                   label="每次数量（基础单位）"
                   value={form.doseQuantity}
                   onChange={(event) => setForm((current) => ({ ...current, doseQuantity: event.target.value }))}
-                  placeholder="如 1 或 1.5（可留空）"
+                  placeholder="如 1 或 1.5（可清空）"
                   inputMode="decimal"
                   aria-invalid={formError && hasOrderFieldError(form, "doseQuantity") ? true : undefined}
                   aria-describedby={formError && hasOrderFieldError(form, "doseQuantity") ? "order-form-error" : undefined}
@@ -1473,7 +1483,7 @@ export default function OrdersPage() {
                   placeholder="如 口服"
                 />
                 <p className="text-xs text-fg-dimmed sm:col-span-2">
-                  三者区别：剂量 = 单剂强度（如 500mg）；每次数量 = 每次给药的基础单位个数（如 1 片）；单位 = 每次给药的计量单位（如 片/次）。每次数量可留空，留空时开嘱与药房发药行为不变。
+                  三者区别：剂量 = 单剂强度（如 500mg）；每次数量 = 每次给药的基础单位个数（如 1 片）；单位 = 每次给药的计量单位（如 片/次）。默认 1 表示每次 1 个基础单位；每次数量不是 1 时必须改成实际数量。留空（清空）则药房不做自动预填，发药时数量由药房自行填写。
                 </p>
               </>
             )}
