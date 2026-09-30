@@ -151,6 +151,12 @@ export const BILLING_ERROR_MAPPINGS: BillingErrorMapping[] = [
     pattern: /^(?:month must be in YYYY-MM format|month is required)/,
     render: () => "账期格式应为 YYYY-MM。",
   },
+  {
+    // 031 W4 保守缺省：账期晚于机构时区当前月。precheck 走 `blocked_by=future_month`，
+    // 这里是「直接调生成接口」的 400 路径（如弹窗账期竞态、降级直调），同样不得透出英文。
+    pattern: /^month is in the future, cannot generate bills$/,
+    render: () => "该账期尚未开始，不能提前生成。",
+  },
 
   // ─── 关账未结余额与减免（BillService.settleEncounter） ─────────────────
   {
