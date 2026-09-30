@@ -21,6 +21,7 @@ import org.jooq.impl.DSL
 import java.math.BigDecimal
 import java.time.LocalDate
 import java.time.OffsetDateTime
+import java.time.ZoneId
 
 /** 同 encounter 同账期重复生成账单（409）。 */
 class DuplicateBillException(message: String) : Exception(message)
@@ -55,6 +56,9 @@ class BillService(
     private val ctx: org.jooq.DSLContext = DatabaseConfig.createDSL(),
 ) {
     companion object {
+        /** 机构业务时区（取业务日与当前月的统一口径，与 HealthcareService/CheckupService 等一致）。 */
+        private val businessZone = ZoneId.of("Asia/Shanghai")
+
         /** 手工加项写白名单：source/item_code/item_name/bill_id/amount/created_at/updated_at/id 由服务端管控 */
         private val addKeys = setOf("item_id", "unit_price", "quantity", "remark")
 
@@ -75,6 +79,9 @@ class BillService(
         /** 账期格式错误文案（生成与 precheck 共用的单一来源）。 */
         private const val MONTH_FORMAT_MESSAGE = "month must be in YYYY-MM format"
 
+        /** 未来账期拒绝文案（生成 400；precheck 用机器可读 `future_month` 表达，不直接透出）。 */
+        private const val MONTH_FUTURE_MESSAGE = "month is in the future, cannot generate bills"
+
         /** 自动计费分类（槽位推导、字典匹配与 precheck 计数共用）。 */
         private const val CATEGORY_BED = "床位费"
         private const val CATEGORY_NURSING = "护理费"
@@ -90,6 +97,7 @@ class BillService(
         private const val BLOCK_NO_ADMIT_DATE = "no_admit_date"
         private const val BLOCK_SETTLED = "settled"
         private const val BLOCK_NOT_ELDERLY_ADMISSION = "not_elderly_admission"
+        private const val BLOCK_FUTURE_MONTH = "future_month"
 
         /**
          * precheck 机器可读提示（notice，030 W2）：说明「某分类为什么本账期不计费」，
@@ -157,6 +165,23 @@ class BillService(
                 .put("updated_at", row.getOffsetDateTime("updated_at")?.toString())
     }
 
+    /**
+     * 从 TIMESTAMPTZ 取业务日（机构时区 [businessZone] 的本地日期），
+     * 与 HealthcareService / CheckupService / FollowupService / ChronicDiseaseService 同口径。
+     * 禁止在此用 `OffsetDateTime.toLocalDate()`（按 UTC 解释，机构本地日会差一天）。
+     */
+    private fun businessDate(value: OffsetDateTime): LocalDate =
+        value.atZoneSameInstant(businessZone).toLocalDate()
+
+    /**
+     * 账期是否晚于机构时区当前月。
+     *
+     * 产品未确认「先住后收 vs 预付费」时的**保守缺省**（可回退）：当前月允许、未来月拒绝。
+     * [periodStart] 恒为账期月首，故只需比较是否晚于当前月首。
+     */
+    private fun isFutureMonth(periodStart: LocalDate): Boolean =
+        periodStart.isAfter(LocalDate.now(businessZone).withDayOfMonth(1))
+
     // ========================================================================
     //  账单生成（自动计费）
     // ========================================================================
@@ -172,6 +197,9 @@ class BillService(
             return Future.failedFuture(error)
         }
         val periodStart = LocalDate.parse("$month-01")
+        if (isFutureMonth(periodStart)) {
+            return Future.failedFuture(IllegalArgumentException(MONTH_FUTURE_MESSAGE))
+        }
         val periodEnd = periodStart.withDayOfMonth(periodStart.lengthOfMonth())
         val billId = Ulid.generate()
         val now = OffsetDateTime.now()
@@ -188,8 +216,8 @@ class BillService(
                         IllegalArgumentException("encounter has no admit date, cannot bill"),
                     )
                 val dischargeDate = encounter.getOffsetDateTime("discharge_date")
-                val stayStart = maxOf(admitDate.toLocalDate(), periodStart)
-                val stayEnd = minOf(dischargeDate?.toLocalDate() ?: periodEnd, periodEnd)
+                val stayStart = maxOf(businessDate(admitDate), periodStart)
+                val stayEnd = minOf(dischargeDate?.let(::businessDate) ?: periodEnd, periodEnd)
                 if (stayStart.isAfter(stayEnd)) {
                     return@compose Future.failedFuture(
                         IllegalArgumentException("encounter does not overlap month $month"),
@@ -222,13 +250,14 @@ class BillService(
      * 资格判定顺序与真实生成路径 [generate] 的校验顺序一致（避免「precheck 说能生成、
      * 生成却报另一个错」），且逐条对应既有错误码：
      *  1. `month` 缺失/非法 → 400（沿用 `month must be in YYYY-MM format`，不触发 SQL）；
-     *  2. encounter 不存在 → 404（`encounter not found: <id>`）；
-     *  3. 非养老入住 → `not_elderly_admission`（与结算资格校验同序：非养老 400 在最前）；
-     *  4. 已收束（`encounters.settled_at` 非空）→ `settled`（生成 409）；
-     *  5. 缺 `admit_date` → `no_admit_date`（生成 400）；
-     *  6. 账期与在院区间无重合 → `not_overlapping`（生成 400）；
-     *  7. 该账期账单已存在（[exactBillExists] 同一语义）→ `already_exists`（生成 409）；
-     *  8. 存在 `required && !satisfied` 的槽位 → `missing_fee_items`（生成 400 缺字典）；
+     *  2. 账期晚于机构时区当前月 → `future_month`（[isFutureMonth] 的保守缺省，生成 400）；
+     *  3. encounter 不存在 → 404（`encounter not found: <id>`）；
+     *  4. 非养老入住 → `not_elderly_admission`（与结算资格校验同序：非养老 400 在最前）；
+     *  5. 已收束（`encounters.settled_at` 非空）→ `settled`（生成 409）；
+     *  6. 缺 `admit_date` → `no_admit_date`（生成 400）；
+     *  7. 账期与在院区间无重合 → `not_overlapping`（生成 400）；
+     *  8. 该账期账单已存在（[exactBillExists] 同一语义）→ `already_exists`（生成 409）；
+     *  9. 存在 `required && !satisfied` 的槽位 → `missing_fee_items`（生成 400 缺字典）；
      *     否则 `blocked_by = null`、`can_generate = true`。
      *
      * `notices`（030 W2，契约冻结 D8）**始终返回数组**（无提示为 `[]`，早退阻断分支同样返回空数组），
@@ -251,11 +280,15 @@ class BillService(
             return Future.failedFuture(error)
         }
         val monthStart = LocalDate.parse("$parsedMonth-01")
+        // 未来账期（保守缺省）：在 encounter 校验之前拦截，与生成路径的 400 同源；precheck 表达为 blocked_by
+        if (isFutureMonth(monthStart)) {
+            return Future.succeededFuture(precheckJson(parsedMonth, null, BLOCK_FUTURE_MONTH, emptyList(), emptyList()))
+        }
         val monthEnd = monthStart.withDayOfMonth(monthStart.lengthOfMonth())
         return pool.withTransaction { connection ->
             loadEncounter(connection, encounterId).compose { encounter ->
-                val admitDate = encounter.getOffsetDateTime("admit_date")?.toLocalDate()
-                val dischargeDate = encounter.getOffsetDateTime("discharge_date")?.toLocalDate()
+                val admitDate = encounter.getOffsetDateTime("admit_date")?.let(::businessDate)
+                val dischargeDate = encounter.getOffsetDateTime("discharge_date")?.let(::businessDate)
                 val stayStart = admitDate?.let { maxOf(it, monthStart) }
                 val stayEnd = minOf(dischargeDate ?: monthEnd, monthEnd)
                 // 与 [generate] 同一裁剪口径：账期起 > 账期止 = 无重合（区间取不到 → null）
@@ -600,17 +633,17 @@ class BillService(
                     ConflictException("encounter billing is already settled"),
                 )
             }
-            val admitDate = encounter.getOffsetDateTime("admit_date")?.toLocalDate()
+            val admitDate = encounter.getOffsetDateTime("admit_date")?.let(::businessDate)
                 ?: return@compose Future.failedFuture(
                     IllegalArgumentException("encounter has no admit date, cannot settle"),
                 )
             val end = if (requireTerminalStatus) {
                 when (status) {
-                    "DISCHARGED" -> encounter.getOffsetDateTime("discharge_date")?.toLocalDate()
+                    "DISCHARGED" -> encounter.getOffsetDateTime("discharge_date")?.let(::businessDate)
                         ?: return@compose Future.failedFuture(
                             IllegalArgumentException("encounter has no discharge date, cannot settle"),
                         )
-                    "DECEASED" -> encounter.getOffsetDateTime("death_date")?.toLocalDate()
+                    "DECEASED" -> encounter.getOffsetDateTime("death_date")?.let(::businessDate)
                         ?: return@compose Future.failedFuture(
                             IllegalArgumentException("encounter has no death date, cannot settle"),
                         )

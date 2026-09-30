@@ -367,7 +367,7 @@ export default function BedsPage() {
       )}
 
       <p className="rounded-lg border border-border bg-surface-alt px-4 py-3 text-xs text-fg-muted">
-        床位主数据只是候选来源，不强制校验：办理入住时仍可直接填写历史自由文本，029 的同一床位区间冲突校验继续生效。
+        床位主数据只是候选来源，不强制校验：办理入住时仍可直接填写历史自由文本，入住时的同一床位区间冲突校验继续生效。
         删除仅收回候选；被在住长者占用的床位会拒绝删除，可改为停用。
       </p>
 

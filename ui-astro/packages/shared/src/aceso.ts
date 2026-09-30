@@ -4663,6 +4663,8 @@ export type BillPrecheckBlockedBy =
   | "already_exists"
   | "not_overlapping"
   | "no_admit_date"
+  /** 账期晚于机构时区当前月（031 W4 保守缺省：先住后收，不允许预生成未来账期） */
+  | "future_month"
   | "settled"
   | "not_elderly_admission";
 

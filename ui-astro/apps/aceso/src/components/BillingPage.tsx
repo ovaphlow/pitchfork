@@ -141,6 +141,15 @@ function precheckNoticeText(notice: BillPrecheckNotice): string {
   }
 }
 
+/**
+ * `blocked_by` → 中文提示。原因码已全部进 shared 类型联合，文案统一由 `billingMessages` 的映射表提供；
+ * 未知 code（后端新增但前端未同步）给中文兜底，避免直接透出英文机器码或 `undefined`。
+ */
+function blockedByText(blockedBy: string): string {
+  const known = BILLING_BLOCKED_REASONS as Record<string, string>;
+  return known[blockedBy] ?? `当前账期不能生成账单（原因码 ${blockedBy}）。`;
+}
+
 export default function BillingPage() {
   // 入住与费用字典
   const [admissions, setAdmissions] = useState<Admission[]>([]);
@@ -444,7 +453,7 @@ export default function BillingPage() {
     }));
     const blockedBy = precheck?.blocked_by ?? null;
     if (blockedBy !== null && blockedBy !== "missing_fee_items") {
-      notices.push({ key: blockedBy, text: BILLING_BLOCKED_REASONS[blockedBy] });
+      notices.push({ key: blockedBy, text: blockedByText(blockedBy) });
     }
     return notices;
   }, [missingFeeItems, precheck]);
@@ -464,13 +473,16 @@ export default function BillingPage() {
   }, [precheck]);
 
   /**
-   * 按钮可用性完全取服务端 `can_generate`；precheck 尚未返回或请求失败（null）时**不禁用**，
-   * 走刻意降级：交给后端在提交时给出错误文案。
+   * 弹窗确认按钮可用性取「所选账期」的服务端 `can_generate`；precheck 尚未返回或请求失败
+   * （null）时**不禁用**，走刻意降级：交给后端在提交时给出错误文案。
    */
   const precheckAllowsGenerate = precheck === null ? true : precheck.can_generate;
 
-  const canGenerateBill =
-    Boolean(selectedEncounterId) && !selectedAdmission?.settled_at && precheckAllowsGenerate;
+  /**
+   * 「生成账单」入口按钮可用性只取决于「是否选了入住 + 入住是否已关账/冻结」，
+   * 不再取决于默认账期（当月）的 precheck：当月已生成后仍可打开弹窗补生成其它账期。
+   */
+  const canGenerateBill = Boolean(selectedEncounterId) && !selectedAdmission?.settled_at;
 
   // ─── 结算核销金额与减免确认 ─────────────────────────────────────────
 
@@ -890,12 +902,8 @@ export default function BillingPage() {
   const generateGateNotice = generateBlockNotices.length > 0 && (
     <div className="mb-4 rounded-md border border-warning/30 bg-warning-bg px-4 py-3 text-sm">
       <p className="font-medium text-warning">
-        {/* 标题与按钮可用性同源（都取 can_generate），避免出现「已禁用」但按钮可用 */}
-        {precheckAllowsGenerate
-          ? "生成校验提示"
-          : precheck?.blocked_by != null && precheck.blocked_by !== "missing_fee_items"
-            ? "当前账期不能生成账单"
-            : "费用字典缺项，「生成账单」已禁用"}
+        {/* 只有「费用字典缺项」与「其它阻塞原因」两种语义，均针对所选账期 */}
+        {generateBlocked ? "费用字典缺项" : "当前账期不能生成账单"}
       </p>
       <ul className="mt-2 space-y-1 text-fg-muted">
         {generateBlockNotices.map((notice) => (
@@ -907,11 +915,14 @@ export default function BillingPage() {
           当前没有任何启用的费用项目。自动计费至少需要：床位费 ×1、护理费 ×每个评估等级 ×1、伙食费 ×1。
         </p>
       )}
-      <div className="mt-3">
-        <Button variant="secondary" size="sm" onClick={() => window.location.assign(FEE_ITEMS_PAGE_PATH)}>
-          去配置费用项目
-        </Button>
-      </div>
+      {/* 只在原因确实是「费用字典缺项」时给配置入口，与 already_exists / future_month 等无关 */}
+      {generateBlocked && (
+        <div className="mt-3">
+          <Button variant="secondary" size="sm" onClick={() => window.location.assign(FEE_ITEMS_PAGE_PATH)}>
+            去配置费用项目
+          </Button>
+        </div>
+      )}
     </div>
   );
 
@@ -1000,11 +1011,7 @@ export default function BillingPage() {
       <Card
         title="账单列表"
         actions={
-          <Button
-            size="sm"
-            onClick={openGenerate}
-            disabled={!canGenerateBill || Boolean(selectedAdmission?.settled_at)}
-          >
+          <Button size="sm" onClick={openGenerate} disabled={!canGenerateBill}>
             生成账单
           </Button>
         }
@@ -1016,7 +1023,6 @@ export default function BillingPage() {
             {actionError && !generateOpen && !addItemBill && !payTarget && !settleOpen && !detail && (
               <div className="mb-4 rounded-md border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">{actionError}</div>
             )}
-            {generateGateNotice}
             {selectedAdmission?.settled_at && (
               <p className="mb-4 text-sm text-fg-muted">该入住已关账，账单已冻结（不可生成账单、手工加项或缴费）。</p>
             )}

@@ -24,6 +24,7 @@ export const BILLING_BLOCKED_REASONS: Record<NonNullable<BillPrecheckBlockedBy>,
   already_exists: "该账期已经生成过账单，不能重复生成。",
   not_overlapping: "所选账期与该入住的在院区间没有重合。",
   no_admit_date: "该入住缺少入住日期，无法计费。",
+  future_month: "该账期尚未开始，不能提前生成。",
   settled: "该入住已关账，不能生成账单。",
   not_elderly_admission: "只有养老入住可以生成账单。",
 };
@@ -149,6 +150,12 @@ export const BILLING_ERROR_MAPPINGS: BillingErrorMapping[] = [
   {
     pattern: /^(?:month must be in YYYY-MM format|month is required)/,
     render: () => "账期格式应为 YYYY-MM。",
+  },
+  {
+    // 031 W4 保守缺省：账期晚于机构时区当前月。precheck 走 `blocked_by=future_month`，
+    // 这里是「直接调生成接口」的 400 路径（如弹窗账期竞态、降级直调），同样不得透出英文。
+    pattern: /^month is in the future, cannot generate bills$/,
+    render: () => "该账期尚未开始，不能提前生成。",
   },
 
   // ─── 关账未结余额与减免（BillService.settleEncounter） ─────────────────

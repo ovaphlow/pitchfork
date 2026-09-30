@@ -12,6 +12,7 @@ import {
   type Encounter,
 } from "@pitchfork/shared/aceso";
 import { formatDateTime } from "../lib/datetime";
+import { useSubjectDirectory } from "../lib/identity";
 import { billingErrorMessage } from "./billingMessages";
 
 const PAGE_SIZE = 50;
@@ -55,6 +56,9 @@ export default function DepositsPage() {
   const [amount, setAmount] = useState("");
   const [remark, setRemark] = useState("");
   const [submitting, setSubmitting] = useState(false);
+
+  // 操作人（认证主体 ID）→ 姓名映射，目录未命中时回退原始 ID，空值回退 "-"
+  const { subjectLabel } = useSubjectDirectory();
 
   const loadAdmissions = useCallback(async () => {
     setAdmissionsLoading(true);
@@ -197,7 +201,7 @@ export default function DepositsPage() {
         </span>
       ),
     },
-    { key: "operator", header: "操作人", render: (row) => <span className="text-fg-muted text-sm">{row.operator}</span> },
+    { key: "operator", header: "操作人", render: (row) => <span className="text-fg-muted text-sm">{subjectLabel(row.operator)}</span> },
     {
       key: "remark",
       header: "备注",

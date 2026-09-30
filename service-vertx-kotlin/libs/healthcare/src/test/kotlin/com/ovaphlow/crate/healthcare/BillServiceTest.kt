@@ -27,6 +27,7 @@ import org.junit.jupiter.api.extension.ExtendWith
 import java.math.BigDecimal
 import java.time.LocalDate
 import java.time.OffsetDateTime
+import java.time.ZoneId
 import java.util.function.Function as JavaFunction
 
 /**
@@ -310,6 +311,109 @@ class BillServiceTest {
 
     private fun amount(value: Any?): BigDecimal =
         BigDecimal.valueOf((value as Number).toDouble())
+
+    /** 机构时区当前月偏移（用于未来/历史账期测试，避免依赖真实当前日期漂移）。 */
+    private fun businessMonth(offsetMonths: Long): String {
+        val base = LocalDate.now(ZoneId.of("Asia/Shanghai")).plusMonths(offsetMonths)
+        return "%04d-%02d".format(base.year, base.monthValue)
+    }
+
+    // ——— W3/W4 计费取日与账期边界 ———
+
+    @Test
+    fun `入住日按机构时区取日不按UTC差一天`(vertx: Vertx, ctx: VertxTestContext) {
+        // admit_date 2026-08-06T16:00Z = 机构时区(Asia/Shanghai) 08-07 00:00；
+        // 旧逻辑 OffsetDateTime.toLocalDate() 按 UTC 算成 08-06（差一天）。
+        val stub = DatabaseStub(
+            encounters = rows(
+                encounterRow(mapOf("admit_date" to OffsetDateTime.parse("2026-08-06T16:00:00Z"))),
+            ),
+            feeItems = mutableListOf(
+                feeItemRow("fee-bed", "床位费", "标准床位", "100"),
+                feeItemRow("fee-meal", "伙食费", "三餐", "30"),
+            ),
+            mealsByEncounter = mutableMapOf("enc-1" to listOf("正常")),
+        )
+        withServer(vertx, stub, userId = "cashier-route-1") { port ->
+            httpRequest(vertx, port, HttpMethod.POST, "/healthcare/v1/encounters/enc-1/bills", generateBody())
+                .map { (status, body) ->
+                    ctx.verify {
+                        assertEquals(201, status)
+                        assertEquals("2026-08-07", body.getString("period_start"), "入住日按机构时区取日必须为 08-07")
+                        assertEquals("2026-08-31", body.getString("period_end"), "无离院日账期止 = 月末")
+                        val bed = body.getJsonArray("items").getJsonObject(0)
+                        assertEquals(0, BigDecimal("25").compareTo(amount(bed.getValue("quantity"))), "闭区间 08-07..08-31 = 25 天")
+                        assertEquals(0, BigDecimal("2500.00").compareTo(amount(bed.getValue("amount"))), "床位费 = 100 × 25")
+                    }
+                }
+        }.onComplete { ar ->
+            if (ar.succeeded()) ctx.completeNow() else ctx.failNow(ar.cause())
+        }
+    }
+
+    @Test
+    fun `离院日按机构时区取日不按UTC差一天`(vertx: Vertx, ctx: VertxTestContext) {
+        // discharge_date 2026-08-20T16:00Z = 机构时区 08-21 00:00；旧逻辑按 UTC 算成 08-20。
+        val stub = DatabaseStub(
+            encounters = rows(
+                encounterRow(
+                    mapOf(
+                        "admit_date" to OffsetDateTime.parse("2026-08-01T00:00:00+08:00"),
+                        "discharge_date" to OffsetDateTime.parse("2026-08-20T16:00:00Z"),
+                    ),
+                ),
+            ),
+            feeItems = mutableListOf(feeItemRow("fee-bed", "床位费", "标准床位", "100")),
+        )
+        withServer(vertx, stub, userId = "cashier-route-1") { port ->
+            httpRequest(vertx, port, HttpMethod.POST, "/healthcare/v1/encounters/enc-1/bills", generateBody())
+                .map { (status, body) ->
+                    ctx.verify {
+                        assertEquals(201, status)
+                        assertEquals("2026-08-01", body.getString("period_start"))
+                        assertEquals("2026-08-21", body.getString("period_end"), "离院日按机构时区取日必须为 08-21")
+                        val bed = body.getJsonArray("items").getJsonObject(0)
+                        assertEquals(0, BigDecimal("21").compareTo(amount(bed.getValue("quantity"))), "闭区间 08-01..08-21 = 21 天")
+                    }
+                }
+        }.onComplete { ar ->
+            if (ar.succeeded()) ctx.completeNow() else ctx.failNow(ar.cause())
+        }
+    }
+
+    @Test
+    fun `未来账期生成被拒返回400且不触发SQL`() {
+        val stub = fullMonthStub()
+        val futureMonth = businessMonth(1)
+        val cause = causeOf(BillService(stub.pool).generate("enc-1", generateBody(mapOf("month" to futureMonth)), "cashier-1"))
+        assertInstanceOf(IllegalArgumentException::class.java, cause)
+        assertTrue(cause.message?.contains("month is in the future") == true, "got: ${cause.message}")
+        assertTrue(stub.queries.isEmpty(), "未来账期被拒不得触发任何 SQL: ${stub.queries}")
+        assertEquals(0, stub.transactionCalls, "未来账期被拒不得开启事务")
+    }
+
+    @Test
+    fun `当前月与历史月仍可生成`(vertx: Vertx, ctx: VertxTestContext) {
+        val stub = fullMonthStub()
+        val currentMonth = businessMonth(0)
+        val previousMonth = businessMonth(-1)
+        withServer(vertx, stub, userId = "cashier-route-1") { port ->
+            httpRequest(vertx, port, HttpMethod.POST, "/healthcare/v1/encounters/enc-1/bills", generateBody(mapOf("month" to currentMonth)))
+                .compose { (currentStatus, _) ->
+                    ctx.verify {
+                        assertEquals(201, currentStatus, "当前月必须可生成")
+                    }
+                    httpRequest(vertx, port, HttpMethod.POST, "/healthcare/v1/encounters/enc-1/bills", generateBody(mapOf("month" to previousMonth)))
+                        .map { (previousStatus, _) ->
+                            ctx.verify {
+                                assertEquals(201, previousStatus, "历史月必须可生成")
+                            }
+                        }
+                }
+        }.onComplete { ar ->
+            if (ar.succeeded()) ctx.completeNow() else ctx.failNow(ar.cause())
+        }
+    }
 
     // ——— 1. 生成：输入校验与资格 ———
 

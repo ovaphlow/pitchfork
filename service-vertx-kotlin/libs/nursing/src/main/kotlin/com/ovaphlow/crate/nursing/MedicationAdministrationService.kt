@@ -14,7 +14,7 @@ import org.jooq.impl.DSL
 import java.math.BigDecimal
 import java.time.LocalDate
 import java.time.OffsetDateTime
-import java.time.ZoneOffset
+import java.time.ZoneId
 
 /**
  * 医嘱执行闭环：护士给药记录（MAR）。
@@ -37,6 +37,9 @@ class MedicationAdministrationService(
     private val ctx: DSLContext = DatabaseConfig.createDSL(),
 ) {
     companion object {
+        /** 机构业务时区（与 HealthcareService 等全仓口径一致） */
+        private val businessZone = ZoneId.of("Asia/Shanghai")
+
         /** 给药结果（遵循项目惯例存中文值，不引入英文业务 code 存库） */
         val VALID_RESULTS = setOf("已服", "部分服", "拒服", "漏服", "暂缓")
 
@@ -65,10 +68,15 @@ class MedicationAdministrationService(
             else -> null
         }
 
-        /** 十进制文本入口（016 口径）：请求只接受 JSON 十进制文本；行值兼容 BigDecimal */
+        /**
+         * 十进制文本入口（016 口径）：请求只接受 JSON 十进制文本；行值兼容 Vert.x pgclient
+         * 对 NUMERIC 的解码（`io.vertx.sqlclient.data.Numeric`，经 toString 取十进制文本，
+         * 不经 Double，避免二进制尾差）。
+         */
         fun decimalText(value: Any?): BigDecimal? = when (value) {
             null -> null
             is BigDecimal -> value
+            is Number -> value.toString().toBigDecimalOrNull()
             is String -> value.toBigDecimalOrNull()
             else -> null
         }
@@ -96,7 +104,9 @@ class MedicationAdministrationService(
             }
             val dispenseItemId = body.getString("dispense_item_id")?.trim()?.takeIf(String::isNotBlank)
             val quantity = if (body.containsKey("administered_quantity")) {
-                val value = decimalText(body.getValue("administered_quantity"))
+                // 请求体只接受 JSON 十进制文本（拒绝 JSON number，避免 Double 精度损失）；
+                // 行值读取走 decimalText 的 Number 分支，二者口径不同。
+                val value = (body.getValue("administered_quantity") as? String)?.toBigDecimalOrNull()
                     ?: throw IllegalArgumentException("administered_quantity must be decimal text")
                 if (value <= BigDecimal.ZERO) {
                     throw IllegalArgumentException("administered_quantity must be positive")
@@ -294,8 +304,8 @@ class MedicationAdministrationService(
         medicalOrderId?.takeIf(String::isNotBlank)?.let { conditions.add(fMaOrderId.eq(it)) }
         result?.takeIf(String::isNotBlank)?.let { conditions.add(fMaResult.eq(it)) }
         if (date != null) {
-            val dayStart = date.atStartOfDay().atOffset(ZoneOffset.UTC)
-            val dayEnd = date.plusDays(1).atStartOfDay().atOffset(ZoneOffset.UTC)
+            val dayStart = date.atStartOfDay(businessZone).toOffsetDateTime()
+            val dayEnd = date.plusDays(1).atStartOfDay(businessZone).toOffsetDateTime()
             conditions.add(fMaAdministeredAt.ge(dayStart))
             conditions.add(fMaAdministeredAt.lt(dayEnd))
         }
@@ -625,21 +635,23 @@ class MedicationAdministrationService(
         now: OffsetDateTime,
     ): Future<Void?> {
         val id = Ulid.generate()
+        // maTable 无别名：插入列必须用非限定列名（select 里才用 `ma.*` 别名引用），
+        // 否则渲染成 `(ma.id, ...)`，PostgreSQL 报 `column "ma" does not exist`。
         val insert = ctx.insertInto(maTable)
-            .set(fMaId, id)
-            .set(fMaExecId, executionId)
-            .set(fMaOrderId, orderId)
-            .set(fMaResult, input.result)
-            .set(fMaAdministeredBy, userId)
-            .set(fMaAdministeredAt, now)
-            .set(fMaCreatedAt, now)
-            .set(fMaUpdatedAt, now)
-        input.dispenseItemId?.let { insert.set(fMaDispenseItemId, it) }
-        source?.lotId?.let { insert.set(fMaLotId, it) }
-        source?.warehouse?.let { insert.set(fMaWarehouse, it) }
-        input.administeredQuantity?.let { insert.set(fMaQuantity, it) }
-        unit?.takeIf(String::isNotBlank)?.let { insert.set(fMaUnit, it) }
-        input.reason?.let { insert.set(fMaReason, it) }
+            .set(DSL.field("id"), id)
+            .set(DSL.field("task_execution_id"), executionId)
+            .set(DSL.field("medical_order_id"), orderId)
+            .set(DSL.field("result"), input.result)
+            .set(DSL.field("administered_by"), userId)
+            .set(DSL.field("administered_at"), now)
+            .set(DSL.field("created_at"), now)
+            .set(DSL.field("updated_at"), now)
+        input.dispenseItemId?.let { insert.set(DSL.field("dispense_item_id"), it) }
+        source?.lotId?.let { insert.set(DSL.field("lot_id"), it) }
+        source?.warehouse?.let { insert.set(DSL.field("warehouse"), it) }
+        input.administeredQuantity?.let { insert.set(DSL.field("administered_quantity"), it) }
+        unit?.takeIf(String::isNotBlank)?.let { insert.set(DSL.field("unit"), it) }
+        input.reason?.let { insert.set(DSL.field("reason"), it) }
 
         return connection.preparedQuery(DatabaseConfig.sql(insert))
             .execute(DatabaseConfig.tuple(insert))
@@ -663,10 +675,12 @@ class MedicationAdministrationService(
     ): Future<Void?> {
         val target = targetStatusFor(result)
             ?: return Future.failedFuture(IllegalArgumentException("invalid result: $result"))
-        val update = ctx.update(execTable)
-            .set(DSL.field("e.status"), target)
-            .set(DSL.field("e.actual_time"), now)
-            .where(DSL.field("e.id").eq(executionId))
+        // PostgreSQL 不允许 SET 目标列带关系限定（`UPDATE ... AS e SET e.status`），
+        // 因此使用无别名表 + 非限定列名；actual_time 同语句写入。
+        val update = ctx.update(execUpdateTable)
+            .set(DSL.field("status"), target)
+            .set(DSL.field("actual_time"), now)
+            .where(DSL.field("id").eq(executionId))
         return connection.preparedQuery(DatabaseConfig.sql(update))
             .execute(DatabaseConfig.tuple(update))
             .map { null as Void? }

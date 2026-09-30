@@ -27,6 +27,7 @@ import org.junit.jupiter.api.extension.ExtendWith
 import java.math.BigDecimal
 import java.time.LocalDate
 import java.time.OffsetDateTime
+import java.time.ZoneId
 import java.util.function.Function as JavaFunction
 
 /**
@@ -311,6 +312,43 @@ class BillingPrecheckTest {
 
     private fun completed(future: Future<JsonObject>): JsonObject =
         future.toCompletionStage().toCompletableFuture().get()
+
+    /** 机构时区当前月偏移（用于未来/历史账期测试，避免依赖真实当前日期漂移）。 */
+    private fun businessMonth(offsetMonths: Long): String {
+        val base = LocalDate.now(ZoneId.of("Asia/Shanghai")).plusMonths(offsetMonths)
+        return "%04d-%02d".format(base.year, base.monthValue)
+    }
+
+    // ——— W4 未来账期（保守缺省） ———
+
+    @Test
+    fun `precheck未来账期返回future_month且不触发SQL`() {
+        val stub = fullStub()
+        val futureMonth = businessMonth(1)
+        val body = completed(BillService(stub.pool).precheckBillGeneration("enc-1", futureMonth))
+
+        assertFalse(body.getBoolean("can_generate"))
+        assertEquals("future_month", body.getString("blocked_by"))
+        assertNull(body.getString("period_start"), "未来账期早退不计算区间")
+        assertNull(body.getString("period_end"))
+        assertEquals(0, requirementsOf(body).size, "未来账期早退不推算槽位")
+        assertEquals(0, noticesOf(body).size, "未来账期早退 notices 为空数组")
+        assertTrue(stub.writeStatements().isEmpty())
+        assertTrue(stub.queries.isEmpty(), "未来账期被拒不得触发任何 SQL: ${stub.queries}")
+        assertEquals(0, stub.transactionCalls, "未来账期被拒不得开启事务")
+    }
+
+    @Test
+    fun `precheck当前月与历史月仍可生成`() {
+        val stub = fullStub()
+        val current = completed(BillService(stub.pool).precheckBillGeneration("enc-1", businessMonth(0)))
+        assertTrue(current.getBoolean("can_generate"), "当前月必须可生成")
+        assertNull(current.getString("blocked_by"))
+
+        val previous = completed(BillService(stub.pool).precheckBillGeneration("enc-1", businessMonth(-1)))
+        assertTrue(previous.getBoolean("can_generate"), "历史月必须可生成")
+        assertNull(previous.getString("blocked_by"))
+    }
 
     // ——— 1. 槽位推导：字典齐全 + 账期合法 ———
 
