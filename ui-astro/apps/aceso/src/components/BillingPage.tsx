@@ -133,7 +133,8 @@ function precheckNoticeText(notice: BillPrecheckNotice): string {
     case "nursing_fee_not_billed_no_assessment":
       return "账期内没有生效的护理评估（账期之前也没有）：本账期不计护理费。请先到「照护服务 → 护理评估」补做评估；确需补记本期护理费时，可在账单生成后用「手工加项」单独补一条。";
     case "meal_fee_not_billed_no_dining_record":
-      return "账期内没有就餐登记（膳食营养 → 配餐名单与就餐登记）：本账期不计伙食费。伙食费按就餐登记折合餐次计费（正常=1 餐、部分=0.5 餐、未就餐/拒食=0 餐）；请假、外出、住院期间未登记就餐同样不计费。";
+      // 折合餐次口径只在生成对话框的「自动计费口径」bullet 里讲一次，这里只讲本账期事实与下一步
+      return "本账期没有就餐登记，因此不计伙食费。若属漏登，请先到「膳食营养 → 配餐名单与就餐登记」补登记后重新生成。";
     default:
       return notice.category
         ? `「${notice.category}」本账期不计费（原因码 ${notice.code}）。`
