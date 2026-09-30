@@ -440,7 +440,8 @@ export default function PharmacyPage() {
       stockId: "",
       materialId: order.material_id ?? "",
       lotId: "",
-      quantity: "1",
+      // 服务端能可信推导疗程总量时预填（032 P4）；推不出时维持 031 的默认 1，交药师手填
+      quantity: order.prescribed_total_quantity?.trim() || "1",
       operator: "",
     });
     setStocks([]);
@@ -534,6 +535,21 @@ export default function PharmacyPage() {
     const end = createTarget.end_time ? formatDate(createTarget.end_time) : null;
     if (!start && !end) return frequency;
     return `${frequency} · 疗程 ${start ?? "—"} 至 ${end ?? "—"}`;
+  }, [createTarget]);
+
+  /**
+   * 发药数量预填依据（032 P4）：只用服务端返回的字段拼展示文本，前端不做频次换算。
+   * `prescribed_total_quantity` 为空（医嘱未填每次数量 / 频次不可推导 / 缺疗程天数）时返回 null，
+   * 调用处沿用 031 的「默认 1 + 人工核对、系统不做自动换算」口径；缺失项显示 `—`。
+   */
+  const createQuantityPrefill = useMemo(() => {
+    const total = createTarget?.prescribed_total_quantity?.trim();
+    if (!total) return null;
+    if (createTarget?.frequency_code === "STAT") return `按医嘱预填 ${total}：一次性（STAT）`;
+    const dose = createTarget?.dose_quantity?.trim() || "—";
+    const daily = createTarget?.daily_dose_count != null ? String(createTarget.daily_dose_count) : "—";
+    const days = createTarget?.duration_days != null ? String(createTarget.duration_days) : "—";
+    return `按医嘱预填 ${total}：每次 ${dose} × 每日 ${daily} 次 × ${days} 天`;
   }, [createTarget]);
 
   const handleCreateDispense = async () => {
@@ -1558,7 +1574,10 @@ export default function PharmacyPage() {
             )}
 
             <div className="rounded-md border border-border bg-surface-alt px-3 py-2 text-xs text-fg-muted">
-              医嘱频次 / 疗程：{createOrderCourse}。发药数量默认 1，请按医嘱频次与疗程核对后填写（系统不做自动换算）。
+              医嘱频次 / 疗程：{createOrderCourse}。
+              {createQuantityPrefill
+                ? `${createQuantityPrefill}；可手动修改，提交时仍以可用库存为上限（系统不做自动换算）。`
+                : "发药数量默认 1，请按医嘱频次与疗程核对后填写（系统不做自动换算）。"}
             </div>
 
             <div className="grid gap-4 sm:grid-cols-2">
