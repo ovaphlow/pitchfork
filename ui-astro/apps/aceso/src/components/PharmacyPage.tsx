@@ -167,6 +167,21 @@ function returnStatusBadge(status: string | null | undefined): React.ReactNode {
   return <Badge variant={meta.variant}>{meta.label}</Badge>;
 }
 
+/**
+ * 选中批次后按可用库存下调发药数量（032 M4）：医嘱推导出的疗程总量（`prescribed_total_quantity`）
+ * 超过该批次可用库存、且输入框仍等于该预填值时，下调到可用库存，避免药师提交后才被拒。
+ * 药师手改过的值原样保留，提交时的库存上限校验不放松；医嘱未推导出疗程总量或可用库存未知时原样返回。
+ */
+function capDispenseQuantityToStock(
+  quantity: string,
+  prescribedTotal: string | null,
+  available: string | null,
+): string {
+  if (!prescribedTotal || !available) return quantity;
+  if (quantity.trim() !== prescribedTotal) return quantity;
+  return Number(prescribedTotal) > Number(available) ? available : quantity;
+}
+
 export default function PharmacyPage() {
   const [activeTab, setActiveTab] = useState<Tab>("orders");
 
@@ -518,6 +533,20 @@ export default function PharmacyPage() {
   );
 
   const createAvailableQuantity = Number(selectedStock?.available_quantity ?? "0");
+
+  /**
+   * 医嘱推导出的疗程总量超出所选批次可用库存、且数量输入框仍为该上限值时（032 M4），
+   * 提示条要写清「应发多少 / 可用多少 / 已按可用库存预填」；与上面的下调判据同源。
+   * 药师手改过数量后不再声称「已按可用库存预填」，故一并要求输入框仍等于可用库存。
+   */
+  const createStockShortfall = useMemo(() => {
+    const prescribed = createTarget?.prescribed_total_quantity?.trim();
+    const available = selectedStock?.available_quantity?.trim();
+    if (!prescribed || !available) return null;
+    if (Number(prescribed) <= Number(available)) return null;
+    if (createForm.quantity.trim() !== available) return null;
+    return { prescribed, available };
+  }, [createTarget, selectedStock, createForm.quantity]);
 
   /** 已绑定药品的医嘱展示医嘱快照名；历史文本医嘱展示药房补选的目录药品名 */
   const createMaterialName = createTarget?.material_id
@@ -1528,11 +1557,18 @@ export default function PharmacyPage() {
                 disabled={!createForm.warehouse || !createForm.materialId || stocksLoading || stocks.length === 0}
                 onChange={(event) => {
                   const stock = stocks.find((item) => item.id === event.target.value);
+                  // 疗程总量超可用库存时按可用库存预填（032 M4）；手改过的数量不被覆盖
+                  const quantity = capDispenseQuantityToStock(
+                    createForm.quantity,
+                    createTarget?.prescribed_total_quantity?.trim() || null,
+                    stock?.available_quantity?.trim() || null,
+                  );
                   setCreateForm((current) => ({
                     ...current,
                     stockId: stock?.id ?? "",
                     materialId: stock?.material_id ?? current.materialId,
                     lotId: stock?.lot_id ?? "",
+                    quantity,
                   }));
                 }}
               >
@@ -1578,6 +1614,12 @@ export default function PharmacyPage() {
               {createQuantityPrefill
                 ? `${createQuantityPrefill}；可手动修改，提交时仍以可用库存为上限（系统不做自动换算）。`
                 : "发药数量默认 1，请按医嘱频次与疗程核对后填写（系统不做自动换算）。"}
+              {createStockShortfall && (
+                <span className="mt-1 block text-warning">
+                  本疗程应发 {createStockShortfall.prescribed}，当前可用库存仅 {createStockShortfall.available}
+                  （已按可用库存预填，可手动下调）。
+                </span>
+              )}
             </div>
 
             <div className="grid gap-4 sm:grid-cols-2">

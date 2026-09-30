@@ -11,7 +11,8 @@
     "base-url": "http://127.0.0.1:8421"
   },
   "identity": {
-    "base-url": "http://127.0.0.1:8420"
+    "base-url": "http://127.0.0.1:8420",
+    "session-timeout-ms": 3000
   },
   "server": {
     "port": 8422,

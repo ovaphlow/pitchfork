@@ -716,7 +716,18 @@ internal fun idpSessionAuthHandler(
                         }
                     }
                     401, 403 -> respondUnauthorized(ctx)
-                    else -> respondIdentityUnavailable(ctx)
+                    else -> {
+                        // 3xx 与其它 4xx（404 路径配错、429 限流…）仍归「依赖不可用」回 503：
+                        // 若按 401 处理会假掉线，是刻意选择。但排障必须能区分「目标配错」与「真实抖动」，
+                        // 故记录状态码与目标 URL —— **只记状态码与 URL，绝不记 cookie / 会话值**。
+                        log.warn(
+                            "idp session check upstream {}{} returned unexpected status {}; degrading to 503",
+                            idpBaseUrl.removeSuffix("/"),
+                            target,
+                            pair.first,
+                        )
+                        respondIdentityUnavailable(ctx)
+                    }
                 }
             }
             .onFailure { respondIdentityUnavailable(ctx) }
