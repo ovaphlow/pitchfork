@@ -722,7 +722,10 @@ class DischargeBillingWindowTest {
                         Future.succeededFuture(rowSet(mockRow(mapOf("total" to count.toLong()))))
                     }
                     // ——— 核销/未结目标账单：待缴费 且 余额 > 0（必须先于通用 bills 分支） ———
-                    sql.contains("from healthcare.bills") && sql.contains("left outer join") -> {
+                    // 034：账单详情/列表新增 red_bill LEFT JOIN 派生 reversal_bill_id，
+                    // 用 red_bill 排除，避免把账单读查询误判成未结聚合
+                    sql.contains("from healthcare.bills") && sql.contains("left outer join") &&
+                        !sql.contains("red_bill") -> {
                         val scoped = bills
                             .filter { it["encounter_id"] == values.getOrNull(2) && it["status"] == values.getOrNull(3) }
                             .mapNotNull { bill ->
