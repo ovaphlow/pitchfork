@@ -526,6 +526,16 @@ export default function PharmacyPage() {
   const createWarehouseName =
     warehouses.find((warehouse) => warehouse.code === createForm.warehouse)?.name ?? createForm.warehouse;
 
+  /** 医嘱频次/疗程提示（仅展示级，供药师核对发药数量；不参与数量推导/计价） */
+  const createOrderCourse = useMemo(() => {
+    if (!createTarget) return null;
+    const frequency = createTarget.frequency_name || createTarget.frequency_code || "按需";
+    const start = createTarget.start_time ? formatDate(createTarget.start_time) : null;
+    const end = createTarget.end_time ? formatDate(createTarget.end_time) : null;
+    if (!start && !end) return frequency;
+    return `${frequency} · 疗程 ${start ?? "—"} 至 ${end ?? "—"}`;
+  }, [createTarget]);
+
   const handleCreateDispense = async () => {
     if (!createTarget) return;
     const quantity = Number(createForm.quantity);
@@ -1546,6 +1556,10 @@ export default function PharmacyPage() {
                 {selectedStock.expiry_date ? selectedStock.expiry_date.slice(0, 10) : "—"}
               </div>
             )}
+
+            <div className="rounded-md border border-border bg-surface-alt px-3 py-2 text-xs text-fg-muted">
+              医嘱频次 / 疗程：{createOrderCourse}。发药数量默认 1，请按医嘱频次与疗程核对后填写（系统不做自动换算）。
+            </div>
 
             <div className="grid gap-4 sm:grid-cols-2">
               <Input
