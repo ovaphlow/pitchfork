@@ -320,12 +320,14 @@ const EARLY_ADMINISTRATION_NOTICE_MINUTES = 120;
  * 超过 `EARLY_ADMINISTRATION_NOTICE_MINUTES` 分钟」时返回中文警示；
  * 无计划时间、计划时间不可解析、未提前、提前未超阈值一律返回 null —— 既不提示也不阻断。
  *
- * 时间口径复用 `../lib/datetime`：`planned_time` 与 `formatDateTime` 同一来源（后端 OffsetDateTime 串），
- * 按同一方式（`new Date`）解析为瞬时，再用 `formatDateTime` 渲染成业务时区墙上时间，不自行处理时区。
+ * 时间口径复用 `../lib/datetime`：`planned_time` 与 `formatDateTime` 同一来源（后端 OffsetDateTime 串）。
+ * 解析必须走 `toOffsetDateTime`（与同文件其它时间解析一致）：它给「无偏移的墙上时间串」补 `+08:00`，
+ * 而裸 `new Date("2026-08-01T09:00")` 会按**浏览器本地时区**解释，非 +08:00 环境会出现
+ * 「显示 09:00 却提示提前 8 小时」的自相矛盾提示（R3 P2-2）。
  */
 function earlyAdministrationNotice(plannedTime: string | null, now: Date): string | null {
   if (!plannedTime) return null;
-  const planned = new Date(plannedTime);
+  const planned = new Date(toOffsetDateTime(plannedTime));
   if (Number.isNaN(planned.getTime())) return null;
   const leadMinutes = Math.floor((planned.getTime() - now.getTime()) / 60_000);
   if (leadMinutes <= EARLY_ADMINISTRATION_NOTICE_MINUTES) return null;
