@@ -73,6 +73,13 @@ interface DiagnosisForm {
   remark: string;
 }
 
+/**
+ * 新建医嘱表单的初值。`doseQuantity` 默认为 `1`（033 C）：开嘱侧不默认时，后端按 032 P4 契约
+ * 返回 `prescribed_total_quantity = null`，药房发药数量会回退成 1（用户报告的缺陷）。
+ *
+ * ⚠️ 本对象**仅供新建**。任何「编辑既有医嘱」的表单不得复用它，否则会把 `dose_quantity = 1`
+ * 凭空写回从未填写过该字段的既有医嘱（R3 P2-1）；当前仓库不存在编辑医嘱表单，此约束靠本注释维持。
+ */
 const orderFormDefaults: OrderForm = {
   orderType: "MEDICATION",
   orderClass: "LONG_TERM",
