@@ -2549,6 +2549,11 @@ export default function NursingPage() {
                       // 自动预填不覆盖护士手输的数量：仅当输入框为空、或仍等于上一次自动预填值时才更新
                       const auto = autoAdministeredQuantity(adminSources.find((item) => item.id === sourceId));
                       if (auto === null) {
+                        // 新来源没有「每次数量」（032 M3）：若输入框仍是上一条来源的自动预填值，必须清掉，
+                        // 否则会把 A 的来源数量当成 B 的数量记录；判据与下面的「不覆盖手输」一致，手改值不动。
+                        if (adminQuantity.trim() !== "" && adminQuantity.trim() === adminQuantityAutoRef.current) {
+                          setAdminQuantity("");
+                        }
                         adminQuantityAutoRef.current = "";
                         return;
                       }

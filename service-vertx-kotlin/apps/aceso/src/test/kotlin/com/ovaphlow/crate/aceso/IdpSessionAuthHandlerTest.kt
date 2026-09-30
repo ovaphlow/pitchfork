@@ -58,6 +58,12 @@ class IdpSessionAuthHandlerTest {
         /** `200 {"subject_id": ...}`：会话有效。 */
         SESSION_OK,
 
+        /** `200 {}`：状态码正常但响应体缺 `subject_id`（响应形状异常，不算有效会话）。 */
+        SESSION_OK_WITHOUT_SUBJECT_ID,
+
+        /** `200 {"subject_id": ""}`：键存在但空白，同样不算有效会话。 */
+        SESSION_OK_WITH_BLANK_SUBJECT_ID,
+
         /** `401`：会话失效。 */
         INVALID_SESSION,
 
@@ -137,6 +143,30 @@ class IdpSessionAuthHandlerTest {
         assertEquals(401, probe.status, "上游 403 同样属于会话无效，实际 body=${probe.body}")
         assertEquals("""{"error":"authentication required"}""", probe.body)
         assertTrue(businessCalls.isEmpty())
+    }
+
+    // ------------------------------------------------------------------
+    // 2b. 上游 200 但取不到可用 subject_id：响应形状异常 → 本地 401（计划 §2 P2 第 2 条）
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `an upstream 200 without a usable subject id stays a local 401`() {
+        // 两类形态都要锁定：键缺失（`getString` → null）与键存在但空白（`isNotBlank` → false）。
+        // 任一被放宽成「放行」或「503」都是回归，故断言 401 / 无 Retry-After / 不进业务处理器。
+        for (behavior in listOf(
+            UpstreamBehavior.SESSION_OK_WITHOUT_SUBJECT_ID,
+            UpstreamBehavior.SESSION_OK_WITH_BLANK_SUBJECT_ID,
+        )) {
+            upstreamBehavior = behavior
+            val port = startAcesoWithFakeIdp()
+
+            val probe = send(port, HttpMethod.GET, "/crate-api/healthcare/v1/patients", authenticatedCookie)
+
+            assertEquals(401, probe.status, "上游 200 但 $behavior 不是有效会话，实际 body=${probe.body}")
+            assertEquals("""{"error":"authentication required"}""", probe.body, "错误响应外形不得变（$behavior）")
+            assertEquals(null, probe.retryAfter, "响应形状异常不是依赖不可用，不得带 Retry-After（$behavior）")
+            assertTrue(businessCalls.isEmpty(), "响应形状异常不得进入业务处理器（$behavior）")
+        }
     }
 
     // ------------------------------------------------------------------
@@ -284,6 +314,16 @@ class IdpSessionAuthHandlerTest {
                     req.response()
                         .putHeader("Content-Type", "application/json")
                         .end(JsonObject().put("subject_id", "idp-user-1").encode())
+
+                UpstreamBehavior.SESSION_OK_WITHOUT_SUBJECT_ID ->
+                    req.response()
+                        .putHeader("Content-Type", "application/json")
+                        .end(JsonObject().encode())
+
+                UpstreamBehavior.SESSION_OK_WITH_BLANK_SUBJECT_ID ->
+                    req.response()
+                        .putHeader("Content-Type", "application/json")
+                        .end(JsonObject().put("subject_id", "").encode())
 
                 UpstreamBehavior.INVALID_SESSION ->
                     req.response()
