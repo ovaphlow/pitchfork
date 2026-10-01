@@ -325,6 +325,35 @@ class CheckupServiceTest {
     }
 
     @Test
+    fun `快照锚点排序键内联字面量避免 PostgreSQL 参数类型回落为 text`() {
+        val stub = DatabaseStub(
+            checkupCounts = rows(mapOf("total" to 0L)),
+            patients = rows(
+                mapOf("id" to "pat-1", "encounter_id" to "enc-1"),
+                mapOf("id" to "pat-2", "encounter_id" to null),
+            ),
+        )
+        val service = CheckupService(stub.pool)
+
+        successOf(service.createCheckup(validCheckup(mapOf("snapshot" to null)), "user-1"))
+
+        val snapshotSql = stub.queries.first { it.contains("distinct on") }
+        // 回归（2026-10-01）：CASE 的 then/else 若作为绑定参数，PostgreSQL 对无法从
+        // 上下文推断类型的参数回落为 text，Vert.x 便要求 String；绑定 Integer 0/1 会在
+        // 编码期抛 "can not be coerced to the expected class = [java.lang.String]"，
+        // 导致「新建批次」默认快照名单时一律 500。字面量必须内联渲染。
+        assertTrue(
+            snapshotSql.contains("when 'elderly_care' then 0 else 1"),
+            "锚点优先级 CASE 必须内联字面量：$snapshotSql",
+        )
+        val snapshotValues = stub.tuples.first { it.first.contains("distinct on") }.second
+        assertFalse(
+            snapshotValues.any { it is Int },
+            "锚点排序键不得产生整型绑定值：$snapshotValues",
+        )
+    }
+
+    @Test
     fun `创建同一年度第二批次返回409`() {
         val stub = DatabaseStub(checkupCounts = rows(mapOf("total" to 1L)))
         val service = CheckupService(stub.pool)
@@ -443,6 +472,27 @@ class CheckupServiceTest {
         assertTrue(stub.queries.any { it.contains("insert into healthcare.health_checkup_members") })
         assertTrue(stub.tuples.any { it.second.contains("enc-1") }, "锚点必须写入名单")
         assertEquals(1, stub.transactionCalls, "补录必须单事务")
+    }
+
+    @Test
+    fun `补录名单锚点解析同样内联 CASE 字面量`() {
+        val stub = DatabaseStub(
+            checkups = rows(checkupRow()),
+            patients = rows(anchorRow()),
+        )
+        val service = CheckupService(stub.pool)
+
+        successOf(
+            service.addMembers("ck-1", JsonObject().put("patient_ids", JsonArray().add("pat-1")), "user-1"),
+        )
+
+        val anchorSql = stub.queries.first { it.contains("distinct on") }
+        assertTrue(
+            anchorSql.contains("when 'elderly_care' then 0 else 1"),
+            "锚点解析 CASE 必须内联字面量：$anchorSql",
+        )
+        val anchorValues = stub.tuples.first { it.first.contains("distinct on") }.second
+        assertFalse(anchorValues.any { it is Int }, "锚点解析不得产生整型绑定值：$anchorValues")
     }
 
     @Test

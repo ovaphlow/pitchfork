@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Badge, Button, Card, EmptyState, Input, Modal, Table, type Column } from "@pitchfork/ui";
+import { checkupErrorMessage } from "./checkupMessages";
 import { useSubjectDirectory } from "../lib/identity";
 import {
   addHealthCheckupMembers,
@@ -43,8 +44,7 @@ const NUMERIC_ITEM_PRESETS: { item_name: string; unit: string; ref_min: string; 
 ];
 
 function errorMessage(error: unknown, fallback: string): string {
-  if (error instanceof Error && error.message) return error.message;
-  return fallback;
+  return checkupErrorMessage(error, fallback);
 }
 
 function statusBadge(status: string) {

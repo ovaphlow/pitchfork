@@ -18,6 +18,7 @@ import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.RowSet
 import io.vertx.sqlclient.SqlClient
 import org.jooq.Condition
+import org.jooq.Field
 import org.jooq.JSONB
 import org.jooq.Query
 import org.jooq.impl.DSL
@@ -1050,9 +1051,24 @@ class CheckupService(
 
     private data class ResolvedAnchor(val patientName: String, val encounterId: String?)
 
+    /**
+     * 活动锚点优先级排序键：ELDERLY_CARE=0、其余(OUTPATIENT)=1。
+     *
+     * 字面量必须内联渲染——若走绑定参数，PostgreSQL 无法从
+     * `case <varchar> when $n then $m else $k end` 的上下文推断 $m/$k 类型，
+     * 会按 SQL 规范回落为 `text`；Vert.x PG 客户端据此要求 String，
+     * 遇到 Integer 0/1 直接在编码期抛
+     * "Parameter at position[...] ... can not be coerced to the expected class = [java.lang.String]"，
+     * 使创建批次（默认快照名单）与名单补录一律 500。
+     */
+    private fun anchorPreference(): Field<Int> =
+        DSL.case_(ENCOUNTERS.ENCOUNTER_TYPE)
+            .`when`(DSL.inline("ELDERLY_CARE"), DSL.inline(0))
+            .else_(DSL.inline(1))
+
     /** 解析在册患者与活动锚点：ELDERLY_CARE 优先、OUTPATIENT 次之（可无锚点） */
     private fun resolveMemberAnchor(client: SqlClient, patientId: String): Future<ResolvedAnchor> {
-        val preference = DSL.case_(ENCOUNTERS.ENCOUNTER_TYPE).`when`("ELDERLY_CARE", 0).else_(1)
+        val preference = anchorPreference()
         val query = ctx.select(PATIENTS.NAME, PATIENTS.STATUS, ENCOUNTERS.ID.`as`("encounter_id"))
             .distinctOn(PATIENTS.ID)
             .from(PATIENTS)
@@ -1083,7 +1099,7 @@ class CheckupService(
         operator: String,
         now: OffsetDateTime,
     ): Future<Int> {
-        val preference = DSL.case_(ENCOUNTERS.ENCOUNTER_TYPE).`when`("ELDERLY_CARE", 0).else_(1)
+        val preference = anchorPreference()
         val query = ctx.select(PATIENTS.ID, ENCOUNTERS.ID.`as`("encounter_id"))
             .distinctOn(PATIENTS.ID)
             .from(PATIENTS)
