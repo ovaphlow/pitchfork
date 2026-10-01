@@ -9,7 +9,9 @@ import {
   type Patient,
   type PatientInput,
 } from "@pitchfork/shared/aceso";
+import { DOMAIN_ENTITY, currentEntityLabels } from "../lib/domain";
 import { formatDate } from "../lib/datetime";
+import { useDomain } from "../lib/useDomain";
 
 const PAGE_SIZE = 20;
 
@@ -98,6 +100,9 @@ function formFromPatient(patient: Patient): ElderForm {
 }
 
 export default function EldersPage() {
+  // 页面命名随产品域切换（医疗：居民档案 / 养老：长者档案 / 儿保：儿童健康档案），
+  // 与菜单、浏览器标题同源；此前内容写死「长者」，医疗模式下会与菜单打架。
+  const { person, archive } = DOMAIN_ENTITY[useDomain()];
   const [elders, setElders] = useState<Patient[]>([]);
   const [activeEncounters, setActiveEncounters] = useState<Record<string, Encounter>>({});
   const [total, setTotal] = useState(0);
@@ -127,7 +132,9 @@ export default function EldersPage() {
       setTotal(response.meta.total);
       setPage(targetPage);
     } catch (error) {
-      setPageError(errorMessage(error, "无法加载长者档案"));
+      // 兜底文案按「出错那一刻」的域取词：load 的依赖必须保持稳定，
+      // 否则切域会改变回调标识、重置分页并重拉列表
+      setPageError(errorMessage(error, `无法加载${currentEntityLabels().archive}`));
     } finally {
       setLoading(false);
     }
@@ -169,7 +176,7 @@ export default function EldersPage() {
       setEditorOpen(false);
       await load(editTarget ? page : 1);
     } catch (error) {
-      setFormError(errorMessage(error, editTarget ? "无法更新长者档案" : "无法保存长者档案"));
+      setFormError(errorMessage(error, editTarget ? `无法更新${archive}` : `无法保存${archive}`));
     } finally {
       setSaving(false);
     }
@@ -201,16 +208,16 @@ export default function EldersPage() {
     <div className="space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h2 className="text-lg font-semibold text-fg-emphasis">长者档案</h2>
-          <p className="mt-1 text-sm text-fg-muted">建立长者基础档案，后续入住与照护记录将关联到此档案</p>
+          <h2 className="text-lg font-semibold text-fg-emphasis">{archive}</h2>
+          <p className="mt-1 text-sm text-fg-muted">建立{person}基础档案，后续入住与照护记录将关联到此档案</p>
         </div>
-        <Button variant="primary" onClick={openCreate}>录入长者</Button>
+        <Button variant="primary" onClick={openCreate}>录入{person}</Button>
       </div>
 
       {pageError && <div className="rounded-lg border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">{pageError}</div>}
 
-      <Card title="长者档案列表" actions={<span className="text-sm text-fg-dimmed">共 {total} 条</span>}>
-        <Table columns={columns} data={elders} loading={loading} emptyMessage="暂无长者档案，点击右上角开始录入" />
+      <Card title={`${archive}列表`} actions={<span className="text-sm text-fg-dimmed">共 {total} 条</span>}>
+        <Table columns={columns} data={elders} loading={loading} emptyMessage={`暂无${archive}，点击右上角开始录入`} />
         <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
           <span className="text-sm text-fg-muted">第 {page} / {pageCount} 页</span>
           <div className="flex items-center gap-2">
@@ -220,7 +227,7 @@ export default function EldersPage() {
         </div>
       </Card>
 
-      <Modal open={editorOpen} onClose={() => !saving && setEditorOpen(false)} title={editTarget ? "编辑长者档案" : "录入长者档案"}>
+      <Modal open={editorOpen} onClose={() => !saving && setEditorOpen(false)} title={editTarget ? `编辑${archive}` : `录入${archive}`}>
         <form
           className="space-y-5"
           onSubmit={(event) => {

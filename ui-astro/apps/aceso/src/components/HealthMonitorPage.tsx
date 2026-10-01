@@ -15,7 +15,9 @@ import {
   type VitalSignType,
 } from "@pitchfork/shared/aceso";
 import { dayBoundary, daysAgoLocal, formatDate, formatDateTime, nowLocalInput, toInputValue, toOffsetDateTime } from "../lib/datetime";
+import { DOMAIN_ENTITY, currentEntityLabels } from "../lib/domain";
 import { useSubjectDirectory } from "../lib/identity";
+import { useDomain } from "../lib/useDomain";
 
 const PAGE_SIZE = 20;
 
@@ -180,6 +182,8 @@ function TrendChart({ records, type }: { records: VitalSignRecord[]; type: Vital
 }
 
 export default function HealthMonitorPage() {
+  // 健康监测页在养老/儿保都可见：主体称呼随域切换（长者 / 儿童）
+  const { person } = DOMAIN_ENTITY[useDomain()];
   /** 认证主体 ID（记录人）→ 姓名；目录不可用时回退原始 ID */
   const { subjectLabel } = useSubjectDirectory();
 
@@ -243,7 +247,8 @@ export default function HealthMonitorPage() {
       const response = await listPatients({ name: query.trim() || undefined, status: "ACTIVE", limit: 20 });
       setPatientOptions(response.records);
     } catch (error) {
-      setPatientError(errorMessage(error, "无法加载长者列表"));
+      // 兜底文案按出错那一刻的域取词（该回调依赖必须保持稳定）
+      setPatientError(errorMessage(error, `无法加载${currentEntityLabels().person}列表`));
       setPatientOptions([]);
     }
   }, []);
@@ -554,10 +559,10 @@ export default function HealthMonitorPage() {
   return (
     <div className="space-y-6">
       {/* 长者选择 */}
-      <Card title="选择长者">
+      <Card title={`选择${person}`}>
         <div className="relative">
           <Input
-            placeholder="输入姓名搜索入住长者…"
+            placeholder={`输入姓名搜索入住${person}…`}
             value={patientQuery}
             onChange={(event) => {
               setPatientQuery(event.target.value);
@@ -584,7 +589,7 @@ export default function HealthMonitorPage() {
         {patientError && <p className="text-sm text-danger mt-2">{patientError}</p>}
         {selectedPatient && (
           <p className="text-sm text-fg-muted mt-3">
-            当前长者：<span className="text-fg-emphasis font-medium">{selectedPatient.name}</span>
+            当前{person}：<span className="text-fg-emphasis font-medium">{selectedPatient.name}</span>
             {selectedPatient.birth_date ? `（${formatDate(selectedPatient.birth_date)}出生）` : ""}
           </p>
         )}
@@ -592,7 +597,7 @@ export default function HealthMonitorPage() {
 
       {!selectedPatient ? (
         <Card>
-          <EmptyState icon="❤️" title="请先选择长者" description="选择入住长者后即可查看体征快照、录入与趋势" />
+          <EmptyState icon="❤️" title={`请先选择${person}`} description={`选择入住${person}后即可查看体征快照、录入与趋势`} />
         </Card>
       ) : (
         <>
@@ -662,7 +667,7 @@ export default function HealthMonitorPage() {
               ) : admissionError ? (
                 <p className="text-xs text-danger">{admissionError}</p>
               ) : admissionOptions.length === 0 ? (
-                <p className="text-xs text-fg-dimmed">该长者暂无入住记录，体征将不挂接入住</p>
+                <p className="text-xs text-fg-dimmed">该{person}暂无入住记录，体征将不挂接入住</p>
               ) : (
                 <>
                   <select
@@ -684,7 +689,7 @@ export default function HealthMonitorPage() {
                   </select>
                   {forcedAdmission && (
                     <p className="text-xs text-fg-dimmed">
-                      该长者当前在住（住院号 {forcedAdmission.encounter_no}），体征将挂接到该入住记录；
+                      该{person}当前在住（住院号 {forcedAdmission.encounter_no}），体征将挂接到该入住记录；
                       如需不挂接，请先办理离院。
                     </p>
                   )}
@@ -749,7 +754,7 @@ export default function HealthMonitorPage() {
             ) : trendError ? (
               <p className="text-sm text-danger py-8 text-center">{trendError}</p>
             ) : trendPoints.length === 0 ? (
-              <EmptyState icon="📈" title="暂无趋势数据" description={`该长者在所选时间段内没有${TYPE_LABELS[trendType]}记录`} />
+              <EmptyState icon="📈" title="暂无趋势数据" description={`该${person}在所选时间段内没有${TYPE_LABELS[trendType]}记录`} />
             ) : (
               <>
                 <TrendChart records={trendPoints} type={trendType} />

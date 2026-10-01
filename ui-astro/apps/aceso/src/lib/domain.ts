@@ -32,11 +32,35 @@ export interface PageTitleDomainLabel {
 }
 
 /**
+ * 档案主体在各域的叫法（菜单 / 浏览器标题 / 页面内容共用同一份）。
+ *
+ * 背景（2026-10-01 QA）：域切换原先只切了菜单与浏览器标题，页面内容仍写死「长者」，
+ * 于是医疗模式下出现「菜单叫居民档案、页面标题与内容叫长者档案」。
+ * 任何按域改写的命名都必须从本表取词，组件里不再硬编码。
+ */
+export interface DomainEntityLabels {
+  /** 主体名词：居民 / 长者 / 儿童 */
+  person: string;
+  /** 档案名：居民档案 / 长者档案 / 儿童健康档案 */
+  archive: string;
+}
+
+export const DOMAIN_ENTITY: Record<Domain, DomainEntityLabels> = {
+  医疗: { person: "居民", archive: "居民档案" },
+  养老: { person: "长者", archive: "长者档案" },
+  儿保: { person: "儿童", archive: "儿童健康档案" },
+};
+
+/**
  * 路径 → 标题。`base` 即 `Sidebar.menuItems` 里该条目的 `label`（医疗基准名），
  * `labels` 即该条目的 `domainLabels`；`Sidebar` 直接引用本表，两处不会分叉。
  */
 export const PAGE_TITLE_DOMAIN_LABELS: Record<PageTitlePath, PageTitleDomainLabel> = {
-  "/dashboard/elders": { base: "居民档案", labels: { 养老: "长者档案", 儿保: "儿童健康档案" } },
+  // 档案名由 DOMAIN_ENTITY 派生：菜单、浏览器标题、页面内容必然同名
+  "/dashboard/elders": {
+    base: DOMAIN_ENTITY.医疗.archive,
+    labels: { 养老: DOMAIN_ENTITY.养老.archive, 儿保: DOMAIN_ENTITY.儿保.archive },
+  },
   "/dashboard/admission": { base: "入院管理", labels: { 养老: "入住管理" } },
   "/dashboard/inpatient": { base: "住院护理", labels: { 养老: "照护管理" } },
   "/dashboard/followup": { base: "随访管理", labels: { 儿保: "儿童保健随访" } },
@@ -60,4 +84,16 @@ export function readDomain(): Domain {
     if (stored === "医疗" || stored === "养老" || stored === "儿保") return stored;
   } catch { /* SSR / 隐私模式禁用 storage */ }
   return "医疗";
+}
+
+/**
+ * 运行期直接取当前域的词表（`DOMAIN_ENTITY[readDomain()]`）。
+ *
+ * 专供**依赖数组必须保持稳定**的场景：例如 `useCallback([], ...)` 里的兜底文案。
+ * 这类回调不能依赖 `useDomain()` 的返回值，否则切域会改变回调标识，进而重置分页或
+ * 重发请求；而兜底文案只在真正报错的那一刻才需要词，直接读一次当前域即可。
+ * 组件渲染路径请一律使用 `useDomain()`，以便切换域时自动重渲染。
+ */
+export function currentEntityLabels(): DomainEntityLabels {
+  return DOMAIN_ENTITY[readDomain()];
 }

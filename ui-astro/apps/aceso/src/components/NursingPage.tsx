@@ -84,9 +84,11 @@ import {
   toOffsetDateTime,
   todayLocal,
 } from "../lib/datetime";
+import { DOMAIN_ENTITY, currentEntityLabels } from "../lib/domain";
 import { formatOrderItemLabel } from "../lib/orderDetailDisplay";
 import { nursingErrorMessage } from "./nursingMessages";
 import NursingExecutionStatisticsPanel from "./NursingExecutionStatisticsPanel";
+import { useDomain } from "../lib/useDomain";
 
 type Tab = "overview" | "assessments" | "plans" | "tasks" | "orders" | "incidents" | "handovers" | "timeline";
 type MainView = "today" | "resident";
@@ -391,6 +393,8 @@ const revisionDefaults = (): RevisionForm => ({
 });
 
 export default function NursingPage() {
+  // 照护管理页在医疗/养老都可见：主体称呼随域切换（居民 / 长者）
+  const { person } = DOMAIN_ENTITY[useDomain()];
   const [admissions, setAdmissions] = useState<ActiveAdmission[]>([]);
   const [selectedEncounterId, setSelectedEncounterId] = useState("");
   const [period, setPeriod] = useState<NursingServicePeriod | null>(null);
@@ -572,7 +576,8 @@ export default function NursingPage() {
       setAdmissions(records);
       setSelectedEncounterId((current) => records.some((record) => record.id === current) ? current : records[0]?.id ?? "");
     } catch (error) {
-      setPageError(errorMessage(error, "无法加载当前入住长者"));
+      // 兜底文案按出错那一刻的域取词：该回调依赖含 admissionSearch，不能再加域依赖
+      setPageError(errorMessage(error, `无法加载当前入住${currentEntityLabels().person}`));
     } finally {
       setLoading(false);
     }
@@ -820,7 +825,7 @@ export default function NursingPage() {
 
   async function handleCreateIncident() {
     if (!selectedAdmission || !period) {
-      setIncidentError("请先选择入住长者并建立照护周期");
+      setIncidentError(`请先选择入住${person}并建立照护周期`);
       return;
     }
     if (!incidentForm.description.trim()) {
@@ -1187,8 +1192,8 @@ export default function NursingPage() {
 
   /** 当前逾期队列的收口范围：队列按所选入住记录的周期过滤（与 027 队列口径一致），无周期时为跨长者全量 */
   const convergeScopeLabel = period && selectedAdmission
-    ? `长者 ${selectedAdmission.patientName} 当前照护周期`
-    : "全部长者（当前未选定照护周期）";
+    ? `${person} ${selectedAdmission.patientName} 当前照护周期`
+    : `全部${person}（当前未选定照护周期）`;
   /** 确认文案里展示的阈值：输入非法时回退默认值（提交时仍会校验并拒绝非法输入） */
   const convergeThresholdLabel = (() => {
     const value = Number(convergeThreshold.trim());
@@ -1396,7 +1401,7 @@ export default function NursingPage() {
   const todayColumns: Column<NursingTodayExecution>[] = useMemo(() => {
     const columns: Column<NursingTodayExecution>[] = [
       { key: "planned_time", header: "计划时间", className: "min-w-[140px]", render: (row) => formatDateTime(row.planned_time) },
-      { key: "patient_name", header: "长者", className: "min-w-[80px]", render: (row) => row.patient_name ?? row.patient_id ?? "-" },
+      { key: "patient_name", header: person, className: "min-w-[80px]", render: (row) => row.patient_name ?? row.patient_id ?? "-" },
       { key: "task_description", header: "任务说明", className: "min-w-[180px]", render: (row) => row.task_description ?? "-" },
       {
         // 医嘱任务只显示自由文本的正文时，护士看不出是什么药。这里按护理页与医生页
@@ -1444,7 +1449,7 @@ export default function NursingPage() {
       });
     }
     return columns;
-  }, [subjectMap, mounted, todayExecutions, actionSaving, adminSaving]);
+  }, [subjectMap, mounted, todayExecutions, actionSaving, adminSaving, person]);
 
   function executionStatusBadge(status: string) {
     const variant = status === "PENDING" ? "warning" as const
@@ -1841,13 +1846,13 @@ export default function NursingPage() {
         <div>
           <h2 className="text-lg font-semibold text-fg-emphasis">照护管理</h2>
           <p className="mt-1 text-sm text-fg-muted">
-            {mainView === "today" ? "查看今日所有长者的待执行任务" : "选择长者 → 评估（至少一条）→ 计划 → 任务 → 完成记录"}
+            {mainView === "today" ? `查看今日所有${person}的待执行任务` : `选择${person} → 评估（至少一条）→ 计划 → 任务 → 完成记录`}
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
           <div className="flex rounded-lg border border-border p-0.5">
             <button type="button" onClick={() => { setMainView("today"); setActionError(""); }} className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${mainView === "today" ? "bg-accent text-white" : "text-fg-muted hover:text-fg"}`}>今日执行</button>
-            <button type="button" onClick={() => { setMainView("resident"); setActionError(""); }} className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${mainView === "resident" ? "bg-accent text-white" : "text-fg-muted hover:text-fg"}`}>长者照护档案</button>
+            <button type="button" onClick={() => { setMainView("resident"); setActionError(""); }} className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${mainView === "resident" ? "bg-accent text-white" : "text-fg-muted hover:text-fg"}`}>{person}照护档案</button>
           </div>
           {mainView === "resident" && selectedAdmission && period && (
             <>
@@ -1970,16 +1975,16 @@ export default function NursingPage() {
       </div>
 
       {loading ? (
-        <Card><div className="py-16 text-center text-sm text-fg-dimmed">正在加载当前入住长者…</div></Card>
+        <Card><div className="py-16 text-center text-sm text-fg-dimmed">正在加载当前入住{person}…</div></Card>
       ) : admissions.length === 0 ? (
         <EmptyState
           icon="🏠"
-          title={admissionSearch ? "未找到匹配的入住长者" : "暂无活动入住"}
-          description={admissionSearch ? "请尝试姓名、住院号或身份证的其他部分。" : "请先在入住管理为长者办理入住，再开始建立照护记录。"}
+          title={admissionSearch ? `未找到匹配的入住${person}` : "暂无活动入住"}
+          description={admissionSearch ? "请尝试姓名、住院号或身份证的其他部分。" : `请先在入住管理为${person}办理入住，再开始建立照护记录。`}
         />
       ) : (
         <div className="grid min-h-0 flex-1 gap-6 xl:grid-cols-[280px_minmax(0,1fr)]">
-              <Card title="当前入住长者" className="flex flex-col h-full" bodyClassName="flex flex-col min-h-0">
+              <Card title={`当前入住${person}`} className="flex flex-col h-full" bodyClassName="flex flex-col min-h-0">
                 <div className="flex-1 space-y-2 overflow-y-auto min-h-0">
                   {admissions.map((admission) => (
                 <button
@@ -2021,7 +2026,7 @@ export default function NursingPage() {
                 <div className="flex flex-col items-center justify-center py-12 text-center">
                   <span className="text-4xl">🧑‍⚕️</span>
                   <h3 className="mt-4 text-base font-semibold text-fg-emphasis">尚未建立养老照护周期</h3>
-                  <p className="mt-2 max-w-md text-sm text-fg-muted">为入住长者建立与本次入住绑定的养老照护周期后，才能保存评估、照护计划和日常任务。</p>
+                  <p className="mt-2 max-w-md text-sm text-fg-muted">为入住{person}建立与本次入住绑定的养老照护周期后，才能保存评估、照护计划和日常任务。</p>
                   <Button className="mt-5" loading={saving} onClick={() => void handleCreatePeriod()}>建立养老照护周期</Button>
                 </div>
               </Card>
@@ -2389,14 +2394,14 @@ export default function NursingPage() {
               <label className="text-sm font-medium text-fg-muted" htmlFor="action-note">
                 {actionModal === "skip" ? "跳过原因" : "取消原因"} <span className="text-danger">*</span>
               </label>
-              <textarea id="action-note" rows={3} className={textareaClass} value={actionNote} onChange={(event) => setActionNote(event.target.value)} placeholder={actionModal === "skip" ? "例如：长者拒绝、临时外出" : "例如：医嘱变更、不再需要"} required />
+              <textarea id="action-note" rows={3} className={textareaClass} value={actionNote} onChange={(event) => setActionNote(event.target.value)} placeholder={actionModal === "skip" ? `例如：${person}拒绝、临时外出` : "例如：医嘱变更、不再需要"} required />
             </div>
           )}
           {actionModal === "complete" && (
             <div className="space-y-3">
               <div className="flex flex-col gap-1.5">
                 <label className="text-sm font-medium text-fg-muted" htmlFor="action-note">执行备注</label>
-                <textarea id="action-note" rows={2} className={textareaClass} value={actionNote} onChange={(event) => setActionNote(event.target.value)} placeholder="记录执行情况、异常和长者反馈（可选）" />
+                <textarea id="action-note" rows={2} className={textareaClass} value={actionNote} onChange={(event) => setActionNote(event.target.value)} placeholder={`记录执行情况、异常和${person}反馈（可选）`} />
               </div>
               {/* 耗材使用 */}
               <div className="rounded-md border border-border p-3">
@@ -2658,8 +2663,8 @@ export default function NursingPage() {
               onChange={(event) => { setAdminReason(event.target.value); setAdminError(""); }}
               placeholder={
                 isConsumingResult(adminResult)
-                  ? adminResult === "部分服" ? "例如：长者服用部分后不适，剩余退回" : "记录给药情况（可选）"
-                  : adminResult === "拒服" ? "例如：长者拒绝服用" : adminResult === "漏服" ? "例如：错过计划时间，补记" : "例如：长者外出暂缓，稍后补服"
+                  ? adminResult === "部分服" ? `例如：${person}服用部分后不适，剩余退回` : "记录给药情况（可选）"
+                  : adminResult === "拒服" ? `例如：${person}拒绝服用` : adminResult === "漏服" ? "例如：错过计划时间，补记" : `例如：${person}外出暂缓，稍后补服`
               }
             />
           </div>
@@ -2885,7 +2890,7 @@ export default function NursingPage() {
           <div className="rounded-md bg-surface-alt px-3 py-2 text-sm text-fg-muted">{executionTask?.description}</div>
           <Input label="计划执行时间" type="datetime-local" value={executionForm.plannedTime} onChange={(event) => setExecutionForm((current) => ({ ...current, plannedTime: event.target.value }))} />
           {mounted ? (<div className="flex flex-col gap-1.5"><label className="text-sm font-medium text-fg-muted" htmlFor="execution-executor">执行人</label><select id="execution-executor" className={selectClass} value={executionForm.executor} onChange={(event) => setExecutionForm((current) => ({ ...current, executor: event.target.value }))}><option value="">请选择执行人</option>{subjects.map((subject) => <option key={subject.id} value={subject.id}>{subject.display_name}</option>)}</select></div>) : (<Input label="执行人" value="" placeholder="加载中..." onChange={() => {}} />)}
-          <div className="flex flex-col gap-1.5"><label className="text-sm font-medium text-fg-muted" htmlFor="execution-note">执行备注</label><textarea id="execution-note" rows={3} className={textareaClass} value={executionForm.note} onChange={(event) => setExecutionForm((current) => ({ ...current, note: event.target.value }))} placeholder="记录执行情况、异常和长者反馈" /></div>
+          <div className="flex flex-col gap-1.5"><label className="text-sm font-medium text-fg-muted" htmlFor="execution-note">执行备注</label><textarea id="execution-note" rows={3} className={textareaClass} value={executionForm.note} onChange={(event) => setExecutionForm((current) => ({ ...current, note: event.target.value }))} placeholder={`记录执行情况、异常和${person}反馈`} /></div>
           <div className="flex justify-end gap-3"><Button type="button" variant="ghost" onClick={() => setExecutionTask(null)} disabled={saving}>取消</Button><Button type="submit" loading={saving}>保存完成记录</Button></div>
         </form>
       </Modal>
@@ -3001,7 +3006,7 @@ export default function NursingPage() {
           </div>
           <div className="flex flex-col gap-1.5">
             <label className="text-sm font-medium text-fg-muted" htmlFor="incident-initial-action">即时处置（可选）</label>
-            <textarea id="incident-initial-action" rows={2} className={textareaClass} value={incidentForm.initialAction} onChange={(event) => setIncidentForm((current) => ({ ...current, initialAction: event.target.value }))} placeholder="例如：已扶起长者并评估伤情、通知家属（填写后事件直接进入处理中）" />
+            <textarea id="incident-initial-action" rows={2} className={textareaClass} value={incidentForm.initialAction} onChange={(event) => setIncidentForm((current) => ({ ...current, initialAction: event.target.value }))} placeholder={`例如：已扶起${person}并评估伤情、通知家属（填写后事件直接进入处理中）`} />
           </div>
           {incidentError && <p className="text-sm text-danger">{incidentError}</p>}
           <div className="flex justify-end gap-3">

@@ -1,5 +1,6 @@
 import { useState, useCallback } from "react";
 import { DOMAIN_CHANGE_EVENT, DOMAIN_STORAGE_KEY, readDomain, type Domain } from "./Sidebar";
+import { DOMAIN_ENTITY } from "../lib/domain";
 
 const subtitle: Record<Domain, string> = {
   医疗: "临床诊疗平台",
@@ -57,7 +58,8 @@ export default function DashboardPage() {
             </div>
             <div>
               <p className="text-xs text-fg-dimmed uppercase tracking-wider">
-                {domain === "儿保" ? "儿童健康档案" : domain === "养老" ? "长者健康档案" : "居民健康档案"}
+                {/* 与菜单/页面同源取词（居民 / 长者 / 儿童），不再各写一份三元表达式 */}
+                {`${DOMAIN_ENTITY[domain].person}健康档案`}
               </p>
               <p className="text-xl font-semibold text-fg-emphasis">—</p>
             </div>

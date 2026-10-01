@@ -22,7 +22,9 @@ import {
   type Patient,
 } from "@pitchfork/shared/aceso";
 import { admissionErrorMessage } from "./admissionMessages";
+import { DOMAIN_ENTITY, currentEntityLabels } from "../lib/domain";
 import { dayBoundary, formatDate, formatDateTime, toOffsetDateTime, todayLocal } from "../lib/datetime";
+import { useDomain } from "../lib/useDomain";
 
 interface AdmissionForm {
   patientId: string;
@@ -90,6 +92,7 @@ function ExecutionSummary({ summary }: { summary: ElderlyDischargeHandoverSnapsh
 }
 
 function HandoverReadOnly({ handover, subjectLabel }: { handover: ElderlyDischargeHandover; subjectLabel: (value: string | null | undefined) => string }) {
+  const { person } = DOMAIN_ENTITY[useDomain()];
   const snapshot = handover.snapshot;
   const patient = snapshot.patient;
   const encounter = snapshot.encounter;
@@ -106,7 +109,7 @@ function HandoverReadOnly({ handover, subjectLabel }: { handover: ElderlyDischar
 
       {/* 基础资料 */}
       <section>
-        <h4 className="mb-2 text-sm font-semibold text-fg-emphasis">长者基础资料</h4>
+        <h4 className="mb-2 text-sm font-semibold text-fg-emphasis">{person}基础资料</h4>
         <div className="grid gap-x-6 gap-y-1.5 text-sm sm:grid-cols-2">
           <p><span className="text-fg-dimmed">姓名：</span>{patient.name || "-"}</p>
           <p><span className="text-fg-dimmed">性别：</span>{patient.gender || "-"}</p>
@@ -312,6 +315,8 @@ function HandoverReadOnly({ handover, subjectLabel }: { handover: ElderlyDischar
 }
 
 export default function AdmissionsPage() {
+  // 入院管理页在医疗/养老都可见：主体称呼与档案名随域切换（居民 / 长者）
+  const { person, archive } = DOMAIN_ENTITY[useDomain()];
   const [view, setView] = useState<"active" | "discharged">("active");
   const [patients, setPatients] = useState<Patient[]>([]);
   const [admissions, setAdmissions] = useState<AdmissionRow[]>([]);
@@ -453,7 +458,8 @@ export default function AdmissionsPage() {
         .catch((error) => {
           if (requestId !== patientSearchRequest.current) return;
           setPatientOptions([]);
-          setPatientSearchError(errorMessage(error, "无法搜索长者"));
+          // 兜底文案按出错那一刻的域取词：该 effect 的依赖必须保持稳定，避免切域重跑防抖搜索
+          setPatientSearchError(errorMessage(error, `无法搜索${currentEntityLabels().person}`));
         })
         .finally(() => {
           if (requestId === patientSearchRequest.current) setPatientSearchLoading(false);
@@ -522,7 +528,7 @@ export default function AdmissionsPage() {
   async function handleSave() {
     const input = toAdmissionInput(form);
     if (!input) {
-      setFormError("长者、住院号和入住日期不能为空");
+      setFormError(`${person}、住院号和入住日期不能为空`);
       return;
     }
 
@@ -572,7 +578,7 @@ export default function AdmissionsPage() {
       setDischargeDate("");
       setDischargeDiagnosis("");
       await load();
-      setNotice(`已办理离院。该长者的账单尚未关账，${BILLING_SETTLEMENT_HINT}`);
+      setNotice(`已办理离院。该${person}的账单尚未关账，${BILLING_SETTLEMENT_HINT}`);
     } catch (error) {
       // 409/网络/校验失败：保留表单输入，错误独立展示（不得用错误面板替换输入表单）
       setDischargeError(errorMessage(error, "无法办理离院"));
@@ -616,7 +622,7 @@ export default function AdmissionsPage() {
       setDeathDate("");
       setDeathCause("");
       await load();
-      setNotice(`已办理去世。该长者的账单尚未关账，${BILLING_SETTLEMENT_HINT}`);
+      setNotice(`已办理去世。该${person}的账单尚未关账，${BILLING_SETTLEMENT_HINT}`);
     } catch (error) {
       // 409/网络/校验失败：保留表单输入，错误独立展示（不得用错误面板替换输入表单）
       setDeathError(errorMessage(error, "无法办理去世"));
@@ -721,7 +727,7 @@ export default function AdmissionsPage() {
   }, [beds, form.department]);
 
   const activeColumns: Column<AdmissionRow>[] = [
-    { key: "patientName", header: "长者", className: "min-w-[140px]" },
+    { key: "patientName", header: person, className: "min-w-[140px]" },
     { key: "encounter_no", header: "住院号", className: "min-w-[140px]" },
     { key: "admit_date", header: "入住日期", className: "min-w-[120px]", render: (row) => formatDate(row.admit_date) },
     { key: "department", header: "照护单元/病区", className: "min-w-[150px]", render: (row) => row.department || "-" },
@@ -760,7 +766,7 @@ export default function AdmissionsPage() {
   ];
 
   const dischargedColumns: Column<AdmissionRow>[] = [
-    { key: "patientName", header: "长者", className: "min-w-[140px]" },
+    { key: "patientName", header: person, className: "min-w-[140px]" },
     { key: "encounter_no", header: "住院号", className: "min-w-[140px]" },
     { key: "admit_date", header: "入住日期", className: "min-w-[120px]", render: (row) => formatDate(row.admit_date) },
     { key: "discharge_date", header: "离院日期", className: "min-w-[120px]", render: (row) => formatDate(row.discharge_date) },
@@ -853,7 +859,7 @@ export default function AdmissionsPage() {
 
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="relative flex flex-col gap-1.5 sm:col-span-2">
-              <label className="text-sm font-medium text-fg-muted" htmlFor="admission-patient">长者</label>
+              <label className="text-sm font-medium text-fg-muted" htmlFor="admission-patient">{person}</label>
               <input
                 id="admission-patient"
                 role="combobox"
@@ -881,7 +887,7 @@ export default function AdmissionsPage() {
                   {patientSearchLoading && <p className="px-3 py-2 text-sm text-fg-dimmed">搜索中…</p>}
                   {!patientSearchLoading && patientSearchError && <p className="px-3 py-2 text-sm text-danger">{patientSearchError}</p>}
                   {!patientSearchLoading && !patientSearchError && availablePatientOptions.length === 0 && (
-                    <p className="px-3 py-2 text-sm text-fg-dimmed">{patientSearch.trim() ? "未找到匹配的可入住长者" : "暂无可办理入住的长者"}</p>
+                    <p className="px-3 py-2 text-sm text-fg-dimmed">{patientSearch.trim() ? `未找到匹配的可入住${person}` : `暂无可办理入住的${person}`}</p>
                   )}
                   {!patientSearchLoading && !patientSearchError && availablePatientOptions.slice(0, 20).map((patient) => (
                     <button
@@ -900,7 +906,7 @@ export default function AdmissionsPage() {
                 </div>
               )}
               {patientSearch.trim() === "" && availablePatientOptions.length > 20 && <p className="text-xs text-fg-dimmed">请输入姓名缩小搜索范围，当前显示前 20 条。</p>}
-              {availablePatients.length === 0 && <p className="text-xs text-fg-dimmed">暂无可办理入住的长者，请先录入长者档案或办理活动入住的离院。</p>}
+              {availablePatients.length === 0 && <p className="text-xs text-fg-dimmed">暂无可办理入住的{person}，请先录入{archive}或办理活动入住的离院。</p>}
             </div>
             <Input
               label="住院号"
@@ -1049,7 +1055,7 @@ export default function AdmissionsPage() {
             办理离院将结束该入住：状态置为「已离院」，终止全部医嘱并关闭照护周期；办理后可在「已离院档案」生成交接摘要。此操作不可撤销，请确认后再提交。
           </p>
           <p className="rounded-lg border border-info/30 bg-info-bg px-4 py-3 text-sm text-info">
-            离院不会自动关账：该长者的账单保留原状，请到「养老收费 → 结算关账」生成区间最终账单、核销押金并冻结账单；押金退还是独立步骤。
+            离院不会自动关账：该{person}的账单保留原状，请到「养老收费 → 结算关账」生成区间最终账单、核销押金并冻结账单；押金退还是独立步骤。
           </p>
           {dischargeError && (
             <div id="discharge-error" role="alert" className="rounded-lg border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">

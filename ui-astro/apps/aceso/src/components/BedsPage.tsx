@@ -10,7 +10,9 @@ import {
   type BedInput,
   type BedStatus,
 } from "@pitchfork/shared/aceso";
+import { DOMAIN_ENTITY } from "../lib/domain";
 import { formatDateTime } from "../lib/datetime";
+import { useDomain } from "../lib/useDomain";
 import { Badge, Button, Card, EmptyState, Input, Modal, Table, type Column } from "@pitchfork/ui";
 
 const PAGE_SIZE = 50;
@@ -93,6 +95,8 @@ function bedIdentity(row: Bed): string {
 }
 
 export default function BedsPage() {
+  // 床位页三个域都可见：占用者称呼必须随域切换（居民 / 长者 / 儿童）
+  const { person } = DOMAIN_ENTITY[useDomain()];
   const [items, setItems] = useState<Bed[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
@@ -246,7 +250,7 @@ export default function BedsPage() {
     const confirmed = window.confirm(
       `确认删除床位「${bedIdentity(row)}」？\n\n` +
         "删除后该床位不再作为办理入住时的候选；历史入住记录里的自由文本不受影响，删除不可恢复。\n" +
-        "若该床位当前有在住长者，系统会拒绝删除，可改为停用。",
+        `若该床位当前有在住${person}，系统会拒绝删除，可改为停用。`,
     );
     if (!confirmed) return;
     setPageError("");
@@ -257,7 +261,7 @@ export default function BedsPage() {
     } catch (error) {
       const status = errorStatus(error);
       if (status === 409) {
-        setPageError("该床位有在住长者，不能删除");
+        setPageError(`该床位有在住${person}，不能删除`);
       } else if (status === 404) {
         setPageError("该床位不存在或已被删除，请刷新列表后重试");
       } else {
@@ -368,7 +372,7 @@ export default function BedsPage() {
 
       <p className="rounded-lg border border-border bg-surface-alt px-4 py-3 text-xs text-fg-muted">
         床位主数据只是候选来源，不强制校验：办理入住时仍可直接填写历史自由文本，入住时的同一床位区间冲突校验继续生效。
-        删除仅收回候选；被在住长者占用的床位会拒绝删除，可改为停用。
+        删除仅收回候选；被在住{person}占用的床位会拒绝删除，可改为停用。
       </p>
 
       <Card
