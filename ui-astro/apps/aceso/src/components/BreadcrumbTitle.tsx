@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
-import { DOMAIN_CHANGE_EVENT, displayLabel, menuItems, readDomain, type Domain } from "./Sidebar";
+import { useEffect } from "react";
+import { displayLabel, menuItems, type Domain } from "./Sidebar";
+import { useDomain } from "../lib/useDomain";
 
 interface BreadcrumbTitleProps {
   /** 当前路由路径（构建期由 Astro 注入） */
@@ -35,17 +36,7 @@ function resolveMenuLabel(pathname: string, domain: Domain): string | null {
  * 组件挂载即为正确文案，不会先闪一次错误叫法。
  */
 export default function BreadcrumbTitle({ currentPath, fallback }: BreadcrumbTitleProps) {
-  const [domain, setDomain] = useState<Domain>(readDomain);
-
-  useEffect(() => {
-    const handler = () => setDomain(readDomain());
-    window.addEventListener("storage", handler);
-    window.addEventListener(DOMAIN_CHANGE_EVENT, handler);
-    return () => {
-      window.removeEventListener("storage", handler);
-      window.removeEventListener(DOMAIN_CHANGE_EVENT, handler);
-    };
-  }, []);
+  const domain = useDomain();
 
   const label = resolveMenuLabel(currentPath, domain) ?? fallback;
 

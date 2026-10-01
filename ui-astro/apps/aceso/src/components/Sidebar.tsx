@@ -1,4 +1,3 @@
-import { useState, useEffect } from "react";
 import {
   DOMAIN_CHANGE_EVENT,
   DOMAIN_STORAGE_KEY,
@@ -7,6 +6,7 @@ import {
   readDomain,
   type Domain,
 } from "../lib/domain";
+import { useDomain } from "../lib/useDomain";
 
 // 域常量与解析函数已迁到 ../lib/domain.ts：Astro 的 DashboardLayout / pages 需要
 // 在首屏内联脚本里复用同一份口径，而 Astro 模板不能 import 本文件（JSX）。
@@ -106,17 +106,8 @@ export const menuItems: Item[] = [
 ];
 
 export default function Sidebar({ currentPath }: SidebarProps) {
-  const [domain, setDomain] = useState<Domain>(readDomain);
-
-  useEffect(() => {
-    const handler = () => setDomain(readDomain());
-    window.addEventListener("storage", handler);
-    window.addEventListener(DOMAIN_CHANGE_EVENT, handler);
-    return () => {
-      window.removeEventListener("storage", handler);
-      window.removeEventListener(DOMAIN_CHANGE_EVENT, handler);
-    };
-  }, []);
+  // 域订阅口径统一走 useDomain（与页面内容、浏览器标题同源）
+  const domain = useDomain();
 
   return (
     <aside className="fixed top-0 left-0 z-40 w-[var(--sidebar-w)] h-screen bg-surface border-r border-border overflow-y-auto flex flex-col">

@@ -11,7 +11,8 @@
     "preview": "pnpm --filter @pitchfork/auth preview",
     "preview:aceso": "pnpm --filter @pitchfork/aceso preview",
     "test:e2e": "playwright test",
-    "test:e2e:aceso": "playwright test apps/aceso/e2e/elderly-care-lifecycle.spec.ts --project=chromium"
+    "test:e2e:aceso": "playwright test apps/aceso/e2e/elderly-care-lifecycle.spec.ts --project=chromium",
+    "test:unit:aceso": "node --test apps/aceso/tests/*.test.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.48.0",

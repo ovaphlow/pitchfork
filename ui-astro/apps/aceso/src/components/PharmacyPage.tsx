@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Badge, Button, Card, EmptyState, Input, Modal, Table, type Column } from "@pitchfork/ui";
 import PurchaseOrdersSection from "./PurchaseOrdersSection";
 import RequisitionsSection from "./RequisitionsSection";
+import { DOMAIN_ENTITY } from "../lib/domain";
+import { useDomain } from "../lib/useDomain";
 import {
   ApiRequestError,
   bindMaterialOrdersBatch,
@@ -183,6 +185,8 @@ function capDispenseQuantityToStock(
 }
 
 export default function PharmacyPage() {
+  // 药房页在医疗/养老都可见：患者列与退药原因随域取词（居民 / 长者）
+  const { person } = DOMAIN_ENTITY[useDomain()];
   const [activeTab, setActiveTab] = useState<Tab>("orders");
 
   // ── 人员与入住（操作人下拉、发药单长者名映射）─────────────────────
@@ -270,7 +274,7 @@ export default function PharmacyPage() {
 
   // ── 创建退药单弹窗 ────────────────────────────────────────────────
   const [returnTarget, setReturnTarget] = useState<PharmacyDispense | null>(null);
-  const [returnForm, setReturnForm] = useState<ReturnForm>({ itemId: "", quantity: "1", reason: "长者未使用", operator: "", remark: "" });
+  const [returnForm, setReturnForm] = useState<ReturnForm>({ itemId: "", quantity: "1", reason: `${person}未使用`, operator: "", remark: "" });
   const [returnError, setReturnError] = useState("");
   const [returnSaving, setReturnSaving] = useState(false);
   const [returnAction, setReturnAction] = useState<PharmacyReturn | null>(null);
@@ -742,7 +746,7 @@ export default function PharmacyPage() {
     setReturnForm({
       itemId: selectedItemId,
       quantity: String(selectedItem?.dispensed_quantity ?? firstItem?.dispensed_quantity ?? 1),
-      reason: "长者未使用",
+      reason: `${person}未使用`,
       operator: "",
       remark: "",
     });
@@ -815,7 +819,7 @@ export default function PharmacyPage() {
   const orderColumns: Column<PharmacyMedicationOrder>[] = [
     {
       key: "patient",
-      header: "长者",
+      header: person,
       render: (row) => (
         <div>
           <div className="font-medium text-fg-emphasis">{row.patient_name}</div>
@@ -910,7 +914,7 @@ export default function PharmacyPage() {
     },
     {
       key: "patient",
-      header: "长者",
+      header: person,
       render: (row) => (
         <div>
           <div className="text-fg">{encounterName.get(row.encounter_id ?? "") ?? row.patient_id}</div>
@@ -971,7 +975,7 @@ export default function PharmacyPage() {
     },
     {
       key: "patient",
-      header: "长者",
+      header: person,
       render: (row) => <span className="text-fg">{patientName.get(row.patient_id) ?? row.patient_id}</span>,
     },
     { key: "reason", header: "退药原因", render: (row) => <span className="text-fg-muted">{row.return_reason || "—"}</span> },
@@ -1145,7 +1149,7 @@ export default function PharmacyPage() {
                 ))}
               </select>
               <Input
-                placeholder="搜索药名 / 医嘱内容 / 长者"
+                placeholder={`搜索药名 / 医嘱内容 / ${person}`}
                 value={search}
                 onChange={(event) => {
                   setSearch(event.target.value);
@@ -1218,7 +1222,7 @@ export default function PharmacyPage() {
                 ))}
               </select>
               <Input
-                placeholder="搜索医嘱说明 / 历史药名 / 长者 / 住院号"
+                placeholder={`搜索医嘱说明 / 历史药名 / ${person} / 住院号`}
                 value={unboundSearch}
                 onChange={(event) => {
                   setUnboundSearch(event.target.value);
@@ -1842,7 +1846,7 @@ export default function PharmacyPage() {
                 </select>
               </div>
             </div>
-            <Input label="退药原因" value={returnForm.reason} onChange={(event) => setReturnForm((current) => ({ ...current, reason: event.target.value }))} placeholder="例如：长者未使用" />
+            <Input label="退药原因" value={returnForm.reason} onChange={(event) => setReturnForm((current) => ({ ...current, reason: event.target.value }))} placeholder={`例如：${person}未使用`} />
             <Input label="备注（可选）" value={returnForm.remark} onChange={(event) => setReturnForm((current) => ({ ...current, remark: event.target.value }))} />
             {returnError && <p className="text-sm text-danger">{returnError}</p>}
             <div className="flex justify-end gap-2 pt-2">

@@ -15,8 +15,10 @@ import {
   type FollowupPlanStats,
   type FollowupRecord,
 } from "@pitchfork/shared/aceso";
+import { DOMAIN_ENTITY, currentEntityLabels } from "../lib/domain";
 import { formatDate, formatDateTime, nowLocalInput, toOffsetDateTime, todayLocal } from "../lib/datetime";
 import { useSubjectDirectory } from "../lib/identity";
+import { useDomain } from "../lib/useDomain";
 
 const PAGE_SIZE = 20;
 
@@ -121,6 +123,8 @@ const recordFormDefaults: RecordForm = {
 };
 
 export default function FollowupPage() {
+  // 随访页在医疗/养老/儿保都可见：主体称呼随域切换（居民 / 长者 / 儿童）
+  const { person } = DOMAIN_ENTITY[useDomain()];
   // 主体目录（IdP）：责任人 / 记录人列存的是认证主体 ID，取不到目录时回退原始 ID
   const { subjectLabel } = useSubjectDirectory();
 
@@ -268,7 +272,8 @@ export default function FollowupPage() {
         }));
       setAdmissionOptions(options);
     } catch (error) {
-      setPageError(errorMessage(error, "无法加载长者入住信息"));
+      // 兜底文案按出错那一刻的域取词：loadAdmissionOptions 的依赖必须保持稳定
+      setPageError(errorMessage(error, `无法加载${currentEntityLabels().person}入住信息`));
     }
   }, []);
 
@@ -322,7 +327,7 @@ export default function FollowupPage() {
 
   async function handleCreate() {
     if (!createForm.encounter_id) {
-      setCreateError("请选择长者入住记录");
+      setCreateError(`请选择${person}入住记录`);
       return;
     }
     if (!createForm.followup_type) {
@@ -335,7 +340,7 @@ export default function FollowupPage() {
     }
     const option = admissionOptions.find((item) => item.id === createForm.encounter_id);
     if (!option) {
-      setCreateError("请选择长者入住记录");
+      setCreateError(`请选择${person}入住记录`);
       return;
     }
     setCreating(true);
@@ -392,9 +397,9 @@ export default function FollowupPage() {
       encounterId = plan.encounter_id;
       followupType = plan.followup_type;
     } else {
-      if (!tempEncounterId) return { error: "请选择长者入住记录" };
+      if (!tempEncounterId) return { error: `请选择${person}入住记录` };
       const option = admissionOptions.find((item) => item.id === tempEncounterId);
-      if (!option) return { error: "请选择长者入住记录" };
+      if (!option) return { error: `请选择${person}入住记录` };
       patientId = option.patient_id;
       encounterId = option.id;
       if (!tempFollowupType) return { error: "请选择随访类型" };
@@ -504,7 +509,7 @@ export default function FollowupPage() {
   const planColumns: Column<FollowupPlan>[] = [
     {
       key: "patient_name",
-      header: "长者",
+      header: person,
       className: "min-w-[140px]",
       render: (row) => (
         <div className="flex items-center gap-2">
@@ -556,7 +561,7 @@ export default function FollowupPage() {
   const recordColumns: Column<FollowupRecord>[] = [
     {
       key: "patient_name",
-      header: "长者",
+      header: person,
       className: "min-w-[140px]",
       render: (row) => (
         <div className="flex items-center gap-2">
@@ -606,7 +611,7 @@ export default function FollowupPage() {
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h2 className="text-lg font-semibold text-fg-emphasis">随访管理</h2>
-          <p className="mt-1 text-sm text-fg-muted">离院长者回访与在院慢病长者定期随访，形成计划 → 执行 → 记录 → 转诊/复访闭环</p>
+          <p className="mt-1 text-sm text-fg-muted">离院{person}回访与在院慢病{person}定期随访，形成计划 → 执行 → 记录 → 转诊/复访闭环</p>
         </div>
         <div className="flex items-center gap-2">
           <Button variant="secondary" onClick={openTempRecord}>临时随访</Button>
@@ -790,7 +795,7 @@ export default function FollowupPage() {
           {createError && <div className="rounded-lg border border-danger/30 bg-danger-bg px-3 py-2 text-sm text-danger">{createError}</div>}
 
           <div className="flex flex-col gap-1.5">
-            <label className="text-sm font-medium text-fg-muted" htmlFor="followup-patient">长者（入住记录）</label>
+            <label className="text-sm font-medium text-fg-muted" htmlFor="followup-patient">{person}（入住记录）</label>
             <Input
               id="followup-patient-search"
               value={patientQuery}
@@ -803,7 +808,7 @@ export default function FollowupPage() {
               onChange={(event) => setCreateForm((current) => ({ ...current, encounter_id: event.target.value }))}
               className="h-10 rounded-md border border-border bg-surface px-3 text-sm text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
             >
-              <option value="">请选择长者</option>
+              <option value="">请选择{person}</option>
               {filteredOptions.map((option) => (
                 <option key={option.id} value={option.id}>
                   {option.patient_name}（{option.encounter_no ?? "-"} · {option.status === "ACTIVE" ? "在院" : "已离院"}）
@@ -890,7 +895,7 @@ export default function FollowupPage() {
             </div>
           ) : (
             <div className="flex flex-col gap-1.5">
-              <label className="text-sm font-medium text-fg-muted" htmlFor="temp-patient">长者（入住记录）</label>
+              <label className="text-sm font-medium text-fg-muted" htmlFor="temp-patient">{person}（入住记录）</label>
               <Input
                 id="temp-patient-search"
                 value={patientQuery}
@@ -903,7 +908,7 @@ export default function FollowupPage() {
                 onChange={(event) => setTempEncounterId(event.target.value)}
                 className="h-10 rounded-md border border-border bg-surface px-3 text-sm text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
               >
-                <option value="">请选择长者</option>
+                <option value="">请选择{person}</option>
                 {filteredOptions.map((option) => (
                   <option key={option.id} value={option.id}>
                     {option.patient_name}（{option.encounter_no ?? "-"} · {option.status === "ACTIVE" ? "在院" : "已离院"}）
@@ -950,7 +955,7 @@ export default function FollowupPage() {
               label="联系对象"
               value={recordForm.contact_object}
               onChange={(event) => setRecordForm((current) => ({ ...current, contact_object: event.target.value }))}
-              placeholder="长者或家属姓名"
+              placeholder={`${person}或家属姓名`}
             />
             <Input
               label="建议下次随访日期"
@@ -1011,7 +1016,7 @@ export default function FollowupPage() {
               onChange={(event) => setRecordForm((current) => ({ ...current, condition_summary: event.target.value }))}
               rows={2}
               className="resize-none rounded-md border border-border bg-surface px-3 py-2 text-sm text-fg placeholder:text-fg-dimmed focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-              placeholder="长者近况、主诉与观察到的状况"
+              placeholder={`${person}近况、主诉与观察到的状况`}
             />
           </div>
 
