@@ -302,8 +302,14 @@ export default function ChronicDiseasePage() {
     setDetailError("");
     try {
       await updateChronicDiseaseStatus(detailId, { status });
-      // 重新加载时间线（档案状态变化）与列表
-      setTimeline(await getChronicDiseaseTimeline(detailId));
+      // 状态变更后必须同时刷新：详情档案（面板徽标与「标记已缓解/停管/恢复管理」按钮依赖
+      // detail.status，漏刷会让面板停留在旧状态，用户误以为没生效而重复点击）、时间线与列表
+      const [registration, timelineData] = await Promise.all([
+        getChronicDisease(detailId),
+        getChronicDiseaseTimeline(detailId),
+      ]);
+      setDetail(registration);
+      setTimeline(timelineData);
       await loadList(page);
     } catch (error) {
       setDetailError(errorMessage(error, "状态变更失败"));

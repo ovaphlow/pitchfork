@@ -850,7 +850,7 @@ function WeeklyMenusTab() {
   const columns: Column<WeeklyMenu>[] = [
     { key: "week_start", header: "起始日期（周一）", className: "min-w-[130px]", render: (row) => formatDate(row.week_start) },
     { key: "name", header: "菜谱名称", className: "min-w-[140px]", render: (row) => row.name ?? "-" },
-    { key: "item_count", header: "菜品项", className: "w-[90px]", render: (row) => (row.items?.length ?? "-") },
+    { key: "item_count", header: "菜品项", className: "w-[90px]", render: (row) => (row.item_count ?? row.items?.length ?? "-") },
     { key: "status", header: "状态", className: "w-[90px]", render: (row) => statusBadge(row.status) },
     {
       key: "actions",

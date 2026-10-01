@@ -10,6 +10,7 @@ import {
   listInventoryStocks,
   listPharmacyPurchaseOrders,
   listWarehouseOptions,
+  newIdempotencyKey,
   receivePharmacyPurchaseOrder,
   updatePharmacyPurchaseOrder,
   type InventoryStockAvailability,
@@ -169,7 +170,7 @@ export default function PurchaseOrdersSection() {
     setEditTarget(null);
     setCreateForm({ warehouse: "", supplierName: "", rows: [{ materialId: "", quantity: "1" }] });
     setCreateError("");
-    setCreateIdempotencyKey(crypto.randomUUID());
+    setCreateIdempotencyKey(newIdempotencyKey());
     setCreateOpen(true);
     void loadWarehouses();
   };
@@ -254,7 +255,7 @@ export default function PurchaseOrdersSection() {
   const openReceive = (order: PharmacyPurchaseOrder) => {
     setReceiveTarget(order);
     setReceiveError("");
-    setReceiveIdempotencyKey(crypto.randomUUID());
+    setReceiveIdempotencyKey(newIdempotencyKey());
     setReceiveRows(
       (order.items ?? []).map((item) => ({
         orderItemId: item.id,

@@ -621,3 +621,42 @@ test("窄屏下办理去世弹窗可操作且文字不重叠", async ({ page }) 
   const encounter = await api<Encounter>(page, `/crate-api/healthcare/v1/encounters/${admission.encounter.id}`);
   expect(encounter.status).toBe("DECEASED");
 });
+
+// ——— 用例 6：去世/离院记录在机构侧可查到（P1-3 回归） ———
+
+test("去世入住可在「已去世档案」与档案状态筛选中查到", async ({ page }) => {
+  // 已离院：用于确认「已离院档案」视图仍只含离院记录
+  const discharged = await createActiveAdmission(page, "ARCHDISC", "2026-07-01");
+  await api(page, `/crate-api/healthcare/v1/encounters/${discharged.encounter.id}/discharge`, {
+    method: "PATCH",
+    body: { discharge_date: "2026-07-31T00:00:00+08:00" },
+  });
+  // 已去世：档案侧此前无处可查的那类记录
+  const deceased = await createActiveAdmission(page, "ARCHDEC");
+  await api(page, `/crate-api/healthcare/v1/encounters/${deceased.encounter.id}/death`, {
+    method: "PATCH",
+    body: { death_date: "2026-08-05T14:00:00+08:00", death_cause: "档案回归原因" },
+  });
+
+  const admissionsPage = new AdmissionsPage(page);
+  await admissionsPage.goto();
+
+  // 入住管理 → 已去世档案：能定位去世入住，且带去世原因
+  await page.getByRole("button", { name: "已去世档案" }).click();
+  const deceasedRow = admissionsPage.row(`${FIXTURE_PREFIX}ARCHDEC`);
+  await expect(deceasedRow).toBeVisible();
+  await expect(deceasedRow).toContainText("档案回归原因");
+
+  // 已离院档案视图不受影响：只有离院记录，不含去世记录
+  await page.getByRole("button", { name: "已离院档案" }).click();
+  await expect(admissionsPage.row(`${FIXTURE_PREFIX}ARCHDISC`)).toBeVisible();
+  await expect(admissionsPage.row(`${FIXTURE_PREFIX}ARCHDEC`)).not.toBeVisible();
+
+  // 档案页：状态筛选切到「已去世」后可查到该居民档案
+  await page.goto("/dashboard/elders");
+  await page.waitForLoadState("networkidle");
+  await page.getByRole("button", { name: "已去世", exact: true }).click();
+  await expect(
+    page.getByRole("row").filter({ hasText: `${FIXTURE_PREFIX}ARCHDEC-patient` }),
+  ).toBeVisible();
+});

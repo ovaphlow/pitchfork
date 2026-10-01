@@ -1017,7 +1017,7 @@ test("退药创建边界：restockable=false 拒绝、旧通用入口拒绝、�
     },
   );
   expect(overQuantity.status).toBe(409);
-  expect(overQuantity.body).toMatchObject({ error: expect.stringContaining("return quantity exceeds") });
+  expect(overQuantity.body).toMatchObject({ error: expect.stringContaining("剩余可退") });
 
   // 合法创建不受上述失败影响
   const created = await createReturnViaApi(page, dispense);

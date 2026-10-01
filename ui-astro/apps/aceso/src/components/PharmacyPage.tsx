@@ -184,6 +184,24 @@ function capDispenseQuantityToStock(
   return Number(prescribedTotal) > Number(available) ? available : quantity;
 }
 
+/**
+ * 退药可退数量：服务端派生「实发 − 已给药 − 未取消退药」。
+ * 返回 null 表示服务端未提供（旧数据），此时退回只按原发药数量提示，最终仍以后端校验为准。
+ */
+function returnableQuantity(item: PharmacyDispense["items"][number] | undefined): number | null {
+  if (!item) return null;
+  const value = item.returnable_quantity ?? item.dispensed_quantity;
+  if (value === null || value === undefined || value === "") return null;
+  return Number(value);
+}
+
+/** 默认退药数量：优先取剩余可退，已无可退（0）时留 1 让校验给出明确提示。 */
+function returnableDraft(item: PharmacyDispense["items"][number] | undefined): string {
+  const returnable = returnableQuantity(item);
+  if (returnable === null) return "1";
+  return returnable > 0 ? String(returnable) : "1";
+}
+
 export default function PharmacyPage() {
   // 药房页在医疗/养老都可见：患者列与退药原因随域取词（居民 / 长者）
   const { person } = DOMAIN_ENTITY[useDomain()];
@@ -745,7 +763,7 @@ export default function PharmacyPage() {
     setReturnTarget(dispense);
     setReturnForm({
       itemId: selectedItemId,
-      quantity: String(selectedItem?.dispensed_quantity ?? firstItem?.dispensed_quantity ?? 1),
+      quantity: returnableDraft(selectedItem ?? firstItem),
       reason: `${person}未使用`,
       operator: "",
       remark: "",
@@ -761,8 +779,13 @@ export default function PharmacyPage() {
     if (!returnForm.operator.trim()) return setReturnError("请选择操作人");
     const selectedItem = returnTarget.items.find((item) => item.id === returnForm.itemId);
     if (!selectedItem) return setReturnError("请选择退药明细");
-    if (!quantity || quantity <= 0 || (selectedItem.dispensed_quantity != null && quantity > Number(selectedItem.dispensed_quantity))) {
-      return setReturnError("退药数量必须大于 0 且不超过原发药数量");
+    if (!quantity || quantity <= 0) return setReturnError("退药数量必须大于 0");
+    const returnable = returnableQuantity(selectedItem);
+    if (returnable !== null && returnable <= 0) {
+      return setReturnError("该发药明细已无可退数量（已给药或已退满）");
+    }
+    if (returnable !== null && quantity > returnable) {
+      return setReturnError(`退药数量超出剩余可退数量（剩余可退 ${returnable}）`);
     }
     setReturnSaving(true);
     setReturnError("");
@@ -1094,6 +1117,8 @@ export default function PharmacyPage() {
 
   const actionTitle =
     actionKind === "review" ? "审方" : actionKind === "start" ? "开始调配" : actionKind === "confirm" ? "发药确认" : "取消发药单";
+
+  const returnItem = returnTarget?.items.find((item) => item.id === returnForm.itemId);
 
   return (
     <div className="space-y-4">
@@ -1827,12 +1852,12 @@ export default function PharmacyPage() {
                 value={returnForm.itemId}
                 onChange={(event) => {
                   const item = returnTarget.items.find((candidate) => candidate.id === event.target.value);
-                  setReturnForm((current) => ({ ...current, itemId: event.target.value, quantity: String(item?.dispensed_quantity ?? 1) }));
+                  setReturnForm((current) => ({ ...current, itemId: event.target.value, quantity: returnableDraft(item) }));
                 }}
               >
                 <option value="">请选择发药明细</option>
                 {returnTarget.items.map((item) => (
-                  <option key={item.id} value={item.id}>{item.material_id || "药品"} · 批次 {item.lot_id || "无"} · 原发 {item.dispensed_quantity ?? "—"}</option>
+                  <option key={item.id} value={item.id}>{item.material_id || "药品"} · 批次 {item.lot_id || "无"} · 已发 {item.dispensed_quantity ?? "—"} · 已给 {item.administered_quantity ?? "—"} · 可退 {item.returnable_quantity ?? "—"}</option>
                 ))}
               </select>
             </div>
@@ -1848,6 +1873,12 @@ export default function PharmacyPage() {
             </div>
             <Input label="退药原因" value={returnForm.reason} onChange={(event) => setReturnForm((current) => ({ ...current, reason: event.target.value }))} placeholder={`例如：${person}未使用`} />
             <Input label="备注（可选）" value={returnForm.remark} onChange={(event) => setReturnForm((current) => ({ ...current, remark: event.target.value }))} />
+            {returnItem && returnItem.returnable_quantity !== undefined && (
+              <p className="text-xs text-fg-dimmed">
+                已发 {returnItem.dispensed_quantity ?? "—"} · 已给药 {returnItem.administered_quantity ?? "—"} · 剩余可退{" "}
+                {returnItem.returnable_quantity ?? "—"}（已给药的数量不可退回库存）
+              </p>
+            )}
             {returnError && <p className="text-sm text-danger">{returnError}</p>}
             <div className="flex justify-end gap-2 pt-2">
               <Button variant="secondary" onClick={() => setReturnTarget(null)}>取消</Button>

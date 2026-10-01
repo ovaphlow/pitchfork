@@ -317,12 +317,14 @@ function HandoverReadOnly({ handover, subjectLabel }: { handover: ElderlyDischar
 export default function AdmissionsPage() {
   // 入院管理页在医疗/养老都可见：主体称呼与档案名随域切换（居民 / 长者）
   const { person, archive } = DOMAIN_ENTITY[useDomain()];
-  const [view, setView] = useState<"active" | "discharged">("active");
+  const [view, setView] = useState<"active" | "discharged" | "deceased">("active");
   const [patients, setPatients] = useState<Patient[]>([]);
   const [admissions, setAdmissions] = useState<AdmissionRow[]>([]);
   const [dischargedAdmissions, setDischargedAdmissions] = useState<AdmissionRow[]>([]);
+  const [deceasedAdmissions, setDeceasedAdmissions] = useState<AdmissionRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [dischargedLoading, setDischargedLoading] = useState(false);
+  const [deceasedLoading, setDeceasedLoading] = useState(false);
   const [pageError, setPageError] = useState("");
   /** 离院/去世成功后的下一步指引（023：离院不再关账，账单需到「养老收费 → 结算关账」收尾） */
   const [notice, setNotice] = useState("");
@@ -377,7 +379,6 @@ export default function AdmissionsPage() {
     (value: string | null | undefined) => (value ? subjectMap.get(value) ?? value : "-"),
     [subjectMap],
   );
-
   const load = useCallback(async () => {
     setLoading(true);
     setPageError("");
@@ -421,13 +422,39 @@ export default function AdmissionsPage() {
     }
   }, []);
 
+  /**
+   * 已去世档案：接口 `GET /elderly-admissions?status=DECEASED` 一直支持该状态，
+   * 但页面此前只有「活动 / 已离院」两个视图，导致去世居民的入住档案在机构侧无处可查
+   * （财务与医嘱侧却仍能选到该入住）。此处补齐只读列表。
+   */
+  const loadDeceased = useCallback(async () => {
+    setDeceasedLoading(true);
+    setPageError("");
+    try {
+      const [patientResponse, encounterResponse] = await Promise.all([
+        listPatients({ limit: 1000 }),
+        listElderlyAdmissions({ status: "DECEASED", limit: 100 }),
+      ]);
+      const patientById = new Map(patientResponse.records.map((patient) => [patient.id, patient]));
+      setDeceasedAdmissions(encounterResponse.records.map((encounter) => ({
+        ...encounter,
+        patientName: patientById.get(encounter.patient_id)?.name ?? encounter.patient_id,
+      })));
+    } catch (error) {
+      setPageError(errorMessage(error, "无法加载已去世档案"));
+    } finally {
+      setDeceasedLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     void load();
   }, [load]);
 
   useEffect(() => {
     if (view === "discharged") void loadDischarged();
-  }, [view, loadDischarged]);
+    if (view === "deceased") void loadDeceased();
+  }, [view, loadDischarged, loadDeceased]);
 
   useEffect(() => {
     if (!editorOpen) return;
@@ -782,6 +809,15 @@ export default function AdmissionsPage() {
     },
   ];
 
+  /** 已去世档案为只读归档：去世入住不生成离院交接摘要，故不提供操作入口 */
+  const deceasedColumns: Column<AdmissionRow>[] = [
+    { key: "patientName", header: person, className: "min-w-[140px]" },
+    { key: "encounter_no", header: "住院号", className: "min-w-[140px]" },
+    { key: "admit_date", header: "入住日期", className: "min-w-[120px]", render: (row) => formatDate(row.admit_date) },
+    { key: "death_date", header: "去世日期", className: "min-w-[120px]", render: (row) => formatDate(row.death_date) },
+    { key: "death_cause", header: "去世原因", className: "min-w-[140px]", render: (row) => row.death_cause?.trim() || "-" },
+  ];
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -830,19 +866,41 @@ export default function AdmissionsPage() {
         >
           已离院档案
         </button>
+        <button
+          type="button"
+          onClick={() => setView("deceased")}
+          className={`rounded-md px-4 py-1.5 text-sm font-medium transition-colors ${
+            view === "deceased" ? "bg-accent text-white" : "text-fg-muted hover:text-fg"
+          }`}
+        >
+          已去世档案
+        </button>
       </div>
 
-      {view === "active" ? (
+      {view === "active" && (
         <Card title="当前活动入住" actions={<span className="text-sm text-fg-dimmed">共 {admissions.length} 条</span>}>
           <Table columns={activeColumns} data={admissions} loading={loading} emptyMessage="暂无活动入住记录" />
         </Card>
-      ) : (
+      )}
+
+      {view === "discharged" && (
         <Card title="已离院档案" actions={<span className="text-sm text-fg-dimmed">共 {dischargedAdmissions.length} 条</span>}>
           <Table
             columns={dischargedColumns}
             data={dischargedAdmissions}
             loading={dischargedLoading}
             emptyMessage="暂无已离院档案"
+          />
+        </Card>
+      )}
+
+      {view === "deceased" && (
+        <Card title="已去世档案" actions={<span className="text-sm text-fg-dimmed">共 {deceasedAdmissions.length} 条</span>}>
+          <Table
+            columns={deceasedColumns}
+            data={deceasedAdmissions}
+            loading={deceasedLoading}
+            emptyMessage="暂无已去世档案"
           />
         </Card>
       )}
@@ -1158,6 +1216,7 @@ export default function AdmissionsPage() {
           </form>
         </div>
       </Modal>
+
     </div>
   );
 }

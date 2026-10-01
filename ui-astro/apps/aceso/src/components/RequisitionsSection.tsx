@@ -9,6 +9,7 @@ import {
   listInventoryStocks,
   listPharmacyRequisitions,
   listWarehouseOptions,
+  newIdempotencyKey,
   type InventoryStockAvailability,
   type PharmacyRequisition,
   type WarehouseOption,
@@ -160,7 +161,7 @@ export default function RequisitionsSection() {
   const openCreate = () => {
     setCreateForm({ warehouse: "", destinationWarehouse: "", department: "", rows: [{ materialId: "", quantity: "1" }] });
     setCreateError("");
-    setIdempotencyKey(crypto.randomUUID());
+    setIdempotencyKey(newIdempotencyKey());
     setCreateOpen(true);
     void loadWarehouses();
   };

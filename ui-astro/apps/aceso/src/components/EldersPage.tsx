@@ -15,6 +15,27 @@ import { useDomain } from "../lib/useDomain";
 
 const PAGE_SIZE = 20;
 
+/** 档案状态筛选：ACTIVE=有效、DECEASED=已去世、""=全部（默认保持既有「只看有效」口径） */
+type ArchiveStatusFilter = "ACTIVE" | "DECEASED" | "";
+
+const ARCHIVE_STATUS_FILTERS: { value: ArchiveStatusFilter; label: string }[] = [
+  { value: "ACTIVE", label: "有效" },
+  { value: "DECEASED", label: "已去世" },
+  { value: "", label: "全部" },
+];
+
+const PATIENT_STATUS_LABELS: Record<string, string> = {
+  ACTIVE: "有效",
+  INACTIVE: "已停用",
+  DECEASED: "已去世",
+};
+
+function patientStatusBadgeVariant(status: string): "success" | "default" | "danger" {
+  if (status === "ACTIVE") return "success";
+  if (status === "DECEASED") return "danger";
+  return "default";
+}
+
 interface ElderForm {
   name: string;
   gender: string;
@@ -107,6 +128,7 @@ export default function EldersPage() {
   const [activeEncounters, setActiveEncounters] = useState<Record<string, Encounter>>({});
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
+  const [statusFilter, setStatusFilter] = useState<ArchiveStatusFilter>("ACTIVE");
   const [loading, setLoading] = useState(true);
   const [pageError, setPageError] = useState("");
   const [editorOpen, setEditorOpen] = useState(false);
@@ -121,7 +143,7 @@ export default function EldersPage() {
     try {
       const [response, activeResponse] = await Promise.all([
         listPatients({
-          status: "ACTIVE",
+          ...(statusFilter ? { status: statusFilter } : {}),
           limit: PAGE_SIZE,
           offset: (targetPage - 1) * PAGE_SIZE,
         }),
@@ -138,7 +160,7 @@ export default function EldersPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [statusFilter]);
 
   useEffect(() => {
     void load(1);
@@ -194,7 +216,11 @@ export default function EldersPage() {
       key: "status",
       header: "状态",
       className: "w-[100px]",
-      render: (row) => <Badge variant={row.status === "ACTIVE" ? "success" : "default"}>{row.status === "ACTIVE" ? "有效" : row.status}</Badge>,
+      render: (row) => (
+        <Badge variant={patientStatusBadgeVariant(row.status)}>
+          {PATIENT_STATUS_LABELS[row.status] ?? row.status}
+        </Badge>
+      ),
     },
     {
       key: "actions",
@@ -214,10 +240,31 @@ export default function EldersPage() {
         <Button variant="primary" onClick={openCreate}>录入{person}</Button>
       </div>
 
+      {/* 状态筛选：接口层 status=DECEASED 一直保留，此处补齐「已去世」入口，避免档案侧看不到去世居民 */}
+      <div className="flex w-fit gap-1 rounded-lg border border-border bg-surface p-1">
+        {ARCHIVE_STATUS_FILTERS.map((filter) => (
+          <button
+            key={filter.value || "ALL"}
+            type="button"
+            onClick={() => setStatusFilter(filter.value)}
+            className={`rounded-md px-4 py-1.5 text-sm font-medium transition-colors ${
+              statusFilter === filter.value ? "bg-accent text-white" : "text-fg-muted hover:text-fg"
+            }`}
+          >
+            {filter.label}
+          </button>
+        ))}
+      </div>
+
       {pageError && <div className="rounded-lg border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">{pageError}</div>}
 
       <Card title={`${archive}列表`} actions={<span className="text-sm text-fg-dimmed">共 {total} 条</span>}>
-        <Table columns={columns} data={elders} loading={loading} emptyMessage={`暂无${archive}，点击右上角开始录入`} />
+        <Table
+          columns={columns}
+          data={elders}
+          loading={loading}
+          emptyMessage={statusFilter === "DECEASED" ? `暂无已去世${person}` : `暂无${archive}，点击右上角开始录入`}
+        />
         <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
           <span className="text-sm text-fg-muted">第 {page} / {pageCount} 页</span>
           <div className="flex items-center gap-2">

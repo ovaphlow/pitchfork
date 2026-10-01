@@ -17,6 +17,33 @@ export class ApiRequestError extends Error {
   }
 }
 
+/**
+ * 幂等键生成（采购订单创建/收货、护理站申领创建都用它）。
+ *
+ * `crypto.randomUUID` 只在安全上下文（HTTPS 或 localhost）可用：内网以
+ * `http://<ip>:4324` 直接访问 Aceso 时它不存在，直接调用会让「新建采购订单」
+ * 「新建申领」按钮抛 `Uncaught TypeError: crypto.randomUUID is not a function`，
+ * 弹窗打不开。这里依次降级：randomUUID → getRandomValues 自行拼 UUID v4 →
+ * 时间无关的随机串（幂等键不用于安全用途）。
+ */
+export function newIdempotencyKey(): string {
+  const cryptoApi = globalThis.crypto as Crypto | undefined;
+  if (typeof cryptoApi?.randomUUID === "function") return cryptoApi.randomUUID();
+
+  const bytes = new Uint8Array(16);
+  if (typeof cryptoApi?.getRandomValues === "function") {
+    cryptoApi.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
+  }
+  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x40; // version 4
+  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80; // RFC 4122 variant
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 interface RequestOptions {
   csrf?: boolean;
   redirectOnUnauthorized?: boolean;
@@ -2537,6 +2564,10 @@ export interface PharmacyDispenseItem {
   lot_id: string | null;
   prescribed_quantity: DecimalText | null;
   dispensed_quantity: DecimalText | null;
+  /** 累计已给药数量（护理给药记录「已服/部分服」，服务端派生） */
+  administered_quantity?: DecimalText | null;
+  /** 剩余可退数量 = 实发 − 已给药 − 未取消退药（待确认 + 已确认），服务端派生 */
+  returnable_quantity?: DecimalText | null;
   stock_operation_detail_id: string | null;
   unit_cost: DecimalText | null;
   total_cost: DecimalText | null;
@@ -4060,6 +4091,8 @@ export interface WeeklyMenu {
   name: string | null;
   status: string;
   remark: string | null;
+  /** 列表接口返回的菜品项数；详情接口返回 items 时不重复统计 */
+  item_count?: number;
   items?: WeeklyMenuItem[];
   metadata: Record<string, unknown> | null;
   created_at: string;

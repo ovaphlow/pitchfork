@@ -532,10 +532,17 @@ export default function AbnormalAlertsPage() {
               {formatDateTime(referring.measured_at)} 测量）转诊？系统将自动创建
               <span className="font-medium text-fg-emphasis">慢病随访计划（门诊）</span>，安排责任人跟进。
             </p>
+            {referring.encounter_id === null && (
+              <p className="text-sm text-danger">
+                该长者没有在住的养老入住记录，无法生成随访计划；请先办理入住后重试。
+              </p>
+            )}
             {referError && <p className="text-sm text-danger">{referError}</p>}
             <div className="flex justify-end gap-2">
               <Button variant="secondary" onClick={() => setReferring(null)}>取消</Button>
-              <Button onClick={() => void submitRefer()} loading={savingRefer}>确认转诊</Button>
+              {referring.encounter_id !== null && (
+                <Button onClick={() => void submitRefer()} loading={savingRefer}>确认转诊</Button>
+              )}
             </div>
           </div>
         )}
