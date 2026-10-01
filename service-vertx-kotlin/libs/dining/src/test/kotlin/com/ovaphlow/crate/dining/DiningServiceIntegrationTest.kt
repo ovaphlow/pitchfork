@@ -534,15 +534,25 @@ class DiningServiceIntegrationTest {
                     .compose { _ ->
                         rosterService.get(rosterId)
                     }
+                    .compose { detail ->
+                        ctx.verify {
+                            val items = detail.getJsonArray("items")
+                            assertEquals(3, items.size())
+                            val byPatient = items.associate { (it as JsonObject).let { obj -> obj.getString("patient_id") to obj } }
+                            assertEquals("外出", byPatient[PATIENT_1]?.getString("adjust_type"))
+                            assertEquals("临时加餐", byPatient[PATIENT_3]?.getString("adjust_type"))
+                        }
+                        // 列表接口不返回 items，必须单独返回「名单人数」item_count
+                        rosterService.list(date.toString(), "午餐")
+                    }
             }
             .onComplete { ar ->
                 ctx.verify {
                     assertTrue(ar.succeeded())
-                    val items = ar.result().getJsonArray("items")
-                    assertEquals(3, items.size())
-                    val byPatient = items.associate { (it as JsonObject).let { obj -> obj.getString("patient_id") to obj } }
-                    assertEquals("外出", byPatient[PATIENT_1]?.getString("adjust_type"))
-                    assertEquals("临时加餐", byPatient[PATIENT_3]?.getString("adjust_type"))
+                    val record = ar.result().getJsonArray("records")
+                        .map { it as JsonObject }
+                        .first { it.getString("id") == rosterId }
+                    assertEquals(3L, record.getLong("item_count"), "列表应返回名单人数 item_count")
                     ctx.completeNow()
                 }
             }
