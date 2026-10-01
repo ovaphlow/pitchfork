@@ -108,12 +108,36 @@ class WeeklyMenuService(
 
         return execute(pool, countQuery).flatMap { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(pool, dataQuery).map { dataRows ->
-                val records = JsonArray()
-                for (row in dataRows) records.add(toJson(row))
-                JsonObject().put("records", records)
-                    .put("meta", JsonObject().put("total", total))
+            execute(pool, dataQuery).compose { dataRows ->
+                val heads = dataRows.map { toJson(it) }
+                if (heads.isEmpty()) {
+                    return@compose Future.succeededFuture(
+                        JsonObject().put("records", JsonArray())
+                            .put("meta", JsonObject().put("total", total))
+                    )
+                }
+                countItems(heads.mapNotNull { it.getString("id") }).map { counts ->
+                    val records = JsonArray()
+                    for (head in heads)
+                        records.add(head.copy().put("item_count", counts[head.getString("id")] ?: 0L))
+                    JsonObject().put("records", records)
+                        .put("meta", JsonObject().put("total", total))
+                }
             }
+        }
+    }
+
+    /** 列表页「菜品项」：按 menu_id 统计明细条数，避免列表接口带出全部明细。 */
+    private fun countItems(menuIds: List<String>): Future<Map<String, Long>> {
+        val query = ctx.select(
+            cMenuId,
+            count().`as`("item_count"),
+        )
+            .from(items)
+            .where(cMenuId.`in`(menuIds))
+            .groupBy(cMenuId)
+        return execute(pool, query).map { rows ->
+            rows.associate { it.getString("menu_id") to (it.getLong("item_count") ?: 0L) }
         }
     }
 

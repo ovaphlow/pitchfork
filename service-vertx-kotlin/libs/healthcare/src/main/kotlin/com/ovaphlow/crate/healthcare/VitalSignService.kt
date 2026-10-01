@@ -3,8 +3,10 @@ package com.ovaphlow.crate.healthcare
 import com.ovaphlow.crate.common.Ulid
 import com.ovaphlow.crate.database.DatabaseConfig
 import com.ovaphlow.crate.database.gen.healthcare.tables.Encounters.ENCOUNTERS
+import com.ovaphlow.crate.database.gen.healthcare.tables.FollowupPlans.FOLLOWUP_PLANS
 import com.ovaphlow.crate.database.gen.healthcare.tables.Patients.PATIENTS
 import com.ovaphlow.crate.database.gen.healthcare.tables.VitalSignRecords.VITAL_SIGN_RECORDS
+import com.ovaphlow.crate.nursing.ConflictException
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
@@ -38,7 +40,8 @@ import java.time.ZoneId
  *     待复核 ─复核→ 已误报（终态）。复核可重复执行（覆盖式更新，取最新复核人/时间）；
  *     转诊前置 review_status=已确认，事务内创建随访计划（慢病随访/门诊），
  *     计划 metadata 关联体征记录 id；已转诊/已误报为终态不可再复核。
- *  8. PATCH 修正导致 abnormal 翻转时，review_status 重置为待复核并清空复核/转诊结论。
+ *  8. PATCH 修正导致 abnormal 翻转时，review_status 重置为待复核并清空复核/转诊结论；
+ *     同事务把该记录转诊自动生成的「待随访」计划置为已取消并写明原因（避免孤儿随访任务累积）。
  */
 class VitalSignService(
     private val pool: Pool,
@@ -78,6 +81,12 @@ class VitalSignService(
 
         /** 复核状态枚举（中文白名单）：待复核/已确认/已误报/已转诊 */
         val reviewStatuses = setOf("待复核", "已确认", "已误报", "已转诊")
+
+        /** 转诊自动生成计划在 `followup_plans.metadata` 里的来源标记（与 FollowupService 一致） */
+        private const val REFERRAL_METADATA_SOURCE = "体征异常告警"
+
+        /** 异常撤销时自动作废转诊计划的原因（护士据此解释任务为何消失） */
+        private const val REVOKED_REFERRAL_CANCEL_REASON = "体征异常已撤销：记录修正后不再异常，自动转诊计划作废"
 
         /** 复核结论枚举（中文白名单） */
         val reviewResults = setOf("确认异常", "误报")
@@ -195,6 +204,26 @@ class VitalSignService(
             rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(recordJson(it)) }
                 ?: Future.failedFuture(HealthcareNotFoundException("vital sign record not found: $id"))
         }
+
+    /**
+     * 作废本记录转诊自动生成的待随访计划（异常被修正撤销时调用）。
+     *
+     * 只命中 `metadata.source = 体征异常告警` 且 `metadata.vital_sign_record_id` 指向本记录、
+     * 状态仍为「待随访」的计划：已完成/已取消的计划不动，也不删除行（取消原因留痕，
+     * 护士在随访管理里能看到「已取消 + 原因」，而不是一条无法解释的待随访任务）。
+     */
+    private fun cancelReferralPlans(client: SqlClient, vitalSignRecordId: String, now: OffsetDateTime): Future<Int> {
+        val update = ctx.update(FOLLOWUP_PLANS)
+            .set(FOLLOWUP_PLANS.STATUS, "已取消")
+            .set(FOLLOWUP_PLANS.CANCEL_REASON, REVOKED_REFERRAL_CANCEL_REASON)
+            .set(FOLLOWUP_PLANS.UPDATED_AT, now)
+            .where(
+                FOLLOWUP_PLANS.STATUS.eq("待随访")
+                    .and(DSL.field("metadata ->> 'source'", String::class.java).eq(REFERRAL_METADATA_SOURCE))
+                    .and(DSL.field("metadata ->> 'vital_sign_record_id'", String::class.java).eq(vitalSignRecordId)),
+            )
+        return execute(client, update).map { it.rowCount() }
+    }
 
     fun listVitalSigns(
         patientId: String?,
@@ -502,8 +531,16 @@ class VitalSignService(
                         }
                         .where(VITAL_SIGN_RECORDS.ID.eq(id).and(VITAL_SIGN_RECORDS.DELETED_AT.isNull)),
                 ).compose { rows ->
-                    if (rows.rowCount() == 1) getVitalSignVia(connection, id)
-                    else Future.failedFuture(HealthcareNotFoundException("vital sign record not found: $id"))
+                    if (rows.rowCount() != 1) {
+                        return@compose Future.failedFuture(HealthcareNotFoundException("vital sign record not found: $id"))
+                    }
+                    // abnormal 翻转（含异常被撤销）后，此前转诊自动生成的待随访计划必须一并作废，
+                    // 否则会留下无来源的孤儿随访任务；作废与修正同事务提交/回滚。
+                    if (abnormal == oldAbnormal) {
+                        getVitalSignVia(connection, id)
+                    } else {
+                        cancelReferralPlans(connection, id, now).compose { getVitalSignVia(connection, id) }
+                    }
                 }
             }
         }
@@ -595,7 +632,7 @@ class VitalSignService(
                 val encounterId = record.getString("encounter_id")
                 if (encounterId == null) {
                     return@compose Future.failedFuture(
-                        IllegalArgumentException("vital sign record has no encounter, cannot create a followup plan"),
+                        ConflictException(FollowupService.REFERRAL_WITHOUT_ADMISSION_MESSAGE),
                     )
                 }
                 execute(

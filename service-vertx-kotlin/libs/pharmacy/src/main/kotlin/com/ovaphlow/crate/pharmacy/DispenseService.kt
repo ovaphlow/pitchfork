@@ -756,13 +756,37 @@ class DispenseService(
                     val header = toJson(rows.iterator().next())
                     client.preparedQuery(DatabaseConfig.sql(itemsQuery))
                         .execute(DatabaseConfig.tuple(itemsQuery))
-                        .map { itemRows ->
+                        .compose { itemRows ->
                             val items = JsonArray()
+                            val dispenseItemIds = mutableListOf<String>()
                             for (row in itemRows) {
                                 items.add(itemToJson(row))
+                                row.getValue("id")?.toString()?.let { dispenseItemIds.add(it) }
                             }
-                            header.put("items", items)
-                            header
+                            // 退药可退数量口径（ADR-001）：实发 − 累计已给药 − 未取消退药。
+                            Future.all(
+                                ReturnableQuantities.administeredQuantities(client, ctx, dispenseItemIds),
+                                ReturnableQuantities.reservedQuantities(client, ctx, dispenseItemIds),
+                            ).map { lookup ->
+                                val administered = lookup.resultAt<Map<String, BigDecimal>>(0)
+                                val reserved = lookup.resultAt<Map<String, BigDecimal>>(1)
+                                for (index in 0 until items.size()) {
+                                    val item = items.getJsonObject(index)
+                                    val itemId = item.getString("id") ?: continue
+                                    val dispensed = decimalText(item.getValue("dispensed_quantity")) ?: BigDecimal.ZERO
+                                    val administeredQuantity = administered[itemId] ?: BigDecimal.ZERO
+                                    val reservedQuantity = reserved[itemId] ?: BigDecimal.ZERO
+                                    val returnable = ReturnableQuantities.remaining(dispensed, administeredQuantity, reservedQuantity)
+                                    item.put("administered_quantity", decimalApi(administeredQuantity))
+                                    // 展示用：历史超退数据可能算出负值，界面按 0 处理，拦截仍以后端校验为准
+                                    item.put(
+                                        "returnable_quantity",
+                                        decimalApi(if (returnable < BigDecimal.ZERO) BigDecimal.ZERO else returnable),
+                                    )
+                                }
+                                header.put("items", items)
+                                header
+                            }
                         }
                 }
             }

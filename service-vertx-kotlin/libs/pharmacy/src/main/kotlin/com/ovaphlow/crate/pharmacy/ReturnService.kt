@@ -33,7 +33,10 @@ class ReturnService(
         val warehouse: String,
         val materialId: String,
         val lotId: String?,
+        /** 创建退药单时为本单退药数量，确认入库时为原发药明细实发数量 */
         val quantity: BigDecimal,
+        /** 原发药明细实发数量：可退数量上限的基数 */
+        val dispensedQuantity: BigDecimal,
         val unitCost: BigDecimal,
         val originalStockOperationDetailId: String,
         val returnStockOperationDetailId: String?,
@@ -94,21 +97,20 @@ class ReturnService(
             loadDispenseSource(connection, dispenseId, dispenseItemId).compose { source ->
                 validateDispenseSource(source)
                 val requested = quantity
-                if (requested > source.quantity) {
-                    return@compose Future.failedFuture(ConflictException("return quantity exceeds dispensed quantity"))
-                }
-                loadReservedReturnQuantity(connection, dispenseItemId).compose { reserved ->
-                    if (reserved.add(requested) > source.quantity) {
-                        return@compose Future.failedFuture(ConflictException("return quantity exceeds remaining quantity"))
+                // 可退口径：实发 − 累计已给药 − 未取消退药（待确认 + 已确认）；已给药不得退回库存。
+                ReturnableQuantities.administeredQuantity(connection, ctx, dispenseItemId).compose { administered ->
+                    ReturnableQuantities.reservedQuantity(connection, ctx, dispenseItemId).compose { reserved ->
+                        ReturnableQuantities.overReturnError(requested, source.dispensedQuantity, administered, reserved)
+                            ?.let { return@compose Future.failedFuture(it) }
+                        insertReturn(
+                            connection,
+                            source,
+                            requested,
+                            returnReason,
+                            operator,
+                            body,
+                        )
                     }
-                    insertReturn(
-                        connection,
-                        source,
-                        requested,
-                        returnReason,
-                        operator,
-                        body,
-                    )
                 }
             }
         }
@@ -194,34 +196,51 @@ class ReturnService(
                         if (source.returnStockOperationDetailId != null) {
                             return@compose Future.failedFuture(ConflictException("return already has stock operation"))
                         }
-                        inventoryInboundPort.confirmInbound(
-                            connection,
-                            InboundCommand(
-                                warehouse = source.warehouse,
-                                materialId = source.materialId,
-                                lotId = source.lotId,
-                                quantity = source.quantity,
-                                unitCost = source.unitCost,
-                                note = "pharmacy return $id",
-                            ),
-                        ).compose { inbound ->
-                            val now = OffsetDateTime.now()
-                            val itemUpdate = ctx.update(PHARMACY_RETURN_ITEMS)
-                                .set(PHARMACY_RETURN_ITEMS.STOCK_OPERATION_DETAIL_ID, inbound.stockOperationDetailId)
-                                .set(PHARMACY_RETURN_ITEMS.UNIT_COST, inbound.unitCost)
-                                .set(PHARMACY_RETURN_ITEMS.TOTAL_COST, inbound.unitCost.multiply(source.quantity))
-                                .where(PHARMACY_RETURN_ITEMS.ID.eq(source.returnItemId))
-                            val headerUpdate = ctx.update(PHARMACY_RETURNS)
-                                .set(PHARMACY_RETURNS.STATUS, "CONFIRMED")
-                                .set(PHARMACY_RETURNS.OPERATOR, operator)
-                                .set(PHARMACY_RETURNS.CONFIRMED_AT, now)
-                                .where(PHARMACY_RETURNS.ID.eq(id))
-                            connection.preparedQuery(DatabaseConfig.sql(itemUpdate))
-                                .execute(DatabaseConfig.tuple(itemUpdate))
-                                .compose { connection.preparedQuery(DatabaseConfig.sql(headerUpdate)).execute(DatabaseConfig.tuple(headerUpdate)) }
-                                .compose { get(connection, id) }
+                        // 待确认期间可能补水给药记录：确认前按同一可退口径复验（本单排除后叠加本单数量）。
+                        ReturnableQuantities.administeredQuantity(connection, ctx, source.dispenseItemId)
+                            .compose { administered ->
+                                ReturnableQuantities.reservedQuantity(
+                                    connection,
+                                    ctx,
+                                    source.dispenseItemId,
+                                    excludeReturnId = id,
+                                ).compose { reservedByOthers ->
+                                    ReturnableQuantities.overReturnError(
+                                        source.quantity,
+                                        source.dispensedQuantity,
+                                        administered,
+                                        reservedByOthers,
+                                    )?.let { return@compose Future.failedFuture(it) }
+                                    inventoryInboundPort.confirmInbound(
+                                        connection,
+                                        InboundCommand(
+                                            warehouse = source.warehouse,
+                                            materialId = source.materialId,
+                                            lotId = source.lotId,
+                                            quantity = source.quantity,
+                                            unitCost = source.unitCost,
+                                            note = "pharmacy return $id",
+                                        ),
+                                    ).compose { inbound ->
+                                        val now = OffsetDateTime.now()
+                                        val itemUpdate = ctx.update(PHARMACY_RETURN_ITEMS)
+                                            .set(PHARMACY_RETURN_ITEMS.STOCK_OPERATION_DETAIL_ID, inbound.stockOperationDetailId)
+                                            .set(PHARMACY_RETURN_ITEMS.UNIT_COST, inbound.unitCost)
+                                            .set(PHARMACY_RETURN_ITEMS.TOTAL_COST, inbound.unitCost.multiply(source.quantity))
+                                            .where(PHARMACY_RETURN_ITEMS.ID.eq(source.returnItemId))
+                                        val headerUpdate = ctx.update(PHARMACY_RETURNS)
+                                            .set(PHARMACY_RETURNS.STATUS, "CONFIRMED")
+                                            .set(PHARMACY_RETURNS.OPERATOR, operator)
+                                            .set(PHARMACY_RETURNS.CONFIRMED_AT, now)
+                                            .where(PHARMACY_RETURNS.ID.eq(id))
+                                        connection.preparedQuery(DatabaseConfig.sql(itemUpdate))
+                                            .execute(DatabaseConfig.tuple(itemUpdate))
+                                            .compose { connection.preparedQuery(DatabaseConfig.sql(headerUpdate)).execute(DatabaseConfig.tuple(headerUpdate)) }
+                                            .compose { get(connection, id) }
+                                    }
+                                }
+                            }
                         }
-                    }
                     else -> Future.failedFuture(ConflictException("cannot confirm return in status ${current.getString("status")}"))
                 }
             }
@@ -337,6 +356,7 @@ class ReturnService(
             PHARMACY_RETURN_ITEMS.STOCK_OPERATION_DETAIL_ID.`as`("return_stock_operation_detail_id"),
             PHARMACY_DISPENSE_ITEMS.MATERIAL_ID,
             PHARMACY_DISPENSE_ITEMS.LOT_ID,
+            PHARMACY_DISPENSE_ITEMS.DISPENSED_QUANTITY.`as`("dispensed_quantity"),
             PHARMACY_DISPENSE_ITEMS.UNIT_COST,
             PHARMACY_DISPENSE_ITEMS.STOCK_OPERATION_DETAIL_ID.`as`("original_stock_operation_detail_id"),
         )
@@ -364,6 +384,7 @@ class ReturnService(
         lotId = row.getString("lot_id"),
         quantity = if (returnRow) row.getBigDecimal("return_quantity") ?: BigDecimal.ZERO
         else row.getBigDecimal("dispensed_quantity") ?: BigDecimal.ZERO,
+        dispensedQuantity = row.getBigDecimal("dispensed_quantity") ?: BigDecimal.ZERO,
         unitCost = row.getBigDecimal("unit_cost") ?: BigDecimal.ZERO,
         originalStockOperationDetailId = row.getString("original_stock_operation_detail_id") ?: "",
         returnStockOperationDetailId = if (returnRow) row.getString("return_stock_operation_detail_id") else null,
@@ -384,17 +405,6 @@ class ReturnService(
         validateDispenseSource(source)
         if (source.returnStatus != "PENDING") throw ConflictException("return is not pending")
         if (source.returnItemId.isBlank()) throw ConflictException("return has no item")
-    }
-
-    private fun loadReservedReturnQuantity(connection: SqlConnection, dispenseItemId: String): Future<BigDecimal> {
-        val query = ctx.select(DSL.sum(PHARMACY_RETURN_ITEMS.QUANTITY).`as`("reserved_quantity"))
-            .from(PHARMACY_RETURN_ITEMS)
-            .join(PHARMACY_RETURNS).on(PHARMACY_RETURNS.ID.eq(PHARMACY_RETURN_ITEMS.RETURN_ID))
-            .where(PHARMACY_RETURN_ITEMS.DISPENSE_ITEM_ID.eq(dispenseItemId))
-            .and(PHARMACY_RETURNS.STATUS.ne("CANCELLED"))
-        return connection.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
-            .map { rows -> rows.iterator().next().getBigDecimal("reserved_quantity") ?: BigDecimal.ZERO }
     }
 
     private fun rejectUnknown(body: JsonObject, allowed: Set<String>): IllegalArgumentException? {

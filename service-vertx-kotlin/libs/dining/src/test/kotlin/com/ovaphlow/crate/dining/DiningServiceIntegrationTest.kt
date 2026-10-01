@@ -417,7 +417,11 @@ class DiningServiceIntegrationTest {
             .onComplete { ar ->
                 ctx.verify {
                     assertTrue(ar.succeeded())
-                    assertEquals(2L, ar.result().getJsonObject("meta").getLong("total"))
+                    val body = ar.result()
+                    assertEquals(2L, body.getJsonObject("meta").getLong("total"))
+                    // 列表接口不返回 items，但必须给出「菜品项」数（P2-2 回归）
+                    val counts = body.getJsonArray("records").map { (it as JsonObject).getLong("item_count") }
+                    assertEquals(listOf(3L, 3L), counts, "列表应返回每份菜谱的菜品项 item_count")
                     ctx.completeNow()
                 }
             }

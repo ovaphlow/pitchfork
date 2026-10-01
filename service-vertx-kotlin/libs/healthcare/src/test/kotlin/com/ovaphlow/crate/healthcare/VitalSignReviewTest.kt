@@ -17,12 +17,14 @@ import io.vertx.sqlclient.RowIterator
 import io.vertx.sqlclient.RowSet
 import io.vertx.sqlclient.SqlConnection
 import io.vertx.sqlclient.Tuple
+import com.ovaphlow.crate.nursing.ConflictException
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertInstanceOf
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Assertions.fail
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.extension.ExtendWith
 import java.math.BigDecimal
@@ -471,13 +473,14 @@ class VitalSignReviewTest {
     }
 
     @Test
-    fun `体征记录无入住周期时转诊返回400`() {
+    fun `体征记录无入住周期时转诊返回中文业务提示且不创建计划`() {
         val stub = DatabaseStub(
             records = rows(recordRow(mapOf("review_status" to "已确认", "encounter_id" to null))),
         )
         val cause = causeOf(VitalSignService(stub.pool).referVitalSign("vs-1", JsonObject(), "user-3"))
-        assertInstanceOf(IllegalArgumentException::class.java, cause)
-        assertTrue(cause.message?.contains("has no encounter") == true, "got: ${cause.message}")
+        assertInstanceOf(ConflictException::class.java, cause)
+        assertTrue(cause.message?.contains("没有在住的养老入住记录") == true, "got: ${cause.message}")
+        assertTrue(stub.queries.none { it.contains("insert into healthcare.followup_plans") }, "无入住不得创建计划")
     }
 
     @Test
@@ -549,6 +552,38 @@ class VitalSignReviewTest {
         val updateSql = stub.queries.first { it.contains("update healthcare.vital_sign_records") }
         assertTrue(updateSql.contains("abnormal = $"), "修正必须重算 abnormal: $updateSql")
         assertTrue(!updateSql.contains("review_status = $"), "abnormal 未翻转不得重置复核状态: $updateSql")
+        assertTrue(
+            stub.queries.none { it.contains("update healthcare.followup_plans") },
+            "未翻转不得动随访计划: ${stub.queries}",
+        )
+    }
+
+    @Test
+    fun `修正撤销异常时同事务作废转诊自动生成的待随访计划`() {
+        val stub = DatabaseStub(
+            records = rows(
+                recordRow(
+                    mapOf(
+                        "value" to BigDecimal("39.3"),
+                        "abnormal" to true,
+                        "review_status" to "已转诊",
+                    ),
+                ),
+            ),
+            detailRows = rows(recordRow(mapOf("value" to BigDecimal("37.0"), "abnormal" to false))),
+        )
+        successOf(VitalSignService(stub.pool).updateVitalSign("vs-1", JsonObject().put("value", 37.0), "user-1"))
+
+        val cancelSql = stub.queries.firstOrNull { it.contains("update healthcare.followup_plans") }
+            ?: fail("撤销异常必须作废关联的自动转诊计划: ${stub.queries}")
+        assertTrue(cancelSql.contains("status = $"), "必须更新计划状态: $cancelSql")
+        assertTrue(cancelSql.contains("cancel_reason"), "必须写入取消原因: $cancelSql")
+        assertTrue(cancelSql.contains("metadata ->> 'source'"), "只作废体征转诊自动生成的计划: $cancelSql")
+        assertTrue(cancelSql.contains("metadata ->> 'vital_sign_record_id'"), "必须按体征记录关联: $cancelSql")
+        val cancelTuple = stub.tuples.first { it.first.contains("update healthcare.followup_plans") }.second
+        assertTrue(cancelTuple.contains("已取消"), "计划置为已取消: $cancelTuple")
+        assertTrue(cancelTuple.contains("vs-1"), "按本记录 id 关联: $cancelTuple")
+        assertEquals(1, stub.transactionCalls, "作废计划必须与修正同事务")
     }
 
     // ========================================================================

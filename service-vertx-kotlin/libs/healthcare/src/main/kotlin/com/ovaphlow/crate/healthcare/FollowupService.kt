@@ -46,6 +46,13 @@ class FollowupService(
     companion object {
         private val businessZone = ZoneId.of("Asia/Shanghai")
 
+        /**
+         * 转诊要自动创建随访计划，计划必须归属一条养老入住记录。
+         * 居家／社区及已离院长者没有在住记录时，给中文业务提示而不是后台英文校验文案。
+         */
+        const val REFERRAL_WITHOUT_ADMISSION_MESSAGE =
+            "该长者没有在住的养老入住记录，无法生成随访计划；请先办理入住后重试"
+
         val followupTypes = setOf("出院后随访", "慢病随访", "常规电话随访")
         private val followupWays = setOf("电话", "上门", "门诊")
         private val followupResults = setOf("正常", "异常", "需复访", "需转诊")
@@ -204,7 +211,7 @@ class FollowupService(
                     IllegalArgumentException("cannot create followup plan for a deceased patient"),
                 )
             }
-            validateEncounterOwnership(client, patientId, encounterId).compose { encounter ->
+            loadReferralEncounter(client, patientId, encounterId).compose { encounter ->
                 val admitDate = patientAdmitDate(encounter)
                 if (admitDate != null && plannedDate.isBefore(admitDate)) {
                     return@compose Future.failedFuture(
@@ -755,6 +762,23 @@ class FollowupService(
             }
             Future.succeededFuture(encounter)
         }
+
+    /**
+     * 转诊专用入住校验：入住记录缺失、不属于该长者或不是养老入住时统一返回中文业务提示
+     * （[REFERRAL_WITHOUT_ADMISSION_MESSAGE]），不把后台英文校验文案透出到界面。
+     */
+    private fun loadReferralEncounter(client: SqlClient, patientId: String, encounterId: String): Future<Row> =
+        getEncounterRow(client, encounterId)
+            .recover { Future.failedFuture<Row>(ConflictException(REFERRAL_WITHOUT_ADMISSION_MESSAGE)) }
+            .compose { encounter ->
+                val isOwnedElderlyCare = encounter.getString("patient_id") == patientId &&
+                    encounter.getString("encounter_type") == "ELDERLY_CARE"
+                if (isOwnedElderlyCare) {
+                    Future.succeededFuture(encounter)
+                } else {
+                    Future.failedFuture(ConflictException(REFERRAL_WITHOUT_ADMISSION_MESSAGE))
+                }
+            }
 
     private fun validatePatientEncounter(client: SqlClient, patientId: String, encounterId: String): Future<Row> =
         getPatient(client, patientId).compose {
