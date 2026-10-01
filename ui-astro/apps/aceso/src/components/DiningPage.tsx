@@ -987,6 +987,8 @@ function WeeklyMenusTab() {
 // ========================================================================
 
 function RostersTab() {
+  // 029（评审 P2-3）同口径：generated_by 存的是认证主体 ID，展示前映射为姓名
+  const { subjectLabel } = useSubjectDirectory();
   const [records, setRecords] = useState<Roster[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -1112,8 +1114,8 @@ function RostersTab() {
   const rosterColumns: Column<Roster>[] = [
     { key: "menu_date", header: "日期", className: "min-w-[110px]", render: (row) => formatDate(row.menu_date) },
     { key: "meal_time", header: "餐次", className: "w-[90px]", render: (row) => <Badge variant="info">{row.meal_time}</Badge> },
-    { key: "item_count", header: "名单人数", className: "w-[100px]", render: (row) => (row.items?.length ?? "-") },
-    { key: "generated_by", header: "生成人", className: "w-[110px]", render: (row) => row.generated_by ?? "-" },
+    { key: "item_count", header: "名单人数", className: "w-[100px]", render: (row) => (row.item_count ?? row.items?.length ?? "-") },
+    { key: "generated_by", header: "生成人", className: "w-[110px]", render: (row) => subjectLabel(row.generated_by) },
     { key: "generated_at", header: "生成时间", className: "min-w-[140px]", render: (row) => formatDateTime(row.generated_at) },
     { key: "actions", header: "操作", className: "w-[90px]", render: (row) => <Button variant="link" size="sm" onClick={() => void openDetail(row)}>查看名单</Button> },
   ];
