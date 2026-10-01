@@ -22,6 +22,7 @@ import {
   type NursingTodayExecution,
   type Patient,
 } from "@pitchfork/shared/aceso";
+import { executionRateCards, formatCompletionRate, type ExecutionStatCard } from "./executionStatistics";
 import { daysAgoLocal, formatDate, formatDateTime, formatTime, todayLocal } from "../lib/datetime";
 
 const PAGE_SIZE = 10;
@@ -224,6 +225,9 @@ export default function ActivitiesPage() {
 
   // ——— 每活动执行进度（当前页任务逐条拉取，按 task_id 过滤） ———
   const [execByTask, setExecByTask] = useState<Record<string, TaskExecProgress>>({});
+  /** 写操作后的重拉信号：打卡/开始/任务完成取消/生成排期都会自增，驱动下面的进度重取 */
+  const [execProgressVersion, setExecProgressVersion] = useState(0);
+  const refreshExecProgress = useCallback(() => setExecProgressVersion((version) => version + 1), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -250,7 +254,7 @@ export default function ActivitiesPage() {
     return () => {
       cancelled = true;
     };
-  }, [pageTasks]);
+  }, [pageTasks, execProgressVersion]);
 
   // ========================================================================
   //  今日活动看板（F5）— 复用 GET /task-executions/today + task_type 过滤
@@ -369,6 +373,16 @@ export default function ActivitiesPage() {
     void loadStats();
   }, [loadStats]);
 
+  /**
+   * 执行状态写操作后的统一刷新：今日看板 + 进度统计 + 每任务进度。
+   * 只刷新看板与统计会让「活动任务」列表的「进度」列停在旧值
+   * （2026-10-01 QA：看板已显示 完成 1/1，列表仍显示 已完成 0/1）。
+   */
+  const refreshAfterExecutionChange = useCallback(async () => {
+    await Promise.all([loadToday(), loadStats()]);
+    refreshExecProgress();
+  }, [loadToday, loadStats, refreshExecProgress]);
+
   // ========================================================================
   //  创建活动任务（F2）
   // ========================================================================
@@ -473,7 +487,7 @@ export default function ActivitiesPage() {
     try {
       const result = await generateNursingExecutions({ date_from: generateFrom, date_to: generateTo });
       setGenerateResult(result);
-      await Promise.all([loadToday(), loadStats()]);
+      await refreshAfterExecutionChange();
     } catch (error) {
       setGenerateError(errorMessage(error, "生成排期失败"));
     } finally {
@@ -511,7 +525,7 @@ export default function ActivitiesPage() {
       setActionTarget(null);
       setActionMode(null);
       setActionNote("");
-      await Promise.all([loadToday(), loadStats()]);
+      await refreshAfterExecutionChange();
     } catch (error) {
       setActionError(errorMessage(error, "操作失败"));
     } finally {
@@ -535,7 +549,7 @@ export default function ActivitiesPage() {
       await updateNursingTaskStatus(taskStatusTarget.id, taskStatusMode);
       setTaskStatusTarget(null);
       setTaskStatusMode(null);
-      await Promise.all([loadTasks(), loadToday(), loadStats()]);
+      await Promise.all([loadTasks(), refreshAfterExecutionChange()]);
     } catch (error) {
       setTaskStatusError(errorMessage(error, "更新活动状态失败"));
     } finally {
@@ -553,7 +567,7 @@ export default function ActivitiesPage() {
       case "PENDING":
         return (
           <div className="flex gap-1">
-            <button type="button" className={btnClass + " bg-accent/10 text-accent hover:bg-accent/20"} onClick={() => void updateNursingTaskExecutionStatus(record.id, "IN_PROGRESS").then(() => Promise.all([loadToday(), loadStats()])).catch((error) => setTodayError(errorMessage(error, "开始执行失败")))}>
+            <button type="button" className={btnClass + " bg-accent/10 text-accent hover:bg-accent/20"} onClick={() => void updateNursingTaskExecutionStatus(record.id, "IN_PROGRESS").then(() => refreshAfterExecutionChange()).catch((error) => setTodayError(errorMessage(error, "开始执行失败")))}>
               开始
             </button>
             <button type="button" className={btnClass + " bg-amber-100 text-amber-700 hover:bg-amber-200"} onClick={() => openActionModal(record, "skip")}>
@@ -696,15 +710,31 @@ export default function ActivitiesPage() {
   // ========================================================================
   //  进度统计 — 指标与按执行人明细
   // ========================================================================
-  const statMetaItems = useMemo(() => {
+  const statMetaItems = useMemo<ExecutionStatCard[]>(() => {
     const meta = stats?.meta;
+    if (!meta) {
+      return [
+        { label: "计划任务", value: "-" },
+        { label: "应完成", value: "-" },
+        { label: "已完成", value: "-" },
+        { label: "已跳过", value: "-" },
+        { label: "已取消", value: "-" },
+        { label: "逾期", value: "-" },
+        { label: "计划完成率", value: "-" },
+      ];
+    }
+    // 完成率沿用与照护管理完全相同的口径与文案（executionRateCards）：
+    // 分母是「应完成（已到计划时间）」，所以必须与「应完成 / 已完成」同屏显示，
+    // 否则「计划任务 1 / 已完成 1」会被读成 100%，与 completion_rate 打架。
+    const [scheduled, due, completedDue, overdue, rate] = executionRateCards(meta);
     return [
-      { label: "计划次数", value: meta ? String(meta.scheduled_total) : "-" },
-      { label: "已完成", value: meta ? String(meta.completed_total) : "-" },
-      { label: "已跳过", value: meta ? String(meta.skipped_total) : "-" },
-      { label: "已取消", value: meta ? String(meta.cancelled_total) : "-" },
-      { label: "逾期", value: meta ? String(meta.overdue_total) : "-" },
-      { label: "完成率", value: meta ? (meta.completion_rate != null ? `${meta.completion_rate}%` : "—") : "-" },
+      scheduled,
+      due,
+      completedDue,
+      { label: "已跳过", value: String(meta.skipped_total) },
+      { label: "已取消", value: String(meta.cancelled_total) },
+      overdue,
+      rate,
     ];
   }, [stats]);
 
@@ -721,11 +751,20 @@ export default function ActivitiesPage() {
     { key: "completed_total", header: "已完成", className: "min-w-[60px]", render: (row) => String(row.completed_total) },
     { key: "skipped_total", header: "已跳过", className: "min-w-[60px]", render: (row) => String(row.skipped_total) },
     { key: "cancelled_total", header: "已取消", className: "min-w-[60px]", render: (row) => String(row.cancelled_total) },
+    // 完成率的分母是「应完成（已到计划时间）」而不是「计划」：把应完成/逾期放在
+    // 完成率左侧，避免读者把完成率当成「已完成 / 计划」而读出与卡片不一致的口径。
+    { key: "due_total", header: "应完成", className: "min-w-[60px]", render: (row) => String(row.due_total) },
+    {
+      key: "overdue_total",
+      header: "逾期",
+      className: "min-w-[60px]",
+      render: (row) => (row.overdue_total > 0 ? <span className="text-danger">{row.overdue_total}</span> : String(row.overdue_total)),
+    },
     {
       key: "completion_rate",
       header: "完成率",
       className: "min-w-[70px]",
-      render: (row) => (row.completion_rate != null ? `${String(row.completion_rate)}%` : "—"),
+      render: (row) => formatCompletionRate(row.completion_rate),
     },
   ];
 
@@ -989,11 +1028,14 @@ export default function ActivitiesPage() {
         }
       >
         {statsError && <p className="mb-3 text-sm text-danger">{statsError}</p>}
-        <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+        <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7">
           {statMetaItems.map((item) => (
-            <div key={item.label} className="rounded-lg border border-border bg-surface-alt/50 px-4 py-3">
+            <div
+              key={item.label}
+              className={`rounded-lg border px-4 py-3 ${item.highlight ? "border-danger/30 bg-danger-bg" : "border-border bg-surface-alt/50"}`}
+            >
               <div className="text-xs text-fg-muted">{item.label}</div>
-              <div className="mt-1 text-xl font-semibold text-fg-emphasis">{item.value}</div>
+              <div className={`mt-1 text-xl font-semibold ${item.highlight ? "text-danger" : "text-fg-emphasis"}`}>{item.value}</div>
             </div>
           ))}
         </div>

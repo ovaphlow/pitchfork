@@ -5,16 +5,12 @@ import {
   type IdentitySubject,
   type NursingExecutionStatistics,
 } from "@pitchfork/shared/aceso";
+import { executionRateCards, formatCompletionRate } from "./executionStatistics";
 import { todayLocal, weekStartOf } from "../lib/datetime";
 
 // ========================================================================
 //  Helpers
 // ========================================================================
-
-function formatRate(value: number | null | undefined): string {
-  if (value === null || value === undefined) return "暂无应完成任务";
-  return `${value.toFixed(2)}%`;
-}
 
 function statusCountSummary(stat: NursingExecutionStatistics): string {
   const parts: string[] = [];
@@ -116,7 +112,7 @@ export default function NursingExecutionStatisticsPanel({ subjects, reloadKey = 
       className: "w-[90px] text-right",
       render: (row) => (
         <span className={row.completion_rate != null && row.completion_rate < 100 ? "text-fg" : "text-success"}>
-          {formatRate(row.completion_rate)}
+          {formatCompletionRate(row.completion_rate)}
         </span>
       ),
     },
@@ -176,15 +172,9 @@ export default function NursingExecutionStatisticsPanel({ subjects, reloadKey = 
       {/* 统计卡片 */}
       {meta && !loading && (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
-          <StatCard label="计划任务" value={meta.scheduled_total} />
-          <StatCard label="应完成" value={meta.due_total} />
-          <StatCard label="已完成" value={meta.completed_due_total} />
-          <StatCard label="逾期" value={meta.overdue_total} highlight={meta.overdue_total > 0} />
-          <StatCard
-            label="计划完成率"
-            value={formatRate(meta.completion_rate)}
-            highlight={meta.completion_rate != null && meta.completion_rate < 60}
-          />
+          {executionRateCards(meta).map((card) => (
+            <StatCard key={card.label} label={card.label} value={card.value} highlight={card.highlight} />
+          ))}
         </div>
       )}
 
