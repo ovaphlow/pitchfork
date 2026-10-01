@@ -555,7 +555,11 @@ export default function DischargeSettlementWizard(props: {
                   label="全额核销后是否仍未结"
                   value={requiresWriteOff ? "是（必须减免）" : "否（可结清）"}
                   tone={requiresWriteOff ? "warning" : "success"}
-                  hint="结算预览 requires_write_off：即使按上限全额核销仍会剩余未结"
+                  hint={
+                    requiresWriteOff
+                      ? "即使按可核销上限全额核销仍会剩余未结，必须填写减免原因"
+                      : "按可核销上限全额核销即可结清剩余未结，无需减免原因"
+                  }
                 />
               </div>
 
