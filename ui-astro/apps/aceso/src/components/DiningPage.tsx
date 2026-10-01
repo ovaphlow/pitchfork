@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { Badge, Button, Card, EmptyState, Input, Modal, Table, type Column } from "@pitchfork/ui";
+import { Badge, Button, Card, ConfirmDialog, EmptyState, Input, Modal, Table, type Column } from "@pitchfork/ui";
 import { useSubjectDirectory } from "../lib/identity";
 import {
   addRosterItem,
@@ -143,6 +143,8 @@ function DietProfilesTab() {
   });
   const [formError, setFormError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<DietProfile | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -266,13 +268,23 @@ function DietProfilesTab() {
     }
   }
 
-  async function handleDelete(profile: DietProfile) {
-    if (!window.confirm(`确认删除「${profile.patient_name ?? profile.patient_id}」的饮食档案？`)) return;
+  function handleDelete(profile: DietProfile) {
+    setDeleteTarget(profile);
+  }
+
+  async function confirmDelete() {
+    const profile = deleteTarget;
+    if (!profile) return;
+    setDeleting(true);
     try {
       await deleteDietProfile(profile.id);
+      setDeleteTarget(null);
       await load();
     } catch (error) {
       setPageError(errorMessage(error, "无法删除饮食档案"));
+      setDeleteTarget(null);
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -428,6 +440,20 @@ function DietProfilesTab() {
           </div>
         </form>
       </Modal>
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title="确认删除饮食档案"
+        description={
+          deleteTarget
+            ? `删除「${deleteTarget.patient_name ?? deleteTarget.patient_id}」的饮食档案。`
+            : undefined
+        }
+        confirmText="确认删除"
+        loading={deleting}
+        onConfirm={() => void confirmDelete()}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 }
@@ -1009,6 +1035,8 @@ function RostersTab() {
   const [adjustCandidates, setAdjustCandidates] = useState<Array<{ patient_id: string; name: string; encounter_no: string }>>([]);
   const [adjustError, setAdjustError] = useState("");
   const [adjusting, setAdjusting] = useState(false);
+  const [removeTarget, setRemoveTarget] = useState<RosterItem | null>(null);
+  const [removing, setRemoving] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -1100,14 +1128,24 @@ function RostersTab() {
     }
   }
 
-  async function handleRemoveItem(item: RosterItem) {
+  function handleRemoveItem(item: RosterItem) {
     if (!detail) return;
-    if (!window.confirm(`确认从名单中移除「${item.patient_name}」？已登记就餐的条目不可删除。`)) return;
+    setRemoveTarget(item);
+  }
+
+  async function confirmRemoveItem() {
+    const item = removeTarget;
+    if (!detail || !item) return;
+    setRemoving(true);
     try {
       await removeRosterItem(detail.id, item.id);
+      setRemoveTarget(null);
       setDetail(await getRoster(detail.id));
     } catch (error) {
       setDetailError(errorMessage(error, "无法移除条目"));
+      setRemoveTarget(null);
+    } finally {
+      setRemoving(false);
     }
   }
 
@@ -1226,6 +1264,16 @@ function RostersTab() {
           </div>
         </form>
       </Modal>
+
+      <ConfirmDialog
+        open={removeTarget !== null}
+        title="确认移除配餐名单条目"
+        description={removeTarget ? `将「${removeTarget.patient_name}」从本餐名单中移除。已登记就餐的条目不可删除。` : undefined}
+        confirmText="确认移除"
+        loading={removing}
+        onConfirm={() => void confirmRemoveItem()}
+        onCancel={() => setRemoveTarget(null)}
+      />
     </div>
   );
 }

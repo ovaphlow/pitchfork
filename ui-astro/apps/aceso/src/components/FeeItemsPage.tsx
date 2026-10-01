@@ -12,7 +12,7 @@ import {
   type FeeItemStatus,
 } from "@pitchfork/shared/aceso";
 import { formatDateTime } from "../lib/datetime";
-import { Badge, Button, Card, EmptyState, Input, Modal, Table, type Column } from "@pitchfork/ui";
+import { Badge, Button, Card, ConfirmDialog, EmptyState, Input, Modal, Table, type Column } from "@pitchfork/ui";
 
 const PAGE_SIZE = 50;
 const NAME_MAX = 100;
@@ -160,6 +160,8 @@ export default function FeeItemsPage() {
   const [form, setForm] = useState<FeeItemForm>(emptyForm);
   const [formError, setFormError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<FeeItem | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   /** 已启用的护理费：用于同等级重复的即时提示（服务端 409 之外的前端一层） */
   const [nursingEnabled, setNursingEnabled] = useState<FeeItem[]>([]);
@@ -263,20 +265,26 @@ export default function FeeItemsPage() {
     }
   }
 
-  async function handleDelete(item: FeeItem) {
-    const confirmed = window.confirm(
-      `确认删除费用项目「${item.name}」（${item.category}）？\n\n` +
-        "已生成账单的明细是快照，删除字典项不影响历史账单；但删除后新账单无法再按该分类自动计费，删除不可恢复。",
-    );
-    if (!confirmed) return;
+  function handleDelete(item: FeeItem) {
+    setDeleteTarget(item);
+  }
+
+  async function confirmDelete() {
+    const item = deleteTarget;
+    if (!item) return;
+    setDeleting(true);
     setPageError("");
     try {
       await deleteFeeItem(item.id);
+      setDeleteTarget(null);
       if (items.length === 1 && offset > 0) setOffset(Math.max(0, offset - PAGE_SIZE));
       else await load();
     } catch (error) {
       const msg = errorMessage(error, "删除失败");
       setPageError(/foreign|constraint/i.test(msg) ? "该费用项目已被引用，无法删除；可改为停用" : msg);
+      setDeleteTarget(null);
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -615,6 +623,21 @@ export default function FeeItemsPage() {
           </div>
         </div>
       </Modal>
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title="确认删除费用项目"
+        description={
+          deleteTarget
+            ? `将删除费用项目「${deleteTarget.name}」（${deleteTarget.category}）。\n\n` +
+              "已生成账单的明细是快照，删除字典项不影响历史账单；但删除后新账单无法再按该分类自动计费，删除不可恢复。"
+            : undefined
+        }
+        confirmText="确认删除"
+        loading={deleting}
+        onConfirm={() => void confirmDelete()}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 }

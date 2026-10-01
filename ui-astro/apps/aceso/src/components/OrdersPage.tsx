@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Badge, Button, Card, EmptyState, Input, Modal, Table, type Column } from "@pitchfork/ui";
+import { Badge, Button, Card, ConfirmDialog, EmptyState, Input, Modal, Table, type Column } from "@pitchfork/ui";
 import {
   closeExpiredMedicalOrders,
   createDiagnosis,
@@ -325,6 +325,7 @@ export default function OrdersPage() {
   /** 上次收束的实际条数：0 时反馈必须是中性提示，不能用成功语气（P2-1） */
   const [convergeClosed, setConvergeClosed] = useState<number | null>(null);
   const [convergeWarningCount, setConvergeWarningCount] = useState(0);
+  const [convergeConfirmOpen, setConvergeConfirmOpen] = useState(false);
 
   // —— 药品目录（025：药品 = materials 中 category='药品' 且 status='ACTIVE'）——
   const [drugCatalog, setDrugCatalog] = useState<InventoryMaterial[]>([]);
@@ -734,17 +735,18 @@ export default function OrdersPage() {
     }
   }
 
-  /** 收束已到期医嘱（027 §4.5，显式、幂等）：显式二次确认 → 幂等 POST → 刷新列表与详情 */
-  async function handleCloseExpiredOrders() {
+  /**
+   * 收束已到期医嘱（027 §4.5，显式、幂等）：显式二次确认 → 幂等 POST → 刷新列表与详情。
+   * 服务端按 encounter_id 收束「该入住全部 ACTIVE 且已到期」的医嘱，可见列表可能被类型/状态
+   * 筛选与 limit 截断，故确认文案只描述范围，不声称具体条数（P2-1）。
+   */
+  function handleCloseExpiredOrders() {
     if (!selectedAdmission) return;
-    // 服务端按 encounter_id 收束「该入住全部 ACTIVE 且已到期」的医嘱，
-    // 可见列表可能被类型/状态筛选与 limit 截断，故确认文案只描述范围，不声称具体条数（P2-1）。
-    const confirmed = window.confirm(
-      `确认收束「${selectedAdmission.patientName}」本入住全部已到期（结束时间已过）且状态为进行中的医嘱吗？\n` +
-        "收束后医嘱状态变为已完成：结束时间保留原值，其护理任务被结束；" +
-        "未执行的护理记录保持原状态，仍会出现在逾期队列中提醒。",
-    );
-    if (!confirmed) return;
+    setConvergeConfirmOpen(true);
+  }
+
+  async function confirmCloseExpiredOrders() {
+    if (!selectedAdmission) return;
     setConverging(true);
     setConvergeError("");
     setConvergeMessage("");
@@ -756,6 +758,7 @@ export default function OrdersPage() {
       setConvergeMessage(result.closed > 0 ? `已收束 ${result.closed} 条已到期医嘱` : "没有已到期医嘱");
       setConvergeClosed(result.closed);
       setConvergeWarningCount(result.warnings.length);
+      setConvergeConfirmOpen(false);
       await loadOrders();
       if (detailTarget) {
         // 详情刷新失败不覆盖收束结果，避免误导为「收束失败」
@@ -767,6 +770,7 @@ export default function OrdersPage() {
       }
     } catch (error) {
       setConvergeError(errorMessage(error, "无法收束已到期医嘱"));
+      setConvergeConfirmOpen(false);
     } finally {
       setConverging(false);
     }
@@ -1756,6 +1760,23 @@ export default function OrdersPage() {
           </div>
         )}
       </Modal>
+
+      <ConfirmDialog
+        open={convergeConfirmOpen}
+        title="确认收束已到期医嘱"
+        description={
+          selectedAdmission
+            ? `收束「${selectedAdmission.patientName}」本入住全部已到期（结束时间已过）且状态为进行中的医嘱？\n` +
+              "收束后医嘱状态变为已完成：结束时间保留原值，其护理任务被结束；" +
+              "未执行的护理记录保持原状态，仍会出现在逾期队列中提醒。"
+            : undefined
+        }
+        confirmText="确认收束"
+        variant="primary"
+        loading={converging}
+        onConfirm={() => void confirmCloseExpiredOrders()}
+        onCancel={() => setConvergeConfirmOpen(false)}
+      />
     </div>
   );
 }

@@ -1,6 +1,14 @@
 @import "tailwindcss";
 @import "./theme.css";
 
+/*
+ * 共享组件包 @pitchfork/ui 的类名必须显式登记为 Tailwind 源：
+ * Tailwind v4 只自动扫描本 app 的源码目录，不扫描 workspace 依赖，
+ * 否则 packages/ui 独有的工具类（如 LoadingSpinner 的 animate-spin、
+ * EmptyState 的 max-w-xs）不会出现在产物 CSS 里，组件静默丢样式。
+ */
+@source "../../../../packages/ui/src";
+
 @theme {
   --sidebar-w: 260px;
   --sidebar-collapsed-w: 64px;

@@ -13,7 +13,7 @@ import {
 import { DOMAIN_ENTITY } from "../lib/domain";
 import { formatDateTime } from "../lib/datetime";
 import { useDomain } from "../lib/useDomain";
-import { Badge, Button, Card, EmptyState, Input, Modal, Table, type Column } from "@pitchfork/ui";
+import { Badge, Button, Card, ConfirmDialog, EmptyState, Input, Modal, Table, type Column } from "@pitchfork/ui";
 
 const PAGE_SIZE = 50;
 /** department/ward 上限：与服务端 BedService.MAX_IDENTITY_LENGTH 一致 */
@@ -117,6 +117,8 @@ export default function BedsPage() {
   const [form, setForm] = useState<BedForm>(emptyForm);
   const [formError, setFormError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<Bed | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   /** 已启用床位：用于编辑时对同一业务键的即时提示（服务端 409 之外的前端一层） */
   const [enabledBeds, setEnabledBeds] = useState<Bed[]>([]);
@@ -246,16 +248,18 @@ export default function BedsPage() {
     }
   }
 
-  async function handleDelete(row: Bed) {
-    const confirmed = window.confirm(
-      `确认删除床位「${bedIdentity(row)}」？\n\n` +
-        "删除后该床位不再作为办理入住时的候选；历史入住记录里的自由文本不受影响，删除不可恢复。\n" +
-        `若该床位当前有在住${person}，系统会拒绝删除，可改为停用。`,
-    );
-    if (!confirmed) return;
+  function handleDelete(row: Bed) {
+    setDeleteTarget(row);
+  }
+
+  async function confirmDelete() {
+    const row = deleteTarget;
+    if (!row) return;
+    setDeleting(true);
     setPageError("");
     try {
       await deleteBed(row.id);
+      setDeleteTarget(null);
       if (items.length === 1 && offset > 0) setOffset(Math.max(0, offset - PAGE_SIZE));
       else await load();
     } catch (error) {
@@ -267,6 +271,9 @@ export default function BedsPage() {
       } else {
         setPageError(errorMessage(error, "删除失败"));
       }
+      setDeleteTarget(null);
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -526,6 +533,22 @@ export default function BedsPage() {
           </div>
         </div>
       </Modal>
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title="确认删除床位"
+        description={
+          deleteTarget
+            ? `将删除床位「${bedIdentity(deleteTarget)}」。\n\n` +
+              "删除后该床位不再作为办理入住时的候选；历史入住记录里的自由文本不受影响，删除不可恢复。\n" +
+              `若该床位当前有在住${person}，系统会拒绝删除，可改为停用。`
+            : undefined
+        }
+        confirmText="确认删除"
+        loading={deleting}
+        onConfirm={() => void confirmDelete()}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 }

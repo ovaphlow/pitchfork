@@ -6,7 +6,7 @@ import {
   updateInventoryMaterial,
   type InventoryMaterial,
 } from "@pitchfork/shared/aceso";
-import { Button, Card, Input, Modal, Table, type Column } from "@pitchfork/ui";
+import { Button, Card, ConfirmDialog, Input, Modal, Table, type Column } from "@pitchfork/ui";
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
@@ -97,6 +97,8 @@ export default function MaterialsPage() {
   const [editForm, setEditForm] = useState<EditMaterialForm | null>(null);
   const [editError, setEditError] = useState("");
   const [editing, setEditing] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<InventoryMaterial | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -216,15 +218,25 @@ export default function MaterialsPage() {
     }
   }
 
-  async function handleDeleteMaterial(material: InventoryMaterial) {
-    if (!window.confirm(`确认删除物资「${material.name}」（${material.code}）？删除后不可恢复。`)) return;
+  function handleDeleteMaterial(material: InventoryMaterial) {
+    setDeleteTarget(material);
+  }
+
+  async function confirmDeleteMaterial() {
+    const material = deleteTarget;
+    if (!material) return;
+    setDeleting(true);
     setPageError("");
     try {
       await deleteInventoryMaterial(material.id);
+      setDeleteTarget(null);
       await load();
     } catch (error) {
       const msg = errorMessage(error, "无法删除物资");
       setPageError(/foreign|constraint/i.test(msg) ? "该物资已有库存或单据记录，无法删除；可改为禁用" : msg);
+      setDeleteTarget(null);
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -352,6 +364,16 @@ export default function MaterialsPage() {
           </div>
         )}
       </Modal>
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title="确认删除物资"
+        description={deleteTarget ? `将删除物资「${deleteTarget.name}」（${deleteTarget.code}），删除后不可恢复。` : undefined}
+        confirmText="确认删除"
+        loading={deleting}
+        onConfirm={() => void confirmDeleteMaterial()}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 }

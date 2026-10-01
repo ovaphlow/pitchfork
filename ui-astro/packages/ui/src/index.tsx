@@ -1,6 +1,6 @@
 // @pitchfork/ui — shared React UI components
 
-import React, { type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type TableHTMLAttributes } from "react";
+import React, { useId, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type TableHTMLAttributes } from "react";
 
 // ─── Button ───────────────────────────────────────────────────────
 
@@ -168,6 +168,7 @@ export function Modal({
   children,
   width = "32rem",
 }: ModalProps) {
+  const titleId = useId();
   if (!open) return null;
   return (
     <div
@@ -184,6 +185,9 @@ export function Modal({
       onClick={onClose}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={title ? titleId : undefined}
         style={{
           background: "oklch(22% 0.012 250)",
           border: "1px solid oklch(25% 0.01 250)",
@@ -204,11 +208,12 @@ export function Modal({
             padding: "1.25rem 2rem",
             borderBottom: "1px solid oklch(25% 0.01 250)",
           }}>
-            <h3 style={{ fontSize: "1rem", fontWeight: 600, color: "oklch(95% 0.005 250)" }}>
+            <h3 id={titleId} style={{ fontSize: "1rem", fontWeight: 600, color: "oklch(95% 0.005 250)" }}>
               {title}
             </h3>
             <button
               onClick={onClose}
+              aria-label="关闭"
               style={{
                 width: "2rem",
                 height: "2rem",
@@ -232,6 +237,62 @@ export function Modal({
         <div style={{ padding: "2rem" }}>{children}</div>
       </div>
     </div>
+  );
+}
+
+// ─── ConfirmDialog ────────────────────────────────────────────────
+
+/**
+ * 二次确认对话框：替代 window.confirm 的页面内实现。
+ *
+ * 原生确认框由浏览器 chrome 渲染，不在 DOM 中，自动化测试无法用选择器点击，
+ * 只能靠注册 dialog 处理器接受/拒绝；改为页面内 Modal 后可用角色与文案定位。
+ */
+interface ConfirmDialogProps {
+  open: boolean;
+  title: string;
+  /** 说明文案；换行（\n）原样保留，便于保留既有 window.confirm 的多段说明 */
+  description?: ReactNode;
+  confirmText?: string;
+  cancelText?: string;
+  /** danger 用于删除等不可恢复操作，primary 用于普通二次确认 */
+  variant?: "danger" | "primary";
+  /** 确认操作进行中：按钮进入加载态并阻止重复提交与关闭 */
+  loading?: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}
+
+export function ConfirmDialog({
+  open,
+  title,
+  description,
+  confirmText = "确认",
+  cancelText = "取消",
+  variant = "danger",
+  loading = false,
+  onConfirm,
+  onCancel,
+}: ConfirmDialogProps) {
+  return (
+    <Modal open={open} onClose={() => !loading && onCancel()} title={title} width="32rem">
+      <div className="space-y-5">
+        {description && (
+          // 换行原样保留；此处用内联样式，避免依赖消费方 Tailwind 扫描 packages/ui
+          <div className="text-sm text-fg-muted" style={{ whiteSpace: "pre-line" }}>
+            {description}
+          </div>
+        )}
+        <div className="flex justify-end gap-3">
+          <Button variant="ghost" onClick={onCancel} disabled={loading}>
+            {cancelText}
+          </Button>
+          <Button variant={variant} onClick={onConfirm} loading={loading}>
+            {confirmText}
+          </Button>
+        </div>
+      </div>
+    </Modal>
   );
 }
 
