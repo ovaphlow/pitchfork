@@ -22,7 +22,7 @@ import {
   type Patient,
 } from "@pitchfork/shared/aceso";
 import { admissionErrorMessage } from "./admissionMessages";
-import { dayBoundary, formatDate, formatDateTime, nowLocalInput, toOffsetDateTime } from "../lib/datetime";
+import { dayBoundary, formatDate, formatDateTime, toOffsetDateTime, todayLocal } from "../lib/datetime";
 
 interface AdmissionForm {
   patientId: string;
@@ -545,9 +545,9 @@ export default function AdmissionsPage() {
 
   function openDischarge(admission: AdmissionRow) {
     setDischargeAdmission(admission);
-    // 默认「现在」（业务时区，Asia/Shanghai），与入住日期同一套时区口径；
-    // 允许操作者改写为实际离院时刻，以支持补录历史离院与按实际离院日结算。
-    setDischargeDate(nowLocalInput());
+    // 默认「今天」（业务时区，Asia/Shanghai），与入住日期同一套时区口径；
+    // 允许操作者改写为实际离院日期，以支持补录历史离院与按实际离院日结算。
+    setDischargeDate(todayLocal());
     setDischargeDiagnosis("");
     setDischargeError("");
     setDischargeSubmitting(false);
@@ -557,7 +557,7 @@ export default function AdmissionsPage() {
     if (!dischargeAdmission) return;
     const dischargeDateValue = dischargeDate.trim();
     if (!dischargeDateValue) {
-      setDischargeError("离院时间不能为空");
+      setDischargeError("离院日期不能为空");
       return;
     }
     setDischargeSubmitting(true);
@@ -565,7 +565,7 @@ export default function AdmissionsPage() {
     setNotice("");
     try {
       await dischargeEncounter(dischargeAdmission.id, {
-        discharge_date: toOffsetDateTime(dischargeDateValue),
+        discharge_date: dayBoundary(dischargeDateValue, "start"),
         ...(dischargeDiagnosis.trim() ? { discharge_diagnosis: dischargeDiagnosis.trim() } : {}),
       });
       setDischargeAdmission(null);
@@ -1067,8 +1067,8 @@ export default function AdmissionsPage() {
           >
             <Input
               id="discharge-date"
-              label="离院时间（必填）"
-              type="datetime-local"
+              label="离院日期（必填）"
+              type="date"
               value={dischargeDate}
               onChange={(event) => setDischargeDate(event.target.value)}
               required
