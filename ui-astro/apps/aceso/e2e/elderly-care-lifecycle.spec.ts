@@ -290,13 +290,14 @@ class AdmissionsPage {
     return this.page.getByRole("row").filter({ hasText: encounterNo });
   }
 
-  async discharge(encounterNo: string): Promise<number> {
+  async discharge(encounterNo: string, dischargeDate = "2026-07-31T16:00"): Promise<number> {
     const responsePromise = this.page.waitForResponse(
       (response) => response.url().includes("/encounters/") && response.url().includes("/discharge"),
     );
-    const dialogPromise = this.page.waitForEvent("dialog").then((dialog) => dialog.accept());
     await this.row(encounterNo).getByRole("button", { name: /办理离院/ }).click();
-    await dialogPromise;
+    const dialog = this.page.getByRole("heading", { name: /^办理离院/ }).locator("xpath=../..");
+    await dialog.getByLabel("离院时间（必填）").fill(dischargeDate);
+    await dialog.getByRole("button", { name: "确认办理离院" }).click();
     return (await responsePromise).status();
   }
 }

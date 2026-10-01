@@ -22,7 +22,7 @@ import {
   type Patient,
 } from "@pitchfork/shared/aceso";
 import { admissionErrorMessage } from "./admissionMessages";
-import { dayBoundary, formatDate, formatDateTime, toOffsetDateTime } from "../lib/datetime";
+import { dayBoundary, formatDate, formatDateTime, nowLocalInput, toOffsetDateTime } from "../lib/datetime";
 
 interface AdmissionForm {
   patientId: string;
@@ -329,7 +329,6 @@ export default function AdmissionsPage() {
   /** 启用的床位主数据（只读候选，用于两个字段的 datalist；加载失败静默降级为空候选） */
   const [beds, setBeds] = useState<Bed[]>([]);
   const [saving, setSaving] = useState(false);
-  const [dischargingId, setDischargingId] = useState<string | null>(null);
   const [patientSearch, setPatientSearch] = useState("");
   const [patientOptions, setPatientOptions] = useState<Patient[]>([]);
   const [selectedPatient, setSelectedPatient] = useState<Patient | null>(null);
@@ -354,6 +353,13 @@ export default function AdmissionsPage() {
   const [deathCause, setDeathCause] = useState("");
   const [deathError, setDeathError] = useState("");
   const [deathSubmitting, setDeathSubmitting] = useState(false);
+
+  // 办理离院弹窗状态
+  const [dischargeAdmission, setDischargeAdmission] = useState<AdmissionRow | null>(null);
+  const [dischargeDate, setDischargeDate] = useState("");
+  const [dischargeDiagnosis, setDischargeDiagnosis] = useState("");
+  const [dischargeError, setDischargeError] = useState("");
+  const [dischargeSubmitting, setDischargeSubmitting] = useState(false);
 
   const [subjects, setSubjects] = useState<IdentitySubject[]>([]);
 
@@ -537,20 +543,50 @@ export default function AdmissionsPage() {
   const BILLING_SETTLEMENT_HINT =
     "请到「养老收费 → 结算关账」完成账单收尾（可核销押金，未结部分需说明减免原因）。";
 
-  async function handleDischarge(encounter: Encounter) {
-    if (!window.confirm(`确认办理住院号 ${encounter.encounter_no} 的离院吗？`)) return;
-    setDischargingId(encounter.id);
-    setPageError("");
+  function openDischarge(admission: AdmissionRow) {
+    setDischargeAdmission(admission);
+    // 默认「现在」（业务时区，Asia/Shanghai），与入住日期同一套时区口径；
+    // 允许操作者改写为实际离院时刻，以支持补录历史离院与按实际离院日结算。
+    setDischargeDate(nowLocalInput());
+    setDischargeDiagnosis("");
+    setDischargeError("");
+    setDischargeSubmitting(false);
+  }
+
+  async function handleDischarge() {
+    if (!dischargeAdmission) return;
+    const dischargeDateValue = dischargeDate.trim();
+    if (!dischargeDateValue) {
+      setDischargeError("离院时间不能为空");
+      return;
+    }
+    setDischargeSubmitting(true);
+    setDischargeError("");
     setNotice("");
     try {
-      await dischargeEncounter(encounter.id, new Date().toISOString());
+      await dischargeEncounter(dischargeAdmission.id, {
+        discharge_date: toOffsetDateTime(dischargeDateValue),
+        ...(dischargeDiagnosis.trim() ? { discharge_diagnosis: dischargeDiagnosis.trim() } : {}),
+      });
+      setDischargeAdmission(null);
+      setDischargeDate("");
+      setDischargeDiagnosis("");
       await load();
       setNotice(`已办理离院。该长者的账单尚未关账，${BILLING_SETTLEMENT_HINT}`);
     } catch (error) {
-      setPageError(errorMessage(error, "无法办理离院"));
+      // 409/网络/校验失败：保留表单输入，错误独立展示（不得用错误面板替换输入表单）
+      setDischargeError(errorMessage(error, "无法办理离院"));
     } finally {
-      setDischargingId(null);
+      setDischargeSubmitting(false);
     }
+  }
+
+  function closeDischarge() {
+    if (dischargeSubmitting) return;
+    setDischargeAdmission(null);
+    setDischargeDate("");
+    setDischargeDiagnosis("");
+    setDischargeError("");
   }
 
   function openDeath(admission: AdmissionRow) {
@@ -706,16 +742,14 @@ export default function AdmissionsPage() {
           <Button
             variant="link"
             size="sm"
-            disabled={dischargingId === row.id}
-            onClick={() => void handleDischarge(row)}
+            onClick={() => openDischarge(row)}
           >
-            {dischargingId === row.id ? "处理中" : "办理离院"}
+            办理离院
           </Button>
           <Button
             variant="link"
             size="sm"
             className="text-danger!"
-            disabled={dischargingId === row.id}
             onClick={() => openDeath(row)}
           >
             办理去世
@@ -1002,6 +1036,65 @@ export default function AdmissionsPage() {
             </div>
           </>
         )}
+      </Modal>
+
+      {/* 办理离院弹窗 */}
+      <Modal
+        open={dischargeAdmission !== null}
+        onClose={closeDischarge}
+        title={dischargeAdmission ? `办理离院 · ${dischargeAdmission.patientName}` : "办理离院"}
+      >
+        <div className="space-y-4">
+          <p className="rounded-lg border border-warning/30 bg-warning-bg px-4 py-3 text-sm text-warning">
+            办理离院将结束该入住：状态置为「已离院」，终止全部医嘱并关闭照护周期；办理后可在「已离院档案」生成交接摘要。此操作不可撤销，请确认后再提交。
+          </p>
+          <p className="rounded-lg border border-info/30 bg-info-bg px-4 py-3 text-sm text-info">
+            离院不会自动关账：该长者的账单保留原状，请到「养老收费 → 结算关账」生成区间最终账单、核销押金并冻结账单；押金退还是独立步骤。
+          </p>
+          {dischargeError && (
+            <div id="discharge-error" role="alert" className="rounded-lg border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">
+              {dischargeError}
+            </div>
+          )}
+          <form
+            aria-label="办理离院"
+            className="space-y-4"
+            noValidate
+            onSubmit={(event) => {
+              event.preventDefault();
+              void handleDischarge();
+            }}
+          >
+            <Input
+              id="discharge-date"
+              label="离院时间（必填）"
+              type="datetime-local"
+              value={dischargeDate}
+              onChange={(event) => setDischargeDate(event.target.value)}
+              required
+              aria-invalid={dischargeError ? true : undefined}
+              aria-describedby={dischargeError ? "discharge-error" : undefined}
+            />
+            <div className="flex flex-col gap-1.5">
+              <label className="text-sm font-medium text-fg-muted" htmlFor="discharge-diagnosis">离院诊断（可选）</label>
+              <textarea
+                id="discharge-diagnosis"
+                value={dischargeDiagnosis}
+                onChange={(event) => setDischargeDiagnosis(event.target.value)}
+                maxLength={500}
+                rows={3}
+                placeholder="如：病情稳定，转居家照护"
+                className="w-full resize-none rounded-md border border-border bg-surface px-3 py-2 text-sm text-fg placeholder:text-fg-dimmed focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                aria-invalid={dischargeError ? true : undefined}
+                aria-describedby={dischargeError ? "discharge-error" : undefined}
+              />
+            </div>
+            <div className="flex justify-end gap-3 pt-1">
+              <Button type="button" variant="ghost" onClick={closeDischarge} disabled={dischargeSubmitting}>取消</Button>
+              <Button type="submit" variant="warning" loading={dischargeSubmitting} disabled={dischargeSubmitting}>确认办理离院</Button>
+            </div>
+          </form>
+        </div>
       </Modal>
 
       {/* 办理去世弹窗 */}

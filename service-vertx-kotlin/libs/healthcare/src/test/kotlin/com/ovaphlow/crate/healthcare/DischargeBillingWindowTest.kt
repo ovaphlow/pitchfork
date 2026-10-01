@@ -580,21 +580,28 @@ class DischargeBillingWindowTest {
                         Future.succeededFuture(rowSet())
                     }
                     sql.contains("update healthcare.encounters") && sql.contains("death_date") -> {
+                        // V524：SET 列序 = death_date, status, deceased_at, updated_at[, death_cause][, deceased_by]，最后才是 WHERE id。
                         val target = encounters.firstOrNull { it["id"] == values.last() }
                         if (target != null) {
                             target["death_date"] = values[0]
                             target["status"] = values[1]
-                            target["updated_at"] = values[2]
+                            target["deceased_at"] = values[2]
+                            target["updated_at"] = values[3]
+                            if (values.size > 5) target["death_cause"] = values[4]
+                            if (values.size > 6) target["deceased_by"] = values[5]
                         }
                         Future.succeededFuture(rowSet())
                     }
                     sql.contains("update healthcare.encounters") -> {
-                        val target = encounters.firstOrNull { it["id"] == values.getOrNull(4) }
+                        // V524：SET 列序 = discharge_date, discharge_diagnosis, status, discharged_at, updated_at[, discharged_by]，最后才是 WHERE id。
+                        val target = encounters.firstOrNull { it["id"] == values.last() }
                         if (target != null) {
                             target["discharge_date"] = values[0]
                             target["discharge_diagnosis"] = values[1]
                             target["status"] = values[2]
-                            target["updated_at"] = values[3]
+                            target["discharged_at"] = values[3]
+                            target["updated_at"] = values[4]
+                            if (values.size > 6) target["discharged_by"] = values[5]
                         }
                         Future.succeededFuture(rowSet())
                     }

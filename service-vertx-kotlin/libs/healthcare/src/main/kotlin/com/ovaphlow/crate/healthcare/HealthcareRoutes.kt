@@ -91,6 +91,11 @@ object HealthcareRoutes {
         // 认证中间件（IDP 会话校验）由 App 编排层注入；未注入时保持原有 401 兜底。
         if (encounterAuthHandler != null) {
             router.post("/encounters").handler(encounterAuthHandler)
+            // V524：离院/去世是终局高危写，路由级显式挂认证中间件（与生产 /crate-api 默认拒绝
+            // 总闸同源，重复校验幂等），使 ctx 里的 userId 可用于操作人留痕。未注入时不挂，
+            // 保持既有嵌入式测试（不注入认证）的原行为。
+            router.patch("/encounters/:id/discharge").handler(encounterAuthHandler)
+            router.patch("/encounters/:id/death").handler(encounterAuthHandler)
         }
         router.post("/encounters").handler { ctx ->
             val userId = userId(ctx) ?: return@handler
@@ -235,8 +240,10 @@ object HealthcareRoutes {
                 .onSuccess { ctx.json(it) }
                 .onFailure { respondFailure(ctx, it) }
         }
+        // V524：离院/去世操作人取认证中间件写入的 userId（生产由 /crate-api 默认拒绝总闸
+        // 保证已登录），不接受请求体伪造；未认证挂载（仅嵌入式测试）下为 null。
         router.patch("/encounters/:id/death").handler { ctx ->
-            service.deathEncounter(requiredId(ctx), body(ctx))
+            service.deathEncounter(requiredId(ctx), body(ctx), ctx.get<String>("userId"))
                 .onSuccess { ctx.json(it) }
                 .onFailure { respondFailure(ctx, it) }
         }
@@ -309,7 +316,7 @@ object HealthcareRoutes {
                 .onFailure { respondFailure(ctx, it) }
         }
         router.patch("/encounters/:id/discharge").handler { ctx ->
-            service.dischargeEncounter(requiredId(ctx), body(ctx))
+            service.dischargeEncounter(requiredId(ctx), body(ctx), ctx.get<String>("userId"))
                 .onSuccess { ctx.json(it) }
                 .onFailure { respondFailure(ctx, it) }
         }

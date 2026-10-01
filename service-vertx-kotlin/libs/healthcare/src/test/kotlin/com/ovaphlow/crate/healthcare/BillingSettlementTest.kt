@@ -110,21 +110,28 @@ class BillingSettlementTest {
                         Future.succeededFuture(rowSet())
                     }
                     sql.contains("update healthcare.encounters") && sql.contains("death_date") -> {
+                        // V524：SET 列序 = death_date, status, deceased_at, updated_at[, death_cause][, deceased_by]，最后才是 WHERE id。
                         val target = encounters.firstOrNull { it["id"] == values.last() }
                         if (target != null) {
                             target["death_date"] = values[0]
                             target["status"] = values[1]
-                            target["updated_at"] = values[2]
+                            target["deceased_at"] = values[2]
+                            target["updated_at"] = values[3]
+                            if (values.size > 5) target["death_cause"] = values[4]
+                            if (values.size > 6) target["deceased_by"] = values[5]
                         }
                         Future.succeededFuture(rowSet())
                     }
                     sql.contains("update healthcare.encounters") -> {
-                        val target = encounters.firstOrNull { it["id"] == values.getOrNull(4) }
+                        // V524：SET 列序 = discharge_date, discharge_diagnosis, status, discharged_at, updated_at[, discharged_by]，最后才是 WHERE id。
+                        val target = encounters.firstOrNull { it["id"] == values.last() }
                         if (target != null) {
                             target["discharge_date"] = values[0]
                             target["discharge_diagnosis"] = values[1]
                             target["status"] = values[2]
-                            target["updated_at"] = values[3]
+                            target["discharged_at"] = values[3]
+                            target["updated_at"] = values[4]
+                            if (values.size > 6) target["discharged_by"] = values[5]
                         }
                         Future.succeededFuture(rowSet())
                     }
@@ -574,6 +581,70 @@ class BillingSettlementTest {
 
         // 离院仍在同一个 withTransaction 连接内完成
         assertEquals(1, stub.transactionCalls)
+    }
+
+    // ========================================================================
+    //  V524 操作人留痕：路由把认证主体写入 discharged_by / deceased_by
+    // ========================================================================
+
+    @Test
+    fun `离院路由把认证主体写入操作人留痕`(vertx: Vertx, ctx: VertxTestContext) {
+        val stub = settlementStub()
+        withServer(vertx, stub, userId = "discharge-operator-1") { port ->
+            httpRequest(
+                vertx,
+                port,
+                HttpMethod.PATCH,
+                "/healthcare/v1/encounters/enc-1/discharge",
+                JsonObject().put("discharge_date", "2026-09-20T10:00:00+08:00"),
+            ).map { (status, body) ->
+                ctx.verify {
+                    assertEquals(200, status, "离院必须 200")
+                    assertEquals("DISCHARGED", body.getString("status"))
+                    assertEquals("discharge-operator-1", body.getString("discharged_by"), "响应必须回显操作人")
+                    assertNotNull(body.getString("discharged_at"), "确认时刻必须由服务端写入")
+                    assertEquals("discharge-operator-1", stub.encounters.single()["discharged_by"])
+                    val (sql, values) = stub.tuples.first {
+                        it.first.contains("update healthcare.encounters") && it.first.contains("discharge_date")
+                    }
+                    assertTrue(sql.contains("discharged_by"), "UPDATE 必须含 discharged_by: $sql")
+                    assertTrue(sql.contains("discharged_at"), "UPDATE 必须含 discharged_at: $sql")
+                    assertEquals("discharge-operator-1", values[5], "认证主体必须绑定进 discharged_by")
+                }
+            }
+        }.onComplete { ar ->
+            if (ar.succeeded()) ctx.completeNow() else ctx.failNow(ar.cause())
+        }
+    }
+
+    @Test
+    fun `去世路由把认证主体写入操作人留痕`(vertx: Vertx, ctx: VertxTestContext) {
+        val stub = settlementStub()
+        withServer(vertx, stub, userId = "death-operator-1") { port ->
+            httpRequest(
+                vertx,
+                port,
+                HttpMethod.PATCH,
+                "/healthcare/v1/encounters/enc-1/death",
+                JsonObject().put("death_date", "2026-09-20T14:00:00+08:00").put("death_cause", "心脏躯停"),
+            ).map { (status, body) ->
+                ctx.verify {
+                    assertEquals(200, status, "去世必须 200")
+                    assertEquals("DECEASED", body.getString("status"))
+                    assertEquals("death-operator-1", body.getString("deceased_by"), "响应必须回显操作人")
+                    assertNotNull(body.getString("deceased_at"), "确认时刻必须由服务端写入")
+                    assertEquals("death-operator-1", stub.encounters.single()["deceased_by"])
+                    val (sql, values) = stub.tuples.first {
+                        it.first.contains("update healthcare.encounters") && it.first.contains("death_date")
+                    }
+                    assertTrue(sql.contains("deceased_by"), "UPDATE 必须含 deceased_by: $sql")
+                    assertTrue(sql.contains("deceased_at"), "UPDATE 必须含 deceased_at: $sql")
+                    assertEquals("death-operator-1", values[5], "认证主体必须绑定进 deceased_by")
+                }
+            }
+        }.onComplete { ar ->
+            if (ar.succeeded()) ctx.completeNow() else ctx.failNow(ar.cause())
+        }
     }
 
     @Test

@@ -416,6 +416,9 @@ class HealthcareRoutesElderlyCareDischargeTest {
             ctx.verify {
                 assertEquals(200, status)
                 assertEquals("DISCHARGED", body.getString("status"))
+                // V524：离院操作人来自认证中间件写入的会话 userId，确认时刻由服务端写入
+                assertEquals(sessionUserId, body.getString("discharged_by"), "响应必须回显离院操作人")
+                assertNotNull(body.getString("discharged_at"), "离院确认时刻必须由服务端写入")
             }
             val executionCountAfterDischarge = DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
                 val stmt = conn.createStatement()
@@ -423,13 +426,15 @@ class HealthcareRoutesElderlyCareDischargeTest {
                     .use { rs -> if (rs.next()) Pair(rs.getString(1), rs.getString(2)) else null }
                 val execCount = stmt.executeQuery("SELECT count(*) FROM nursing.nursing_task_executions WHERE id = '${fixtureId("exec-ok")}'")
                     .use { rs -> if (rs.next()) rs.getLong(1) else 0L }
-                val encounterStatus = stmt.executeQuery("SELECT status FROM healthcare.encounters WHERE id = '${fixtureId("enc-ok")}'")
-                    .use { rs -> if (rs.next()) rs.getString(1) else null }
+                val encounterStatus = stmt.executeQuery("SELECT status, discharged_by, discharged_at FROM healthcare.encounters WHERE id = '${fixtureId("enc-ok")}'")
+                    .use { rs -> if (rs.next()) Triple(rs.getString(1), rs.getString(2), rs.getTimestamp(3)) else null }
                 ctx.verify {
                     assertEquals("COMPLETED", periodStatus?.first, "周期必须收束为 COMPLETED")
                     assertEquals("2026-08-10", periodStatus?.second, "结束日期必须等于离院业务日期")
                     assertEquals(1L, execCount, "历史执行必须保留")
-                    assertEquals("DISCHARGED", encounterStatus, "encounter 必须同步收束")
+                    assertEquals("DISCHARGED", encounterStatus?.first, "encounter 必须同步收束")
+                    assertEquals(sessionUserId, encounterStatus?.second, "落库的离院操作人必须是会话 userId")
+                    assertNotNull(encounterStatus?.third, "落库的离院确认时刻不得为空")
                 }
                 stmt.executeQuery("SELECT count(*) FROM nursing.nursing_task_executions WHERE id LIKE '${FIXTURE_PREFIX}%'")
                     .use { rs -> if (rs.next()) rs.getLong(1) else 0L }

@@ -150,6 +150,14 @@ export interface Encounter {
   status: string;
   /** 结算关账冻结标记（养老收费）；未关账为 null */
   settled_at: string | null;
+  /** 离院操作人（认证主体 id）；历史数据与未认证环境为 null */
+  discharged_by: string | null;
+  /** 离院确认时刻（服务端写入，区别于可回填的 discharge_date） */
+  discharged_at: string | null;
+  /** 去世操作人（认证主体 id）；历史数据与未认证环境为 null */
+  deceased_by: string | null;
+  /** 去世确认时刻（服务端写入，区别于可回填的 death_date） */
+  deceased_at: string | null;
   metadata: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
@@ -1048,10 +1056,15 @@ export function updateEncounter(id: string, input: Omit<EncounterInput, "patient
   });
 }
 
-export function dischargeEncounter(id: string, dischargeDate?: string): Promise<Encounter> {
+export interface DischargeInput {
+  discharge_date?: string;
+  discharge_diagnosis?: string;
+}
+
+export function dischargeEncounter(id: string, input: DischargeInput = {}): Promise<Encounter> {
   return request<Encounter>(`/healthcare/v1/encounters/${encodeURIComponent(id)}/discharge`, {
     method: "PATCH",
-    body: JSON.stringify(dischargeDate ? { discharge_date: dischargeDate } : {}),
+    body: JSON.stringify(input),
   });
 }
 
@@ -4106,6 +4119,8 @@ export interface Roster {
   generated_by: string | null;
   generated_at: string | null;
   remark: string | null;
+  /** 列表接口返回的条目数；详情接口返回 items 时不重复统计 */
+  item_count?: number;
   items?: RosterItem[];
   metadata: Record<string, unknown> | null;
   created_at: string;

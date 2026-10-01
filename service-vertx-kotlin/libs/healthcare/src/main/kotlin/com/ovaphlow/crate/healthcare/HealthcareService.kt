@@ -31,6 +31,7 @@ import io.vertx.sqlclient.RowSet
 import io.vertx.sqlclient.SqlClient
 import io.vertx.sqlclient.Tuple
 import org.jooq.Condition
+import org.jooq.Field
 import org.jooq.InsertSetMoreStep
 import org.jooq.JSONB
 import org.jooq.Query
@@ -62,6 +63,30 @@ class HealthcareService(
     )
     private val billService = BillService(pool)
     private val depositOffsetService = DepositOffsetService()
+
+    // ========================================================================
+    //  V524 离院/去世操作人留痕列（未重跑 jOOQ codegen：按列名引用）
+    //  jOOQ 生成代码由 DB 反向生成，无法在无 DB 授权的车道重跑；故新列一律用
+    //  `DSL.field` 按名引用（与 V523 账单红冲列的既有写法一致）。
+    //  两种拼法不能混：
+    //   - SELECT 必须带表名限定（listEncounters 与 patients 联表，裸列名虽不歧义
+    //     但统一限定便于审计）；
+    //   - UPDATE SET 子句必须用裸列名（PostgreSQL 不接受表名前缀）。
+    // ========================================================================
+
+    /** SELECT 用的 encounters 留痕列（带表名限定）。 */
+    private val encounterAuditSelectFields: List<Field<*>> = listOf(
+        DSL.field(DSL.name("encounters", "discharged_by"), String::class.java),
+        DSL.field(DSL.name("encounters", "discharged_at"), OffsetDateTime::class.java),
+        DSL.field(DSL.name("encounters", "deceased_by"), String::class.java),
+        DSL.field(DSL.name("encounters", "deceased_at"), OffsetDateTime::class.java),
+    )
+
+    /** UPDATE SET 子句用的裸列名。 */
+    private val wDischargedBy = DSL.field(DSL.name("discharged_by"), String::class.java)
+    private val wDischargedAt = DSL.field(DSL.name("discharged_at"), OffsetDateTime::class.java)
+    private val wDeceasedBy = DSL.field(DSL.name("deceased_by"), String::class.java)
+    private val wDeceasedAt = DSL.field(DSL.name("deceased_at"), OffsetDateTime::class.java)
     companion object {
         private val patientStatuses = setOf("ACTIVE", "INACTIVE", "DECEASED")
         private val encounterStatuses = setOf("ACTIVE", "DISCHARGED", "TRANSFERRED")
@@ -105,6 +130,10 @@ class HealthcareService(
                 .put("attending_physician", row.getString("attending_physician"))
                 .put("status", row.getString("status"))
                 .put("settled_at", row.getOffsetDateTime("settled_at")?.toString())
+                .put("discharged_by", row.getString("discharged_by"))
+                .put("discharged_at", row.getOffsetDateTime("discharged_at")?.toString())
+                .put("deceased_by", row.getString("deceased_by"))
+                .put("deceased_at", row.getOffsetDateTime("deceased_at")?.toString())
                 .put("metadata", row.getValue("metadata"))
                 .put("created_at", row.getOffsetDateTime("created_at")?.toString())
                 .put("updated_at", row.getOffsetDateTime("updated_at")?.toString())
@@ -190,7 +219,7 @@ class HealthcareService(
             .from(ENCOUNTERS)
             .join(PATIENTS).on(ENCOUNTERS.PATIENT_ID.eq(PATIENTS.ID))
             .where(conditions)
-        val dataQuery = ctx.select(ENCOUNTERS.fields().toList())
+        val dataQuery = ctx.select(ENCOUNTERS.fields().toList() + encounterAuditSelectFields)
             .from(ENCOUNTERS)
             .join(PATIENTS).on(ENCOUNTERS.PATIENT_ID.eq(PATIENTS.ID))
             .where(conditions)
@@ -323,7 +352,7 @@ class HealthcareService(
         }
     }
 
-    fun dischargeEncounter(id: String, body: JsonObject): Future<JsonObject> {
+    fun dischargeEncounter(id: String, body: JsonObject, operator: String? = null): Future<JsonObject> {
         val dischargeDate = body.getString("discharge_date")?.let { offsetDateTime(it, "discharge_date") }
             ?: OffsetDateTime.now()
         val now = OffsetDateTime.now()
@@ -354,19 +383,22 @@ class HealthcareService(
                     // 并冻结全部账单，使 settled_at 在离院时即被置位，养老收费页「结算收束」
                     // 因此永不可达，押金核销与减免门禁形同虚设。
                     // 账单收尾统一由「结算收束」（settleEncounterBilling，显式三步）承担。
-                    val query = ctx.update(ENCOUNTERS)
+                    // V524：离院操作人留痕。operator 取认证中间件写入的 userId，客户端不得提交；
+                    // *_at 用服务端 now，与可回填的业务日期 discharge_date 区分。
+                    var query = ctx.update(ENCOUNTERS)
                         .set(ENCOUNTERS.DISCHARGE_DATE, dischargeDate)
                         .set(ENCOUNTERS.DISCHARGE_DIAGNOSIS, body.getString("discharge_diagnosis"))
                         .set(ENCOUNTERS.STATUS, "DISCHARGED")
+                        .set(wDischargedAt, now)
                         .set(ENCOUNTERS.UPDATED_AT, now)
-                        .where(ENCOUNTERS.ID.eq(id))
-                    execute(connection, query).compose { getEncounter(connection, id) }
+                    if (!operator.isNullOrBlank()) query = query.set(wDischargedBy, operator)
+                    execute(connection, query.where(ENCOUNTERS.ID.eq(id))).compose { getEncounter(connection, id) }
                 }
             }
         }
     }
 
-    fun deathEncounter(id: String, body: JsonObject): Future<JsonObject> {
+    fun deathEncounter(id: String, body: JsonObject, operator: String? = null): Future<JsonObject> {
         val deathDate = try {
             offsetDateTime(requiredText(body, "death_date"), "death_date")
         } catch (error: IllegalArgumentException) {
@@ -405,11 +437,15 @@ class HealthcareService(
                     .compose {
                         // 023 决策 A：去世与离院同构，只标记事实与照护流程收尾，
                         // **不再收束账单**（账单收尾统一由 settleEncounterBilling 承担）。
+                        // V524：去世操作人留痕，口径同离院（*_at 为服务端确认时刻，
+                        // death_date 为可回填的业务日期）。
                         var query = ctx.update(ENCOUNTERS)
                             .set(ENCOUNTERS.DEATH_DATE, deathDate)
                             .set(ENCOUNTERS.STATUS, "DECEASED")
+                            .set(wDeceasedAt, now)
                             .set(ENCOUNTERS.UPDATED_AT, now)
                         if (deathCause != null) query = query.set(ENCOUNTERS.DEATH_CAUSE, deathCause)
+                        if (!operator.isNullOrBlank()) query = query.set(wDeceasedBy, operator)
                         execute(connection, query.where(ENCOUNTERS.ID.eq(id)))
                     }
                     .compose {
@@ -1094,7 +1130,7 @@ class HealthcareService(
     }
 
     private fun lockEncounter(client: SqlClient, id: String): Future<JsonObject> =
-        execute(client, ctx.selectFrom(ENCOUNTERS).where(ENCOUNTERS.ID.eq(id)).forUpdate()).compose { rows ->
+        execute(client, ctx.select(ENCOUNTERS.fields().toList() + encounterAuditSelectFields).from(ENCOUNTERS).where(ENCOUNTERS.ID.eq(id)).forUpdate()).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(encounterJson(it)) }
                 ?: Future.failedFuture(HealthcareNotFoundException("encounter not found: $id"))
         }
@@ -1106,7 +1142,7 @@ class HealthcareService(
         }
 
     private fun getEncounter(client: SqlClient, id: String): Future<JsonObject> =
-        execute(client, ctx.selectFrom(ENCOUNTERS).where(ENCOUNTERS.ID.eq(id))).compose { rows ->
+        execute(client, ctx.select(ENCOUNTERS.fields().toList() + encounterAuditSelectFields).from(ENCOUNTERS).where(ENCOUNTERS.ID.eq(id))).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(encounterJson(it)) }
                 ?: Future.failedFuture(HealthcareNotFoundException("encounter not found: $id"))
         }
