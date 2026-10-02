@@ -2,10 +2,12 @@ import { useCallback, useEffect, useState } from "react";
 import {
   createRole,
   deleteRole,
+  listDeclaredPermissions,
   listRoles,
   updateRole,
   type NexusRole,
   type NexusRoleInput,
+  type PermissionCatalogEntry,
 } from "@pitchfork/shared/aceso";
 import { Badge, Button, Card, Input, Modal, Table, type Column } from "@pitchfork/ui";
 
@@ -13,33 +15,32 @@ interface RoleForm {
   roleCode: string;
   displayName: string;
   description: string;
-  permissionsText: string;
+  permissionCodes: string[];
 }
 
 const roleFormDefaults: RoleForm = {
   roleCode: "",
   displayName: "",
   description: "",
-  permissionsText: "",
+  permissionCodes: [],
 };
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
-function permissionsFromText(text: string): string[] {
-  return Array.from(new Set(
-    text
-      .split(/[,，]/)
-      .map((item) => item.trim())
-      .filter((item) => item.length > 0),
-  ));
+/** 勾选/取消一个权限码，返回新数组。 */
+function toggleCode(codes: string[], code: string): string[] {
+  return codes.includes(code) ? codes.filter((item) => item !== code) : [...codes, code];
 }
 
 export default function RolesPage() {
   const [roles, setRoles] = useState<NexusRole[]>([]);
   const [loading, setLoading] = useState(true);
   const [pageError, setPageError] = useState("");
+  // 产品权限目录（含未接线的码）：角色页只能从这里勾选权限码。
+  // null 表示自省端点拿不到——此时不提供勾选，避免又写出自由文本垃圾。
+  const [permissionCatalog, setPermissionCatalog] = useState<PermissionCatalogEntry[] | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<NexusRole | null>(null);
   const [form, setForm] = useState<RoleForm>(roleFormDefaults);
@@ -65,6 +66,26 @@ export default function RolesPage() {
     void load();
   }, [load]);
 
+  useEffect(() => {
+    void (async () => {
+      try {
+        const declared = await listDeclaredPermissions();
+        setPermissionCatalog(declared.catalog);
+      } catch {
+        setPermissionCatalog(null);
+      }
+    })();
+  }, []);
+
+  const wiredPermissionCodes = permissionCatalog
+    ? new Set(permissionCatalog.filter((entry) => entry.wired).map((entry) => entry.code))
+    : null;
+
+  // 目录外（历史遗留或别的产品）的权限码：原样保留并在弹窗里列出，保存时不静默丢弃。
+  const catalogForeignCodes = permissionCatalog
+    ? form.permissionCodes.filter((code) => !permissionCatalog.some((entry) => entry.code === code))
+    : [];
+
   function openCreate() {
     setEditTarget(null);
     setForm(roleFormDefaults);
@@ -78,7 +99,7 @@ export default function RolesPage() {
       roleCode: role.role_code,
       displayName: role.display_name,
       description: role.description,
-      permissionsText: role.permission_codes.join(", "),
+      permissionCodes: [...role.permission_codes],
     });
     setFormError("");
     setEditorOpen(true);
@@ -95,12 +116,11 @@ export default function RolesPage() {
       setFormError("角色编码仅允许小写字母、数字和点");
       return null;
     }
-    const permissionCodes = permissionsFromText(form.permissionsText);
     return {
       role_code: roleCode,
       display_name: displayName,
       description: form.description.trim(),
-      permission_codes: permissionCodes,
+      permission_codes: form.permissionCodes,
     };
   }
 
@@ -166,14 +186,23 @@ export default function RolesPage() {
       render: (row) =>
         row.permission_codes.length > 0 ? (
           <div className="flex flex-wrap gap-1.5">
-            {row.permission_codes.map((code) => (
-              <span
-                key={code}
-                className="inline-flex items-center rounded border border-border bg-surface-alt px-2 py-0.5 font-mono text-xs text-fg-muted"
-              >
-                {code}
-              </span>
-            ))}
+            {row.permission_codes.map((code) => {
+              const wired = wiredPermissionCodes?.has(code) ?? false;
+              return (
+                <span
+                  key={code}
+                  title={wired ? "已被接口判定" : "当前没有任何接口在判定这个权限码"}
+                  className={
+                    wired
+                      ? "inline-flex items-center rounded border border-border bg-surface-alt px-2 py-0.5 font-mono text-xs text-fg-muted"
+                      : "inline-flex items-center rounded border border-dashed border-border px-2 py-0.5 font-mono text-xs text-fg-dimmed"
+                  }
+                >
+                  {code}
+                  {!wired && <span className="ml-1.5">未接线</span>}
+                </span>
+              );
+            })}
           </div>
         ) : (
           "-"
@@ -192,20 +221,40 @@ export default function RolesPage() {
     },
   ];
 
+  // 已接线但没有任何角色承载的权限码：接线了却没人能通过，必须显式提示，
+  // 否则相关操作会静默变成全员 403。拿不到自省清单时不提示（避免误报）。
+  const permissionCodesWithoutRole = wiredPermissionCodes
+    ? [...wiredPermissionCodes].filter(
+        (code) => !roles.some((role) => role.permission_codes.includes(code)),
+      )
+    : [];
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h2 className="text-lg font-semibold text-fg-emphasis">角色管理</h2>
-          <p className="mt-1 text-sm text-fg-muted">管理共享角色目录与每个角色的权限码集合，供各产品消费</p>
+          <p className="mt-1 text-sm text-fg-muted">
+            管理共享角色目录与每个角色的权限码集合；平台管理员由身份服务单独维护，不在本页
+          </p>
         </div>
         <Button onClick={openCreate}>添加角色</Button>
       </div>
 
       {pageError && <div className="rounded-lg border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">{pageError}</div>}
 
-      <Card title="角色列表" actions={<span className="text-sm text-fg-dimmed">共 {roles.length} 个</span>}>
-        <Table columns={columns} data={roles} loading={loading} emptyMessage="暂无角色" />
+      {permissionCodesWithoutRole.length > 0 && (
+        <div className="rounded-lg border border-warning/30 bg-warning-bg px-4 py-3 text-sm text-warning">
+          已有接口在判定这些权限码，但当前没有任何角色带有它们，相关操作会直接返回「权限不足」：
+          <span className="ml-1 font-mono">{permissionCodesWithoutRole.join("、")}</span>。请创建带这些权限码的角色，再到「用户管理」把它分配给对应账号。
+        </div>
+      )}
+
+      <Card title="产品角色" actions={<span className="text-sm text-fg-dimmed">共 {roles.length} 个</span>}>
+        <p className="mb-4 text-sm text-fg-muted">
+          存放在共享角色目录（Nexus），可在「用户管理」中分配给用户；权限码用于接口准入，标为「未接线」的权限码目前没有任何接口在判定它。
+        </p>
+        <Table columns={columns} data={roles} loading={loading} emptyMessage="暂无产品角色" />
       </Card>
 
       <Modal open={editorOpen} onClose={() => !saving && setEditorOpen(false)} title={editTarget ? "编辑角色" : "添加角色"}>
@@ -236,17 +285,47 @@ export default function RolesPage() {
               placeholder="请输入角色描述"
             />
           </div>
-          <div className="flex flex-col gap-1.5">
-            <label className="text-sm font-medium text-fg-muted" htmlFor="role-permissions">权限码</label>
-            <textarea
-              id="role-permissions"
-              value={form.permissionsText}
-              onChange={(event) => setForm((current) => ({ ...current, permissionsText: event.target.value }))}
-              rows={3}
-              className="resize-none rounded-md border border-border bg-surface px-3 py-2 font-mono text-sm text-fg placeholder:text-fg-dimmed focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-              placeholder="逗号分隔，例如 nursing:execute, nursing:record"
-            />
-            <p className="text-xs text-fg-dimmed">以逗号分隔多个权限码，重复项会自动去重。</p>
+          <div className="space-y-2">
+            <span className="block text-sm font-medium text-fg">权限码</span>
+            {permissionCatalog === null ? (
+              <div className="rounded-lg border border-border bg-surface-alt px-3 py-2 text-sm text-fg-muted">
+                无法读取权限码目录，暂不能编辑权限码；已保存的权限码会原样保留。
+              </div>
+            ) : (
+              <>
+                <div className="max-h-56 space-y-1.5 overflow-y-auto rounded-lg border border-border px-3 py-2">
+                  {permissionCatalog.map((entry) => (
+                    <label key={entry.code} className="flex cursor-pointer items-start gap-2.5 text-sm text-fg">
+                      <input
+                        type="checkbox"
+                        className="mt-0.5 h-4 w-4 rounded border-border bg-surface accent-accent"
+                        checked={form.permissionCodes.includes(entry.code)}
+                        onChange={() =>
+                          setForm((current) => ({
+                            ...current,
+                            permissionCodes: toggleCode(current.permissionCodes, entry.code),
+                          }))
+                        }
+                      />
+                      <span>
+                        <span className="font-mono text-xs">{entry.code}</span>
+                        <span className="ml-2 text-xs text-fg-muted">{entry.description}</span>
+                        {!entry.wired && <span className="ml-1.5 text-xs text-fg-dimmed">未接线</span>}
+                      </span>
+                    </label>
+                  ))}
+                  {catalogForeignCodes.length > 0 && (
+                    <div className="border-t border-border pt-1.5 text-xs text-fg-dimmed">
+                      目录外的既有权限码（保留，不会因为保存被清掉）：
+                      <span className="ml-1 font-mono">{catalogForeignCodes.join("、")}</span>
+                    </div>
+                  )}
+                </div>
+                <p className="text-xs text-fg-dimmed">
+                  只能从产品权限目录里勾选；「未接线」表示目前还没有接口在判定它。格式与合法性由服务端兜底校验。
+                </p>
+              </>
+            )}
           </div>
           <div className="flex justify-end gap-3 pt-2">
             <Button variant="ghost" onClick={() => setEditorOpen(false)} disabled={saving}>取消</Button>

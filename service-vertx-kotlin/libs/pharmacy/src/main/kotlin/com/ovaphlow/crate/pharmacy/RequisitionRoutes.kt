@@ -2,6 +2,7 @@ package com.ovaphlow.crate.pharmacy
 
 import io.vertx.core.Handler
 import io.vertx.core.Vertx
+import io.vertx.core.json.JsonObject
 import io.vertx.ext.web.Router
 import io.vertx.ext.web.RoutingContext
 import io.vertx.ext.web.handler.BodyHandler
@@ -19,6 +20,7 @@ object RequisitionRoutes {
         pool: Pool,
         inventoryPort: InventoryRequisitionTransferPort,
         authHandler: Handler<RoutingContext>,
+        departmentDirectoryPort: DepartmentDirectoryPort? = null,
     ): Router {
         val router = Router.router(vertx)
         val service = RequisitionService(pool, inventoryPort)
@@ -30,13 +32,22 @@ object RequisitionRoutes {
             if (userId == null) {
                 PharmacyRoutes.respond(ctx, 401, "authentication required"); return@handler
             }
-            val key = ctx.request().getHeader("Idempotency-Key")
-            service.create(PharmacyRoutes.body(ctx), key, userId)
-                .onSuccess { result ->
-                    ctx.response().setStatusCode(if (result.replayed) 200 else 201)
-                    ctx.json(result.requisition)
+            val body = PharmacyRoutes.body(ctx)
+            val department = body.getString("department")?.trim().orEmpty()
+            if (departmentDirectoryPort == null || department.isEmpty()) {
+                createRequisition(ctx, service, body, userId)
+                return@handler
+            }
+            departmentDirectoryPort.exists(department, ctx.request().getHeader("Cookie")).onComplete { result ->
+                when {
+                    result.failed() ->
+                        PharmacyRoutes.respond(ctx, 503, "department directory unavailable")
+                    result.result() == true ->
+                        createRequisition(ctx, service, body, userId)
+                    else ->
+                        PharmacyRoutes.respond(ctx, 400, "unknown department: $department")
                 }
-                .onFailure { respondFailure(ctx, it) }
+            }
         }
 
         router.get("/").handler { ctx ->
@@ -96,6 +107,21 @@ object RequisitionRoutes {
     }
 
     private fun userIdOf(ctx: RoutingContext): String? = ctx.get<String>("userId")
+
+    private fun createRequisition(
+        ctx: RoutingContext,
+        service: RequisitionService,
+        body: JsonObject,
+        userId: String,
+    ) {
+        val key = ctx.request().getHeader("Idempotency-Key")
+        service.create(body, key, userId)
+            .onSuccess { result ->
+                ctx.response().setStatusCode(if (result.replayed) 200 else 201)
+                ctx.json(result.requisition)
+            }
+            .onFailure { respondFailure(ctx, it) }
+    }
 
     private fun respondFailure(ctx: RoutingContext, err: Throwable?) {
         when (err) {

@@ -150,6 +150,21 @@ async fn roles_directory_crud_flow() {
     .await;
     assert_eq!(blank_name.status(), StatusCode::BAD_REQUEST);
 
+    for (index, rejected) in ["totally.made.up:code", "中文权限码", "12345"].iter().enumerate() {
+        let response = request_json(
+            &router,
+            "POST",
+            &format!("{API_PREFIX}/roles"),
+            json!({
+                "role_code": format!("junk.role{index}"),
+                "display_name": "垃圾权限码",
+                "permission_codes": [rejected],
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{rejected}");
+    }
+
     let updated = request_json(
         &router,
         "PUT",
