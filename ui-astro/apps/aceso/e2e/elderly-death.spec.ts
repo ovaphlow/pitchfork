@@ -647,6 +647,14 @@ test("去世入住可在「已去世档案」与档案状态筛选中查到", as
   await expect(deceasedRow).toBeVisible();
   await expect(deceasedRow).toContainText("档案回归原因");
 
+  // 去世长者同样需要照护快照归档：已去世档案必须与已离院档案一样提供「查看/生成交接摘要」，
+  // 且弹窗按终态取词（标题为去世版本），未生成时展示受控生成表单。
+  await deceasedRow.getByRole("button", { name: /查看|摘要|交接/ }).click();
+  await expect(page.locator('h3').filter({ hasText: "养老照护去世交接摘要" })).toBeVisible();
+  await expect(page.locator('form[aria-label="生成交接摘要"]')).toBeVisible();
+  await page.getByRole("button", { name: "取消" }).click();
+  await expect(page.locator('form[aria-label="生成交接摘要"]')).not.toBeVisible();
+
   // 已离院档案视图不受影响：只有离院记录，不含去世记录
   await page.getByRole("button", { name: "已离院档案" }).click();
   await expect(admissionsPage.row(`${FIXTURE_PREFIX}ARCHDISC`)).toBeVisible();
@@ -656,7 +664,12 @@ test("去世入住可在「已去世档案」与档案状态筛选中查到", as
   await page.goto("/dashboard/elders");
   await page.waitForLoadState("networkidle");
   await page.getByRole("button", { name: "已去世", exact: true }).click();
-  await expect(
-    page.getByRole("row").filter({ hasText: `${FIXTURE_PREFIX}ARCHDEC-patient` }),
-  ).toBeVisible();
+  const deceasedArchiveRow = page.getByRole("row").filter({ hasText: `${FIXTURE_PREFIX}ARCHDEC-patient` });
+  await expect(deceasedArchiveRow).toBeVisible();
+  // 档案侧串起入住/医嘱/账单：去世长者也要能跳到其入住记录与费用/医嘱
+  await expect(deceasedArchiveRow.getByRole("link", { name: "入住" })).toBeVisible();
+  await expect(deceasedArchiveRow.getByRole("link", { name: "账单" })).toHaveAttribute(
+    "href",
+    /encounter_id=.+/,
+  );
 });

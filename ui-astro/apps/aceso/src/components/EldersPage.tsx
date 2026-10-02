@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Badge, Button, Card, Input, Modal, Table, type Column } from "@pitchfork/ui";
 import {
   createPatient,
-  listActiveElderlyAdmissions,
+  listElderlyAdmissions,
   listPatients,
   updatePatient,
   type ChildHealthProfileInput,
@@ -49,6 +49,29 @@ interface VaccinationRow {
   dose: string;
   date: string;
   facility: string;
+}
+
+/** 入住状态 → 入住管理页视图参数（URL ?view=），与 AdmissionsPage 的 `view` 取值同源 */
+const ENCOUNTER_VIEW: Record<string, string> = {
+  ACTIVE: "active",
+  DISCHARGED: "discharged",
+  DECEASED: "deceased",
+};
+
+/**
+ * 每页长者各自解析一条代表入住：优先活动入住，其次按入住日期取最新的一条
+ * （含已离院/已去世），用于「住院号」列与入住/医嘱/账单跳转；无入住则不返回。
+ */
+function resolveEncountersByPatient(encounters: Encounter[], patientIds: string[]): Record<string, Encounter> {
+  const byPatient: Record<string, Encounter> = {};
+  for (const patientId of patientIds) {
+    const candidates = encounters.filter((encounter) => encounter.patient_id === patientId);
+    if (candidates.length === 0) continue;
+    const active = candidates.find((encounter) => encounter.status === "ACTIVE");
+    const latest = [...candidates].sort((a, b) => (b.admit_date ?? "").localeCompare(a.admit_date ?? ""))[0];
+    byPatient[patientId] = active ?? latest;
+  }
+  return byPatient;
 }
 
 interface ElderForm {
@@ -216,7 +239,7 @@ export default function EldersPage() {
   // 儿保域走儿童专属列表列与表单；医疗/养老保持现状
   const isChild = domain === "儿保";
   const [elders, setElders] = useState<Patient[]>([]);
-  const [activeEncounters, setActiveEncounters] = useState<Record<string, Encounter>>({});
+  const [encountersByPatient, setEncountersByPatient] = useState<Record<string, Encounter>>({});
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [statusFilter, setStatusFilter] = useState<ArchiveStatusFilter>("ACTIVE");
@@ -232,7 +255,7 @@ export default function EldersPage() {
     setLoading(true);
     setPageError("");
     try {
-      const [response, activeResponse] = await Promise.all([
+      const [response, encounterResponse] = await Promise.all([
         listPatients({
           ...(statusFilter ? { status: statusFilter } : {}),
           // 儿保域只看儿童；医疗/养老保持不过滤（既有数据默认「居民」，
@@ -241,10 +264,17 @@ export default function EldersPage() {
           limit: PAGE_SIZE,
           offset: (targetPage - 1) * PAGE_SIZE,
         }),
-        listActiveElderlyAdmissions({ limit: 100 }),
+        // 取全部状态的养老入住：档案页签（有效/已去世/全部）下都要能拿到代表入住，
+        // 否则已去世/已离院长者的「住院号」与入住/医嘱/账单跳转都为空。
+        listElderlyAdmissions({ status: "", limit: 1000 }),
       ]);
       setElders(response.records);
-      setActiveEncounters(Object.fromEntries(activeResponse.records.map((encounter) => [encounter.patient_id, encounter])));
+      setEncountersByPatient(
+        resolveEncountersByPatient(
+          encounterResponse.records,
+          response.records.map((patient) => patient.id),
+        ),
+      );
       setTotal(response.meta.total);
       setPage(targetPage);
     } catch (error) {
@@ -339,7 +369,7 @@ export default function EldersPage() {
   } else {
     columns.push(
       { key: "id_card_no", header: "身份证号", className: "min-w-[190px]", render: (row) => displayValue(row.id_card_no) },
-      { key: "encounter_no", header: "住院号", className: "min-w-[140px]", render: (row) => displayValue(activeEncounters[row.id]?.encounter_no) },
+      { key: "encounter_no", header: "住院号", className: "min-w-[140px]", render: (row) => displayValue(encountersByPatient[row.id]?.encounter_no) },
     );
   }
   columns.push(
@@ -357,8 +387,40 @@ export default function EldersPage() {
     {
       key: "actions",
       header: "操作",
-      className: "w-[90px]",
-      render: (row) => <Button variant="link" size="sm" onClick={() => openEdit(row)}>编辑</Button>,
+      className: "w-[220px]",
+      render: (row) => {
+        const encounter = encountersByPatient[row.id];
+        const view = encounter ? ENCOUNTER_VIEW[encounter.status] : undefined;
+        return (
+          <div className="flex items-center gap-3">
+            <Button variant="link" size="sm" onClick={() => openEdit(row)}>编辑</Button>
+            {encounter && (
+              <>
+                {view && (
+                  <a
+                    href={`/dashboard/admission?view=${view}&patient=${encodeURIComponent(row.id)}`}
+                    className="text-sm text-accent hover:underline underline-offset-4"
+                  >
+                    入住
+                  </a>
+                )}
+                <a
+                  href={`/dashboard/orders?encounter_id=${encounter.id}`}
+                  className="text-sm text-accent hover:underline underline-offset-4"
+                >
+                  医嘱
+                </a>
+                <a
+                  href={`/dashboard/billing?encounter_id=${encounter.id}`}
+                  className="text-sm text-accent hover:underline underline-offset-4"
+                >
+                  账单
+                </a>
+              </>
+            )}
+          </div>
+        );
+      },
     },
   );
 
