@@ -71,6 +71,7 @@ object HealthcareRoutes {
             service.listPatients(
                 name = ctx.request().getParam("name"),
                 status = ctx.request().getParam("status"),
+                personType = ctx.request().getParam("person_type"),
                 limit = limit(ctx),
                 offset = offset(ctx),
             ).onSuccess { ctx.json(it) }

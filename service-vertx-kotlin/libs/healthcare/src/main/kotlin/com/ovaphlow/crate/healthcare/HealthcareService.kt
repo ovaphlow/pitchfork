@@ -32,9 +32,11 @@ import io.vertx.sqlclient.SqlClient
 import io.vertx.sqlclient.Tuple
 import org.jooq.Condition
 import org.jooq.Field
+import org.jooq.InsertOnDuplicateSetMoreStep
 import org.jooq.InsertSetMoreStep
 import org.jooq.JSONB
 import org.jooq.Query
+import org.jooq.Record
 import org.jooq.impl.DSL
 import java.math.BigDecimal
 import java.time.LocalDate
@@ -87,6 +89,56 @@ class HealthcareService(
     private val wDischargedAt = DSL.field(DSL.name("discharged_at"), OffsetDateTime::class.java)
     private val wDeceasedBy = DSL.field(DSL.name("deceased_by"), String::class.java)
     private val wDeceasedAt = DSL.field(DSL.name("deceased_at"), OffsetDateTime::class.java)
+
+    // ========================================================================
+    //  V525 患者域标识与儿保档案（未重跑 jOOQ codegen：按列名/表名引用）
+    //  与 V524 同一约定：SELECT 带表名限定，UPDATE SET 用裸列名；child_health_profiles
+    //  一律用 DSL.table 按名引用，不依赖生成代码。
+    // ========================================================================
+
+    /** patients.person_type（SELECT / INSERT 用带表名限定）。 */
+    private val patientsPersonType = DSL.field(DSL.name("patients", "person_type"), String::class.java)
+
+    /** patients.person_type UPDATE SET 用的裸列名。 */
+    private val wPersonType = DSL.field(DSL.name("person_type"), String::class.java)
+
+    /** 儿保 1:1 子表（按名引用）。 */
+    private val CHILD_PROFILES = DSL.table(DSL.name("healthcare", "child_health_profiles"))
+
+    /** 儿保子表 SELECT 列（带表名限定）。 */
+    private val childProfileSelectFields: List<Field<*>> = listOf(
+        DSL.field(DSL.name("child_health_profiles", "id"), String::class.java),
+        DSL.field(DSL.name("child_health_profiles", "patient_id"), String::class.java),
+        DSL.field(DSL.name("child_health_profiles", "guardian_name"), String::class.java),
+        DSL.field(DSL.name("child_health_profiles", "guardian_relationship"), String::class.java),
+        DSL.field(DSL.name("child_health_profiles", "guardian_phone"), String::class.java),
+        DSL.field(DSL.name("child_health_profiles", "birth_weight_g"), Int::class.javaObjectType),
+        DSL.field(DSL.name("child_health_profiles", "birth_height_mm"), Int::class.javaObjectType),
+        DSL.field(DSL.name("child_health_profiles", "delivery_mode"), String::class.java),
+        DSL.field(DSL.name("child_health_profiles", "feeding_method"), String::class.java),
+        DSL.field(DSL.name("child_health_profiles", "vaccination_summary"), String::class.java),
+        DSL.field(DSL.name("child_health_profiles", "vaccination_records"), JSONB::class.java),
+        DSL.field(DSL.name("child_health_profiles", "remark"), String::class.java),
+    )
+
+    private val childProfileIdField = DSL.field(DSL.name("child_health_profiles", "id"), String::class.java)
+    private val childProfilePatientIdField = DSL.field(DSL.name("child_health_profiles", "patient_id"), String::class.java)
+    private val childProfileCreatedAtField = DSL.field(DSL.name("child_health_profiles", "created_at"), OffsetDateTime::class.java)
+    private val childProfileUpdatedAtField = DSL.field(DSL.name("child_health_profiles", "updated_at"), OffsetDateTime::class.java)
+
+    /** 儿保子表 UPDATE SET 用的裸列名。 */
+    private val wGuardianName = DSL.field(DSL.name("guardian_name"), String::class.java)
+    private val wGuardianRelationship = DSL.field(DSL.name("guardian_relationship"), String::class.java)
+    private val wGuardianPhone = DSL.field(DSL.name("guardian_phone"), String::class.java)
+    private val wBirthWeightG = DSL.field(DSL.name("birth_weight_g"), Int::class.javaObjectType)
+    private val wBirthHeightMm = DSL.field(DSL.name("birth_height_mm"), Int::class.javaObjectType)
+    private val wDeliveryMode = DSL.field(DSL.name("delivery_mode"), String::class.java)
+    private val wFeedingMethod = DSL.field(DSL.name("feeding_method"), String::class.java)
+    private val wVaccinationSummary = DSL.field(DSL.name("vaccination_summary"), String::class.java)
+    private val wVaccinationRecords = DSL.field(DSL.name("vaccination_records"), JSONB::class.java)
+    private val wRemark = DSL.field(DSL.name("remark"), String::class.java)
+    private val wProfileUpdatedAt = DSL.field(DSL.name("updated_at"), OffsetDateTime::class.java)
+
     companion object {
         private val patientStatuses = setOf("ACTIVE", "INACTIVE", "DECEASED")
         private val encounterStatuses = setOf("ACTIVE", "DISCHARGED", "TRANSFERRED")
@@ -95,8 +147,48 @@ class HealthcareService(
         /** 交班快照只收集开放照护周期下的活动养老入住。 */
         private val HANDOVER_PERIOD_OPEN_STATUSES = setOf("ACTIVE", "SUSPENDED")
 
-        private fun patientJson(row: Row): JsonObject =
-            JsonObject()
+        /** 患者域白名单（与前端 DOMAIN_ENTITY.person 对齐）。 */
+        internal val personTypeValues = setOf("居民", "长者", "儿童")
+        internal const val PERSON_TYPE_DEFAULT = "居民"
+        internal const val PERSON_TYPE_CHILD = "儿童"
+
+        /**
+         * 解析请求体中的 person_type（纯函数，不访库）：缺省/空白 → 默认「居民」；非字符串 → 400。
+         */
+        internal fun personTypeFrom(body: JsonObject): String {
+            val raw = body.getValue("person_type") ?: return PERSON_TYPE_DEFAULT
+            if (raw !is String) throw IllegalArgumentException("person_type must be a string")
+            return raw.trim().ifBlank { PERSON_TYPE_DEFAULT }
+        }
+
+        /**
+         * 校验 person_type 白名单与儿保约束（纯函数，不访库）。
+         * @param personType 最终生效的 person_type
+         * @param birthDate 最终生效的 birth_date
+         * @param hasChildProfile 请求体是否携带 child_profile（含显式 null）
+         */
+        internal fun validatePersonType(personType: String, birthDate: String?, hasChildProfile: Boolean) {
+            if (personType !in personTypeValues) {
+                throw IllegalArgumentException("invalid person_type, must be one of: $personTypeValues")
+            }
+            if (personType == PERSON_TYPE_CHILD && birthDate.isNullOrBlank()) {
+                throw IllegalArgumentException("儿童档案必须填写出生日期")
+            }
+            if (hasChildProfile && personType != PERSON_TYPE_CHILD) {
+                throw IllegalArgumentException("child_profile 仅适用于儿童档案")
+            }
+        }
+
+        /** 校验 child_profile 形状：必须是 JSON 对象或显式 null。 */
+        internal fun validateChildProfileShape(value: Any?) {
+            if (value != null && value !is JsonObject) {
+                throw IllegalArgumentException("child_profile must be a JSON object or null")
+            }
+        }
+
+        private fun patientJson(row: Row, childProfile: JsonObject? = null): JsonObject {
+            val personType = row.getString("person_type")
+            return JsonObject()
                 .put("id", row.getString("id"))
                 .put("name", row.getString("name"))
                 .put("gender", row.getString("gender"))
@@ -110,8 +202,27 @@ class HealthcareService(
                 .put("past_history", row.getString("past_history"))
                 .put("metadata", row.getValue("metadata"))
                 .put("status", row.getString("status"))
+                .put("person_type", personType)
+                // 冻结契约（计划 §5）：非儿童档案一律返回 child_profile=null，即使历史上残留了档案行
+                .put("child_profile", if (personType == PERSON_TYPE_CHILD) childProfile else null)
                 .put("created_at", row.getOffsetDateTime("created_at")?.toString())
                 .put("updated_at", row.getOffsetDateTime("updated_at")?.toString())
+        }
+
+        /** 儿保档案 JSON（不含 patient_id；合并时由调用方按 patient_id 建索引）。 */
+        private fun childProfileJson(row: Row): JsonObject =
+            JsonObject()
+                .put("id", row.getString("id"))
+                .put("guardian_name", row.getString("guardian_name"))
+                .put("guardian_relationship", row.getString("guardian_relationship"))
+                .put("guardian_phone", row.getString("guardian_phone"))
+                .put("birth_weight_g", row.getInteger("birth_weight_g"))
+                .put("birth_height_mm", row.getInteger("birth_height_mm"))
+                .put("delivery_mode", row.getString("delivery_mode"))
+                .put("feeding_method", row.getString("feeding_method"))
+                .put("vaccination_summary", row.getString("vaccination_summary"))
+                .put("vaccination_records", row.getValue("vaccination_records"))
+                .put("remark", row.getString("remark"))
 
         private fun encounterJson(row: Row): JsonObject =
             JsonObject()
@@ -142,22 +253,44 @@ class HealthcareService(
     fun createPatient(body: JsonObject): Future<JsonObject> {
         val id = Ulid.generate()
         val now = OffsetDateTime.now()
-        return execute(pool, patientInsert(body, id, now))
-            .map { patientResponse(body, id, now) }
+        val personType = try {
+            validateChildProfileShape(body.getValue("child_profile"))
+            personTypeFrom(body).also {
+                validatePersonType(it, body.getString("birth_date"), body.containsKey("child_profile"))
+            }
+        } catch (error: IllegalArgumentException) {
+            return Future.failedFuture(error)
+        }
+        // 患者行与儿保档案必须同事务落库；响应统一走 getPatient，保证含 person_type 与 child_profile。
+        return pool.withTransaction<JsonObject> { connection ->
+            execute(connection, patientInsert(body, id, now, personType))
+                .compose {
+                    val profile = body.getValue("child_profile")
+                    if (personType == PERSON_TYPE_CHILD && profile is JsonObject) {
+                        execute(connection, childProfileInsert(profile, id, now)).map { Unit }
+                    } else {
+                        Future.succeededFuture(Unit)
+                    }
+                }
+                .compose { getPatient(connection, id) }
+        }
     }
 
     fun listPatients(
         name: String?,
         status: String?,
+        personType: String?,
         limit: Int,
         offset: Int,
     ): Future<JsonObject> {
         val conditions = mutableListOf<Condition>()
         name?.takeIf(String::isNotBlank)?.let { conditions += PATIENTS.NAME.containsIgnoreCase(it) }
         status?.takeIf(String::isNotBlank)?.let { conditions += PATIENTS.STATUS.eq(it) }
+        personType?.takeIf(String::isNotBlank)?.let { conditions += patientsPersonType.eq(it) }
 
         val countQuery = ctx.select(DSL.count().`as`("total")).from(PATIENTS).where(conditions)
-        val dataQuery = ctx.selectFrom(PATIENTS)
+        val dataQuery = ctx.select(PATIENTS.fields().toList() + patientsPersonType)
+            .from(PATIENTS)
             .where(conditions)
             .orderBy(PATIENTS.CREATED_AT.desc())
             .limit(limit)
@@ -165,10 +298,14 @@ class HealthcareService(
 
         return execute(pool, countQuery).compose { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(pool, dataQuery).map { rows ->
-                JsonObject()
-                    .put("records", JsonArray(rows.map(::patientJson)))
-                    .put("meta", JsonObject().put("total", total))
+            execute(pool, dataQuery).compose { rows ->
+                val records = rows.iterator().asSequence().toList()
+                val patientIds = records.mapNotNull { it.getString("id") }
+                childProfilesByPatientIds(pool, patientIds).map { profiles ->
+                    JsonObject()
+                        .put("records", JsonArray(records.map { patientJson(it, profiles[it.getString("id")]) }))
+                        .put("meta", JsonObject().put("total", total))
+                }
             }
         }
     }
@@ -176,10 +313,33 @@ class HealthcareService(
     fun getPatient(id: String): Future<JsonObject> = getPatient(pool, id)
 
     fun updatePatient(id: String, body: JsonObject): Future<JsonObject> {
-        validatePatientUpdate(body)
-        return getPatient(id).compose {
-            execute(pool, patientUpdate(body, id, OffsetDateTime.now()))
-                .compose { getPatient(id) }
+        try {
+            validatePatientUpdate(body)
+        } catch (error: IllegalArgumentException) {
+            return Future.failedFuture(error)
+        }
+        return getPatient(id).compose { existing ->
+            val finalPersonType = if (body.containsKey("person_type")) {
+                personTypeFrom(body)
+            } else {
+                existing.getString("person_type") ?: PERSON_TYPE_DEFAULT
+            }
+            val finalBirthDate = if (body.containsKey("birth_date")) {
+                body.getString("birth_date")
+            } else {
+                existing.getString("birth_date")
+            }
+            try {
+                validatePersonType(finalPersonType, finalBirthDate, body.containsKey("child_profile"))
+            } catch (error: IllegalArgumentException) {
+                return@compose Future.failedFuture<JsonObject>(error)
+            }
+            val now = OffsetDateTime.now()
+            pool.withTransaction<JsonObject> { connection ->
+                execute(connection, patientUpdate(body, id, now))
+                    .compose { applyChildProfileChange(connection, body, id, now) }
+                    .compose { getPatient(connection, id) }
+            }
         }
     }
 
@@ -1136,10 +1296,24 @@ class HealthcareService(
         }
 
     private fun getPatient(client: SqlClient, id: String): Future<JsonObject> =
-        execute(client, ctx.selectFrom(PATIENTS).where(PATIENTS.ID.eq(id))).compose { rows ->
-            rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(patientJson(it)) }
-                ?: Future.failedFuture(HealthcareNotFoundException("patient not found: $id"))
+        execute(client, ctx.select(PATIENTS.fields().toList() + patientsPersonType).from(PATIENTS).where(PATIENTS.ID.eq(id))).compose { rows ->
+            rows.iterator().asSequence().firstOrNull()?.let { row ->
+                childProfilesByPatientIds(client, listOf(id)).map { profiles -> patientJson(row, profiles[id]) }
+            } ?: Future.failedFuture(HealthcareNotFoundException("patient not found: $id"))
         }
+
+    /** 按患者 ID 集合一次性查儿保档案，返回 patient_id → child_profile JSON 映射（无档案时为空 map）。 */
+    private fun childProfilesByPatientIds(client: SqlClient, patientIds: List<String>): Future<Map<String, JsonObject>> {
+        if (patientIds.isEmpty()) return Future.succeededFuture(emptyMap())
+        val query = ctx.select(childProfileSelectFields)
+            .from(CHILD_PROFILES)
+            .where(childProfilePatientIdField.`in`(patientIds))
+        return execute(client, query).map { rows ->
+            rows.iterator().asSequence().associate { row ->
+                requireNotNull(row.getString("patient_id")) to childProfileJson(row)
+            }
+        }
+    }
 
     private fun getEncounter(client: SqlClient, id: String): Future<JsonObject> =
         execute(client, ctx.select(ENCOUNTERS.fields().toList() + encounterAuditSelectFields).from(ENCOUNTERS).where(ENCOUNTERS.ID.eq(id))).compose { rows ->
@@ -1361,6 +1535,7 @@ class HealthcareService(
         body: JsonObject,
         id: String,
         now: OffsetDateTime,
+        personType: String = PERSON_TYPE_DEFAULT,
     ): InsertSetMoreStep<PatientsRecord> {
         val name = requiredText(body, "name")
         var query = ctx.insertInto(PATIENTS)
@@ -1368,6 +1543,7 @@ class HealthcareService(
             .set(PATIENTS.NAME, name)
             .set(PATIENTS.GENDER, body.getString("gender", ""))
             .set(PATIENTS.STATUS, "ACTIVE")
+            .set(patientsPersonType, personType)
             .set(PATIENTS.CREATED_AT, now)
             .set(PATIENTS.UPDATED_AT, now)
         body.getString("birth_date")?.let { query = query.set(PATIENTS.BIRTH_DATE, localDate(it, "birth_date")) }
@@ -1396,7 +1572,81 @@ class HealthcareService(
         if (body.containsKey("past_history")) query = query.set(PATIENTS.PAST_HISTORY, body.getString("past_history"))
         if (body.containsKey("metadata")) query = query.set(PATIENTS.METADATA, JSONB.valueOf(requireNotNull(jsonObject(body, "metadata", true)).encode()))
         if (body.containsKey("status")) query = query.set(PATIENTS.STATUS, validStatus(body.getString("status"), patientStatuses, "patient status"))
+        if (body.containsKey("person_type")) query = query.set(wPersonType, personTypeFrom(body))
         return query.where(PATIENTS.ID.eq(id))
+    }
+
+    /** 儿保档案 INSERT（字段缺省时依赖列默认；vaccination_records 缺省 []）。 */
+    private fun childProfileInsert(profile: JsonObject, patientId: String, now: OffsetDateTime): InsertSetMoreStep<Record> {
+        var query = ctx.insertInto(CHILD_PROFILES)
+            .set(childProfileIdField, Ulid.generate())
+            .set(childProfilePatientIdField, patientId)
+            .set(childProfileCreatedAtField, now)
+            .set(childProfileUpdatedAtField, now)
+        query = applyChildProfileInsertFields(query, profile)
+        return query
+    }
+
+    private fun applyChildProfileInsertFields(query: InsertSetMoreStep<Record>, profile: JsonObject): InsertSetMoreStep<Record> {
+        var q = query
+        if (profile.containsKey("guardian_name")) q = q.set(wGuardianName, profile.getString("guardian_name"))
+        if (profile.containsKey("guardian_relationship")) q = q.set(wGuardianRelationship, profile.getString("guardian_relationship"))
+        if (profile.containsKey("guardian_phone")) q = q.set(wGuardianPhone, profile.getString("guardian_phone"))
+        if (profile.containsKey("birth_weight_g")) q = q.set(wBirthWeightG, childProfileInteger(profile, "birth_weight_g"))
+        if (profile.containsKey("birth_height_mm")) q = q.set(wBirthHeightMm, childProfileInteger(profile, "birth_height_mm"))
+        if (profile.containsKey("delivery_mode")) q = q.set(wDeliveryMode, profile.getString("delivery_mode"))
+        if (profile.containsKey("feeding_method")) q = q.set(wFeedingMethod, profile.getString("feeding_method"))
+        if (profile.containsKey("vaccination_summary")) q = q.set(wVaccinationSummary, profile.getString("vaccination_summary"))
+        q = q.set(wVaccinationRecords, if (profile.containsKey("vaccination_records")) childProfileVaccinationRecords(profile) else JSONB.valueOf("[]"))
+        if (profile.containsKey("remark")) q = q.set(wRemark, profile.getString("remark"))
+        return q
+    }
+
+    /** 儿保档案 upsert：按 patient_id 冲突则更新；对象内字段缺省保持原值，显式 null 清空该列。 */
+    private fun childProfileUpsert(profile: JsonObject, patientId: String, now: OffsetDateTime): Query {
+        val insert = childProfileInsert(profile, patientId, now)
+        var query: InsertOnDuplicateSetMoreStep<Record> =
+            insert.onConflict(childProfilePatientIdField).doUpdate().set(wProfileUpdatedAt, now)
+        if (profile.containsKey("guardian_name")) query = query.set(wGuardianName, profile.getString("guardian_name"))
+        if (profile.containsKey("guardian_relationship")) query = query.set(wGuardianRelationship, profile.getString("guardian_relationship"))
+        if (profile.containsKey("guardian_phone")) query = query.set(wGuardianPhone, profile.getString("guardian_phone"))
+        if (profile.containsKey("birth_weight_g")) query = query.set(wBirthWeightG, childProfileInteger(profile, "birth_weight_g"))
+        if (profile.containsKey("birth_height_mm")) query = query.set(wBirthHeightMm, childProfileInteger(profile, "birth_height_mm"))
+        if (profile.containsKey("delivery_mode")) query = query.set(wDeliveryMode, profile.getString("delivery_mode"))
+        if (profile.containsKey("feeding_method")) query = query.set(wFeedingMethod, profile.getString("feeding_method"))
+        if (profile.containsKey("vaccination_summary")) query = query.set(wVaccinationSummary, profile.getString("vaccination_summary"))
+        if (profile.containsKey("vaccination_records")) query = query.set(wVaccinationRecords, childProfileVaccinationRecords(profile))
+        if (profile.containsKey("remark")) query = query.set(wRemark, profile.getString("remark"))
+        return query
+    }
+
+    /** child_profile 语义：JSON 对象 → upsert；JSON null → 删除该患者档案；缺省键不动。 */
+    private fun applyChildProfileChange(client: SqlClient, body: JsonObject, patientId: String, now: OffsetDateTime): Future<Unit> {
+        if (!body.containsKey("child_profile")) return Future.succeededFuture(Unit)
+        return when (val value = body.getValue("child_profile")) {
+            null -> execute(client, ctx.deleteFrom(CHILD_PROFILES).where(childProfilePatientIdField.eq(patientId))).map { Unit }
+            is JsonObject -> execute(client, childProfileUpsert(value, patientId, now)).map { Unit }
+            else -> Future.failedFuture<Unit>(IllegalArgumentException("child_profile must be a JSON object or null"))
+        }
+    }
+
+    private fun childProfileInteger(profile: JsonObject, key: String): Int? {
+        val value = profile.getValue(key)
+        return when (value) {
+            null -> null
+            is Number -> value.toInt()
+            else -> throw IllegalArgumentException("child_profile.$key must be an integer or null")
+        }
+    }
+
+    private fun childProfileVaccinationRecords(profile: JsonObject): JSONB? {
+        val value = profile.getValue("vaccination_records")
+        return when (value) {
+            null -> null
+            is JsonArray -> JSONB.valueOf(value.encode())
+            is JsonObject -> JSONB.valueOf(value.encode())
+            else -> throw IllegalArgumentException("child_profile.vaccination_records must be a JSON array or null")
+        }
     }
 
     private fun encounterInsert(
@@ -1454,6 +1704,8 @@ class HealthcareService(
             .put("past_history", body.getString("past_history"))
             .put("metadata", body.getJsonObject("metadata"))
             .put("status", "ACTIVE")
+            .put("person_type", body.getString("person_type")?.takeIf(String::isNotBlank) ?: PERSON_TYPE_DEFAULT)
+            .put("child_profile", body.getJsonObject("child_profile"))
             .put("created_at", now.toString())
             .put("updated_at", now.toString())
 
@@ -1488,6 +1740,9 @@ class HealthcareService(
         if (body.containsKey("emergency_contact")) jsonObject(body, "emergency_contact", true)
         if (body.containsKey("allergies")) jsonArray(body, "allergies", true)
         if (body.containsKey("metadata")) jsonObject(body, "metadata", true)
+        // person_type 形状（白名单与儿童约束在取到现有行后由 validatePersonType 统一校验）
+        if (body.containsKey("person_type")) personTypeFrom(body)
+        if (body.containsKey("child_profile")) validateChildProfileShape(body.getValue("child_profile"))
     }
 
     private fun validateEncounterUpdate(body: JsonObject) {

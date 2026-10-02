@@ -123,6 +123,42 @@ export interface WarehouseOption {
   name: string;
 }
 
+export interface VaccinationRecord {
+  vaccine?: string;
+  dose?: string;
+  date?: string;
+  facility?: string;
+}
+
+/** 儿保专属档案（person_type=儿童 时 1:1 内嵌）；非儿童为 null */
+export interface ChildHealthProfile {
+  id?: string;
+  guardian_name?: string | null;
+  guardian_relationship?: string | null;
+  guardian_phone?: string | null;
+  birth_weight_g?: number | null;
+  birth_height_mm?: number | null;
+  delivery_mode?: string | null;
+  feeding_method?: string | null;
+  vaccination_summary?: string | null;
+  vaccination_records?: VaccinationRecord[] | null;
+  remark?: string | null;
+}
+
+/** 建档/更新儿保档案的入参（与 ChildHealthProfile 同字段，均可选、无 id） */
+export interface ChildHealthProfileInput {
+  guardian_name?: string | null;
+  guardian_relationship?: string | null;
+  guardian_phone?: string | null;
+  birth_weight_g?: number | null;
+  birth_height_mm?: number | null;
+  delivery_mode?: string | null;
+  feeding_method?: string | null;
+  vaccination_summary?: string | null;
+  vaccination_records?: VaccinationRecord[] | null;
+  remark?: string | null;
+}
+
 export interface Patient {
   id: string;
   name: string;
@@ -137,6 +173,10 @@ export interface Patient {
   past_history: string | null;
   metadata: Record<string, unknown> | null;
   status: string;
+  /** 患者域：居民 / 长者 / 儿童（缺省 居民） */
+  person_type: string;
+  /** 儿保档案；非儿童或无档案为 null */
+  child_profile: ChildHealthProfile | null;
   created_at: string;
   updated_at: string;
 }
@@ -158,6 +198,10 @@ export interface PatientInput {
   allergies?: string[] | null;
   past_history?: string | null;
   metadata?: Record<string, unknown>;
+  /** 患者域：居民 / 长者 / 儿童（缺省 居民） */
+  person_type?: string;
+  /** 儿保档案；仅 person_type=儿童 时可持久化，null 表示清空 */
+  child_profile?: ChildHealthProfileInput | null;
 }
 
 export interface Encounter {
@@ -708,12 +752,14 @@ export async function listWarehouseOptions(): Promise<WarehouseOption[]> {
 export function listPatients(params: {
   name?: string;
   status?: string;
+  person_type?: string;
   limit?: number;
   offset?: number;
 } = {}): Promise<PatientList> {
   const query = new URLSearchParams();
   if (params.name?.trim()) query.set("name", params.name.trim());
   if (params.status) query.set("status", params.status);
+  if (params.person_type) query.set("person_type", params.person_type);
   if (params.limit) query.set("limit", String(params.limit));
   if (params.offset) query.set("offset", String(params.offset));
   const suffix = query.toString() ? `?${query.toString()}` : "";
