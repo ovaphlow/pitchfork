@@ -244,7 +244,7 @@ func (handler Handler) dashboard(responseWriter http.ResponseWriter, request *ht
 		writeProblem(responseWriter, request, http.StatusForbidden, "password-change-required", "password change required")
 		return
 	}
-	administrator, err := identity.HasRole(request.Context(), handler.database, session.SubjectID, identity.RoleCodeAdministrator)
+	administrator, err := identity.IsPlatformAdmin(request.Context(), handler.database, session.SubjectID)
 	if err != nil {
 		writeProblem(responseWriter, request, http.StatusInternalServerError, "internal-error", "could not authorize subject")
 		return
@@ -389,6 +389,21 @@ func (handler Handler) createSubject(responseWriter http.ResponseWriter, request
 type updateSubjectRequest struct {
 	Status            string `json:"status"`
 	TemporaryPassword string `json:"temporary_password"`
+	PlatformAdmin     *bool  `json:"platform_admin"`
+}
+
+// parseOptionalBool 解析 HTML 表单里的三态布尔：空串表示"本字段未提交"。
+func parseOptionalBool(raw string) *bool {
+	switch strings.TrimSpace(raw) {
+	case "true", "1", "on":
+		value := true
+		return &value
+	case "false", "0", "off":
+		value := false
+		return &value
+	default:
+		return nil
+	}
 }
 
 func (handler Handler) updateSubject(responseWriter http.ResponseWriter, request *http.Request) {
@@ -421,6 +436,7 @@ func (handler Handler) updateSubject(responseWriter http.ResponseWriter, request
 		input = updateSubjectRequest{
 			Status:            request.PostForm.Get("status"),
 			TemporaryPassword: request.PostForm.Get("temporary_password"),
+			PlatformAdmin:     parseOptionalBool(request.PostForm.Get("platform_admin")),
 		}
 	} else if err := decodeJSON(request, responseWriter, &input); err != nil {
 		writeProblem(responseWriter, request, http.StatusBadRequest, "invalid-request", "invalid JSON request")
@@ -430,13 +446,15 @@ func (handler Handler) updateSubject(responseWriter http.ResponseWriter, request
 	var subject identity.Subject
 	var err error
 	switch {
-	case input.Status == identity.StatusDisabled && input.TemporaryPassword == "":
+	case input.Status == identity.StatusDisabled && input.TemporaryPassword == "" && input.PlatformAdmin == nil:
 		subject, err = identity.DisableSubject(request.Context(), handler.database, session.SubjectID, subjectID)
-	case input.Status == "" && input.TemporaryPassword != "":
+	case input.Status == "" && input.TemporaryPassword != "" && input.PlatformAdmin == nil:
 		err = identity.SetTemporaryPassword(request.Context(), handler.database, session.SubjectID, subjectID, input.TemporaryPassword)
 		if err == nil {
 			subject, err = identity.GetSubject(request.Context(), handler.database, subjectID)
 		}
+	case input.Status == "" && input.TemporaryPassword == "" && input.PlatformAdmin != nil:
+		subject, err = identity.SetPlatformAdmin(request.Context(), handler.database, session.SubjectID, subjectID, *input.PlatformAdmin)
 	default:
 		if htmlRequest {
 			handler.redirectSubjectsWithError(responseWriter, request)
@@ -511,7 +529,7 @@ func (handler Handler) requireAdministrator(responseWriter http.ResponseWriter, 
 		writeProblem(responseWriter, request, http.StatusForbidden, "password-change-required", "password change required")
 		return identity.Session{}, false
 	}
-	administrator, err := identity.HasRole(request.Context(), handler.database, session.SubjectID, identity.RoleCodeAdministrator)
+	administrator, err := identity.IsPlatformAdmin(request.Context(), handler.database, session.SubjectID)
 	if err != nil {
 		writeProblem(responseWriter, request, http.StatusInternalServerError, "internal-error", "could not authorize subject")
 		return identity.Session{}, false
@@ -534,7 +552,7 @@ func (handler Handler) requireAdministratorPage(responseWriter http.ResponseWrit
 		writeProblem(responseWriter, request, http.StatusForbidden, "password-change-required", "password change required")
 		return identity.Session{}, false
 	}
-	administrator, err := identity.HasRole(request.Context(), handler.database, session.SubjectID, identity.RoleCodeAdministrator)
+	administrator, err := identity.IsPlatformAdmin(request.Context(), handler.database, session.SubjectID)
 	if err != nil {
 		writeProblem(responseWriter, request, http.StatusInternalServerError, "internal-error", "could not authorize subject")
 		return identity.Session{}, false

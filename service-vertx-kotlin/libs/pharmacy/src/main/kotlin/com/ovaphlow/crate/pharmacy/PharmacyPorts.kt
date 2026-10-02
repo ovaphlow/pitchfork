@@ -336,3 +336,20 @@ interface InventoryPurchaseReceiptPort {
 
     fun confirmPurchaseReceipt(client: SqlClient, command: PurchaseReceiptCommand): Future<PurchaseReceiptResult>
 }
+
+/**
+ * 040 组织部门目录端口（Pharmacy 侧）。
+ *
+ * 申领的「申领科室」不再接受任意文本，必须是 Nexus `departments.code`。
+ * 申领表在 Aceso PostgreSQL、部门表在 Nexus SQLite，跨服务无法建外键，
+ * 因此由本端口在写入前校验 code 存在。由 Aceso `Main.kt` 注入 Nexus 支撑的实现；
+ * 为 null 时保持旧行为（仅校验非空），便于本库既有测试与离线场景。
+ */
+interface DepartmentDirectoryPort {
+
+    /**
+     * 该 code 是否在组织部门目录里。上游不可用返回 failedFuture，
+     * 由调用方按 503 fail-closed 处理（宁可不建单，也不落一个没有出处的科室）。
+     */
+    fun exists(code: String, cookie: String?): Future<Boolean>
+}

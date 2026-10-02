@@ -308,6 +308,69 @@ func TestJSONLoginReturnsSessionAccessAndCookies(t *testing.T) {
 	assertProblemDetails(t, wrongPasswordResponse, http.StatusUnauthorized, "invalid-credentials", "/crate-api/identity/v1/sessions")
 }
 
+// TestPlatformAdministratorAPI 覆盖平台管理员开关：未认证 401、
+// 且最后一个启用的平台管理员不可撤销（403 last-administrator）。
+func TestPlatformAdministratorAPI(t *testing.T) {
+	databaseConnection, err := database.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "identityd.sqlite"))
+	if err != nil {
+		t.Fatalf("open SQLite database: %v", err)
+	}
+	t.Cleanup(func() {
+		databaseConnection.Close()
+	})
+	if _, err := database.Migrate(context.Background(), databaseConnection, migrations.Files); err != nil {
+		t.Fatalf("migrate database: %v", err)
+	}
+	if _, err := identity.EnsureBootstrap(context.Background(), databaseConnection, identity.BootstrapInput{
+		Identifier: "admin",
+		Password:   "correct horse battery staple",
+	}); err != nil {
+		t.Fatalf("ensure bootstrap: %v", err)
+	}
+
+	mux := httpapi.NewMux(databaseConnection, httpapi.Options{
+		SessionSettings: identity.SessionSettings{TTL: time.Hour, IdleTTL: 30 * time.Minute},
+		LoginThrottle:   testLoginThrottle,
+	})
+
+	adminSession, adminCSRF := loginCookies(t, mux, "admin", "correct horse battery staple")
+
+	subjectsRequest := httptest.NewRequest(http.MethodGet, "/crate-api/identity/v1/subjects", nil)
+	subjectsRequest.AddCookie(adminSession)
+	subjectsResponse := httptest.NewRecorder()
+	mux.ServeHTTP(subjectsResponse, subjectsRequest)
+	if subjectsResponse.Code != http.StatusOK {
+		t.Fatalf("list subjects status = %d, body = %s", subjectsResponse.Code, subjectsResponse.Body.String())
+	}
+	var subjectsPayload struct {
+		Records []identity.Subject `json:"records"`
+	}
+	if err := json.Unmarshal(subjectsResponse.Body.Bytes(), &subjectsPayload); err != nil {
+		t.Fatalf("decode subjects payload: %v", err)
+	}
+	if len(subjectsPayload.Records) != 1 || !subjectsPayload.Records[0].PlatformAdmin {
+		t.Fatalf("bootstrap subject = %#v", subjectsPayload.Records)
+	}
+	adminID := subjectsPayload.Records[0].ID
+
+	unauthenticated := httptest.NewRequest(http.MethodPatch, "/crate-api/identity/v1/subjects/"+adminID, strings.NewReader(`{"platform_admin":false}`))
+	unauthenticated.Header.Set("Content-Type", "application/json")
+	unauthenticatedResponse := httptest.NewRecorder()
+	mux.ServeHTTP(unauthenticatedResponse, unauthenticated)
+	if unauthenticatedResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated platform admin status = %d", unauthenticatedResponse.Code)
+	}
+
+	demote := httptest.NewRequest(http.MethodPatch, "/crate-api/identity/v1/subjects/"+adminID, strings.NewReader(`{"platform_admin":false}`))
+	demote.Header.Set("Content-Type", "application/json")
+	demote.Header.Set("X-CSRF-Token", adminCSRF.Value)
+	demote.AddCookie(adminSession)
+	demote.AddCookie(adminCSRF)
+	demoteResponse := httptest.NewRecorder()
+	mux.ServeHTTP(demoteResponse, demote)
+	assertProblemDetails(t, demoteResponse, http.StatusForbidden, "last-administrator", "/crate-api/identity/v1/subjects/"+adminID)
+}
+
 func TestAdministratorSubjectManagementAPI(t *testing.T) {
 	databaseConnection, err := database.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "identityd.sqlite"))
 	if err != nil {

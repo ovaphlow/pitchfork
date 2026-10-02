@@ -36,7 +36,10 @@ import java.util.function.Function as JavaFunction
  *
  * 使用 mockk 模拟 Pool.withTransaction 与 SqlConnection/RowSet，不访问数据库：
  *   - 输入校验：author 必填/去空白/长度，handover_note 可选/类型/长度，客户端注入字段被忽略
- *   - 资格错误映射：不存在 404、非养老 400、未离院/缺周期/周期非 COMPLETED/日期不一致/患者不一致 409
+ *   - 资格：已离院（取 discharge_date）与已去世（取 death_date）都可归档同一份快照，
+ *           标题分别为离院/去世交接摘要；不存在 404、非养老 400、未离院未去世/缺周期/
+ *           周期非 COMPLETED/日期不一致/患者不一致 409
+ *   - 资格错误映射：不存在 404、非养老 400、未离院未去世/缺周期/周期非 COMPLETED/日期不一致/患者不一致 409
  *   - 幂等：首次 201、相同输入重试 200 同一 ID、不同输入 409
  *   - 快照内容：服务端构建的 content_blocks 为空数组/零计数/最小患者字段，不含敏感身份数据
  *   - 护理记录快照按业务记录时间（metadata.record_time）稳定排序
@@ -107,7 +110,8 @@ class HealthcareDischargeHandoverTest {
                     is JsonObject -> v.encode()
                     else -> v?.toString() ?: ""
                 }
-                if (text.contains("snapshot_version")) insertPayloads.add(text)
+                // 捕获服务端写入的归档标记/快照，以及文书标题（离院/去世交接摘要）
+                if (text.contains("snapshot_version") || text.contains("交接摘要")) insertPayloads.add(text)
             }
             val rs = when {
                 sql.contains("nursing_assessments") || sql.contains("nursing_plans") ||
@@ -585,6 +589,65 @@ class HealthcareDischargeHandoverTest {
         val cause = causeOf(service.createElderlyDischargeHandover("enc-1", JsonObject().put("author", "王护理师")))
         assertInstanceOf(ConflictException::class.java, cause)
         assertTrue(cause.message?.contains("patient_id mismatch") == true, "got: ${cause.message}")
+    }
+
+    // ——— 去世场景：同一份照护快照链在去世终态也可归档 ———
+
+    @Test
+    fun `去世encounter可归档且标题为去世交接摘要`() {
+        val deathDate = OffsetDateTime.parse("2026-08-05T14:00:00+08:00")
+        val (_, payloads, pool) = stubConnection(
+            encounters = rows(encounterRow(mapOf(
+                "status" to "DECEASED",
+                "discharge_date" to null,
+                "death_date" to deathDate,
+                "death_cause" to "多器官衰竭",
+            ))),
+            periods = rows(periodRow(mapOf("end_date" to LocalDate.of(2026, 8, 5)))),
+            existingHandover = rowSet(),
+            patients = rows(patientRow()),
+            nursingRecords = rowSet(),
+            readBack = rows(handoverRow(mapOf(
+                "title" to "养老照护去世交接摘要",
+                "record_date" to LocalDate.of(2026, 8, 5),
+            ))),
+        )
+        val service = HealthcareService(pool)
+
+        val (created, handover) = service.createElderlyDischargeHandover(
+            "enc-1",
+            JsonObject().put("author", "王护理师"),
+        ).toCompletionStage().toCompletableFuture().get()
+
+        assertTrue(created, "去世入住首次归档必须返回 created=true")
+        assertEquals("养老照护去世交接摘要", handover.getString("title"))
+        assertEquals("2026-08-05", handover.getString("record_date"), "record_date 必须等于去世业务日期")
+        assertTrue(payloads.contains("养老照护去世交接摘要"), "写入文书的标题必须是去世交接摘要")
+        // 快照 encounter 必须带去世终态字段，前端只读视图据此渲染「去世时间 / 去世原因」
+        val snapshotPayload = payloads.first { it.contains("\"snapshot\"") && !it.contains("is_elderly_discharge_handover") }
+        assertTrue(snapshotPayload.contains("\"death_date\""), "快照必须带 death_date 字段")
+        assertTrue(snapshotPayload.contains("2026-08-05T14:00"), "快照 death_date 必须为去世业务日期")
+        assertTrue(snapshotPayload.contains("多器官衰竭"), "快照必须带去世原因")
+    }
+
+    @Test
+    fun `去世encounter缺少去世日期返回409`() {
+        val (_, _, pool) = stubConnection(
+            encounters = rows(encounterRow(mapOf(
+                "status" to "DECEASED",
+                "discharge_date" to null,
+                "death_date" to null,
+            ))),
+            periods = rows(periodRow()),
+            existingHandover = rowSet(),
+            patients = rowSet(),
+            nursingRecords = rowSet(),
+            readBack = rowSet(),
+        )
+        val service = HealthcareService(pool)
+        val cause = causeOf(service.createElderlyDischargeHandover("enc-1", JsonObject().put("author", "王护理师")))
+        assertInstanceOf(ConflictException::class.java, cause)
+        assertTrue(cause.message?.contains("no valid death date") == true, "got: ${cause.message}")
     }
 
     @Test

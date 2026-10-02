@@ -153,13 +153,28 @@ async fn delete(
     Path(id): Path<String>,
 ) -> ApiResult<axum::http::StatusCode> {
     let result = sqlx::query("DELETE FROM roles WHERE id = ?")
-        .bind(id)
+        .bind(&id)
         .execute(&state.database)
-        .await?;
-    if result.rows_affected() == 0 {
-        return Err(ApiError::NotFound("role not found".to_owned()));
+        .await;
+    match result {
+        Ok(result) if result.rows_affected() == 0 => {
+            Err(ApiError::NotFound("role not found".to_owned()))
+        }
+        Ok(_) => Ok(axum::http::StatusCode::NO_CONTENT),
+        // 仍被分配的角色不能删：删掉会留下悬空的用户↔角色引用。
+        Err(error) if is_foreign_key_violation(&error) => {
+            let assignments: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM subject_roles WHERE role_id = ?")
+                    .bind(&id)
+                    .fetch_one(&state.database)
+                    .await
+                    .unwrap_or(0);
+            Err(ApiError::Conflict(format!(
+                "role is assigned to {assignments} subject(s); unassign before deleting"
+            )))
+        }
+        Err(error) => Err(ApiError::from(error)),
     }
-    Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 async fn fetch(state: &AppState, id: &str) -> ApiResult<Role> {
@@ -202,11 +217,44 @@ fn normalized_permissions(codes: Option<Vec<String>>) -> ApiResult<Vec<String>> 
     let mut result = Vec::with_capacity(codes.len());
     for code in codes {
         let trimmed = code.trim().to_owned();
-        if !trimmed.is_empty() && seen.insert(trimmed.clone()) {
+        if trimmed.is_empty() {
+            continue;
+        }
+        validate_permission_code(&trimmed)?;
+        if seen.insert(trimmed.clone()) {
             result.push(trimmed);
         }
     }
     Ok(result)
+}
+
+/// 权限码格式：`<域>:<动作>`，两段都只允许小写字母/数字/下划线，且以字母开头。
+///
+/// 只做格式校验、不做白名单：目录是共享的，可能承载别的产品的权限码（037 D4）。
+/// 「有哪些码可用」由各产品的自省目录声明，前端据其收敛输入。
+fn validate_permission_code(code: &str) -> ApiResult<()> {
+    let Some((domain, action)) = code.split_once(':') else {
+        return Err(ApiError::BadRequest(format!(
+            "permission code must look like <domain>:<action>: {code}"
+        )));
+    };
+    if !is_permission_segment(domain) || !is_permission_segment(action) {
+        return Err(ApiError::BadRequest(format!(
+            "permission code segments must start with a lowercase letter and contain only lowercase letters, digits, and underscores: {code}"
+        )));
+    }
+    Ok(())
+}
+
+fn is_permission_segment(segment: &str) -> bool {
+    let mut characters = segment.chars();
+    match characters.next() {
+        Some(first) if first.is_ascii_lowercase() => {}
+        _ => return false,
+    }
+    characters.all(|character| {
+        character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
+    })
 }
 
 fn map_write_error(error: sqlx::Error, conflict_detail: &str) -> ApiError {
@@ -219,6 +267,18 @@ fn map_write_error(error: sqlx::Error, conflict_detail: &str) -> ApiError {
     } else {
         ApiError::from(error)
     }
+}
+
+fn is_foreign_key_violation(error: &sqlx::Error) -> bool {
+    let Some(database_error) = error.as_database_error() else {
+        return false;
+    };
+    // ON DELETE RESTRICT 由 SQLite 内部触发器实现，报的是 CONSTRAINT_TRIGGER(1811)
+    // 而不是 CONSTRAINT_FOREIGNKEY(787)，两种码都要认；再以消息兜底。
+    if database_error.message().contains("FOREIGN KEY") {
+        return true;
+    }
+    matches!(database_error.code().as_deref(), Some("19" | "787" | "1811"))
 }
 
 #[cfg(test)]
@@ -275,5 +335,30 @@ mod tests {
     fn missing_permissions_means_empty_array() {
         let empty = normalized_permissions(None).expect("normalization succeeds");
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn permission_codes_must_look_like_domain_colon_action() {
+        for accepted in ["nursing:execute", "pharmacy:manage", "billing:write", "a1:b2"] {
+            assert!(
+                normalized_permissions(Some(vec![accepted.to_owned()])).is_ok(),
+                "{accepted} must be accepted"
+            );
+        }
+        for rejected in [
+            "totally.made.up:code",
+            "中文权限码",
+            "12345",
+            "Nursing:execute",
+            "nursing:",
+            ":execute",
+            "nursing:execute:extra",
+            "nursing execute",
+        ] {
+            assert!(
+                normalized_permissions(Some(vec![rejected.to_owned()])).is_err(),
+                "{rejected} must be rejected"
+            );
+        }
     }
 }

@@ -252,8 +252,13 @@ internal fun buildApiRouter(
             vertx,
             pool,
             idpSessionAuthHandler(vertx, idpBaseUrl, idpSessionTimeoutMs),
+            requirePermission(
+                SubjectPermissionClient(vertx, nexusBaseUrl, idpSessionTimeoutMs),
+                NURSING_EXECUTE_PERMISSION,
+            ),
         ),
     )
+    apiRouter.route("/access/v1/*").subRouter(AccessRoutes.create(vertx))
     apiRouter.route("/dining/v1/*").subRouter(
         DiningRoutes.create(
             vertx,
@@ -272,6 +277,7 @@ internal fun buildApiRouter(
             inventoryPurchaseReceiptPort(stockService),
             idpSessionAuthHandler(vertx, idpBaseUrl, idpSessionTimeoutMs),
             drugCatalogPort = pharmacyDrugCatalogPort(materialService),
+            departmentDirectoryPort = DepartmentDirectoryClient(vertx, nexusBaseUrl, idpSessionTimeoutMs),
         ),
     )
     return apiRouter

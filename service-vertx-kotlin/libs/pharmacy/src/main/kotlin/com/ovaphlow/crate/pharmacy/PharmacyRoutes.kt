@@ -26,6 +26,11 @@ object PharmacyRoutes {
          * 存量医嘱补绑路径 fail-closed 返回 503；附加在末尾以保持既有调用点可编译。
          */
         drugCatalogPort: DrugCatalogPort? = null,
+        /**
+         * 040 组织部门目录端口：申领的「申领科室」必须是 Nexus departments.code。
+         * 为 null 时保持旧行为（只校验非空）。
+         */
+        departmentDirectoryPort: DepartmentDirectoryPort? = null,
     ): Router {
         val router = Router.router(vertx)
         val mPool = pool
@@ -42,7 +47,13 @@ object PharmacyRoutes {
         )
         router.route("/returns*").subRouter(ReturnRoutes.create(vertx, mPool, inventoryInboundPort))
         router.route("/requisitions*").subRouter(
-            RequisitionRoutes.create(vertx, mPool, inventoryRequisitionTransferPort, authHandler),
+            RequisitionRoutes.create(
+                vertx,
+                mPool,
+                inventoryRequisitionTransferPort,
+                authHandler,
+                departmentDirectoryPort,
+            ),
         )
         val (orderRouter, receiptRouter) = PurchaseOrderRoutes.create(
             vertx,

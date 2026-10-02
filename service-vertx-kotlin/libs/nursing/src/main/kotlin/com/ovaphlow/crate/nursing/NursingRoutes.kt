@@ -17,11 +17,14 @@ object NursingRoutes {
     /**
      * @param authHandler 认证中间件（由 App 编排层注入，Aceso 为 IDP 会话校验，
      *   写入 ctx userId 作为操作人）：保护护理执行的两条写路由——记录给药与打卡状态更新。
+     * @param permissionHandler 权限中间件（由 App 编排层注入，Aceso 为角色权限码校验）：
+     *   紧跟在 [authHandler] 之后挂在同样两条写路由上；未注入时行为与既有完全一致。
      */
     fun create(
         vertx: Vertx,
         pool: Pool,
         authHandler: Handler<RoutingContext>? = null,
+        permissionHandler: Handler<RoutingContext>? = null,
     ): Router {
         val router = Router.router(vertx)
         val mPool = pool
@@ -60,7 +63,9 @@ object NursingRoutes {
         router.route("/assessments/*").subRouter(AssessmentRoutes.create(vertx, mPool))
         router.route("/plans/*").subRouter(PlanRoutes.create(vertx, mPool))
         router.route("/tasks/*").subRouter(TaskRoutes.create(vertx, mPool))
-        router.route("/executions/*").subRouter(TaskExecutionRoutes.create(vertx, mPool, authHandler))
+        router.route("/executions/*").subRouter(
+            TaskExecutionRoutes.create(vertx, mPool, authHandler, permissionHandler),
+        )
         router.route("/visit-schedules/*").subRouter(VisitScheduleRoutes.create(vertx, mPool))
 
         return router

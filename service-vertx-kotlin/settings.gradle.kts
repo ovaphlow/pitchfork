@@ -1,7 +1,6 @@
 rootProject.name = "service-vertx-kotlin"
 
 include(
-    "libs:permissions",
     "libs:database",
     "libs:knowledge",
     "libs:skills",

@@ -21,7 +21,7 @@ func TestCreateListAndDisableSubject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create subject: %v", err)
 	}
-	if created.Status != "启用" || created.Identifier != "zhangsan" || len(created.Roles) != 0 {
+	if created.Status != "启用" || created.Identifier != "zhangsan" || created.PlatformAdmin {
 		t.Fatalf("created subject = %#v", created)
 	}
 
@@ -226,6 +226,44 @@ func TestChangePasswordRejectsIncorrectCurrentPassword(t *testing.T) {
 	}
 	if _, err := identity.CurrentSession(context.Background(), databaseConnection, login.SessionToken, testSessionSettings); err != nil {
 		t.Fatalf("load unchanged-password session: %v", err)
+	}
+}
+
+// TestSetPlatformAdminGuardsLastAdministrator 覆盖平台管理员授予/撤销与「最后管理员」保护：
+// 引导主体默认是平台管理员；新主体默认不是；撤销到只剩一个时必须报 ErrLastAdministrator。
+func TestSetPlatformAdminGuardsLastAdministrator(t *testing.T) {
+	databaseConnection := migratedDatabase(t)
+	administrator := bootstrapAdministrator(t, databaseConnection)
+
+	if !administrator.PlatformAdmin {
+		t.Fatalf("bootstrap administrator must be a platform administrator: %#v", administrator)
+	}
+
+	created, err := identity.CreateSubject(context.Background(), databaseConnection, administrator.ID, identity.CreateSubjectInput{
+		DisplayName: "李四",
+		Identifier:  "LiSi",
+		Password:    "a sufficiently long password",
+	})
+	if err != nil {
+		t.Fatalf("create subject: %v", err)
+	}
+	if created.PlatformAdmin {
+		t.Fatalf("new subject must not be a platform administrator: %#v", created)
+	}
+
+	promoted, err := identity.SetPlatformAdmin(context.Background(), databaseConnection, administrator.ID, created.ID, true)
+	if err != nil {
+		t.Fatalf("promote subject: %v", err)
+	}
+	if !promoted.PlatformAdmin {
+		t.Fatalf("promoted subject = %#v", promoted)
+	}
+
+	if _, err := identity.SetPlatformAdmin(context.Background(), databaseConnection, administrator.ID, administrator.ID, false); err != nil {
+		t.Fatalf("demote one of two administrators: %v", err)
+	}
+	if _, err := identity.SetPlatformAdmin(context.Background(), databaseConnection, created.ID, created.ID, false); !errors.Is(err, identity.ErrLastAdministrator) {
+		t.Fatalf("demoting last administrator error = %v", err)
 	}
 }
 

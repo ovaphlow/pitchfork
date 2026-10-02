@@ -109,12 +109,6 @@ func containsHan(value string) bool {
 	return false
 }
 
-// 角色 code 由 EnsureBootstrap 播种而非迁移创建，因此不参与迁移一致性校验。
-var roleCodeConstants = map[string]bool{
-	"RoleCodeAdministrator": true,
-	"RoleCodeAuditReader":   true,
-}
-
 func TestEnumConstantsMatchMigrations(t *testing.T) {
 	constants := enumConstants(t)
 	schemaValues := schemaEnumValues(t)
@@ -126,16 +120,13 @@ func TestEnumConstantsMatchMigrations(t *testing.T) {
 
 	checked := 0
 	for name, value := range constants {
-		if roleCodeConstants[name] {
-			continue
-		}
 		checked++
 		if _, ok := schemaValues[value]; !ok {
 			t.Errorf("常量 %s = %q 未出现在任何迁移的 CHECK 约束中", name, value)
 		}
 	}
 	if checked == 0 {
-		t.Fatal("没有校验到任何非角色常量")
+		t.Fatal("没有校验到任何枚举常量")
 	}
 
 	missing := make([]string, 0)

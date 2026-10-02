@@ -71,9 +71,5 @@ const (
 	OutcomeFailed    = "失败"
 )
 
-// role_code：identity_roles.role_code。角色由 EnsureBootstrap 播种而非迁移创建，
-// 因此不参与 enums_test.go 的迁移一致性校验。
-const (
-	RoleCodeAdministrator = "identity.admin"
-	RoleCodeAuditReader   = "identity.audit.read"
-)
+// 039：IDP 不再持有控制面角色目录。管理台准入改判 identity_subjects.is_platform_admin
+// （见 db/migrations/000011_platform_admin.sql）；产品角色与部门归 Nexus。

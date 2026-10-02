@@ -179,11 +179,22 @@ function blockedByText(blockedBy: string): string {
   return known[blockedBy] ?? `当前账期不能生成账单（原因码 ${blockedBy}）。`;
 }
 
+/** SSR 安全地读取 URL 上的 encounter_id：从长者档案「账单」跳转时预选该入住 */
+function readEncounterIdFromUrl(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    return new URLSearchParams(window.location.search).get("encounter_id") ?? "";
+  } catch {
+    return "";
+  }
+}
+
 export default function BillingPage() {
   // 入住与费用字典
   const [admissions, setAdmissions] = useState<Admission[]>([]);
   const [admissionsLoading, setAdmissionsLoading] = useState(true);
   const [selectedEncounterId, setSelectedEncounterId] = useState("");
+  const [preferredEncounterId] = useState(readEncounterIdFromUrl);
   const [feeItems, setFeeItems] = useState<FeeItem[]>([]);
   const [feeItemsLoading, setFeeItemsLoading] = useState(true);
 
@@ -273,6 +284,10 @@ export default function BillingPage() {
       setAdmissions(records);
       setSelectedEncounterId((current) => {
         if (records.some((record) => record.id === current)) return current;
+        // 档案页「账单」跳转带 ?encounter_id=：加载后优先选中该入住（含已离院/已去世）
+        if (preferredEncounterId && records.some((record) => record.id === preferredEncounterId)) {
+          return preferredEncounterId;
+        }
         return records.find((record) => record.status === "ACTIVE")?.id || records[0]?.id || "";
       });
     } catch (error) {
@@ -280,7 +295,7 @@ export default function BillingPage() {
     } finally {
       setAdmissionsLoading(false);
     }
-  }, []);
+  }, [preferredEncounterId]);
 
   const loadFeeItems = useCallback(async () => {
     setFeeItemsLoading(true);

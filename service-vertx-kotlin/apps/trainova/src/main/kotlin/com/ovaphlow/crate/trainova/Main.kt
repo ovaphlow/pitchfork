@@ -5,7 +5,6 @@ import com.ovaphlow.crate.database.DatabaseConfig
 import com.ovaphlow.crate.exam.ExamRoutes
 import com.ovaphlow.crate.knowledge.KnowledgeRoutes
 import com.ovaphlow.crate.onsite.OnsiteRoutes
-import com.ovaphlow.crate.permission.PermissionRoutes
 import com.ovaphlow.crate.skills.SkillsRoutes
 import com.ovaphlow.crate.training.TrainingRoutes
 import io.vertx.config.ConfigRetriever
@@ -14,10 +13,6 @@ import io.vertx.config.ConfigStoreOptions
 import io.vertx.core.Vertx
 import io.vertx.core.http.HttpMethod
 import io.vertx.core.json.JsonObject
-import io.vertx.ext.auth.JWTOptions
-import io.vertx.ext.auth.PubSecKeyOptions
-import io.vertx.ext.auth.jwt.JWTAuth
-import io.vertx.ext.auth.jwt.JWTAuthOptions
 import io.vertx.ext.web.Router
 import io.vertx.ext.web.handler.CorsHandler
 import org.slf4j.LoggerFactory
@@ -77,21 +72,7 @@ fun main() {
             .allowedHeader("Authorization"),
     )
 
-    val jwtSecret = requiredEnvironment("PITCHFORK_JWT_SECRET")
-    val jwtAuth =
-        JWTAuth.create(
-            vertx,
-            JWTAuthOptions()
-                .addPubSecKey(
-                    PubSecKeyOptions()
-                        .setAlgorithm("HS256")
-                        .setBuffer(jwtSecret)
-                        .setSymmetric(true),
-                ).setJWTOptions(JWTOptions().setExpiresInSeconds(86400)),
-        )
-
     val apiRouter = Router.router(vertx)
-    apiRouter.route("/permission/v1/*").subRouter(PermissionRoutes.create(vertx, pool, jwtAuth))
     apiRouter.route("/knowledge/v1/*").subRouter(KnowledgeRoutes.create(vertx, pool))
     apiRouter.route("/skills/v1/*").subRouter(SkillsRoutes.create(vertx, pool))
     apiRouter.route("/training/v1/*").subRouter(TrainingRoutes.create(vertx, pool))

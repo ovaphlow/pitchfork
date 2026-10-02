@@ -89,11 +89,14 @@ object TaskExecutionRoutes {
      * @param authHandler 认证中间件（由 App 编排层注入，Aceso 为 IDP 会话校验，
      *   写入 ctx userId 作为操作人）：同时保护记录给药与打卡状态更新两条写路由；
      *   未注入时业务处理器保持原有行为（不强制登录，也不记录执行人）。
+     * @param permissionHandler 权限中间件（由 App 编排层注入）：与 [authHandler] 同路径先后执行，
+     *   未注入时行为不变。判定失败时由该中间件自行结束响应（403/503）。
      */
     fun create(
         vertx: Vertx,
         pool: Pool,
         authHandler: Handler<RoutingContext>? = null,
+        permissionHandler: Handler<RoutingContext>? = null,
     ): Router {
         val router = Router.router(vertx)
         val service = TaskExecutionService(pool)
@@ -387,6 +390,9 @@ object TaskExecutionRoutes {
         if (authHandler != null) {
             router.post("/:id/administration").handler(authHandler)
         }
+        if (permissionHandler != null) {
+            router.post("/:id/administration").handler(permissionHandler)
+        }
         router.post("/:id/administration").handler { ctx ->
             val id = ctx.pathParam("id") ?: return@handler NursingRoutes.respond(ctx, 400, "id required")
             val userId = ctx.get<String>("userId")
@@ -457,6 +463,9 @@ object TaskExecutionRoutes {
         // 随状态流转落库 executor；未注入认证时保持原有行为（不强制登录）。
         if (authHandler != null) {
             router.patch("/:id/status").handler(authHandler)
+        }
+        if (permissionHandler != null) {
+            router.patch("/:id/status").handler(permissionHandler)
         }
         router.patch("/:id/status").handler { ctx ->
             val id = ctx.pathParam("id") ?: return@handler NursingRoutes.respond(ctx, 400, "id required")

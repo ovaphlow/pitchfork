@@ -38,17 +38,27 @@ export interface PageTitleDomainLabel {
  * 于是医疗模式下出现「菜单叫居民档案、页面标题与内容叫长者档案」。
  * 任何按域改写的命名都必须从本表取词，组件里不再硬编码。
  */
+/**
+ * `patients.person_type` 的合法取值，与后端白名单逐字一致。
+ *
+ * 组件不得再用 `person`（展示名词）去猜 API 值：两者当前同值，但一个用于展示、
+ * 一个用于写入请求体，必须各有单一事实来源。
+ */
+export type PersonType = "居民" | "长者" | "儿童";
+
 export interface DomainEntityLabels {
   /** 主体名词：居民 / 长者 / 儿童 */
   person: string;
   /** 档案名：居民档案 / 长者档案 / 儿童健康档案 */
   archive: string;
+  /** 写入 `patients.person_type` 的域值：居民 / 长者 / 儿童 */
+  personType: PersonType;
 }
 
 export const DOMAIN_ENTITY: Record<Domain, DomainEntityLabels> = {
-  医疗: { person: "居民", archive: "居民档案" },
-  养老: { person: "长者", archive: "长者档案" },
-  儿保: { person: "儿童", archive: "儿童健康档案" },
+  医疗: { person: "居民", archive: "居民档案", personType: "居民" },
+  养老: { person: "长者", archive: "长者档案", personType: "长者" },
+  儿保: { person: "儿童", archive: "儿童健康档案", personType: "儿童" },
 };
 
 /**

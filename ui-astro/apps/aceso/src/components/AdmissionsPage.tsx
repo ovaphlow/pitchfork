@@ -38,6 +38,49 @@ interface AdmissionRow extends Encounter {
   patientName: string;
 }
 
+const ARCHIVE_PAGE_SIZE = 20;
+
+/** 照护档案状态筛选：全部 / 已离院 / 已去世（对应服务端 status 过滤）。 */
+type ArchiveScope = "DISCHARGED" | "DECEASED" | "ALL";
+
+const ARCHIVE_SCOPE_LABELS: Record<ArchiveScope, string> = {
+  ALL: "全部",
+  DISCHARGED: "已离院",
+  DECEASED: "已去世",
+};
+
+const ARCHIVE_SCOPE_CARD_TITLES: Record<ArchiveScope, string> = {
+  ALL: "照护档案",
+  DISCHARGED: "已离院档案",
+  DECEASED: "已去世档案",
+};
+
+/** 入住状态 → 归档文书表述（离院 / 去世），用于标题与只读说明。 */
+function archiveEndLabel(status: string | null | undefined): string {
+  return status === "DECEASED" ? "去世" : "离院";
+}
+
+/** SSR 安全地读取入住管理页的 ?view=，用于长者档案「入住」跳转直接落到对应视图。 */
+function readAdmissionView(): "active" | "discharged" | "deceased" | "" {
+  if (typeof window === "undefined") return "";
+  try {
+    const value = new URLSearchParams(window.location.search).get("view");
+    return value === "active" || value === "discharged" || value === "deceased" ? value : "";
+  } catch {
+    return "";
+  }
+}
+
+/** SSR 安全地读取 ?patient=：长者档案「入住」跳转只聚焦该长者，避免在大列表里再找一次。 */
+function readFocusPatientId(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    return new URLSearchParams(window.location.search).get("patient") ?? "";
+  } catch {
+    return "";
+  }
+}
+
 const admissionFormDefaults: AdmissionForm = {
   patientId: "",
   encounterNo: "",
@@ -103,7 +146,7 @@ function HandoverReadOnly({ handover, subjectLabel }: { handover: ElderlyDischar
     <div className="space-y-6">
       {/* 归档说明 */}
       <div className="rounded-lg border border-info/30 bg-info-bg px-4 py-3 text-sm text-info">
-        本摘要为离院时的只读归档快照（版本 {handover.snapshot_version}），归档时间 {formatDateTime(handover.generated_at)}；
+        本摘要为{archiveEndLabel(encounter.status)}时的只读归档快照（版本 {handover.snapshot_version}），归档时间 {formatDateTime(handover.generated_at)}；
         归档后源记录更正不会自动同步此摘要。
       </div>
 
@@ -137,9 +180,17 @@ function HandoverReadOnly({ handover, subjectLabel }: { handover: ElderlyDischar
           <p><span className="text-fg-dimmed">房间床位：</span>{encounter.ward || "-"}</p>
           <p><span className="text-fg-dimmed">责任照护人员：</span>{subjectLabel(encounter.attending_physician)}</p>
           <p><span className="text-fg-dimmed">入住时间：</span>{formatDateTime(encounter.admit_date)}</p>
-          <p><span className="text-fg-dimmed">离院时间：</span>{formatDateTime(encounter.discharge_date)}</p>
+          {encounter.status === "DECEASED" ? (
+            <p><span className="text-fg-dimmed">去世时间：</span>{formatDateTime(encounter.death_date)}</p>
+          ) : (
+            <p><span className="text-fg-dimmed">离院时间：</span>{formatDateTime(encounter.discharge_date)}</p>
+          )}
           <p className="sm:col-span-2"><span className="text-fg-dimmed">入院诊断：</span>{encounter.admitting_diagnosis || "-"}</p>
-          <p className="sm:col-span-2"><span className="text-fg-dimmed">离院诊断：</span>{encounter.discharge_diagnosis || "-"}</p>
+          {encounter.status === "DECEASED" ? (
+            <p className="sm:col-span-2"><span className="text-fg-dimmed">去世原因：</span>{encounter.death_cause || "-"}</p>
+          ) : (
+            <p className="sm:col-span-2"><span className="text-fg-dimmed">离院诊断：</span>{encounter.discharge_diagnosis || "-"}</p>
+          )}
           <p><span className="text-fg-dimmed">周期 ID：</span>{period.id || "-"}</p>
           <p><span className="text-fg-dimmed">服务类型：</span>{period.service_type || "-"}</p>
           <p><span className="text-fg-dimmed">周期起止：</span>{formatDate(period.start_date)} 至 {formatDate(period.end_date)}</p>
@@ -317,14 +368,22 @@ function HandoverReadOnly({ handover, subjectLabel }: { handover: ElderlyDischar
 export default function AdmissionsPage() {
   // 入院管理页在医疗/养老都可见：主体称呼与档案名随域切换（居民 / 长者）
   const { person, archive } = DOMAIN_ENTITY[useDomain()];
-  const [view, setView] = useState<"active" | "discharged" | "deceased">("active");
+  // 长者档案「入住」跳转带 ?view=：命中时直接落到对应视图（active/discharged/deceased）
+  const [initialView] = useState(readAdmissionView);
+  const [view, setView] = useState<"active" | "archive">(() =>
+    initialView === "discharged" || initialView === "deceased" ? "archive" : "active",
+  );
+  const [archiveScope, setArchiveScope] = useState<ArchiveScope>(() =>
+    initialView === "deceased" ? "DECEASED" : "DISCHARGED",
+  );
+  const [archivePage, setArchivePage] = useState(1);
+  /** 长者档案「入住」跳转带来的聚焦长者；为空表示不过滤 */
+  const [focusPatientId, setFocusPatientId] = useState(readFocusPatientId);
   const [patients, setPatients] = useState<Patient[]>([]);
   const [admissions, setAdmissions] = useState<AdmissionRow[]>([]);
-  const [dischargedAdmissions, setDischargedAdmissions] = useState<AdmissionRow[]>([]);
-  const [deceasedAdmissions, setDeceasedAdmissions] = useState<AdmissionRow[]>([]);
+  const [archiveRows, setArchiveRows] = useState<AdmissionRow[]>([]);
   const [loading, setLoading] = useState(true);
-  const [dischargedLoading, setDischargedLoading] = useState(false);
-  const [deceasedLoading, setDeceasedLoading] = useState(false);
+  const [archiveLoading, setArchiveLoading] = useState(false);
   const [pageError, setPageError] = useState("");
   /** 离院/去世成功后的下一步指引（023：离院不再关账，账单需到「养老收费 → 结算关账」收尾） */
   const [notice, setNotice] = useState("");
@@ -402,48 +461,38 @@ export default function AdmissionsPage() {
     }
   }, []);
 
-  const loadDischarged = useCallback(async () => {
-    setDischargedLoading(true);
-    setPageError("");
-    try {
-      const [patientResponse, encounterResponse] = await Promise.all([
-        listPatients({ limit: 1000 }),
-        listElderlyAdmissions({ status: "DISCHARGED", limit: 100 }),
-      ]);
-      const patientById = new Map(patientResponse.records.map((patient) => [patient.id, patient]));
-      setDischargedAdmissions(encounterResponse.records.map((encounter) => ({
-        ...encounter,
-        patientName: patientById.get(encounter.patient_id)?.name ?? encounter.patient_id,
-      })));
-    } catch (error) {
-      setPageError(errorMessage(error, "无法加载已离院档案"));
-    } finally {
-      setDischargedLoading(false);
-    }
-  }, []);
-
   /**
-   * 已去世档案：接口 `GET /elderly-admissions?status=DECEASED` 一直支持该状态，
-   * 但页面此前只有「活动 / 已离院」两个视图，导致去世居民的入住档案在机构侧无处可查
-   * （财务与医嘱侧却仍能选到该入住）。此处补齐只读列表。
+   * 照护档案（已离院 + 已去世）：一次取回两种终态，供「状态筛选」在
+   * 全部 / 已离院 / 已去世 之间即时切换。已离院与已去世都保留
+   * 「查看/生成交接摘要」入口（照护快照归档在去世终态同样成立）。
    */
-  const loadDeceased = useCallback(async () => {
-    setDeceasedLoading(true);
+  const loadArchive = useCallback(async () => {
+    setArchiveLoading(true);
     setPageError("");
     try {
-      const [patientResponse, encounterResponse] = await Promise.all([
+      const [patientResponse, dischargedResponse, deceasedResponse] = await Promise.all([
         listPatients({ limit: 1000 }),
-        listElderlyAdmissions({ status: "DECEASED", limit: 100 }),
+        listElderlyAdmissions({ status: "DISCHARGED", limit: 500 }),
+        listElderlyAdmissions({ status: "DECEASED", limit: 500 }),
       ]);
       const patientById = new Map(patientResponse.records.map((patient) => [patient.id, patient]));
-      setDeceasedAdmissions(encounterResponse.records.map((encounter) => ({
+      const toRow = (encounter: Encounter): AdmissionRow => ({
         ...encounter,
         patientName: patientById.get(encounter.patient_id)?.name ?? encounter.patient_id,
-      })));
+      });
+      const rows = [
+        ...dischargedResponse.records.map(toRow),
+        ...deceasedResponse.records.map(toRow),
+      ].sort((a, b) =>
+        (b.discharge_date ?? b.death_date ?? b.admit_date ?? "").localeCompare(
+          a.discharge_date ?? a.death_date ?? a.admit_date ?? "",
+        ),
+      );
+      setArchiveRows(rows);
     } catch (error) {
-      setPageError(errorMessage(error, "无法加载已去世档案"));
+      setPageError(errorMessage(error, "无法加载照护档案"));
     } finally {
-      setDeceasedLoading(false);
+      setArchiveLoading(false);
     }
   }, []);
 
@@ -452,9 +501,8 @@ export default function AdmissionsPage() {
   }, [load]);
 
   useEffect(() => {
-    if (view === "discharged") void loadDischarged();
-    if (view === "deceased") void loadDeceased();
-  }, [view, loadDischarged, loadDeceased]);
+    if (view === "archive") void loadArchive();
+  }, [view, loadArchive]);
 
   useEffect(() => {
     if (!editorOpen) return;
@@ -701,7 +749,7 @@ export default function AdmissionsPage() {
       });
       setHandoverData(created);
       setHandoverSubmitError("");
-      await loadDischarged();
+      await loadArchive();
     } catch (error) {
       // 409/网络/校验失败：保留表单与用户输入，错误独立展示（6.4.3）
       setHandoverSubmitError(errorMessage(error, "无法生成交接摘要"));
@@ -753,6 +801,21 @@ export default function AdmissionsPage() {
     return [...new Set(scoped.map((bed) => bed.ward.trim()).filter(Boolean))];
   }, [beds, form.department]);
 
+  const focusPatientName = focusPatientId
+    ? patients.find((patient) => patient.id === focusPatientId)?.name
+    : undefined;
+  const inFocus = (patientId: string) => !focusPatientId || patientId === focusPatientId;
+  const visibleActiveAdmissions = admissions.filter((row) => inFocus(row.patient_id));
+  const archiveFilteredRows = archiveRows.filter(
+    (row) => (archiveScope === "ALL" || row.status === archiveScope) && inFocus(row.patient_id),
+  );
+  const archivePageCount = Math.max(1, Math.ceil(archiveFilteredRows.length / ARCHIVE_PAGE_SIZE));
+  const archiveCurrentPage = Math.min(archivePage, archivePageCount);
+  const archivePagedRows = archiveFilteredRows.slice(
+    (archiveCurrentPage - 1) * ARCHIVE_PAGE_SIZE,
+    archiveCurrentPage * ARCHIVE_PAGE_SIZE,
+  );
+
   const activeColumns: Column<AdmissionRow>[] = [
     { key: "patientName", header: person, className: "min-w-[140px]" },
     { key: "encounter_no", header: "住院号", className: "min-w-[140px]" },
@@ -792,30 +855,37 @@ export default function AdmissionsPage() {
     },
   ];
 
-  const dischargedColumns: Column<AdmissionRow>[] = [
+  /**
+   * 照护档案共用列：已离院与已去世合并展示，按入住终态渲染结束日期与原因；
+   * 两种终态都提供「查看/生成交接摘要」入口（去世同样需要照护快照归档）。
+   */
+  const archiveColumns: Column<AdmissionRow>[] = [
     { key: "patientName", header: person, className: "min-w-[140px]" },
     { key: "encounter_no", header: "住院号", className: "min-w-[140px]" },
     { key: "admit_date", header: "入住日期", className: "min-w-[120px]", render: (row) => formatDate(row.admit_date) },
-    { key: "discharge_date", header: "离院日期", className: "min-w-[120px]", render: (row) => formatDate(row.discharge_date) },
+    {
+      key: "archive_end_date",
+      header: "离院/去世日期",
+      className: "min-w-[130px]",
+      render: (row) => formatDate(row.status === "DECEASED" ? row.death_date : row.discharge_date),
+    },
+    {
+      key: "archive_reason",
+      header: "离院诊断/去世原因",
+      className: "min-w-[160px]",
+      render: (row) =>
+        (row.status === "DECEASED" ? row.death_cause?.trim() : row.discharge_diagnosis?.trim()) || "-",
+    },
     {
       key: "actions",
       header: "操作",
-      className: "w-[110px]",
+      className: "w-[150px]",
       render: (row) => (
         <Button variant="link" size="sm" onClick={() => void openHandover(row)}>
           查看/生成交接摘要
         </Button>
       ),
     },
-  ];
-
-  /** 已去世档案为只读归档：去世入住不生成离院交接摘要，故不提供操作入口 */
-  const deceasedColumns: Column<AdmissionRow>[] = [
-    { key: "patientName", header: person, className: "min-w-[140px]" },
-    { key: "encounter_no", header: "住院号", className: "min-w-[140px]" },
-    { key: "admit_date", header: "入住日期", className: "min-w-[120px]", render: (row) => formatDate(row.admit_date) },
-    { key: "death_date", header: "去世日期", className: "min-w-[120px]", render: (row) => formatDate(row.death_date) },
-    { key: "death_cause", header: "去世原因", className: "min-w-[140px]", render: (row) => row.death_cause?.trim() || "-" },
   ];
 
   return (
@@ -846,7 +916,23 @@ export default function AdmissionsPage() {
         </div>
       )}
 
-      {/* 视图切换 */}
+      {focusPatientId && (
+        <div
+          role="status"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-info/30 bg-info-bg px-4 py-3 text-sm text-info"
+        >
+          <span>仅显示{focusPatientName ? `「${focusPatientName}」` : `该${person}`}的入住记录</span>
+          <button
+            type="button"
+            onClick={() => setFocusPatientId("")}
+            className="shrink-0 text-xs font-medium underline-offset-2 hover:underline"
+          >
+            显示全部
+          </button>
+        </div>
+      )}
+
+      {/* 视图切换：活动入住 / 照护档案（已离院、已去世合并为一张带状态筛选与分页的列表） */}
       <div className="flex gap-1 rounded-lg border border-border bg-surface p-1 w-fit">
         <button
           type="button"
@@ -859,18 +945,26 @@ export default function AdmissionsPage() {
         </button>
         <button
           type="button"
-          onClick={() => setView("discharged")}
+          onClick={() => {
+            setArchiveScope("DISCHARGED");
+            setArchivePage(1);
+            setView("archive");
+          }}
           className={`rounded-md px-4 py-1.5 text-sm font-medium transition-colors ${
-            view === "discharged" ? "bg-accent text-white" : "text-fg-muted hover:text-fg"
+            view === "archive" && archiveScope === "DISCHARGED" ? "bg-accent text-white" : "text-fg-muted hover:text-fg"
           }`}
         >
           已离院档案
         </button>
         <button
           type="button"
-          onClick={() => setView("deceased")}
+          onClick={() => {
+            setArchiveScope("DECEASED");
+            setArchivePage(1);
+            setView("archive");
+          }}
           className={`rounded-md px-4 py-1.5 text-sm font-medium transition-colors ${
-            view === "deceased" ? "bg-accent text-white" : "text-fg-muted hover:text-fg"
+            view === "archive" && archiveScope === "DECEASED" ? "bg-accent text-white" : "text-fg-muted hover:text-fg"
           }`}
         >
           已去世档案
@@ -878,30 +972,68 @@ export default function AdmissionsPage() {
       </div>
 
       {view === "active" && (
-        <Card title="当前活动入住" actions={<span className="text-sm text-fg-dimmed">共 {admissions.length} 条</span>}>
-          <Table columns={activeColumns} data={admissions} loading={loading} emptyMessage="暂无活动入住记录" />
+        <Card title="当前活动入住" actions={<span className="text-sm text-fg-dimmed">共 {visibleActiveAdmissions.length} 条</span>}>
+          <Table columns={activeColumns} data={visibleActiveAdmissions} loading={loading} emptyMessage="暂无活动入住记录" />
         </Card>
       )}
 
-      {view === "discharged" && (
-        <Card title="已离院档案" actions={<span className="text-sm text-fg-dimmed">共 {dischargedAdmissions.length} 条</span>}>
+      {view === "archive" && (
+        <Card
+          title={ARCHIVE_SCOPE_CARD_TITLES[archiveScope]}
+          actions={
+            <div className="flex items-center gap-3">
+              {/* 状态筛选：全部 / 已离院 / 已去世，与上方档案视图按钮同源 */}
+              <label className="flex items-center gap-2 text-sm text-fg-muted">
+                状态
+                <select
+                  aria-label="档案状态筛选"
+                  value={archiveScope}
+                  onChange={(event) => {
+                    setArchiveScope(event.target.value as ArchiveScope);
+                    setArchivePage(1);
+                  }}
+                  className="h-8 rounded-md border border-border bg-surface px-2 text-sm text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                >
+                  {(["ALL", "DISCHARGED", "DECEASED"] as ArchiveScope[]).map((scope) => (
+                    <option key={scope} value={scope}>{ARCHIVE_SCOPE_LABELS[scope]}</option>
+                  ))}
+                </select>
+              </label>
+              <span className="text-sm text-fg-dimmed">共 {archiveFilteredRows.length} 条</span>
+            </div>
+          }
+        >
           <Table
-            columns={dischargedColumns}
-            data={dischargedAdmissions}
-            loading={dischargedLoading}
-            emptyMessage="暂无已离院档案"
+            columns={archiveColumns}
+            data={archivePagedRows}
+            loading={archiveLoading}
+            emptyMessage={
+              archiveScope === "DECEASED" ? "暂无已去世档案"
+                : archiveScope === "DISCHARGED" ? "暂无已离院档案"
+                  : "暂无照护档案"
+            }
           />
-        </Card>
-      )}
-
-      {view === "deceased" && (
-        <Card title="已去世档案" actions={<span className="text-sm text-fg-dimmed">共 {deceasedAdmissions.length} 条</span>}>
-          <Table
-            columns={deceasedColumns}
-            data={deceasedAdmissions}
-            loading={deceasedLoading}
-            emptyMessage="暂无已去世档案"
-          />
+          <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
+            <span className="text-sm text-fg-muted">第 {archiveCurrentPage} / {archivePageCount} 页</span>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={archiveCurrentPage <= 1 || archiveLoading}
+                onClick={() => setArchivePage(archiveCurrentPage - 1)}
+              >
+                上一页
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={archiveCurrentPage >= archivePageCount || archiveLoading}
+                onClick={() => setArchivePage(archiveCurrentPage + 1)}
+              >
+                下一页
+              </Button>
+            </div>
+          </div>
         </Card>
       )}
 
@@ -1037,11 +1169,15 @@ export default function AdmissionsPage() {
         </form>
       </Modal>
 
-      {/* 已离院交接摘要弹窗 */}
+      {/* 照护交接摘要弹窗（已离院 / 已去世） */}
       <Modal
         open={handoverAdmission !== null}
         onClose={closeHandover}
-        title={handoverAdmission ? `养老照护离院交接摘要 · ${handoverAdmission.patientName}` : "养老照护离院交接摘要"}
+        title={
+          handoverAdmission
+            ? `养老照护${archiveEndLabel(handoverAdmission.status)}交接摘要 · ${handoverAdmission.patientName}`
+            : "养老照护交接摘要"
+        }
       >
         {handoverLoading && <p className="text-sm text-fg-dimmed">正在读取交接摘要…</p>}
         {!handoverLoading && handoverData === null && handoverError && (

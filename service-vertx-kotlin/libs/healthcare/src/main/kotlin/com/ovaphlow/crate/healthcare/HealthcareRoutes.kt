@@ -71,6 +71,7 @@ object HealthcareRoutes {
             service.listPatients(
                 name = ctx.request().getParam("name"),
                 status = ctx.request().getParam("status"),
+                personType = ctx.request().getParam("person_type"),
                 limit = limit(ctx),
                 offset = offset(ctx),
             ).onSuccess { ctx.json(it) }
@@ -967,7 +968,7 @@ object HealthcareRoutes {
         //  同 encounter 同账期唯一（034 起仅约束「有效原单」），重复生成 409；
         //  停用字典项不可用于新账单/加项 400；
         //  结算收束冻结（encounters.settled_at 非空）后生成/加项/红冲/补结算 409。
-        //  红冲沿用本块会话鉴权（`libs/permissions` 无 bill 资源权限点，不新建权限点）。
+        //  红冲沿用本块会话鉴权（本轮不新建权限点）。
         // ========================================================================
         if (billAuthHandler != null) {
             router.post("/encounters/:id/bills").handler(billAuthHandler)

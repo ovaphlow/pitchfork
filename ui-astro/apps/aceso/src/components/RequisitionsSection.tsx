@@ -6,10 +6,12 @@ import {
   createPharmacyRequisition,
   dispensePharmacyRequisition,
   getPharmacyRequisition,
+  listDepartments,
   listInventoryStocks,
   listPharmacyRequisitions,
   listWarehouseOptions,
   newIdempotencyKey,
+  type Department,
   type InventoryStockAvailability,
   type PharmacyRequisition,
   type WarehouseOption,
@@ -64,6 +66,9 @@ export default function RequisitionsSection() {
   const PAGE = 50;
 
   const [warehouses, setWarehouses] = useState<WarehouseOption[]>([]);
+  // 040：申领科室必须是组织部门目录里的 code，因此表单用下拉而非自由文本。
+  const [departments, setDepartments] = useState<Department[]>([]);
+  const [departmentsError, setDepartmentsError] = useState("");
   const [stocks, setStocks] = useState<InventoryStockAvailability[]>([]);
   const [stocksLoading, setStocksLoading] = useState(false);
 
@@ -136,6 +141,16 @@ export default function RequisitionsSection() {
     }
   }, []);
 
+  const loadDepartments = useCallback(async () => {
+    try {
+      setDepartments((await listDepartments()).records);
+      setDepartmentsError("");
+    } catch (loadError) {
+      setDepartments([]);
+      setDepartmentsError(errorMessage(loadError, "无法加载部门目录，暂时无法新建申领"));
+    }
+  }, []);
+
   const loadStocks = useCallback(async (warehouse: string) => {
     if (!warehouse) {
       setStocks([]);
@@ -155,6 +170,19 @@ export default function RequisitionsSection() {
   useEffect(() => {
     void loadRequisitions();
   }, [loadRequisitions]);
+
+  useEffect(() => {
+    void loadDepartments();
+  }, [loadDepartments]);
+
+  /** 申领表存的是部门 code；展示时翻成名称，历史自由文本原样显示。 */
+  const departmentLabel = useCallback(
+    (code: string | null | undefined): string => {
+      if (!code) return "—";
+      return departments.find((department) => department.code === code)?.name ?? code;
+    },
+    [departments],
+  );
 
   // ── 新建 ───────────────────────────────────────────────────────────
 
@@ -184,7 +212,7 @@ export default function RequisitionsSection() {
     if (!createForm.warehouse.trim()) return setCreateError("请选择药房源仓库");
     if (!createForm.destinationWarehouse.trim()) return setCreateError("请选择目标护理站仓库");
     if (createForm.warehouse === createForm.destinationWarehouse) return setCreateError("目标仓库不能与源仓库相同");
-    if (!createForm.department.trim()) return setCreateError("请填写申领科室");
+    if (!createForm.department.trim()) return setCreateError("请选择申领科室");
     if (createForm.rows.length === 0) return setCreateError("请至少添加一项申领物资");
     for (const row of createForm.rows) {
       if (!row.materialId) return setCreateError("请为每行选择物资");
@@ -345,7 +373,7 @@ export default function RequisitionsSection() {
         </div>
       ),
     },
-    { key: "department", header: "科室", render: (row) => <span className="text-fg-muted">{row.department || "—"}</span> },
+    { key: "department", header: "科室", render: (row) => <span className="text-fg-muted">{departmentLabel(row.department)}</span> },
     {
       key: "items",
       header: "物资摘要",
@@ -465,12 +493,30 @@ export default function RequisitionsSection() {
               </select>
             </div>
           </div>
-          <Input
-            label="申领科室"
-            value={createForm.department}
-            onChange={(event) => setCreateForm((current) => ({ ...current, department: event.target.value }))}
-            placeholder="例如：一护理站"
-          />
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm font-medium text-fg-muted" htmlFor="req-department">申领科室</label>
+            <select
+              id="req-department"
+              className={selectClass}
+              value={createForm.department}
+              onChange={(event) => setCreateForm((current) => ({ ...current, department: event.target.value }))}
+              disabled={departments.length === 0}
+            >
+              <option value="">请选择科室</option>
+              {departments.map((department) => (
+                <option key={department.id} value={department.code}>
+                  {department.name}（{department.code}）
+                </option>
+              ))}
+            </select>
+            {departmentsError ? (
+              <p className="text-xs text-danger">{departmentsError}</p>
+            ) : departments.length === 0 ? (
+              <p className="text-xs text-fg-dimmed">部门目录为空，请先到「部门」页创建部门。</p>
+            ) : (
+              <p className="text-xs text-fg-dimmed">申领科室来自组织部门目录，与床位/病区无关。</p>
+            )}
+          </div>
 
           <div className="space-y-2">
             <div className="text-sm font-medium text-fg-muted">申领物资</div>
@@ -542,7 +588,7 @@ export default function RequisitionsSection() {
         {approveTarget && (
           <div className="space-y-4">
             <div className="rounded-md border border-border p-3 text-sm space-y-1">
-              <div className="font-medium text-fg-emphasis">{approveTarget.requisition_no} · {approveTarget.department || "—"}</div>
+              <div className="font-medium text-fg-emphasis">{approveTarget.requisition_no} · {departmentLabel(approveTarget.department)}</div>
               <div className="text-xs text-fg-dimmed">
                 {approveTarget.warehouse} → {approveTarget.destination_warehouse}
               </div>
@@ -619,7 +665,7 @@ export default function RequisitionsSection() {
             <div className="rounded-md border border-border p-3 text-sm space-y-1">
               <div className="font-medium text-fg-emphasis">{dispenseTarget.requisition_no}</div>
               <div className="text-fg-muted">
-                {dispenseTarget.warehouse} → {dispenseTarget.destination_warehouse} · {dispenseTarget.department || "—"}
+                {dispenseTarget.warehouse} → {dispenseTarget.destination_warehouse} · {departmentLabel(dispenseTarget.department)}
               </div>
               <div className="text-xs text-fg-dimmed">
                 已预留：{(dispenseTarget.items ?? []).map((item) => `${materialName.get(item.material_id) ?? item.material_id.slice(0, 8)}×${item.approved_quantity ?? 0}${item.lot_id ? `（批次 ${item.lot_id.slice(0, 8)}）` : ""}`).join("、") || "—"}
@@ -671,7 +717,7 @@ export default function RequisitionsSection() {
                 <span className="font-medium text-fg-emphasis">{detail.requisition_no}</span>
                 {statusBadge(detail.status)}
               </div>
-              <div className="text-fg-muted">{detail.warehouse} → {detail.destination_warehouse || "—"} · {detail.department || "—"}</div>
+              <div className="text-fg-muted">{detail.warehouse} → {detail.destination_warehouse || "—"} · {departmentLabel(detail.department)}</div>
               <div className="text-xs text-fg-dimmed">
                 创建 {formatDateTime(detail.created_at)}
                 {detail.approved_at ? ` · 审批 ${formatDateTime(detail.approved_at)}` : ""}

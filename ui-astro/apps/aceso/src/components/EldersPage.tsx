@@ -2,14 +2,17 @@ import { useCallback, useEffect, useState } from "react";
 import { Badge, Button, Card, Input, Modal, Table, type Column } from "@pitchfork/ui";
 import {
   createPatient,
-  listActiveElderlyAdmissions,
+  listElderlyAdmissions,
   listPatients,
   updatePatient,
+  type ChildHealthProfileInput,
   type Encounter,
   type Patient,
   type PatientInput,
+  type VaccinationRecord,
 } from "@pitchfork/shared/aceso";
-import { DOMAIN_ENTITY, currentEntityLabels } from "../lib/domain";
+import { formatAge } from "../lib/age";
+import { DOMAIN_ENTITY, currentEntityLabels, type PersonType } from "../lib/domain";
 import { formatDate } from "../lib/datetime";
 import { useDomain } from "../lib/useDomain";
 
@@ -36,6 +39,41 @@ function patientStatusBadgeVariant(status: string): "success" | "default" | "dan
   return "default";
 }
 
+/** 儿保表单原生控件样式（与 `@pitchfork/ui` 的 Input / select 保持一致） */
+const FORM_CONTROL_CLASS =
+  "h-10 rounded-md border border-border bg-surface px-3 text-sm text-fg placeholder:text-fg-dimmed focus:outline-none focus-visible:ring-2 focus-visible:ring-accent";
+
+/** 儿保接种记录行（表单态；空行在保存时被过滤） */
+interface VaccinationRow {
+  vaccine: string;
+  dose: string;
+  date: string;
+  facility: string;
+}
+
+/** 入住状态 → 入住管理页视图参数（URL ?view=），与 AdmissionsPage 的 `view` 取值同源 */
+const ENCOUNTER_VIEW: Record<string, string> = {
+  ACTIVE: "active",
+  DISCHARGED: "discharged",
+  DECEASED: "deceased",
+};
+
+/**
+ * 每页长者各自解析一条代表入住：优先活动入住，其次按入住日期取最新的一条
+ * （含已离院/已去世），用于「住院号」列与入住/医嘱/账单跳转；无入住则不返回。
+ */
+function resolveEncountersByPatient(encounters: Encounter[], patientIds: string[]): Record<string, Encounter> {
+  const byPatient: Record<string, Encounter> = {};
+  for (const patientId of patientIds) {
+    const candidates = encounters.filter((encounter) => encounter.patient_id === patientId);
+    if (candidates.length === 0) continue;
+    const active = candidates.find((encounter) => encounter.status === "ACTIVE");
+    const latest = [...candidates].sort((a, b) => (b.admit_date ?? "").localeCompare(a.admit_date ?? ""))[0];
+    byPatient[patientId] = active ?? latest;
+  }
+  return byPatient;
+}
+
 interface ElderForm {
   name: string;
   gender: string;
@@ -49,6 +87,17 @@ interface ElderForm {
   medicalInsurance: string;
   allergies: string;
   pastHistory: string;
+  /** 儿保专属字段；医疗/养老域不渲染，恒为空 */
+  guardianName: string;
+  guardianRelationship: string;
+  guardianPhone: string;
+  birthWeightG: string;
+  birthHeightMm: string;
+  deliveryMode: string;
+  feedingMethod: string;
+  vaccinationSummary: string;
+  vaccinationRecords: VaccinationRow[];
+  remark: string;
 }
 
 const elderFormDefaults: ElderForm = {
@@ -64,6 +113,16 @@ const elderFormDefaults: ElderForm = {
   medicalInsurance: "",
   allergies: "",
   pastHistory: "",
+  guardianName: "",
+  guardianRelationship: "",
+  guardianPhone: "",
+  birthWeightG: "",
+  birthHeightMm: "",
+  deliveryMode: "",
+  feedingMethod: "",
+  vaccinationSummary: "",
+  vaccinationRecords: [],
+  remark: "",
 };
 
 function errorMessage(error: unknown, fallback: string): string {
@@ -74,7 +133,39 @@ function displayValue(value: string | null | undefined): string {
   return value?.trim() || "-";
 }
 
-function buildPatientInput(form: ElderForm, editing: boolean): PatientInput | null {
+/** 数字输入串 → 整数或 null（空串 / 非法值转 null，便于后端清空字段） */
+function nullableInt(value: string): number | null {
+  const raw = value.trim();
+  if (!raw) return null;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? Math.trunc(parsed) : null;
+}
+
+/** 儿保档案输入：空串转 null，接种记录过滤空行 */
+function buildChildProfile(form: ElderForm): ChildHealthProfileInput {
+  const vaccinationRecords: VaccinationRecord[] = form.vaccinationRecords
+    .map((row) => ({
+      ...(row.vaccine.trim() ? { vaccine: row.vaccine.trim() } : {}),
+      ...(row.dose.trim() ? { dose: row.dose.trim() } : {}),
+      ...(row.date ? { date: row.date } : {}),
+      ...(row.facility.trim() ? { facility: row.facility.trim() } : {}),
+    }))
+    .filter((row) => Object.keys(row).length > 0);
+  return {
+    guardian_name: form.guardianName.trim() || null,
+    guardian_relationship: form.guardianRelationship.trim() || null,
+    guardian_phone: form.guardianPhone.trim() || null,
+    birth_weight_g: nullableInt(form.birthWeightG),
+    birth_height_mm: nullableInt(form.birthHeightMm),
+    delivery_mode: form.deliveryMode || null,
+    feeding_method: form.feedingMethod || null,
+    vaccination_summary: form.vaccinationSummary.trim() || null,
+    vaccination_records: vaccinationRecords,
+    remark: form.remark.trim() || null,
+  };
+}
+
+function buildPatientInput(form: ElderForm, editing: boolean, personType: PersonType): PatientInput | null {
   const name = form.name.trim();
   if (!name) return null;
 
@@ -88,8 +179,9 @@ function buildPatientInput(form: ElderForm, editing: boolean): PatientInput | nu
     .map((item) => item.trim())
     .filter(Boolean);
 
-  return {
+  const input: PatientInput = {
     name,
+    person_type: personType,
     ...(editing ? { gender: form.gender || null } : form.gender ? { gender: form.gender } : {}),
     ...(form.birthDate ? { birth_date: form.birthDate } : {}),
     ...(editing ? { id_card_no: form.idCardNo.trim() || null } : form.idCardNo.trim() ? { id_card_no: form.idCardNo.trim() } : {}),
@@ -100,10 +192,14 @@ function buildPatientInput(form: ElderForm, editing: boolean): PatientInput | nu
     ...(editing ? { allergies } : allergies.length > 0 ? { allergies } : {}),
     ...(editing ? { past_history: form.pastHistory.trim() || null } : form.pastHistory.trim() ? { past_history: form.pastHistory.trim() } : {}),
   };
+
+  // 仅儿保域携带 child_profile；医疗/养老域不带，避免服务端「child_profile 配非儿童」400
+  return personType === "儿童" ? { ...input, child_profile: buildChildProfile(form) } : input;
 }
 
-function formFromPatient(patient: Patient): ElderForm {
+function formFromPatient(patient: Patient, personType: PersonType): ElderForm {
   const emergencyContact = patient.emergency_contact ?? {};
+  const profile = personType === "儿童" ? patient.child_profile : null;
   return {
     name: patient.name,
     gender: patient.gender ?? "",
@@ -117,15 +213,33 @@ function formFromPatient(patient: Patient): ElderForm {
     medicalInsurance: patient.medical_insurance ?? "",
     allergies: patient.allergies?.join("，") ?? "",
     pastHistory: patient.past_history ?? "",
+    guardianName: profile?.guardian_name ?? "",
+    guardianRelationship: profile?.guardian_relationship ?? "",
+    guardianPhone: profile?.guardian_phone ?? "",
+    birthWeightG: profile?.birth_weight_g != null ? String(profile.birth_weight_g) : "",
+    birthHeightMm: profile?.birth_height_mm != null ? String(profile.birth_height_mm) : "",
+    deliveryMode: profile?.delivery_mode ?? "",
+    feedingMethod: profile?.feeding_method ?? "",
+    vaccinationSummary: profile?.vaccination_summary ?? "",
+    vaccinationRecords: (profile?.vaccination_records ?? []).map((record) => ({
+      vaccine: record.vaccine ?? "",
+      dose: record.dose ?? "",
+      date: record.date ?? "",
+      facility: record.facility ?? "",
+    })),
+    remark: profile?.remark ?? "",
   };
 }
 
 export default function EldersPage() {
   // 页面命名随产品域切换（医疗：居民档案 / 养老：长者档案 / 儿保：儿童健康档案），
   // 与菜单、浏览器标题同源；此前内容写死「长者」，医疗模式下会与菜单打架。
-  const { person, archive } = DOMAIN_ENTITY[useDomain()];
+  const domain = useDomain();
+  const { person, archive, personType } = DOMAIN_ENTITY[domain];
+  // 儿保域走儿童专属列表列与表单；医疗/养老保持现状
+  const isChild = domain === "儿保";
   const [elders, setElders] = useState<Patient[]>([]);
-  const [activeEncounters, setActiveEncounters] = useState<Record<string, Encounter>>({});
+  const [encountersByPatient, setEncountersByPatient] = useState<Record<string, Encounter>>({});
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [statusFilter, setStatusFilter] = useState<ArchiveStatusFilter>("ACTIVE");
@@ -141,26 +255,36 @@ export default function EldersPage() {
     setLoading(true);
     setPageError("");
     try {
-      const [response, activeResponse] = await Promise.all([
+      const [response, encounterResponse] = await Promise.all([
         listPatients({
           ...(statusFilter ? { status: statusFilter } : {}),
+          // 儿保域只看儿童；医疗/养老保持不过滤（既有数据默认「居民」，
+          // 若养老域也过滤会把真实长者全部隐藏）
+          ...(personType === "儿童" ? { person_type: personType } : {}),
           limit: PAGE_SIZE,
           offset: (targetPage - 1) * PAGE_SIZE,
         }),
-        listActiveElderlyAdmissions({ limit: 100 }),
+        // 取全部状态的养老入住：档案页签（有效/已去世/全部）下都要能拿到代表入住，
+        // 否则已去世/已离院长者的「住院号」与入住/医嘱/账单跳转都为空。
+        listElderlyAdmissions({ status: "", limit: 1000 }),
       ]);
       setElders(response.records);
-      setActiveEncounters(Object.fromEntries(activeResponse.records.map((encounter) => [encounter.patient_id, encounter])));
+      setEncountersByPatient(
+        resolveEncountersByPatient(
+          encounterResponse.records,
+          response.records.map((patient) => patient.id),
+        ),
+      );
       setTotal(response.meta.total);
       setPage(targetPage);
     } catch (error) {
-      // 兜底文案按「出错那一刻」的域取词：load 的依赖必须保持稳定，
-      // 否则切域会改变回调标识、重置分页并重拉列表
+      // 兜底文案按「出错那一刻」的域取词；`personType` 是刻意加入的依赖：
+      // 切域必须重拉列表（儿保只看儿童），而词表本身不进入依赖，避免多余重建。
       setPageError(errorMessage(error, `无法加载${currentEntityLabels().archive}`));
     } finally {
       setLoading(false);
     }
-  }, [statusFilter]);
+  }, [statusFilter, personType]);
 
   useEffect(() => {
     void load(1);
@@ -175,15 +299,41 @@ export default function EldersPage() {
 
   function openEdit(patient: Patient) {
     setEditTarget(patient);
-    setForm(formFromPatient(patient));
+    setForm(formFromPatient(patient, personType));
     setFormError("");
     setEditorOpen(true);
   }
 
+  function updateVaccinationRow(index: number, patch: Partial<VaccinationRow>) {
+    setForm((current) => ({
+      ...current,
+      vaccinationRecords: current.vaccinationRecords.map((row, i) => (i === index ? { ...row, ...patch } : row)),
+    }));
+  }
+
+  function addVaccinationRow() {
+    setForm((current) => ({
+      ...current,
+      vaccinationRecords: [...current.vaccinationRecords, { vaccine: "", dose: "", date: "", facility: "" }],
+    }));
+  }
+
+  function removeVaccinationRow(index: number) {
+    setForm((current) => ({
+      ...current,
+      vaccinationRecords: current.vaccinationRecords.filter((_, i) => i !== index),
+    }));
+  }
+
   async function handleSave() {
-    const input = buildPatientInput(form, editTarget !== null);
+    const input = buildPatientInput(form, editTarget !== null, personType);
     if (!input) {
       setFormError("姓名不能为空");
+      return;
+    }
+    // 儿保域：出生日期必填（与服务端校验同口径，前端先提示）
+    if (isChild && !form.birthDate) {
+      setFormError("儿童档案必须填写出生日期");
       return;
     }
 
@@ -209,8 +359,20 @@ export default function EldersPage() {
     { key: "name", header: "姓名", className: "min-w-[140px]" },
     { key: "gender", header: "性别", className: "w-[90px]", render: (row) => displayValue(row.gender) },
     { key: "birth_date", header: "出生日期", className: "min-w-[130px]", render: (row) => formatDate(row.birth_date) },
-    { key: "id_card_no", header: "身份证号", className: "min-w-[190px]", render: (row) => displayValue(row.id_card_no) },
-    { key: "encounter_no", header: "住院号", className: "min-w-[140px]", render: (row) => displayValue(activeEncounters[row.id]?.encounter_no) },
+  ];
+  if (isChild) {
+    // 儿保域：月龄 + 监护人，隐藏「身份证号 / 住院号」
+    columns.push(
+      { key: "age", header: "月龄", className: "w-[110px]", render: (row) => formatAge(row.birth_date) },
+      { key: "guardian", header: "监护人", className: "min-w-[140px]", render: (row) => displayValue(row.child_profile?.guardian_name) },
+    );
+  } else {
+    columns.push(
+      { key: "id_card_no", header: "身份证号", className: "min-w-[190px]", render: (row) => displayValue(row.id_card_no) },
+      { key: "encounter_no", header: "住院号", className: "min-w-[140px]", render: (row) => displayValue(encountersByPatient[row.id]?.encounter_no) },
+    );
+  }
+  columns.push(
     { key: "phone", header: "联系电话", className: "min-w-[140px]", render: (row) => displayValue(row.phone) },
     {
       key: "status",
@@ -225,10 +387,42 @@ export default function EldersPage() {
     {
       key: "actions",
       header: "操作",
-      className: "w-[90px]",
-      render: (row) => <Button variant="link" size="sm" onClick={() => openEdit(row)}>编辑</Button>,
+      className: "w-[220px]",
+      render: (row) => {
+        const encounter = encountersByPatient[row.id];
+        const view = encounter ? ENCOUNTER_VIEW[encounter.status] : undefined;
+        return (
+          <div className="flex items-center gap-3">
+            <Button variant="link" size="sm" onClick={() => openEdit(row)}>编辑</Button>
+            {encounter && (
+              <>
+                {view && (
+                  <a
+                    href={`/dashboard/admission?view=${view}&patient=${encodeURIComponent(row.id)}`}
+                    className="text-sm text-accent hover:underline underline-offset-4"
+                  >
+                    入住
+                  </a>
+                )}
+                <a
+                  href={`/dashboard/orders?encounter_id=${encounter.id}`}
+                  className="text-sm text-accent hover:underline underline-offset-4"
+                >
+                  医嘱
+                </a>
+                <a
+                  href={`/dashboard/billing?encounter_id=${encounter.id}`}
+                  className="text-sm text-accent hover:underline underline-offset-4"
+                >
+                  账单
+                </a>
+              </>
+            )}
+          </div>
+        );
+      },
     },
-  ];
+  );
 
   return (
     <div className="space-y-6">
@@ -284,8 +478,205 @@ export default function EldersPage() {
         >
           {formError && <div className="rounded-lg border border-danger/30 bg-danger-bg px-3 py-2 text-sm text-danger">{formError}</div>}
 
-          <div>
-            <h4 className="text-sm font-semibold text-fg-emphasis">基本信息</h4>
+          {isChild ? (
+            <>
+              {/* 儿保域：儿童专属分组 */}
+              <div>
+                <h4 className="text-sm font-semibold text-fg-emphasis">基本信息</h4>
+                <div className="mt-3 grid gap-4 sm:grid-cols-2">
+                  <Input
+                    label="姓名"
+                    value={form.name}
+                    onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))}
+                    placeholder="请输入姓名"
+                    required
+                    autoComplete="name"
+                  />
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-sm font-medium text-fg-muted" htmlFor="child-gender">性别</label>
+                    <select
+                      id="child-gender"
+                      value={form.gender}
+                      onChange={(event) => setForm((current) => ({ ...current, gender: event.target.value }))}
+                      className={FORM_CONTROL_CLASS}
+                    >
+                      <option value="">请选择</option>
+                      <option value="男">男</option>
+                      <option value="女">女</option>
+                    </select>
+                  </div>
+                  <Input
+                    label="出生日期"
+                    type="date"
+                    value={form.birthDate}
+                    onChange={(event) => setForm((current) => ({ ...current, birthDate: event.target.value }))}
+                    required
+                  />
+                  <Input
+                    label="身份证号"
+                    value={form.idCardNo}
+                    onChange={(event) => setForm((current) => ({ ...current, idCardNo: event.target.value }))}
+                    placeholder="请输入身份证号"
+                    autoComplete="off"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <h4 className="text-sm font-semibold text-fg-emphasis">监护人</h4>
+                <div className="mt-3 grid gap-4 sm:grid-cols-2">
+                  <Input
+                    label="监护人姓名"
+                    value={form.guardianName}
+                    onChange={(event) => setForm((current) => ({ ...current, guardianName: event.target.value }))}
+                    placeholder="请输入监护人姓名"
+                    autoComplete="off"
+                  />
+                  <Input
+                    label="与儿童关系"
+                    value={form.guardianRelationship}
+                    onChange={(event) => setForm((current) => ({ ...current, guardianRelationship: event.target.value }))}
+                    placeholder="例如：母亲"
+                    autoComplete="off"
+                  />
+                  <Input
+                    label="监护人电话"
+                    type="tel"
+                    value={form.guardianPhone}
+                    onChange={(event) => setForm((current) => ({ ...current, guardianPhone: event.target.value }))}
+                    placeholder="请输入监护人电话"
+                    autoComplete="off"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <h4 className="text-sm font-semibold text-fg-emphasis">出生信息</h4>
+                <div className="mt-3 grid gap-4 sm:grid-cols-2">
+                  <Input
+                    label="出生体重（克）"
+                    type="number"
+                    min="0"
+                    value={form.birthWeightG}
+                    onChange={(event) => setForm((current) => ({ ...current, birthWeightG: event.target.value }))}
+                    placeholder="例如：3200"
+                  />
+                  <Input
+                    label="出生身长（毫米）"
+                    type="number"
+                    min="0"
+                    value={form.birthHeightMm}
+                    onChange={(event) => setForm((current) => ({ ...current, birthHeightMm: event.target.value }))}
+                    placeholder="例如：500"
+                  />
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-sm font-medium text-fg-muted" htmlFor="child-delivery-mode">分娩方式</label>
+                    <select
+                      id="child-delivery-mode"
+                      value={form.deliveryMode}
+                      onChange={(event) => setForm((current) => ({ ...current, deliveryMode: event.target.value }))}
+                      className={FORM_CONTROL_CLASS}
+                    >
+                      <option value="">请选择</option>
+                      <option value="顺产">顺产</option>
+                      <option value="剖宫产">剖宫产</option>
+                      <option value="其他">其他</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <h4 className="text-sm font-semibold text-fg-emphasis">喂养与接种</h4>
+                <div className="mt-3 space-y-4">
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-sm font-medium text-fg-muted" htmlFor="child-feeding-method">喂养方式</label>
+                    <select
+                      id="child-feeding-method"
+                      value={form.feedingMethod}
+                      onChange={(event) => setForm((current) => ({ ...current, feedingMethod: event.target.value }))}
+                      className={FORM_CONTROL_CLASS}
+                    >
+                      <option value="">请选择</option>
+                      <option value="母乳">母乳</option>
+                      <option value="混合">混合</option>
+                      <option value="人工">人工</option>
+                    </select>
+                  </div>
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-sm font-medium text-fg-muted" htmlFor="child-vaccination-summary">预防接种摘要</label>
+                    <textarea
+                      id="child-vaccination-summary"
+                      value={form.vaccinationSummary}
+                      onChange={(event) => setForm((current) => ({ ...current, vaccinationSummary: event.target.value }))}
+                      rows={3}
+                      className="resize-none rounded-md border border-border bg-surface px-3 py-2 text-sm text-fg placeholder:text-fg-dimmed focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                      placeholder="请输入预防接种摘要"
+                    />
+                  </div>
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium text-fg-muted">接种记录</span>
+                      <Button type="button" variant="secondary" size="sm" onClick={addVaccinationRow}>添加接种记录</Button>
+                    </div>
+                    {form.vaccinationRecords.length === 0 && (
+                      <p className="text-sm text-fg-dimmed">暂无接种记录，点击「添加接种记录」录入</p>
+                    )}
+                    {form.vaccinationRecords.map((record, index) => (
+                      <div key={index} className="grid gap-3 rounded-md border border-border p-3 sm:grid-cols-2">
+                        <input
+                          aria-label={`疫苗名称 ${index + 1}`}
+                          value={record.vaccine}
+                          onChange={(event) => updateVaccinationRow(index, { vaccine: event.target.value })}
+                          placeholder="疫苗名称"
+                          className={FORM_CONTROL_CLASS}
+                        />
+                        <input
+                          aria-label={`剂次 ${index + 1}`}
+                          value={record.dose}
+                          onChange={(event) => updateVaccinationRow(index, { dose: event.target.value })}
+                          placeholder="剂次"
+                          className={FORM_CONTROL_CLASS}
+                        />
+                        <input
+                          aria-label={`接种日期 ${index + 1}`}
+                          type="date"
+                          value={record.date}
+                          onChange={(event) => updateVaccinationRow(index, { date: event.target.value })}
+                          className={FORM_CONTROL_CLASS}
+                        />
+                        <input
+                          aria-label={`接种机构 ${index + 1}`}
+                          value={record.facility}
+                          onChange={(event) => updateVaccinationRow(index, { facility: event.target.value })}
+                          placeholder="接种机构"
+                          className={FORM_CONTROL_CLASS}
+                        />
+                        <div className="flex justify-end sm:col-span-2">
+                          <Button type="button" variant="ghost" size="sm" onClick={() => removeVaccinationRow(index)}>删除</Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-sm font-medium text-fg-muted" htmlFor="child-remark">备注</label>
+                    <textarea
+                      id="child-remark"
+                      value={form.remark}
+                      onChange={(event) => setForm((current) => ({ ...current, remark: event.target.value }))}
+                      rows={3}
+                      className="resize-none rounded-md border border-border bg-surface px-3 py-2 text-sm text-fg placeholder:text-fg-dimmed focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                      placeholder="请输入备注"
+                    />
+                  </div>
+                </div>
+              </div>
+            </>
+          ) : (
+            <>
+              {/* 医疗 / 养老域：表单保持现状 */}
+              <div>
+                <h4 className="text-sm font-semibold text-fg-emphasis">基本信息</h4>
             <div className="mt-3 grid gap-4 sm:grid-cols-2">
               <Input
                 label="姓名"
@@ -399,6 +790,8 @@ export default function EldersPage() {
               </div>
             </div>
           </div>
+            </>
+          )}
 
           <div className="flex justify-end gap-3 pt-1">
             <Button type="button" variant="ghost" onClick={() => setEditorOpen(false)} disabled={saving}>取消</Button>
