@@ -58,11 +58,11 @@ pub fn app(state: AppState, max_upload_bytes: usize) -> Router {
         .nest("/messages", messages::router())
         .nest("/files", files::router())
         .nest("/interactions", interactions::router())
-		.nest("/roles", roles::router())
-		.nest("/subject-roles", subject_roles::router())
-		.nest("/departments", departments::router())
-		.nest("/subject-departments", subject_departments::router())
-		.nest("/subject-permissions", subject_roles::permissions_router())
+        .nest("/roles", roles::router())
+        .nest("/subject-roles", subject_roles::router())
+        .nest("/departments", departments::router())
+        .nest("/subject-departments", subject_departments::router())
+        .nest("/subject-permissions", subject_roles::permissions_router())
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_identity,
