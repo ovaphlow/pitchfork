@@ -23,7 +23,7 @@ type Subject struct {
 	SecurityVersion int64     `json:"security_version"`
 	DisplayName     string    `json:"display_name"`
 	Identifier      string    `json:"identifier"`
-	Roles           []string  `json:"roles"`
+	PlatformAdmin   bool      `json:"platform_admin"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
 }
@@ -55,6 +55,7 @@ type managementSubjectRow struct {
 	ID              string    `db:"id"`
 	Status          string    `db:"status"`
 	SecurityVersion int64     `db:"security_version"`
+	PlatformAdmin   bool      `db:"is_platform_admin"`
 	DisplayName     string    `db:"display_name"`
 	IdentifierValue string    `db:"identifier_value"`
 	CreatedAt       time.Time `db:"created_at"`
@@ -67,7 +68,7 @@ SELECT COUNT(*)
 FROM identity_subjects`
 
 const listSubjectsForManagement = `
-SELECT s.id, s.status, s.security_version, p.display_name, i.identifier_value, s.created_at, s.updated_at
+SELECT s.id, s.status, s.security_version, s.is_platform_admin, p.display_name, i.identifier_value, s.created_at, s.updated_at
 FROM identity_subjects s
 JOIN identity_profiles p ON p.subject_id = s.id
 JOIN identity_identifiers i ON i.subject_id = s.id
@@ -76,7 +77,7 @@ ORDER BY s.created_at DESC
 LIMIT :page_limit OFFSET :page_offset`
 
 const getSubjectForManagement = `
-SELECT s.id, s.status, s.security_version, p.display_name, i.identifier_value, s.created_at, s.updated_at
+SELECT s.id, s.status, s.security_version, s.is_platform_admin, p.display_name, i.identifier_value, s.created_at, s.updated_at
 FROM identity_subjects s
 JOIN identity_profiles p ON p.subject_id = s.id
 JOIN identity_identifiers i ON i.subject_id = s.id
@@ -118,13 +119,11 @@ INSERT INTO identity_password_credentials(
     :changed_at, :created_at, :updated_at
 )`
 
-const countEnabledSubjectsByRoleCodeExcludingSubjectID = `
+const countEnabledPlatformAdminsExcludingSubjectID = `
 SELECT COUNT(*)
 FROM identity_subjects AS subject
-JOIN identity_subject_roles AS subject_role ON subject_role.subject_id = subject.id
-JOIN identity_roles AS role ON role.id = subject_role.role_id
 WHERE subject.status = :status
-  AND role.role_code = :role_code
+  AND subject.is_platform_admin = 1
   AND subject.id <> :subject_id`
 
 const disableSubject = `
@@ -135,12 +134,11 @@ SET status = :disabled_status,
     updated_at = :updated_at
 WHERE id = :id AND status = :enabled_status`
 
-const listRoleCodesBySubjectID = `
-SELECT role.role_code
-FROM identity_subject_roles AS subject_role
-JOIN identity_roles AS role ON role.id = subject_role.role_id
-WHERE subject_role.subject_id = :subject_id
-ORDER BY role.role_code`
+const setSubjectPlatformAdmin = `
+UPDATE identity_subjects
+SET is_platform_admin = :is_platform_admin,
+    updated_at = :updated_at
+WHERE id = :id`
 
 func ListSubjects(ctx context.Context, database *sql.DB, input ListSubjectsInput) (ListSubjectsResult, error) {
 	if input.Limit <= 0 || input.Offset < 0 {
@@ -163,27 +161,79 @@ func ListSubjects(ctx context.Context, database *sql.DB, input ListSubjectsInput
 
 	subjects := make([]Subject, 0, len(rows))
 	for _, row := range rows {
-		subject, err := subjectFromManagementValues(
-			ctx,
-			queries,
+		subjects = append(subjects, subjectFromManagementValues(
 			row.ID,
 			row.Status,
 			row.SecurityVersion,
+			row.PlatformAdmin,
 			row.DisplayName,
 			row.IdentifierValue,
 			row.CreatedAt,
 			row.UpdatedAt,
-		)
-		if err != nil {
-			return ListSubjectsResult{}, err
-		}
-		subjects = append(subjects, subject)
+		))
 	}
 	return ListSubjectsResult{Subjects: subjects, Total: total}, nil
 }
 
 func GetSubject(ctx context.Context, database *sql.DB, subjectID string) (Subject, error) {
 	return getSubject(ctx, newQuerier(database), subjectID)
+}
+
+// SetPlatformAdmin 授予或撤销平台管理员。撤销时保证库里仍至少有一个启用的平台管理员，
+// 否则返回 ErrLastAdministrator（与禁用最后一个管理员一致，避免把管理台锁死）。
+func SetPlatformAdmin(ctx context.Context, database *sql.DB, actorSubjectID string, subjectID string, value bool) (Subject, error) {
+	transaction, err := newQuerier(database).BeginTxx(ctx, nil)
+	if err != nil {
+		return Subject{}, fmt.Errorf("begin set platform admin transaction: %w", err)
+	}
+	defer transaction.Rollback()
+
+	subject, err := getSubject(ctx, transaction, subjectID)
+	if err != nil {
+		return Subject{}, err
+	}
+	now := time.Now().UTC()
+	if subject.PlatformAdmin != value {
+		if !value {
+			var remaining int64
+			if err := namedGet(ctx, transaction, &remaining, countEnabledPlatformAdminsExcludingSubjectID, map[string]any{
+				"status":     StatusEnabled,
+				"subject_id": subjectID,
+			}); err != nil {
+				return Subject{}, fmt.Errorf("count remaining platform administrators: %w", err)
+			}
+			if remaining == 0 {
+				return Subject{}, ErrLastAdministrator
+			}
+		}
+		if err := namedExec(ctx, transaction, setSubjectPlatformAdmin, map[string]any{
+			"id":                subjectID,
+			"is_platform_admin": value,
+			"updated_at":        now,
+		}); err != nil {
+			return Subject{}, fmt.Errorf("update platform administrator: %w", err)
+		}
+		action := AuditActionRoleGranted
+		if !value {
+			action = AuditActionRoleRevoked
+		}
+		if err := insertAuditEvent(ctx, transaction, auditEvent{
+			Action:          action,
+			Outcome:         OutcomeSucceeded,
+			ActorSubjectID:  actorSubjectID,
+			TargetSubjectID: subjectID,
+			Metadata:        fmt.Sprintf(`{"platform_admin":%t}`, value),
+		}, now); err != nil {
+			return Subject{}, fmt.Errorf("write platform administrator audit event: %w", err)
+		}
+		subject.PlatformAdmin = value
+		subject.UpdatedAt = now
+	}
+
+	if err := transaction.Commit(); err != nil {
+		return Subject{}, fmt.Errorf("commit set platform admin transaction: %w", err)
+	}
+	return subject, nil
 }
 
 func CreateSubject(ctx context.Context, database *sql.DB, actorSubjectID string, input CreateSubjectInput) (Subject, error) {
@@ -292,7 +342,7 @@ func CreateSubject(ctx context.Context, database *sql.DB, actorSubjectID string,
 		SecurityVersion: 1,
 		DisplayName:     displayName,
 		Identifier:      identifier,
-		Roles:           []string{},
+		PlatformAdmin:   false,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}, nil
@@ -316,11 +366,10 @@ func DisableSubject(ctx context.Context, database *sql.DB, actorSubjectID string
 		return subject, nil
 	}
 
-	if hasRole(subject.Roles, RoleCodeAdministrator) {
+	if subject.PlatformAdmin {
 		var remainingAdministrators int64
-		err := namedGet(ctx, transaction, &remainingAdministrators, countEnabledSubjectsByRoleCodeExcludingSubjectID, map[string]any{
+		err := namedGet(ctx, transaction, &remainingAdministrators, countEnabledPlatformAdminsExcludingSubjectID, map[string]any{
 			"status":     StatusEnabled,
-			"role_code":  RoleCodeAdministrator,
 			"subject_id": subjectID,
 		})
 		if err != nil {
@@ -384,47 +433,28 @@ func getSubject(ctx context.Context, queries querier, subjectID string) (Subject
 		return Subject{}, fmt.Errorf("get subject for management: %w", err)
 	}
 	return subjectFromManagementValues(
-		ctx,
-		queries,
 		row.ID,
 		row.Status,
 		row.SecurityVersion,
+		row.PlatformAdmin,
 		row.DisplayName,
 		row.IdentifierValue,
 		row.CreatedAt,
 		row.UpdatedAt,
-	)
+	), nil
 }
 
-func subjectFromManagementValues(ctx context.Context, queries querier, subjectID string, status string, securityVersion int64, displayName string, identifier string, createdAt time.Time, updatedAt time.Time) (Subject, error) {
-	var roles []string
-	if err := namedSelect(ctx, queries, &roles, listRoleCodesBySubjectID, map[string]any{
-		"subject_id": subjectID,
-	}); err != nil {
-		return Subject{}, fmt.Errorf("list subject roles: %w", err)
-	}
-	if roles == nil {
-		roles = []string{}
-	}
+func subjectFromManagementValues(subjectID string, status string, securityVersion int64, platformAdmin bool, displayName string, identifier string, createdAt time.Time, updatedAt time.Time) Subject {
 	return Subject{
 		ID:              subjectID,
 		Status:          status,
 		SecurityVersion: securityVersion,
 		DisplayName:     displayName,
 		Identifier:      identifier,
-		Roles:           roles,
+		PlatformAdmin:   platformAdmin,
 		CreatedAt:       createdAt,
 		UpdatedAt:       updatedAt,
-	}, nil
-}
-
-func hasRole(roles []string, roleCode string) bool {
-	for _, role := range roles {
-		if role == roleCode {
-			return true
-		}
 	}
-	return false
 }
 
 func validateDisplayName(value string) (string, error) {

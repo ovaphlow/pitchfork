@@ -96,7 +96,7 @@ export default function DepartmentsPage() {
     setLoading(true);
     setPageError("");
     try {
-      setDepartments(await listDepartments());
+      setDepartments((await listDepartments()).records);
     } catch (error) {
       setPageError(errorMessage(error, "无法加载部门列表"));
     } finally {
@@ -125,10 +125,10 @@ export default function DepartmentsPage() {
   function openEdit(department: Department) {
     setEditTarget(department);
     setForm({
-      name: department.payload.name,
+      name: department.name,
       code: department.code,
       parentCode: department.parent_code,
-      description: department.payload.description ?? "",
+      description: department.description ?? "",
     });
     setFormError("");
     setEditorOpen(true);
@@ -155,9 +155,9 @@ export default function DepartmentsPage() {
     return {
       code,
       parent_code: parentCode,
-      root_code: parent ? parent.root_code || parent.code : "",
       name: form.name,
       description: form.description,
+      sort_order: editTarget?.sort_order ?? 0,
     };
   }
 
@@ -214,7 +214,7 @@ export default function DepartmentsPage() {
       render: (row) => (
         <div className={`flex items-center gap-2 ${indentClasses[Math.min(row.depth, indentClasses.length - 1)]}`}>
           {row.depth > 0 && <span className="text-xs text-fg-dimmed">└</span>}
-          <span>{row.payload.name}</span>
+          <span>{row.name}</span>
         </div>
       ),
     },
@@ -229,7 +229,13 @@ export default function DepartmentsPage() {
       key: "description",
       header: "描述",
       className: "min-w-[200px]",
-      render: (row) => row.payload.description || "-",
+      render: (row) => row.description || "-",
+    },
+    {
+      key: "member_count",
+      header: "成员数",
+      className: "w-[100px]",
+      render: (row) => row.member_count,
     },
     {
       key: "actions",
@@ -249,7 +255,9 @@ export default function DepartmentsPage() {
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h2 className="text-lg font-semibold text-fg-emphasis">部门管理</h2>
-          <p className="mt-1 text-sm text-fg-muted">管理 Nexus Settings 中的部门层级</p>
+          <p className="mt-1 text-sm text-fg-muted">
+            管理组织部门层级；与床位/入住里的照护单元、病区不是同一概念
+          </p>
         </div>
         <Button onClick={openCreate}>添加部门</Button>
       </div>
@@ -288,7 +296,7 @@ export default function DepartmentsPage() {
               <option value="">根部门</option>
               {parentChoices.map((department) => (
                 <option key={department.id} value={department.code}>
-                  {"  ".repeat(Math.min(department.depth, 3))}{department.payload.name} ({department.code})
+                  {"  ".repeat(Math.min(department.depth, 3))}{department.name} ({department.code})
                 </option>
               ))}
             </select>
@@ -314,7 +322,7 @@ export default function DepartmentsPage() {
       <Modal open={deleteTarget !== null} onClose={() => !deleting && setDeleteTarget(null)} title="确认删除部门">
         <div className="space-y-5">
           {deleteError && <div className="rounded-lg border border-danger/30 bg-danger-bg px-3 py-2 text-sm text-danger">{deleteError}</div>}
-          <p className="text-sm text-fg-muted">将物理删除部门「{deleteTarget?.payload.name}」，此操作不可恢复。</p>
+          <p className="text-sm text-fg-muted">将物理删除部门「{deleteTarget?.name}」，此操作不可恢复。</p>
           <div className="flex justify-end gap-3">
             <Button variant="ghost" onClick={() => setDeleteTarget(null)} disabled={deleting}>取消</Button>
             <Button variant="danger" onClick={() => void handleDelete()} loading={deleting}>确认删除</Button>

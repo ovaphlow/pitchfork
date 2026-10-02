@@ -1,10 +1,7 @@
 import { serviceBase } from "./aceso-service-config";
+import { problemMessage, type ApiProblem } from "./problem-message";
 
-interface ProblemDetails {
-  error?: string;
-  detail?: string;
-  title?: string;
-}
+type ProblemDetails = ApiProblem;
 
 /** 带 HTTP 状态码的 API 错误；调用方可据此区分 404 等业务状态 */
 export class ApiRequestError extends Error {
@@ -61,7 +58,7 @@ export interface IdentitySubject {
   security_version: number;
   display_name: string;
   identifier: string;
-  roles: string[];
+  platform_admin: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -71,28 +68,34 @@ export interface IdentitySubjectList {
   meta: { total: number };
 }
 
-export interface DepartmentPayload {
-  name: string;
-  description?: string;
-}
-
+/**
+ * 组织部门（Nexus `/departments`）。
+ *
+ * 与床位/入住里的 `department`（照护单元/病区，自由文本）不是同一概念，互不联动。
+ */
 export interface Department {
   id: string;
-  category: string;
   code: string;
-  root_code: string;
+  name: string;
+  description: string;
   parent_code: string;
-  payload: DepartmentPayload;
+  sort_order: number;
+  member_count: number;
   created_at: string;
   updated_at: string;
 }
 
 export interface DepartmentInput {
   code: string;
-  parent_code: string;
-  root_code: string;
   name: string;
   description?: string;
+  parent_code?: string;
+  sort_order?: number;
+}
+
+export interface DepartmentList {
+  records: Department[];
+  meta: { total: number };
 }
 
 export interface WarehousePayload {
@@ -512,14 +515,17 @@ async function readResponse<T>(response: Response, redirectOnUnauthorized: boole
       redirectToLogin();
     }
     const problem = body as ProblemDetails | null;
-    throw new ApiRequestError(
-      response.status,
-      problem?.error || problem?.detail || problem?.title || responseText || `请求失败 (${response.status})`,
-    );
+    throw new ApiRequestError(response.status, problemMessage(response.status, problem, responseText));
   }
   return body as T;
 }
 
+/**
+ * 把服务端错误翻成用户能照做的提示。
+ *
+ * 权限闸门（037/038）在无权限时回 403 + `required_permission`，上游故障回 503；
+ * 这两种若原样透出英文错误码，用户只会看到 "forbidden"，不知道该找谁要哪个权限。
+ */
 async function request<T>(
   path: string,
   init: RequestInit = {},
@@ -621,40 +627,41 @@ export function setIdentityTemporaryPassword(id: string, temporaryPassword: stri
   );
 }
 
-export function listDepartments(): Promise<Department[]> {
-  const params = new URLSearchParams({ category: "department", page: "1", page_size: "100" });
-  return request<Department[]>(`/settings?${params}`, {}, { service: "nexus" });
-}
+// ========================================================================
+//  Nexus API — Departments (组织部门目录)
+// ========================================================================
 
-function settingPayload(input: DepartmentInput): Record<string, unknown> {
+function departmentPayload(input: DepartmentInput): Record<string, unknown> {
   return {
-    category: "department",
     code: input.code.trim(),
-    parent_code: input.parent_code,
-    root_code: input.root_code,
-    payload: {
-      name: input.name.trim(),
-      ...(input.description?.trim() ? { description: input.description.trim() } : {}),
-    },
+    name: input.name.trim(),
+    description: input.description?.trim() ?? "",
+    parent_code: input.parent_code?.trim() ?? "",
+    sort_order: input.sort_order ?? 0,
   };
 }
 
+export function listDepartments(): Promise<DepartmentList> {
+  const params = new URLSearchParams({ page: "1", page_size: "100" });
+  return request<DepartmentList>(`/departments?${params}`, {}, { service: "nexus" });
+}
+
 export function createDepartment(input: DepartmentInput): Promise<Department> {
-  return request<Department>("/settings", {
+  return request<Department>("/departments", {
     method: "POST",
-    body: JSON.stringify(settingPayload(input)),
+    body: JSON.stringify(departmentPayload(input)),
   }, { service: "nexus" });
 }
 
 export function updateDepartment(id: string, input: DepartmentInput): Promise<Department> {
-  return request<Department>(`/settings/${encodeURIComponent(id)}`, {
+  return request<Department>(`/departments/${encodeURIComponent(id)}`, {
     method: "PUT",
-    body: JSON.stringify(settingPayload(input)),
+    body: JSON.stringify(departmentPayload(input)),
   }, { service: "nexus" });
 }
 
 export async function deleteDepartment(id: string): Promise<void> {
-  await request<void>(`/settings/${encodeURIComponent(id)}`, { method: "DELETE" }, { service: "nexus" });
+  await request<void>(`/departments/${encodeURIComponent(id)}`, { method: "DELETE" }, { service: "nexus" });
 }
 
 const WAREHOUSE_CATEGORY = "warehouse";
@@ -741,6 +748,121 @@ export function updateRole(id: string, input: NexusRoleInput): Promise<NexusRole
 
 export async function deleteRole(id: string): Promise<void> {
   await request<void>(`/roles/${encodeURIComponent(id)}`, { method: "DELETE" }, { service: "nexus" });
+}
+
+// ========================================================================
+//  Nexus API — Subject Role Assignments (用户 ↔ 角色分配)
+// ========================================================================
+
+export interface SubjectRoleAssignment {
+  id: string;
+  subject_id: string;
+  role_id: string;
+  role_code: string;
+  role_display_name: string;
+  granted_by_subject_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** 指定主体的角色分配；subjectIds 为空数组时返回全部分配（不传参数） */
+export function listSubjectRoles(subjectIds: string[] = []): Promise<SubjectRoleAssignment[]> {
+  const params = new URLSearchParams();
+  const ids = subjectIds.map((id) => id.trim()).filter((id) => id.length > 0);
+  if (ids.length > 0) params.set("subject_ids", ids.join(","));
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return request<SubjectRoleAssignment[]>(`/subject-roles${suffix}`, {}, { service: "nexus" });
+}
+
+/** 全量替换某个主体的角色集合；空数组表示清空全部角色 */
+export function replaceSubjectRoles(subjectId: string, roleCodes: string[]): Promise<SubjectRoleAssignment[]> {
+  return request<SubjectRoleAssignment[]>(
+    `/subject-roles/subjects/${encodeURIComponent(subjectId)}`,
+    { method: "PUT", body: JSON.stringify({ role_codes: roleCodes }) },
+    { service: "nexus" },
+  );
+}
+
+// ========================================================================
+//  Nexus API — Subject Department (用户 ↔ 部门，一人一主部门)
+// ========================================================================
+
+export interface SubjectDepartmentAssignment {
+  id: string;
+  subject_id: string;
+  department_id: string;
+  department_code: string;
+  department_name: string;
+  granted_by_subject_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SubjectDepartmentList {
+  records: SubjectDepartmentAssignment[];
+  meta: { total: number };
+}
+
+/** 指定主体的部门归属；subjectIds 为空数组时返回全部归属 */
+export function listSubjectDepartments(subjectIds: string[] = []): Promise<SubjectDepartmentList> {
+  const params = new URLSearchParams();
+  const ids = subjectIds.map((id) => id.trim()).filter((id) => id.length > 0);
+  if (ids.length > 0) params.set("subject_ids", ids.join(","));
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return request<SubjectDepartmentList>(`/subject-departments${suffix}`, {}, { service: "nexus" });
+}
+
+/** 全量替换某个主体的部门；传 null 表示清空归属 */
+export function replaceSubjectDepartment(
+  subjectId: string,
+  departmentId: string | null,
+): Promise<SubjectDepartmentAssignment[]> {
+  return request<SubjectDepartmentAssignment[]>(
+    `/subject-departments/subjects/${encodeURIComponent(subjectId)}`,
+    { method: "PUT", body: JSON.stringify({ department_id: departmentId }) },
+    { service: "nexus" },
+  );
+}
+
+export interface SubjectPermissions {
+  subject_id: string;
+  role_codes: string[];
+  permission_codes: string[];
+  source: string;
+}
+
+/** 该主体当前生效的权限码（角色权限码的并集），用于配置后自查 */
+export function getSubjectPermissions(subjectId: string): Promise<SubjectPermissions> {
+  return request<SubjectPermissions>(
+    `/subject-permissions?subject_id=${encodeURIComponent(subjectId)}`,
+    {},
+    { service: "nexus" },
+  );
+}
+
+export interface DeclaredPermission {
+  method: string;
+  path: string;
+  permission_code: string;
+}
+
+/** 040：产品声明的权限码目录条目；`wired=false` 表示还没有接口在判定它。 */
+export interface PermissionCatalogEntry {
+  code: string;
+  description: string;
+  wired: boolean;
+  routes: { method: string; path: string }[];
+}
+
+export interface DeclaredPermissions {
+  permission_codes: string[];
+  catalog: PermissionCatalogEntry[];
+  routes: DeclaredPermission[];
+}
+
+/** Aceso 权限自省：已接线的权限码 + 产品权限目录（含未接线的码） */
+export function listDeclaredPermissions(): Promise<DeclaredPermissions> {
+  return request<DeclaredPermissions>("/access/v1/permissions", {}, { service: "aceso" });
 }
 
 /** 发药单等业务页面使用的仓库下拉选项；无配置时返回空数组 */
@@ -951,6 +1073,8 @@ export interface ElderlyDischargeHandoverEncounter {
   ward: string | null;
   admit_date: string | null;
   discharge_date: string | null;
+  death_date: string | null;
+  death_cause: string | null;
   admitting_diagnosis: string | null;
   discharge_diagnosis: string | null;
   attending_physician: string | null;

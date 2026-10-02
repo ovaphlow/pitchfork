@@ -3,6 +3,7 @@ package identity
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -10,23 +11,24 @@ import (
 	"github.com/ovaphlow/pitchfork/service-idp-go/internal/password"
 )
 
-const getRoleIDByCode = `
-SELECT id
-FROM identity_roles
-WHERE role_code = :role_code`
+const grantPlatformAdmin = `
+UPDATE identity_subjects
+SET is_platform_admin = 1,
+    updated_at = :updated_at
+WHERE id = :id`
 
-const assignSubjectRole = `
-INSERT INTO identity_subject_roles(id, subject_id, role_id, granted_by_subject_id, created_at)
-VALUES (
-    :id, :subject_id, :role_id, :granted_by_subject_id, :created_at
-)`
+const countEnabledPlatformAdmins = `
+SELECT COUNT(*)
+FROM identity_subjects
+WHERE status = :status
+  AND is_platform_admin = 1`
 
-const createRoleIfAbsent = `
-INSERT INTO identity_roles(id, role_code, display_name, description, created_at, updated_at)
-VALUES (
-    :id, :role_code, :display_name, :description, :created_at, :updated_at
-)
-ON CONFLICT(role_code) DO NOTHING`
+const findSubjectIDByIdentifier = `
+SELECT subject_id
+FROM identity_identifiers
+WHERE identifier_type = :identifier_type
+  AND normalized_value = :normalized_value
+  AND identifier_usage = :identifier_usage`
 
 type BootstrapInput struct {
 	Identifier string
@@ -41,19 +43,20 @@ func EnsureBootstrap(ctx context.Context, database *sql.DB, input BootstrapInput
 	defer transaction.Rollback()
 
 	now := time.Now().UTC()
-	if err := seedRoles(ctx, transaction, now); err != nil {
-		return false, err
-	}
 
 	var subjectCount int64
 	if err := namedGet(ctx, transaction, &subjectCount, countSubjects, nil); err != nil {
 		return false, fmt.Errorf("count identity subjects: %w", err)
 	}
 	if subjectCount > 0 {
+		promoted, err := promoteBootstrapAdministratorIfNeeded(ctx, transaction, input.Identifier, now)
+		if err != nil {
+			return false, err
+		}
 		if err := transaction.Commit(); err != nil {
 			return false, fmt.Errorf("commit existing bootstrap state: %w", err)
 		}
-		return false, nil
+		return promoted, nil
 	}
 
 	identifier, err := normalizeAccountIdentifier(input.Identifier)
@@ -74,10 +77,6 @@ func EnsureBootstrap(ctx context.Context, database *sql.DB, input BootstrapInput
 		return false, err
 	}
 	credentialID, err := NewULID(now)
-	if err != nil {
-		return false, err
-	}
-	grantID, err := NewULID(now)
 	if err != nil {
 		return false, err
 	}
@@ -125,20 +124,11 @@ func EnsureBootstrap(ctx context.Context, database *sql.DB, input BootstrapInput
 		return false, fmt.Errorf("create bootstrap credential: %w", err)
 	}
 
-	var adminRoleID string
-	if err := namedGet(ctx, transaction, &adminRoleID, getRoleIDByCode, map[string]any{
-		"role_code": RoleCodeAdministrator,
+	if err := namedExec(ctx, transaction, grantPlatformAdmin, map[string]any{
+		"id":         subjectID,
+		"updated_at": now,
 	}); err != nil {
-		return false, fmt.Errorf("find identity admin role: %w", err)
-	}
-	if err := namedExec(ctx, transaction, assignSubjectRole, map[string]any{
-		"id":                    grantID,
-		"subject_id":            subjectID,
-		"role_id":               adminRoleID,
-		"granted_by_subject_id": nil,
-		"created_at":            now,
-	}); err != nil {
-		return false, fmt.Errorf("grant bootstrap administrator role: %w", err)
+		return false, fmt.Errorf("grant bootstrap platform administrator: %w", err)
 	}
 	if err := insertAuditEvent(ctx, transaction, auditEvent{
 		Action:          AuditActionSubjectCreated,
@@ -155,32 +145,43 @@ func EnsureBootstrap(ctx context.Context, database *sql.DB, input BootstrapInput
 	return true, nil
 }
 
-func seedRoles(ctx context.Context, queries querier, now time.Time) error {
-	roles := []struct {
-		Code        string
-		DisplayName string
-		Description string
-	}{
-		{Code: RoleCodeAdministrator, DisplayName: "身份管理员", Description: "管理身份、凭据、角色、会话和恢复操作。"},
-		{Code: RoleCodeAuditReader, DisplayName: "审计查看者", Description: "查看运行概览和不可变审计事件。"},
+// promoteBootstrapAdministratorIfNeeded 是「没有任何平台管理员」时的兜底通道：
+// 若库里一个启用的平台管理员都没有，把 IDENTITYD_BOOTSTRAP_IDENTIFIER 命中的主体提升为平台管理员。
+// 幂等，且只在无人可管理时触发，不会覆盖正常授予结果。
+func promoteBootstrapAdministratorIfNeeded(ctx context.Context, queries querier, identifier string, now time.Time) (bool, error) {
+	var administrators int64
+	if err := namedGet(ctx, queries, &administrators, countEnabledPlatformAdmins, map[string]any{
+		"status": StatusEnabled,
+	}); err != nil {
+		return false, fmt.Errorf("count platform administrators: %w", err)
 	}
-	for _, role := range roles {
-		roleID, err := NewULID(now)
-		if err != nil {
-			return err
-		}
-		if err := namedExec(ctx, queries, createRoleIfAbsent, map[string]any{
-			"id":           roleID,
-			"role_code":    role.Code,
-			"display_name": role.DisplayName,
-			"description":  role.Description,
-			"created_at":   now,
-			"updated_at":   now,
-		}); err != nil {
-			return fmt.Errorf("seed role %s: %w", role.Code, err)
-		}
+	if administrators > 0 || strings.TrimSpace(identifier) == "" {
+		return false, nil
 	}
-	return nil
+
+	normalized, err := normalizeAccountIdentifier(identifier)
+	if err != nil {
+		return false, nil
+	}
+	var subjectID string
+	err = namedGet(ctx, queries, &subjectID, findSubjectIDByIdentifier, map[string]any{
+		"identifier_type":  IdentifierTypeAccount,
+		"normalized_value": normalized,
+		"identifier_usage": IdentifierUsagePrimaryLogin,
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("find bootstrap subject: %w", err)
+	}
+	if err := namedExec(ctx, queries, grantPlatformAdmin, map[string]any{
+		"id":         subjectID,
+		"updated_at": now,
+	}); err != nil {
+		return false, fmt.Errorf("promote bootstrap platform administrator: %w", err)
+	}
+	return true, nil
 }
 
 func normalizeAccountIdentifier(value string) (string, error) {

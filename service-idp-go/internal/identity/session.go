@@ -101,12 +101,12 @@ SET last_seen_at = :last_seen_at,
 WHERE id = :id
   AND revoked_at IS NULL`
 
-const countSubjectRoleAssignments = `
+const countEnabledPlatformAdministrator = `
 SELECT COUNT(*)
-FROM identity_subject_roles AS subject_role
-JOIN identity_roles AS role ON role.id = subject_role.role_id
-WHERE subject_role.subject_id = :subject_id
-  AND role.role_code = :role_code`
+FROM identity_subjects
+WHERE id = :subject_id
+  AND status = :status
+  AND is_platform_admin = 1`
 
 const getActiveSessionSubjectByTokenHash = `
 SELECT subject_id
@@ -338,15 +338,17 @@ func VerifyCSRF(session Session, rawToken string) bool {
 	return subtle.ConstantTimeCompare(tokenHash, session.csrfTokenHash) == 1
 }
 
-func HasRole(ctx context.Context, database *sql.DB, subjectID string, roleCode string) (bool, error) {
-	var assignmentCount int64
-	if err := namedGet(ctx, newQuerier(database), &assignmentCount, countSubjectRoleAssignments, map[string]any{
+// IsPlatformAdmin 报告该主体是否是启用的平台管理员。
+// 这是 IDP 管理台唯一的准入依据，刻意不依赖 Nexus，避免循环依赖锁死管理台。
+func IsPlatformAdmin(ctx context.Context, database *sql.DB, subjectID string) (bool, error) {
+	var administratorCount int64
+	if err := namedGet(ctx, newQuerier(database), &administratorCount, countEnabledPlatformAdministrator, map[string]any{
 		"subject_id": subjectID,
-		"role_code":  roleCode,
+		"status":     StatusEnabled,
 	}); err != nil {
-		return false, fmt.Errorf("check control-plane role: %w", err)
+		return false, fmt.Errorf("check platform administrator: %w", err)
 	}
-	return assignmentCount > 0, nil
+	return administratorCount > 0, nil
 }
 
 func Logout(ctx context.Context, database *sql.DB, rawToken string) error {

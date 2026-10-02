@@ -21,8 +21,8 @@ func TestMigrateAppliesPhaseOneSchemaOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first migration: %v", err)
 	}
-	if firstResult.Applied != 9 {
-		t.Fatalf("first applied count = %d, want 9", firstResult.Applied)
+	if firstResult.Applied != 10 {
+		t.Fatalf("first applied count = %d, want 10", firstResult.Applied)
 	}
 
 	secondResult, err := database.Migrate(context, databaseConnection, migrations.Files)
@@ -43,8 +43,6 @@ func TestMigrateAppliesPhaseOneSchemaOnce(t *testing.T) {
 				'identity_profiles',
 				'identity_identifiers',
 				'identity_password_credentials',
-				'identity_roles',
-				'identity_subject_roles',
 				'identity_sessions',
 				'identity_login_throttles',
 				'identity_audit_events'
@@ -52,8 +50,8 @@ func TestMigrateAppliesPhaseOneSchemaOnce(t *testing.T) {
 	`).Scan(&tableCount); err != nil {
 		t.Fatalf("count Phase 1 tables: %v", err)
 	}
-	if tableCount != 9 {
-		t.Fatalf("Phase 1 table count = %d, want 9", tableCount)
+	if tableCount != 7 {
+		t.Fatalf("Phase 1 table count = %d, want 7", tableCount)
 	}
 }
 

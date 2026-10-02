@@ -25,35 +25,34 @@ func TestEnsureBootstrapCreatesAdministratorAndAuditTrail(t *testing.T) {
 		t.Fatal("bootstrap was not created")
 	}
 
-	var subjectCount, roleCount, grantCount, auditCount int
+	var subjectCount, administratorCount, auditCount int
 	if err := databaseConnection.QueryRow(`
 		SELECT
 			(SELECT COUNT(*) FROM identity_subjects),
-			(SELECT COUNT(*) FROM identity_roles),
-			(SELECT COUNT(*) FROM identity_subject_roles),
+			(SELECT COUNT(*) FROM identity_subjects WHERE is_platform_admin = 1),
 			(SELECT COUNT(*) FROM identity_audit_events)
-	`).Scan(&subjectCount, &roleCount, &grantCount, &auditCount); err != nil {
+	`).Scan(&subjectCount, &administratorCount, &auditCount); err != nil {
 		t.Fatalf("count bootstrap records: %v", err)
 	}
-	if subjectCount != 1 || roleCount != 2 || grantCount != 1 || auditCount != 1 {
-		t.Fatalf("bootstrap counts = subjects:%d roles:%d grants:%d audits:%d", subjectCount, roleCount, grantCount, auditCount)
+	if subjectCount != 1 || administratorCount != 1 || auditCount != 1 {
+		t.Fatalf("bootstrap counts = subjects:%d administrators:%d audits:%d", subjectCount, administratorCount, auditCount)
 	}
 
-	var normalizedIdentifier, passwordHash, roleCode string
+	var normalizedIdentifier, passwordHash string
+	var platformAdmin bool
 	if err := databaseConnection.QueryRow(`
-		SELECT identifier.normalized_value, credential.password_hash, role.role_code
+		SELECT identifier.normalized_value, credential.password_hash, subject.is_platform_admin
 		FROM identity_identifiers AS identifier
 		JOIN identity_password_credentials AS credential ON credential.subject_id = identifier.subject_id
-		JOIN identity_subject_roles AS grant ON grant.subject_id = identifier.subject_id
-		JOIN identity_roles AS role ON role.id = grant.role_id
-	`).Scan(&normalizedIdentifier, &passwordHash, &roleCode); err != nil {
+		JOIN identity_subjects AS subject ON subject.id = identifier.subject_id
+	`).Scan(&normalizedIdentifier, &passwordHash, &platformAdmin); err != nil {
 		t.Fatalf("read bootstrap identity: %v", err)
 	}
 	if normalizedIdentifier != "admin" {
 		t.Fatalf("normalized identifier = %q, want admin", normalizedIdentifier)
 	}
-	if roleCode != "identity.admin" {
-		t.Fatalf("role code = %q", roleCode)
+	if !platformAdmin {
+		t.Fatal("bootstrap subject must be a platform administrator")
 	}
 	matched, err := password.Verify("correct horse battery staple", passwordHash)
 	if err != nil || !matched {

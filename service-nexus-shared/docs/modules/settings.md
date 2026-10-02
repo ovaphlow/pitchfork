@@ -54,7 +54,7 @@ ALTER TABLE settings RENAME COLUMN update_time TO updated_at;
 
 | Category | 路由路径 | 说明 | 使用方 |
 | ---------- | ---------- | ------ | -------- |
-| `department` | `/settings/v1/departments` | 部门管理 | aceso, trainova |
+| `department` | `/settings/v1/departments` | 部门管理（**历史镜像**：039 起组织部门归 `departments` 模块，settings 行仅保留给冻结的 Trainova 页面） | aceso（旧）, trainova |
 | `knowledge-category` | `/settings/v1/knowledge-categories` | 知识分类 | trainova |
 | `knowledge-tag` | `/settings/v1/knowledge-tags` | 知识标签 | trainova |
 
