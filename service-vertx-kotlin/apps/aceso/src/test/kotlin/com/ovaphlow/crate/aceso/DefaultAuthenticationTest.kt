@@ -85,6 +85,7 @@ class DefaultAuthenticationTest {
             HttpMethod.POST to "/crate-api/dining/v1/rosters/generate",
             HttpMethod.GET to "/crate-api/inventories/v1/materials",
             HttpMethod.POST to "/crate-api/inventories/v1/operations/inbound",
+            HttpMethod.GET to "/crate-api/access/v1/permissions",
         )
 
     private val publicHealthPaths: List<String> =
@@ -368,6 +369,12 @@ class DefaultAuthenticationTest {
         apiRouter.route("/nursing/v1/*").subRouter(nursingRouter(vertx))
         apiRouter.route("/dining/v1/*").subRouter(diningRouter(vertx))
         apiRouter.route("/pharmacy/v1/*").subRouter(pharmacyRouter(vertx))
+        apiRouter.route("/access/v1/*").subRouter(
+            businessRouter(
+                vertx,
+                Triple(HttpMethod.GET, "/permissions", "access:GET /permissions"),
+            ),
+        )
 
         if (!gateBeforeSubRouters) {
             apiRouter.route().handler(gate)

@@ -3,7 +3,6 @@ plugins {
 }
 
 dependencies {
-    implementation(project(":libs:permissions"))
     implementation(project(":libs:knowledge"))
     implementation(project(":libs:skills"))
     implementation(project(":libs:trainings"))
@@ -14,7 +13,6 @@ dependencies {
     implementation(project(":libs:database"))
     implementation(libs.vertx.web)
     implementation(libs.vertx.config)
-    implementation(libs.vertx.auth.jwt)
     implementation(libs.slf4j.api)
     implementation(libs.logback.classic)
     implementation(libs.logstash.logback.encoder)

@@ -15,7 +15,7 @@ cross product boundaries.
 
 | Layer | Libraries |
 |---|---|
-| Platform | `permissions`, `logging`, `database`, `common` |
+| Platform | `logging`, `database`, `common` |
 | Trainova | `knowledge`, `skills`, `trainings`, `exams`, `onsite`, `analytics` |
 | Aceso | `inventories`, `pharmacy`, `nursing`, `dining` |
 | Incubating | `healthcare` |
@@ -28,9 +28,8 @@ complete product contract. Nexus owns shared `settings`, `messages` and `files`.
 ## Configuration And Data
 
 - Backends load a local copy of `apps/<product>/config.example.json` through
-  `PITCHFORK_CONFIG`; passwords and `PITCHFORK_JWT_SECRET` come only from the
-  environment. Never commit secrets, local `config.json`, `.env` or generated
-  jOOQ configuration.
+  `PITCHFORK_CONFIG`; passwords come only from the environment. Never commit
+  secrets, local `config.json`, `.env` or generated jOOQ configuration.
 - A domain table, its Flyway migration and its jOOQ config belong to the owning
   `libs/<module>`. The app receives only migrations from its runtime libraries.
 - Trainova `apps/trainova/.../V5-V7` is executed legacy history: do not move,

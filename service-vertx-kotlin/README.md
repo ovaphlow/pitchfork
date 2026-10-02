@@ -14,7 +14,6 @@ Vert.x Kotlin monorepo for the Trainova and Aceso products. The authoritative ar
 cp apps/trainova/config.example.json apps/trainova/config.json
 export PITCHFORK_CONFIG="$PWD/apps/trainova/config.json"
 export PITCHFORK_DB_PASSWORD='local-development-password'
-export PITCHFORK_JWT_SECRET='long-random-secret'
 ./gradlew :apps:trainova:run
 ```
 
@@ -26,7 +25,6 @@ Trainova listens on `8421`.
 cp apps/aceso/config.example.json apps/aceso/config.json
 export PITCHFORK_CONFIG="$PWD/apps/aceso/config.json"
 export PITCHFORK_DB_PASSWORD='local-development-password'
-export PITCHFORK_JWT_SECRET='long-random-secret'
 ./gradlew :apps:aceso:run
 ```
 
