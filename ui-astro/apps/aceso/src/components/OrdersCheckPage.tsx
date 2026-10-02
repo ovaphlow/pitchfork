@@ -6,6 +6,8 @@ import {
   type NurseCheckPendingOrder,
 } from "@pitchfork/shared/aceso";
 import { formatDateTime } from "../lib/datetime";
+import { DOMAIN_ADMISSION_PHRASE, DOMAIN_ENTITY } from "../lib/domain";
+import { useDomain } from "../lib/useDomain";
 
 const PAGE_SIZE = 50;
 
@@ -19,6 +21,9 @@ function details(row: NurseCheckPendingOrder): Record<string, unknown> {
 
 /** 医嘱核对汇总：跨入住展示所有待核对（未核对）的用药医嘱，护士在此直接核对 */
 export default function OrdersCheckPage() {
+  // 本页在医疗/养老都可见：主体称呼与入院口径随域切换（居民/入院 ↔ 长者/养老入住）
+  const domain = useDomain();
+  const { person } = DOMAIN_ENTITY[domain];
   const [records, setRecords] = useState<NurseCheckPendingOrder[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -63,7 +68,7 @@ export default function OrdersCheckPage() {
   }, [checkingId, load]);
 
   const columns: Column<NurseCheckPendingOrder>[] = [
-    { key: "patient_name", header: "长者", render: (row) => row.patient_name || row.patient_id },
+    { key: "patient_name", header: person, render: (row) => row.patient_name || row.patient_id },
     { key: "encounter_no", header: "住院号", className: "min-w-[110px]", render: (row) => row.encounter_no ?? "-" },
     { key: "drug_name", header: "药品", className: "min-w-[140px]", render: (row) => {
         const d = details(row);
@@ -119,7 +124,7 @@ export default function OrdersCheckPage() {
         actions={
           <div className="flex flex-wrap items-center gap-2">
             <Input
-              placeholder="搜索药名 / 医嘱内容 / 长者 / 住院号"
+              placeholder={`搜索药名 / 医嘱内容 / ${person} / 住院号`}
               value={searchInput}
               onChange={(event) => setSearchInput(event.target.value)}
               onKeyDown={(event) => {
@@ -152,7 +157,7 @@ export default function OrdersCheckPage() {
           <EmptyState
             icon="✅"
             title="暂无待核对用药医嘱"
-            description="当前所有活动养老入住下的用药医嘱均已由护士核对。"
+            description={`当前所有活动${DOMAIN_ADMISSION_PHRASE[domain]}下的用药医嘱均已由护士核对。`}
           />
         ) : (
           <Table

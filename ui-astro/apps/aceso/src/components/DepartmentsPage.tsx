@@ -11,6 +11,22 @@ import { Button, Card, Input, Modal, Table, type Column } from "@pitchfork/ui";
 
 const indentClasses = ["pl-0", "pl-5", "pl-10", "pl-15", "pl-20", "pl-24"] as const;
 
+const filterInputClass =
+  "h-8 w-56 rounded-md border border-border bg-surface px-2 text-xs text-fg placeholder:text-fg-dimmed focus:outline-none focus-visible:ring-2 focus-visible:ring-accent";
+const filterSelectClass =
+  "h-8 rounded-md border border-border bg-surface px-2 text-xs text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent";
+
+/** 排序档位：默认（层级）与现状逐字一致（sort_order, code） */
+type SortField = "default" | "name" | "code" | "members";
+type SortDirection = "asc" | "desc";
+
+const SORT_FIELD_OPTIONS: { value: SortField; label: string }[] = [
+  { value: "default", label: "默认（层级）" },
+  { value: "name", label: "名称" },
+  { value: "code", label: "编码" },
+  { value: "members", label: "成员数" },
+];
+
 interface DepartmentRow extends Department {
   depth: number;
 }
@@ -33,13 +49,62 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
-function flattenDepartments(departments: Department[]): DepartmentRow[] {
+interface DepartmentSearchResult {
+  /** 命中节点及其祖先链的编码：祖先链是「上级部门」列语义所需，不能单独滤掉 */
+  visibleCodes: Set<string>;
+  matchedCount: number;
+}
+
+/** 名称或编码的大小写不敏感子串匹配；命中节点的祖先链一并保留 */
+function searchDepartments(departments: Department[], query: string): DepartmentSearchResult {
+  const needle = query.trim().toLowerCase();
+  const byCode = new Map(departments.map((department) => [department.code, department]));
+  const visibleCodes = new Set<string>();
+  let matchedCount = 0;
+  for (const department of departments) {
+    const hit =
+      department.name.toLowerCase().includes(needle) || department.code.toLowerCase().includes(needle);
+    if (!hit) continue;
+    matchedCount += 1;
+    visibleCodes.add(department.code);
+    // 沿 parent_code 上溯补齐祖先链；已入集即停，同时防住脏数据里的环
+    let parentCode = department.parent_code;
+    while (parentCode && !visibleCodes.has(parentCode)) {
+      visibleCodes.add(parentCode);
+      parentCode = byCode.get(parentCode)?.parent_code ?? "";
+    }
+  }
+  return { visibleCodes, matchedCount };
+}
+
+/** 同一父节点下的兄弟比较：只在兄弟之间排序，层级与缩进不受影响 */
+function compareSiblings(a: Department, b: Department, field: SortField, direction: SortDirection): number {
+  const factor = direction === "desc" ? -1 : 1;
+  const byDefault = a.sort_order - b.sort_order || a.code.localeCompare(b.code);
+  if (field === "default") return byDefault * factor;
+  const primary =
+    field === "name"
+      ? a.name.localeCompare(b.name)
+      : field === "code"
+        ? a.code.localeCompare(b.code)
+        : a.member_count - b.member_count;
+  // 主键相等时退回默认档位，保证顺序稳定可复现
+  return primary * factor || byDefault;
+}
+
+function flattenDepartments(
+  departments: Department[],
+  compare: (a: Department, b: Department) => number,
+): DepartmentRow[] {
   const byCode = new Map(departments.map((department) => [department.code, department]));
   const childrenByParent = new Map<string, Department[]>();
   for (const department of departments) {
     const children = childrenByParent.get(department.parent_code) ?? [];
     children.push(department);
     childrenByParent.set(department.parent_code, children);
+  }
+  for (const children of childrenByParent.values()) {
+    children.sort(compare);
   }
 
   const rows: DepartmentRow[] = [];
@@ -55,8 +120,11 @@ function flattenDepartments(departments: Department[]): DepartmentRow[] {
     }
   };
 
-  for (const department of departments) {
-    if (!department.parent_code || !byCode.has(department.parent_code)) visit(department, 0, new Set());
+  const roots = departments
+    .filter((department) => !department.parent_code || !byCode.has(department.parent_code))
+    .sort(compare);
+  for (const department of roots) {
+    visit(department, 0, new Set());
   }
   for (const department of departments) {
     visit(department, 0, new Set());
@@ -83,6 +151,9 @@ export default function DepartmentsPage() {
   const [departments, setDepartments] = useState<Department[]>([]);
   const [loading, setLoading] = useState(true);
   const [pageError, setPageError] = useState("");
+  const [search, setSearch] = useState("");
+  const [sortField, setSortField] = useState<SortField>("default");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
   const [editorOpen, setEditorOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<Department | null>(null);
   const [form, setForm] = useState<DepartmentForm>(departmentFormDefaults);
@@ -108,7 +179,17 @@ export default function DepartmentsPage() {
     void load();
   }, [load]);
 
-  const rows = useMemo(() => flattenDepartments(departments), [departments]);
+  // 排序只重排兄弟子树，层级由 flatten 固定；parentChoices 始终用未过滤的全量行，
+  // 搜索只影响表格可见行（命中节点 + 祖先链）
+  const rows = useMemo(
+    () => flattenDepartments(departments, (a, b) => compareSiblings(a, b, sortField, sortDirection)),
+    [departments, sortField, sortDirection],
+  );
+  const searchResult = useMemo(() => searchDepartments(departments, search), [departments, search]);
+  const visibleRows = useMemo(
+    () => (search.trim() ? rows.filter((row) => searchResult.visibleCodes.has(row.code)) : rows),
+    [rows, search, searchResult],
+  );
   const unavailableParentCodes = useMemo(() => {
     if (!editTarget) return new Set<string>();
     return new Set([editTarget.code, ...descendantCodes(departments, editTarget.code)]);
@@ -264,8 +345,48 @@ export default function DepartmentsPage() {
 
       {pageError && <div className="rounded-lg border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">{pageError}</div>}
 
-      <Card title="部门列表" actions={<span className="text-sm text-fg-dimmed">共 {departments.length} 个</span>}>
-        <Table columns={columns} data={rows} loading={loading} emptyMessage="暂无部门" />
+      <Card
+        title="部门列表"
+        actions={
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              className={filterInputClass}
+              aria-label="按名称或编码搜索部门"
+              placeholder="搜索名称或编码"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+            />
+            <select
+              className={filterSelectClass}
+              aria-label="部门排序字段"
+              value={sortField}
+              onChange={(event) => setSortField(event.target.value as SortField)}
+            >
+              {SORT_FIELD_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setSortDirection((direction) => (direction === "asc" ? "desc" : "asc"))}
+            >
+              {sortDirection === "asc" ? "升序 ↑" : "降序 ↓"}
+            </Button>
+            <span className="text-sm text-fg-dimmed">
+              {search.trim()
+                ? `匹配 ${searchResult.matchedCount} / 共 ${departments.length} 个`
+                : `共 ${departments.length} 个`}
+            </span>
+          </div>
+        }
+      >
+        <Table
+          columns={columns}
+          data={visibleRows}
+          loading={loading}
+          emptyMessage={search.trim() ? `没有匹配「${search.trim()}」的部门` : "暂无部门"}
+        />
       </Card>
 
       <Modal open={editorOpen} onClose={() => !saving && setEditorOpen(false)} title={editTarget ? "编辑部门" : "添加部门"}>

@@ -27,6 +27,7 @@ const subjectFormDefaults = {
   identifier: "",
   password: "",
   roleCodes: [] as string[],
+  departmentId: "",
 };
 
 function errorMessage(error: unknown, fallback: string): string {
@@ -267,10 +268,23 @@ export default function UsersPage() {
           roleWarning = errorMessage(error, "未知错误");
         }
       }
+      // 部门与角色对称：建号后单独写入，失败不回滚用户，改为合并提示（可在行内重试）
+      let departmentWarning = "";
+      if (createForm.departmentId) {
+        try {
+          await replaceSubjectDepartment(subject.id, createForm.departmentId);
+        } catch (error) {
+          departmentWarning = errorMessage(error, "未知错误");
+        }
+      }
       setCreateOpen(false);
       await load(1);
-      if (roleWarning) {
-        setPageError(`用户「${subject.display_name}」已创建，但角色未保存：${roleWarning}；可在列表行内重新分配`);
+      if (roleWarning || departmentWarning) {
+        const failures = [
+          roleWarning && `角色未保存：${roleWarning}`,
+          departmentWarning && `部门未保存：${departmentWarning}`,
+        ].filter(Boolean);
+        setPageError(`用户「${subject.display_name}」已创建，但${failures.join("；")}；可在列表行内重新设置`);
       }
     } catch (error) {
       setCreateError(errorMessage(error, "无法创建用户"));
@@ -523,6 +537,31 @@ export default function UsersPage() {
               catalogError={roleCatalogError}
               onToggle={(roleCode) => setCreateForm((form) => ({ ...form, roleCodes: toggleCode(form.roleCodes, roleCode) }))}
             />
+          </div>
+          <div className="space-y-2">
+            <span className="block text-sm font-medium text-fg">部门（可选）</span>
+            {departmentCatalogError ? (
+              <p className="text-xs text-fg-dimmed">{departmentCatalogError}</p>
+            ) : departments.length === 0 ? (
+              <p className="text-xs text-fg-dimmed">部门目录为空，请先到「部门」页创建部门。</p>
+            ) : (
+              <div className="flex flex-col gap-1.5">
+                <label className="text-sm font-medium text-fg-muted" htmlFor="create-user-department">部门</label>
+                <select
+                  id="create-user-department"
+                  value={createForm.departmentId}
+                  onChange={(event) => setCreateForm((form) => ({ ...form, departmentId: event.target.value }))}
+                  className="rounded-md border border-border bg-surface px-3 py-2 text-sm text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                >
+                  <option value="">（不设置）</option>
+                  {departments.map((department) => (
+                    <option key={department.id} value={department.id}>
+                      {department.name}（{department.code}）
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
           </div>
           <div className="flex justify-end gap-3 pt-2">
             <Button variant="ghost" onClick={() => setCreateOpen(false)} disabled={creating}>取消</Button>

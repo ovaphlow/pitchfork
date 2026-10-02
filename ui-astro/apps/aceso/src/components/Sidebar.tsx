@@ -65,8 +65,9 @@ export const menuItems: Item[] = [
         domainLabels: PAGE_TITLE_DOMAIN_LABELS["/dashboard/inpatient"].labels,
         path: "/dashboard/inpatient", icon: "🏥", domains: ["医疗", "养老"], order: { 养老: 1 },
       },
-      { label: "医生诊疗", path: "/dashboard/orders", icon: "📝", domains: ["养老"], order: { 养老: 2 } },
-      { label: "医嘱核对", path: "/dashboard/orders-check", icon: "✅", domains: ["养老"], order: { 养老: 3 } },
+      // 医生诊疗/医嘱核对是住院诊疗的主体环节，医疗域同样可见（041 Q4）
+      { label: "医生诊疗", path: "/dashboard/orders", icon: "📝", domains: ["医疗", "养老"], order: { 养老: 2 } },
+      { label: "医嘱核对", path: "/dashboard/orders-check", icon: "✅", domains: ["医疗", "养老"], order: { 养老: 3 } },
       { label: "药房管理",   path: "/dashboard/pharmacy",     icon: "💊", domains: ["医疗", "养老"], order: { 养老: 4 } },
       { label: "库存计量",   path: "/dashboard/inventory",    icon: "📦", domains: ["医疗", "养老"], order: { 养老: 5 } },
       { label: "体检管理",   path: "/dashboard/checkup",      icon: "🩻", domains: ["医疗", "养老", "儿保"], order: { 养老: 6 } },

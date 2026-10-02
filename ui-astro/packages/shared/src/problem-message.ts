@@ -10,11 +10,22 @@ export interface ApiProblem {
 /**
  * 把服务端错误翻成用户能照做的提示。
  *
- * 权限闸门在无权限时回 403 + `required_permission`，上游故障回 503；
- * 这两种若原样透出英文错误码，用户只会看到 `forbidden`，不知道该找谁要哪个权限。
+ * 权限闸门在无权限时回 403 + `required_permission`，上游故障回 503，
+ * 删除仍被引用的部门/角色时 Nexus 回 409 + 英文 detail；
+ * 这几种若原样透出英文，用户只会看到 `forbidden` 或英文句子，不知道该找谁要哪权限、
+ * 还是该先调整归属。
  *
  * 纯函数、不依赖运行环境，便于逐字锁定文案（见 `apps/aceso/tests/api-error-messages.test.ts`）。
  */
+
+/**
+ * 删除冲突（409）的中文映射：句式逐字对齐 Nexus 的英文错误约定
+ * （`service-nexus-shared/src/departments/mod.rs` / `src/roles/mod.rs`）。
+ * 只在这两条句式上动手：其余 409（如重复编码）继续走通用兜底，原样透出 detail。
+ */
+const DEPARTMENT_DELETE_CONFLICT = /^department is assigned to (\d+) subject\(s\); unassign before deleting$/;
+const ROLE_DELETE_CONFLICT = /^role is assigned to (\d+) subject\(s\); unassign before deleting$/;
+
 export function problemMessage(
   status: number,
   problem: ApiProblem | null,
@@ -30,6 +41,17 @@ export function problemMessage(
     }
     if (problem?.error === "identity service unavailable") {
       return "认证服务暂时不可用，请稍后重试（未被登出）。";
+    }
+  }
+  if (status === 409) {
+    const detail = problem?.detail ?? "";
+    const departmentConflict = DEPARTMENT_DELETE_CONFLICT.exec(detail);
+    if (departmentConflict) {
+      return `该部门下还有 ${departmentConflict[1]} 名成员，请先调整归属后再删除。`;
+    }
+    const roleConflict = ROLE_DELETE_CONFLICT.exec(detail);
+    if (roleConflict) {
+      return `该角色已分配给 ${roleConflict[1]} 个用户，请先取消分配后再删除。`;
     }
   }
   return problem?.error || problem?.detail || problem?.title || responseText || `请求失败 (${status})`;

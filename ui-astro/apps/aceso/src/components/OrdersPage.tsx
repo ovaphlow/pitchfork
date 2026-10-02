@@ -25,7 +25,9 @@ import {
   type ProgressNote,
 } from "@pitchfork/shared/aceso";
 import { formatDateTime, toOffsetDateTime, todayLocal } from "../lib/datetime";
+import { DOMAIN_ADMISSION_PHRASE, DOMAIN_ENTITY, PAGE_TITLE_DOMAIN_LABELS, displayLabel } from "../lib/domain";
 import { formatOrderDetailValue, formatOrderItemLabel } from "../lib/orderDetailDisplay";
+import { useDomain } from "../lib/useDomain";
 
 interface ActiveAdmission extends Encounter {
   patientName: string;
@@ -285,6 +287,12 @@ function orderClassVariant(orderClass: string | null): "default" | "success" | "
 }
 
 export default function OrdersPage() {
+  // 本页在医疗/养老都可见：主体称呼与入院口径随域切换（居民/入院 ↔ 长者/养老入住）
+  const domain = useDomain();
+  const { person } = DOMAIN_ENTITY[domain];
+  const admissionPage = PAGE_TITLE_DOMAIN_LABELS["/dashboard/admission"];
+  // 页面名与侧边栏同源（医疗「入院管理」/ 养老「入住管理」）
+  const admissionLabel = displayLabel(admissionPage.base, admissionPage.labels, domain);
   const [admissions, setAdmissions] = useState<ActiveAdmission[]>([]);
   const [admissionsLoading, setAdmissionsLoading] = useState(true);
   const [pageError, setPageError] = useState("");
@@ -937,7 +945,7 @@ export default function OrdersPage() {
         {admissions.length > 0 && (
           <div className="flex flex-wrap items-end gap-3">
             <div className="flex flex-col gap-1.5">
-              <label className="text-sm font-medium text-fg-muted" htmlFor="orders-encounter">入住长者</label>
+              <label className="text-sm font-medium text-fg-muted" htmlFor="orders-encounter">入住{person}</label>
               <select
                 id="orders-encounter"
                 className={`${selectClass} min-w-[280px]`}
@@ -969,14 +977,14 @@ export default function OrdersPage() {
         <Card>
           <EmptyState
             icon="🏠"
-            title="暂无入住长者"
-            description="请先在入住管理办理养老入住，再开展诊疗工作。"
+            title={`暂无入住${person}`}
+            description={`请先在${admissionLabel}办理${DOMAIN_ADMISSION_PHRASE[domain]}，再开展诊疗工作。`}
             action={
               <a
                 href="/dashboard/admission"
                 className="inline-flex items-center justify-center rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:brightness-110"
               >
-                前往入住管理
+                前往{admissionLabel}
               </a>
             }
           />

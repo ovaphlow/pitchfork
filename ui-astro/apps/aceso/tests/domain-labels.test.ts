@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 import {
+	DOMAIN_ADMISSION_PHRASE,
 	DOMAIN_ENTITY,
 	PAGE_TITLE_DOMAIN_LABELS,
 	displayLabel,
@@ -75,6 +76,9 @@ const NON_ELDERLY_VISIBLE_COMPONENTS = [
 	"HealthMonitorPage.tsx",
 	"BedsPage.tsx",
 	"DashboardPage.tsx",
+	// 041 Q4：两项补进医疗域后同样在医疗模式打开，文案不得再写死「长者」
+	"OrdersPage.tsx",
+	"OrdersCheckPage.tsx",
 ];
 
 test("非养老域可见页面不再硬编码「长者」文案", () => {
@@ -90,6 +94,33 @@ test("非养老域可见页面不再硬编码「长者」文案", () => {
 			offenders,
 			[],
 			`${file} 仍有硬编码「长者」：${offenders.map((item) => `${item.line}: ${item.text.trim()}`).join(" | ")}`,
+		);
+	}
+});
+
+/**
+ * 041 把「医生诊疗 / 医嘱核对」补进医疗域后，两页的空态文案必须随域取词：
+ * 写死「养老入住」就会在医疗模式下显示「办理养老入住」。养老档位逐字不变。
+ */
+test("入院口径逐域：医疗/儿保=入院，养老保持「养老入住」", () => {
+	assert.equal(DOMAIN_ADMISSION_PHRASE["养老"], "养老入住");
+	assert.equal(DOMAIN_ADMISSION_PHRASE["医疗"], "入院");
+	assert.equal(DOMAIN_ADMISSION_PHRASE["儿保"], "入院");
+});
+
+test("医疗域可见的医嘱两页不再硬编码「养老入住」", () => {
+	for (const file of ["OrdersPage.tsx", "OrdersCheckPage.tsx"]) {
+		const source = readFileSync(new URL(`../src/components/${file}`, import.meta.url), "utf8");
+		const offenders = source
+			.split("\n")
+			.map((line, index) => ({ line: index + 1, text: line }))
+			.filter(({ text }) => text.includes("养老入住"))
+			.filter(({ text }) => !/^\s*(\/\/|\*|\/\*)/.test(text))
+			.filter(({ text }) => !/\{\/\*.*\*\/\}/.test(text));
+		assert.deepEqual(
+			offenders,
+			[],
+			`${file} 仍有硬编码「养老入住」：${offenders.map((item) => `${item.line}: ${item.text.trim()}`).join(" | ")}`,
 		);
 	}
 });

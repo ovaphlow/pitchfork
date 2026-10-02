@@ -62,6 +62,18 @@ export const DOMAIN_ENTITY: Record<Domain, DomainEntityLabels> = {
 };
 
 /**
+ * 「入院 / 入住」动作在各域的说法。
+ *
+ * 医生诊疗、医嘱核对两页已对医疗域开放（041），其空态文案必须随域取词，
+ * 否则医疗模式下会出现「办理养老入住」。医疗/儿保用「入院」，养老沿用改前逐字的「养老入住」。
+ */
+export const DOMAIN_ADMISSION_PHRASE: Record<Domain, string> = {
+  医疗: "入院",
+  养老: "养老入住",
+  儿保: "入院",
+};
+
+/**
  * 路径 → 标题。`base` 即 `Sidebar.menuItems` 里该条目的 `label`（医疗基准名），
  * `labels` 即该条目的 `domainLabels`；`Sidebar` 直接引用本表，两处不会分叉。
  */
