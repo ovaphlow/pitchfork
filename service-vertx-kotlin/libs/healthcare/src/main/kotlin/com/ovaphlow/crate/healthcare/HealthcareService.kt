@@ -2712,6 +2712,30 @@ class HealthcareService(
     // ========================================================================
 
     private val handoverTitle = "养老照护离院交接摘要"
+    private val deceasedHandoverTitle = "养老照护去世交接摘要"
+
+    /** 归档文书标题按入住终态区分：已离院为离院交接摘要，已去世为去世照护快照摘要。 */
+    private fun handoverTitleFor(encounter: JsonObject): String =
+        if (encounter.getString("status") == "DECEASED") deceasedHandoverTitle else handoverTitle
+
+    /**
+     * 可归档终态的归档时点：已离院取 `discharge_date`，已去世取 `death_date`。
+     * 其它状态或时点缺失/非法返回 null，由资格校验统一映射为 409。
+     * 去世同样关闭了精确关联的照护周期，因此复用同一归档时点做周期锁定。
+     */
+    private fun handoverArchiveInstant(encounter: JsonObject): OffsetDateTime? {
+        val raw: String? = when (encounter.getString("status")) {
+            "DISCHARGED" -> encounter.getString("discharge_date")
+            "DECEASED" -> encounter.getString("death_date")
+            else -> null
+        }
+        if (raw == null) return null
+        return try {
+            OffsetDateTime.parse(raw)
+        } catch (_: RuntimeException) {
+            null
+        }
+    }
 
     /** 获取既有交接摘要；资格错误按 4.1 返回 400/409，无文书返回 404 */
     fun getElderlyDischargeHandover(id: String): Future<JsonObject> {
@@ -2755,13 +2779,13 @@ class HealthcareService(
             validateHandoverEligibility(connection, id).compose { (encounter, period) ->
                 val encounterId = requireNotNull(encounter.getString("id"))
                 val periodId = requireNotNull(period.getString("id"))
-                val dischargeDate = requireNotNull(encounter.getString("discharge_date"))
+                val archiveInstant = requireNotNull(handoverArchiveInstant(encounter))
 
                 lockExistingHandover(connection, encounterId, periodId).compose { existing ->
                     if (existing != null) {
                         return@compose compareHandoverExisting(existing, author, handoverNote)
                     }
-                    buildAndInsertHandover(connection, encounter, period, author, handoverNote, dischargeDate)
+                    buildAndInsertHandover(connection, encounter, period, author, handoverNote, archiveInstant)
                         .map { handover -> Pair(true, handover) }
                         .recover { err ->
                             // 唯一索引竞争：重新锁读既有行后按输入比较，不泄漏数据库约束文本
@@ -2792,7 +2816,10 @@ class HealthcareService(
         )
     }
 
-    /** 第 4.1 节资格校验：锁定 encounter → 校验养老/离院/离院日期 → 锁定精确关联已完成周期 → 患者一致 */
+    /**
+     * 资格校验（第 4.1 节扩展）：锁定 encounter → 校验养老主体 → 校验已离院/已去世及归档时点
+     * → 锁定精确关联已完成周期 → 患者一致。已离院与已去世都归入同一份照护快照。
+     */
     private fun validateHandoverEligibility(
         client: SqlClient,
         encounterId: String,
@@ -2801,20 +2828,22 @@ class HealthcareService(
             if (encounter.getString("encounter_type") != "ELDERLY_CARE") {
                 return@compose Future.failedFuture(IllegalArgumentException("encounter is not an elderly admission"))
             }
-            val dischargeDateStr = encounter.getString("discharge_date")
-            if (encounter.getString("status") != "DISCHARGED" || dischargeDateStr == null) {
+            val status = encounter.getString("status")
+            if (status != "DISCHARGED" && status != "DECEASED") {
                 return@compose Future.failedFuture(
-                    ConflictException("encounter is not discharged; complete the discharge flow first")
+                    ConflictException("encounter is not discharged or deceased; complete the discharge or death flow first")
                 )
             }
-            val dischargeDate = try {
-                OffsetDateTime.parse(dischargeDateStr)
-            } catch (_: RuntimeException) {
-                return@compose Future.failedFuture(ConflictException("encounter has no valid discharge date"))
-            }
+            val archiveInstant = handoverArchiveInstant(encounter)
+                ?: return@compose Future.failedFuture(
+                    ConflictException(
+                        if (status == "DECEASED") "encounter has no valid death date"
+                        else "encounter has no valid discharge date"
+                    )
+                )
 
             servicePeriodService.lockCompletedElderlyCarePeriodForHandover(
-                client, encounterId, businessDate(dischargeDate),
+                client, encounterId, businessDate(archiveInstant),
             ).compose { period ->
                 if (period.getString("patient_id") != encounter.getString("patient_id")) {
                     return@compose Future.failedFuture(
@@ -2856,12 +2885,12 @@ class HealthcareService(
         period: JsonObject,
         author: String,
         handoverNote: String?,
-        dischargeDate: String,
+        archiveInstant: OffsetDateTime,
     ): Future<JsonObject> {
         val encounterId = requireNotNull(encounter.getString("id"))
         val periodId = requireNotNull(period.getString("id"))
         val patientId = requireNotNull(encounter.getString("patient_id"))
-        val recordDate = businessDate(OffsetDateTime.parse(dischargeDate))
+        val recordDate = businessDate(archiveInstant)
         val now = OffsetDateTime.now()
 
         return dischargeHandoverSnapshotService.buildNursingSnapshot(client, periodId)
@@ -2905,7 +2934,7 @@ class HealthcareService(
                             .set(MedicalRecords.MEDICAL_RECORDS.ID, id)
                             .set(MedicalRecords.MEDICAL_RECORDS.ENCOUNTER_ID, encounterId)
                             .set(MedicalRecords.MEDICAL_RECORDS.RECORD_TYPE, "DISCHARGE_SUMMARY")
-                            .set(MedicalRecords.MEDICAL_RECORDS.TITLE, handoverTitle)
+                            .set(MedicalRecords.MEDICAL_RECORDS.TITLE, handoverTitleFor(encounter))
                             .set(MedicalRecords.MEDICAL_RECORDS.CONTENT_BLOCKS, org.jooq.JSONB.valueOf(contentBlocks.encode()))
                             .set(MedicalRecords.MEDICAL_RECORDS.PHYSICIAN, author)
                             .set(MedicalRecords.MEDICAL_RECORDS.RECORD_DATE, recordDate)
@@ -3007,6 +3036,8 @@ class HealthcareService(
             .put("ward", encounter.getString("ward"))
             .put("admit_date", encounter.getString("admit_date"))
             .put("discharge_date", encounter.getString("discharge_date"))
+            .put("death_date", encounter.getString("death_date"))
+            .put("death_cause", encounter.getString("death_cause"))
             .put("admitting_diagnosis", encounter.getString("admitting_diagnosis"))
             .put("discharge_diagnosis", encounter.getString("discharge_diagnosis"))
             .put("attending_physician", encounter.getString("attending_physician"))
