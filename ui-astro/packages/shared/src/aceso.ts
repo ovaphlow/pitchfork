@@ -50,6 +50,13 @@ interface RequestOptions {
 export interface IdentitySession {
   subject_id: string;
   access: "完整" | "仅改密";
+  /**
+   * 042：是否平台管理员 —— 代操作（把业务操作人指定为他人）的唯一门禁。
+   * 字段缺失（旧版 IDP）一律按 `false` 处理：判定不出管理员就不得代操作。
+   */
+  platform_admin?: boolean;
+  /** 042：当前登录主体的姓名，用于「操作人：<姓名>（当前登录用户）」；缺失时回退展示 subject_id。 */
+  display_name?: string;
 }
 
 export interface IdentitySubject {
@@ -597,6 +604,40 @@ export async function logout(): Promise<void> {
 export function listIdentitySubjects(page: number, pageSize: number): Promise<IdentitySubjectList> {
   const params = new URLSearchParams({ limit: String(pageSize), offset: String((page - 1) * pageSize) });
   return request<IdentitySubjectList>(`/subjects?${params}`, {}, { service: "identity" });
+}
+
+/**
+ * 044：业务人员目录条目——**只暴露主体 ID + 姓名**。
+ *
+ * 不含登录账号、状态、角色/权限等管理字段：本端点对**所有登录用户**开放，
+ * 暴露面刻意控制在「组织内通讯录」级别。
+ */
+export interface IdentityDirectoryEntry {
+  id: string;
+  display_name: string;
+}
+
+export interface IdentityDirectoryList {
+  records: IdentityDirectoryEntry[];
+  meta: { total: number };
+}
+
+/**
+ * 业务人员目录（044）：**非管理员可用**。
+ *
+ * 用途只有两个：把主体 ID 解析成姓名（护士核对列、病程记录、配餐名单、交班人…），
+ * 以及填充按执行人/责任人筛选的下拉。管理台的人员管理请继续用 [listIdentitySubjects]
+ * （那是管理员接口，业务账号调用会 403）。
+ */
+export function listIdentityDirectory(
+  params: { search?: string; limit?: number; offset?: number } = {},
+): Promise<IdentityDirectoryList> {
+  const query = new URLSearchParams();
+  if (params.search?.trim()) query.set("search", params.search.trim());
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<IdentityDirectoryList>(`/directory${suffix}`, {}, { service: "identity" });
 }
 
 export function createIdentitySubject(input: {
@@ -2801,7 +2842,11 @@ export interface PharmacyReturnFromDispenseInput {
   dispense_item_id: string;
   quantity: DecimalText;
   return_reason: string;
-  operator: string;
+  /**
+   * 042：仅**平台管理员代操作**时才提交；业务账号一律不传，由服务端按认证会话落库。
+   * 非管理员提交他人会被服务端以 `400 operator cannot be delegated` 拒绝。
+   */
+  operator?: string;
   restockable: true;
   remark?: string;
 }
@@ -2815,9 +2860,9 @@ export interface PharmacyDispenseFromMedicalOrderInput {
   dispensed_quantity: DecimalText;
 }
 
-/** 审方/调配/确认/取消入参 */
+/** 审方/调配/确认/取消入参；`operator` 同 [PharmacyReturnFromDispenseInput]（042） */
 export interface PharmacyDispenseActionInput {
-  operator: string;
+  operator?: string;
   remark?: string;
 }
 
@@ -2932,10 +2977,11 @@ export function createPharmacyReturnFromDispense(input: PharmacyReturnFromDispen
   });
 }
 
-export function confirmPharmacyReturn(id: string, operator: string): Promise<PharmacyReturn> {
+/** 042：`operator` 仅平台管理员代操作时提交；不传则由服务端按会话落库 */
+export function confirmPharmacyReturn(id: string, operator?: string): Promise<PharmacyReturn> {
   return request<PharmacyReturn>(`/pharmacy/v1/returns/${encodeURIComponent(id)}/confirm`, {
     method: "PUT",
-    body: JSON.stringify({ operator }),
+    body: JSON.stringify(operator?.trim() ? { operator: operator.trim() } : {}),
   });
 }
 

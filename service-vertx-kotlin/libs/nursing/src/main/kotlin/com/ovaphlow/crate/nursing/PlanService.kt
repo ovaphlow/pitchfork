@@ -94,7 +94,7 @@ class PlanService(
         }
     }
 
-    fun create(body: JsonObject): Future<JsonObject> {
+    fun create(body: JsonObject, createdBy: String?): Future<JsonObject> {
         val periodId = body.getString("period_id")
         val planName = body.getString("plan_name")
         if (periodId.isNullOrBlank())
@@ -118,7 +118,7 @@ class PlanService(
                     )
                 }
                 requireAssessment(periodId, encounterId)
-                    .compose { doCreate(body, periodId, planName) }
+                    .compose { doCreate(body, periodId, planName, createdBy) }
             }
     }
 
@@ -151,7 +151,7 @@ class PlanService(
             }
     }
 
-    private fun doCreate(body: JsonObject, periodId: String, planName: String): Future<JsonObject> {
+    private fun doCreate(body: JsonObject, periodId: String, planName: String, createdBy: String?): Future<JsonObject> {
         val id = Ulid.generate()
         val now = OffsetDateTime.now()
 
@@ -162,7 +162,7 @@ class PlanService(
             .set(cPlanName, planName)
             .set(cGoals, body.getString("goals"))
             .set(cStatus, "ACTIVE")
-            .set(cCreatedBy, body.getString("created_by"))
+            .set(cCreatedBy, createdBy)
             .set(cStartDate, body.getString("start_date")?.let { LocalDate.parse(it) })
             .set(cEndDate, body.getString("end_date")?.let { LocalDate.parse(it) })
             .set(cMetadata, body.containsKey("metadata")
@@ -180,7 +180,7 @@ class PlanService(
                     .put("plan_name", planName)
                     .put("goals", body.getString("goals"))
                     .put("status", "ACTIVE")
-                    .put("created_by", body.getString("created_by"))
+                    .put("created_by", createdBy)
                     .put("start_date", body.getString("start_date"))
                     .put("end_date", body.getString("end_date"))
                     .put("metadata", body.getJsonObject("metadata"))

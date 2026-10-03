@@ -340,14 +340,17 @@ object TaskExecutionRoutes {
         // ——— 创建执行记录 ———
         router.post("/").handler { ctx ->
             val b = NursingRoutes.body(ctx)
-            service.create(b)
-                .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
-                .onFailure {
-                    when (it) {
-                        is IllegalArgumentException -> NursingRoutes.respond(ctx, 400, it.message)
-                        else -> NursingRoutes.respondError(ctx, it)
+            // 042：执行人取服务端解析身份（非管理员提交他人 → 400，不静默改写）。
+            NursingRoutes.withOperator(ctx, b, "executor") { executor ->
+                service.create(b, executor)
+                    .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                    .onFailure {
+                        when (it) {
+                            is IllegalArgumentException -> NursingRoutes.respond(ctx, 400, it.message)
+                            else -> NursingRoutes.respondError(ctx, it)
+                        }
                     }
-                }
+            }
         }
 
         // ——— 列表查询 ———
@@ -450,12 +453,14 @@ object TaskExecutionRoutes {
         router.put("/:id").handler { ctx ->
             val id = ctx.pathParam("id") ?: return@handler NursingRoutes.respond(ctx, 400, "id required")
             val b = NursingRoutes.body(ctx)
-            service.update(id, b)
-                .onSuccess { ctx.json(it) }
-                .onFailure {
-                    if (it is NotFoundException) NursingRoutes.respond(ctx, 404, it.message)
-                    else NursingRoutes.respondError(ctx, it)
-                }
+            NursingRoutes.withOperator(ctx, b, "executor") { executor ->
+                service.update(id, b, executor)
+                    .onSuccess { ctx.json(it) }
+                    .onFailure {
+                        if (it is NotFoundException) NursingRoutes.respond(ctx, 404, it.message)
+                        else NursingRoutes.respondError(ctx, it)
+                    }
+            }
         }
 
         // ——— 状态更新（支持备注，记录执行人） ———

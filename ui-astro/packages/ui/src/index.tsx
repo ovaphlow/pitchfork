@@ -347,6 +347,13 @@ interface TableProps<T> extends TableHTMLAttributes<HTMLTableElement> {
   sortDir?: "asc" | "desc";
   onSort?: (key: string) => void;
   loading?: boolean;
+  /**
+   * 043：错误态。非空时**只渲染错误**，不渲染空态文案。
+   *
+   * 为什么必须有：21 个组件是「pageError 提示条 + Table 空态」的组合，业务账号打开
+   * 权限不足的页面时会看到「暂无用户 / 共 0 条」，被读成"系统里没有数据"而不是"你没权限"。
+   */
+  error?: string;
 }
 
 export function Table<T extends Record<string, any>>({
@@ -358,12 +365,22 @@ export function Table<T extends Record<string, any>>({
   sortDir,
   onSort,
   loading,
+  error,
   className = "",
 }: TableProps<T>) {
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
         <LoadingSpinner />
+      </div>
+    );
+  }
+
+  if (error) {
+    // 错误与空态互斥：有错误时绝不显示「暂无数据」——那会把"没权限/没连上"读成"库里没数据"
+    return (
+      <div className="flex items-center justify-center py-12">
+        <p className="text-center text-sm text-danger">{error}</p>
       </div>
     );
   }

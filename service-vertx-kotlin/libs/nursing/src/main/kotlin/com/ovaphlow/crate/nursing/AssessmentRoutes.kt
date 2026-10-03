@@ -14,14 +14,17 @@ object AssessmentRoutes {
 
         router.post("/").handler { ctx ->
             val b = NursingRoutes.body(ctx)
-            service.create(b)
-                .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
-                .onFailure {
-                    when (it) {
-                        is IllegalArgumentException -> NursingRoutes.respond(ctx, 400, it.message)
-                        else -> NursingRoutes.respondError(ctx, it)
+            // 042：评估人取服务端解析身份（非管理员提交他人 → 400，不静默改写）。
+            NursingRoutes.withOperator(ctx, b, "assessor") { assessor ->
+                service.create(b, assessor)
+                    .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                    .onFailure {
+                        when (it) {
+                            is IllegalArgumentException -> NursingRoutes.respond(ctx, 400, it.message)
+                            else -> NursingRoutes.respondError(ctx, it)
+                        }
                     }
-                }
+            }
         }
 
         router.get("/").handler { ctx ->
@@ -49,12 +52,14 @@ object AssessmentRoutes {
         router.put("/:id").handler { ctx ->
             val id = ctx.pathParam("id") ?: return@handler NursingRoutes.respond(ctx, 400, "id required")
             val b = NursingRoutes.body(ctx)
-            service.update(id, b)
-                .onSuccess { ctx.json(it) }
-                .onFailure {
-                    if (it is NotFoundException) NursingRoutes.respond(ctx, 404, it.message)
-                    else NursingRoutes.respondError(ctx, it)
-                }
+            NursingRoutes.withOperator(ctx, b, "assessor") { assessor ->
+                service.update(id, b, assessor)
+                    .onSuccess { ctx.json(it) }
+                    .onFailure {
+                        if (it is NotFoundException) NursingRoutes.respond(ctx, 404, it.message)
+                        else NursingRoutes.respondError(ctx, it)
+                    }
+            }
         }
 
         router.delete("/:id").handler { ctx ->

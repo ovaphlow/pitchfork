@@ -14,15 +14,18 @@ object PlanRoutes {
 
         router.post("/").handler { ctx ->
             val b = NursingRoutes.body(ctx)
-            service.create(b)
-                .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
-                .onFailure {
-                    when (it) {
-                        is IllegalArgumentException -> NursingRoutes.respond(ctx, 400, it.message)
-                        is ConflictException -> NursingRoutes.respond(ctx, 409, it.message)
-                        else -> NursingRoutes.respondError(ctx, it)
+            // 042：制定人取服务端解析身份（非管理员提交他人 → 400，不静默改写）。
+            NursingRoutes.withOperator(ctx, b, "created_by") { createdBy ->
+                service.create(b, createdBy)
+                    .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
+                    .onFailure {
+                        when (it) {
+                            is IllegalArgumentException -> NursingRoutes.respond(ctx, 400, it.message)
+                            is ConflictException -> NursingRoutes.respond(ctx, 409, it.message)
+                            else -> NursingRoutes.respondError(ctx, it)
+                        }
                     }
-                }
+            }
         }
 
         router.get("/").handler { ctx ->

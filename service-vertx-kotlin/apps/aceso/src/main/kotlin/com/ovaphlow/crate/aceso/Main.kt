@@ -644,6 +644,10 @@ private fun inventoryPurchaseReceiptPort(stockService: StockService): InventoryP
 //  IDP 使用 HttpOnly cookie `identityd_session`，不签发 JWT。写路由要求有效
 //  会话：转发请求 Cookie 到 IDP `GET /crate-api/identity/v1/session` 换取
 //  `subject_id` 作为操作人（userId），与 Aceso 前端既有 cookie 工作流一致。
+//
+//  042：同一响应还带 `platform_admin`（IDP `identity_subjects.is_platform_admin`），
+//  作为**代操作**的唯一门禁：只有平台管理员才能把操作人指定为他人。该字段缺失、
+//  类型不符或非 true 一律按 false 处理（fail-closed：判定不出管理员就不得代操作）。
 // ========================================================================
 
 private const val IDP_SESSION_COOKIE = "identityd_session"
@@ -718,6 +722,7 @@ internal fun idpSessionAuthHandler(
                             respondUnauthorized(ctx)
                         } else {
                             ctx.put("userId", subjectId)
+                            ctx.put("platformAdmin", platformAdminOrFalse(pair.second))
                             ctx.next()
                         }
                     }
@@ -743,6 +748,15 @@ internal fun idpSessionAuthHandler(
 /** 上游 `200` 响应里的 `subject_id`；缺失或响应体不是含该键的 JSON 对象时返回 `null`。 */
 private fun subjectIdOrNull(body: Buffer): String? =
     runCatching { body.toJsonObject().getString("subject_id") }.getOrNull()?.takeIf { it.isNotBlank() }
+
+/**
+ * 上游 `200` 响应里的 `platform_admin`（042）。
+ *
+ * 缺失、类型不符（如字符串 `"true"`）、响应体不可解析一律 `false`：这是**权限字段**，
+ * 判定不出就必须按最小权限处理，绝不放行代操作。
+ */
+private fun platformAdminOrFalse(body: Buffer): Boolean =
+    runCatching { body.toJsonObject().getBoolean("platform_admin") }.getOrNull() == true
 
 private fun respondUnauthorized(ctx: RoutingContext) {
     if (!ctx.response().ended()) {

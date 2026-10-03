@@ -904,6 +904,29 @@ class CarePlanRevisionTest {
         assertTrue(stub.poolQueries.none { it.startsWith("insert") || it.startsWith("update") }, "读取不得发出写 SQL")
     }
 
+    // ——— 042：复评的操作人由路由层注入，请求体同名键不再具有权威性 ———
+
+    @Test
+    fun `复评按注入的操作人写入评估人与制定人而不是请求体取值`() {
+        val stub = happyStub()
+        val service = HealthcareService(stub.pool)
+
+        // validRevisionBody() 里的 assessor / created_by 都是 "护理员"；注入值必须覆盖它们。
+        val result = service.createCarePlanRevision("enc-1", validRevisionBody(), "sub-9", "sub-8")
+            .toCompletionStage().toCompletableFuture().get()
+        assertNotNull(result.getString("revision_id"))
+
+        val assessmentInsert = stub.connTuples
+            .first { it.first.startsWith("insert into nursing.nursing_assessments") }.second
+        assertTrue(assessmentInsert.contains("sub-9"), "评估人必须取注入值，实际 $assessmentInsert")
+        assertFalse(assessmentInsert.contains("护理员"), "请求体里的 assessor 不得落库，实际 $assessmentInsert")
+
+        val planInsert = stub.connTuples
+            .first { it.first.startsWith("insert into nursing.nursing_plans") }.second
+        assertTrue(planInsert.contains("sub-8"), "制定人必须取注入值，实际 $planInsert")
+        assertFalse(planInsert.contains("护理员"), "请求体里的 created_by 不得落库，实际 $planInsert")
+    }
+
     private fun <T> withServer(
         vertx: Vertx,
         stub: DatabaseStub,

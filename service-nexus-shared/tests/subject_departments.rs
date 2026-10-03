@@ -165,7 +165,9 @@ async fn put_department(router: &Router, subject_id: &str, department_id: Value)
 async fn start_identity_service() -> String {
     let identity_router = Router::new().route(
         "/crate-api/identity/v1/session",
-        get(|| async { Json(json!({"subject_id": "subject-1", "access": "完整"})) }),
+        // 043：这些用例验的是 CRUD 本身，不是授权矩阵——故让会话成为**平台管理员**
+        // （门禁的引导者路径）。授权矩阵本身由 tests/authorization.rs 覆盖。
+        get(|| async { Json(json!({"subject_id": "subject-1", "access": "完整", "platform_admin": true})) }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

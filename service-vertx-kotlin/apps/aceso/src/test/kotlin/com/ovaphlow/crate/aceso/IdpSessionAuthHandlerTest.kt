@@ -58,6 +58,12 @@ class IdpSessionAuthHandlerTest {
         /** `200 {"subject_id": ...}`：会话有效。 */
         SESSION_OK,
 
+        /** `200` 且带 `platform_admin: true`：平台管理员会话（042 代操作门禁的唯一依据）。 */
+        SESSION_OK_WITH_PLATFORM_ADMIN,
+
+        /** `200` 且 `platform_admin` 是字符串 `"true"`：类型不符，必须按 false 处理（fail-closed）。 */
+        SESSION_OK_WITH_PLATFORM_ADMIN_AS_STRING,
+
         /** `200 {}`：状态码正常但响应体缺 `subject_id`（响应形状异常，不算有效会话）。 */
         SESSION_OK_WITHOUT_SUBJECT_ID,
 
@@ -113,7 +119,36 @@ class IdpSessionAuthHandlerTest {
             JsonObject(probe.body).getString("user_id"),
             "上游 subject_id 必须成为业务侧 userId，实际 body=${probe.body}",
         )
+        assertEquals(
+            false,
+            JsonObject(probe.body).getBoolean("platform_admin"),
+            "上游未带 platform_admin 时必须按 false 处理（fail-closed：判定不出管理员就不得代操作）",
+        )
         assertEquals(listOf(authenticatedCookie), upstreamCookies, "会话 cookie 必须原样转发给 IdP")
+    }
+
+    // ------------------------------------------------------------------
+    // 1b. 平台管理员标记：代操作门禁的唯一依据（042）
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `only a boolean true platform_admin flag reaches the business handler`() {
+        for ((behavior, expected) in listOf(
+            UpstreamBehavior.SESSION_OK_WITH_PLATFORM_ADMIN to true,
+            UpstreamBehavior.SESSION_OK_WITH_PLATFORM_ADMIN_AS_STRING to false,
+        )) {
+            upstreamBehavior = behavior
+            val port = startAcesoWithFakeIdp()
+
+            val probe = send(port, HttpMethod.GET, "/crate-api/healthcare/v1/patients", authenticatedCookie)
+
+            assertEquals(200, probe.status, "会话有效必须放行，实际 body=${probe.body}")
+            assertEquals(
+                expected,
+                JsonObject(probe.body).getBoolean("platform_admin"),
+                "$behavior 必须映射为 platformAdmin=$expected，实际 body=${probe.body}",
+            )
+        }
     }
 
     // ------------------------------------------------------------------
@@ -296,6 +331,7 @@ class IdpSessionAuthHandlerTest {
                     JsonObject()
                         .put("handler", "healthcare:GET /patients")
                         .put("user_id", ctx.get<String>("userId"))
+                        .put("platform_admin", ctx.get<Boolean>("platformAdmin") ?: false)
                         .encode(),
                 )
         }
@@ -314,6 +350,26 @@ class IdpSessionAuthHandlerTest {
                     req.response()
                         .putHeader("Content-Type", "application/json")
                         .end(JsonObject().put("subject_id", "idp-user-1").encode())
+
+                UpstreamBehavior.SESSION_OK_WITH_PLATFORM_ADMIN ->
+                    req.response()
+                        .putHeader("Content-Type", "application/json")
+                        .end(
+                            JsonObject()
+                                .put("subject_id", "idp-user-1")
+                                .put("platform_admin", true)
+                                .encode(),
+                        )
+
+                UpstreamBehavior.SESSION_OK_WITH_PLATFORM_ADMIN_AS_STRING ->
+                    req.response()
+                        .putHeader("Content-Type", "application/json")
+                        .end(
+                            JsonObject()
+                                .put("subject_id", "idp-user-1")
+                                .put("platform_admin", "true")
+                                .encode(),
+                        )
 
                 UpstreamBehavior.SESSION_OK_WITHOUT_SUBJECT_ID ->
                     req.response()

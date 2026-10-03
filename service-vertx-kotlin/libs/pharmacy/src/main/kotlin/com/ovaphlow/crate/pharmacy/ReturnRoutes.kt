@@ -18,12 +18,16 @@ object ReturnRoutes {
         }
 
         router.post("/from-dispense").handler { ctx ->
-            service.createFromDispense(PharmacyRoutes.body(ctx))
-                .onSuccess {
-                    ctx.response().setStatusCode(201)
-                    ctx.json(it)
-                }
-                .onFailure { respondFailure(ctx, it) }
+            val body = PharmacyRoutes.body(ctx)
+            // 042：操作人取服务端解析身份（同 DispenseRoutes 的口径）。
+            PharmacyRoutes.withOperator(ctx, body) { operator ->
+                service.createFromDispense(body, operator)
+                    .onSuccess {
+                        ctx.response().setStatusCode(201)
+                        ctx.json(it)
+                    }
+                    .onFailure { respondFailure(ctx, it) }
+            }
         }
 
         router.get("/").handler { ctx ->
@@ -48,9 +52,12 @@ object ReturnRoutes {
 
         router.put("/:id/confirm").handler { ctx ->
             val id = ctx.pathParam("id") ?: return@handler PharmacyRoutes.respond(ctx, 400, "id required")
-            service.confirm(id, PharmacyRoutes.body(ctx))
-                .onSuccess { ctx.json(it) }
-                .onFailure { respondFailure(ctx, it) }
+            val body = PharmacyRoutes.body(ctx)
+            PharmacyRoutes.withOperator(ctx, body) { operator ->
+                service.confirm(id, body, operator)
+                    .onSuccess { ctx.json(it) }
+                    .onFailure { respondFailure(ctx, it) }
+            }
         }
 
         router.put("/:id/cancel").handler { ctx ->

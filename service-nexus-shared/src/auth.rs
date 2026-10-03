@@ -19,6 +19,12 @@ pub struct IdentityClient {
 pub struct Identity {
     pub subject_id: String,
     pub access: String,
+    /// 043：平台管理员标记（IDP `identity_subjects.is_platform_admin`）。
+    ///
+    /// 缺失时按 `false` 处理（`#[serde(default)]`）：这是**权限字段**，
+    /// 判定不出管理员就不得代操作/不得绕过门禁。
+    #[serde(default)]
+    pub platform_admin: bool,
 }
 
 impl IdentityClient {

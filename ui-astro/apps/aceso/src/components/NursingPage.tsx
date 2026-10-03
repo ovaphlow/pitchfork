@@ -88,6 +88,8 @@ import { DOMAIN_ENTITY, currentEntityLabels } from "../lib/domain";
 import { formatOrderItemLabel } from "../lib/orderDetailDisplay";
 import { nursingErrorMessage } from "./nursingMessages";
 import NursingExecutionStatisticsPanel from "./NursingExecutionStatisticsPanel";
+import OperatorPicker, { type CurrentUser } from "./OperatorPicker";
+import { useSubjectDirectory } from "../lib/identity";
 import { useDomain } from "../lib/useDomain";
 
 type Tab = "overview" | "assessments" | "plans" | "tasks" | "orders" | "incidents" | "handovers" | "timeline";
@@ -432,6 +434,9 @@ export default function NursingPage() {
   const [admissionSearch, setAdmissionSearch] = useState("");
   const [subjects, setSubjects] = useState<IdentitySubject[]>([]);
   const [currentSubjectId, setCurrentSubjectId] = useState("");
+  /** 042：当前登录主体（只读展示与代操作判定）与目录加载失败提示 */
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
+  const [operatorDirectoryError, setOperatorDirectoryError] = useState("");
   const [mounted, setMounted] = useState(false);
   // ——— 时间线 ———
   const [timelineEvents, setTimelineEvents] = useState<NursingTimelineEvent[]>([]);
@@ -550,13 +555,18 @@ export default function NursingPage() {
   const [adminViewError, setAdminViewError] = useState("");
   const [adminViewRecord, setAdminViewRecord] = useState<MedicationAdministration | null>(null);
 
-  const subjectMap = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const subject of subjects) {
-      map.set(subject.id, subject.display_name);
-    }
-    return map;
-  }, [subjects]);
+  /**
+   * 044：主体 ID → 姓名改用**业务人员目录**（`useSubjectDirectory`）。
+   *
+   * 此前用 `subjects`——它来自管理员接口 `/identity/v1/subjects`，业务账号 403 → 空 map
+   * → 执行人/评估人/交班人/给药人/上报人… 全部显示 ULID。本页的 `subjects` 保留给
+   * **平台管理员**的操作人下拉使用（候选仍来自管理接口）。
+   */
+  const {
+    subjects: directorySubjects,
+    subjectMap,
+    error: subjectDirectoryError,
+  } = useSubjectDirectory();
 
   const selectedAdmission = admissions.find((admission) => admission.id === selectedEncounterId) ?? null;
 
@@ -658,13 +668,36 @@ export default function NursingPage() {
   }, [loadAdmissions]);
 
   useEffect(() => {
-    Promise.all([
-      listIdentitySubjects(1, 100),
-      getCurrentSession(false),
-    ]).then(([subjectList, session]) => {
-      setSubjects(subjectList.records);
-      setCurrentSubjectId(session.subject_id);
-    }).catch(() => { /* 静默失败，不影响主流程 */ });
+    void (async () => {
+      // 042：评估人/制定人/执行人的候选只在**平台管理员**下才有意义——
+      // `/identity/v1/subjects` 是管理员接口，业务账号调用会 403（旧代码静默吞掉错误，
+      // 于是下拉为空、字段看起来像丢了）。这里先取会话，只有管理员才拉目录。
+      try {
+        const session = await getCurrentSession(false);
+        setCurrentSubjectId(session.subject_id);
+        setCurrentUser({
+          id: session.subject_id,
+          name: session.display_name?.trim() || session.subject_id,
+          platformAdmin: session.platform_admin === true,
+        });
+        if (session.platform_admin !== true) {
+          setSubjects([]);
+          setOperatorDirectoryError("");
+          return;
+        }
+        try {
+          const response = await listIdentitySubjects(1, 100);
+          setSubjects(response.records);
+          setOperatorDirectoryError("");
+        } catch (error) {
+          setSubjects([]);
+          setOperatorDirectoryError(nursingErrorMessage(error, "无法加载人员目录"));
+        }
+      } catch {
+        setCurrentUser(null);
+        setOperatorDirectoryError("无法读取当前登录用户");
+      }
+    })();
   }, []);
 
   useEffect(() => {
@@ -1895,7 +1928,8 @@ export default function NursingPage() {
                   <label className="text-sm font-medium text-fg-muted" htmlFor="today-executor-filter">执行人</label>
                   <select id="today-executor-filter" className={selectClass} value={todayExecutorFilter} onChange={(event) => setTodayExecutorFilter(event.target.value)}>
                     <option value="">全部</option>
-                    {subjects.map((subject) => <option key={subject.id} value={subject.id}>{subject.display_name}</option>)}
+                    {/* 044：筛选候选改用业务人员目录（此前用管理员接口，业务账号 403 → 只剩"全部"） */}
+                    {directorySubjects.map((subject) => <option key={subject.id} value={subject.id}>{subject.display_name}</option>)}
                   </select>
                 </div>
               ) : null}
@@ -1921,7 +1955,7 @@ export default function NursingPage() {
           </Card>
 
           {/* ——— 工作量统计面板 ——— */}
-          <NursingExecutionStatisticsPanel subjects={subjects} reloadKey={statReloadKey} />
+          <NursingExecutionStatisticsPanel subjects={directorySubjects} reloadKey={statReloadKey} />
 
           <Card className="min-w-0 overflow-hidden">
             {todayOverdueOnly && (
@@ -1944,6 +1978,8 @@ export default function NursingPage() {
                 </Button>
               </div>
             )}
+            {/* 044：人员目录失败不再静默——否则执行人/评估人列会只剩 ULID 而看不出原因 */}
+            {subjectDirectoryError ? <p className="mb-2 text-xs text-warning">{subjectDirectoryError}</p> : null}
             <Table columns={todayColumns} data={todayExecutions} loading={todayLoading} emptyMessage={
               todayOverdueOnly
                 ? todayStatusFilter
@@ -2770,7 +2806,15 @@ export default function NursingPage() {
             <div className="flex flex-col gap-1.5"><label className="text-sm font-medium text-fg-muted" htmlFor="assessment-type">评估类型</label><select id="assessment-type" className={selectClass} value={assessmentForm.assessType} onChange={(event) => setAssessmentForm((current) => ({ ...current, assessType: event.target.value }))}><option value="BARTHEL">Barthel 指数</option><option value="FALL_RISK">跌倒风险</option><option value="PRESSURE_SORE">压疮风险</option><option value="NUTRITION">营养评估</option><option value="ADMISSION">入住评估</option><option value="PAIN">疼痛评估</option><option value="OTHER">其他评估</option></select></div>
             <Input label="评估日期" type="date" value={assessmentForm.assessDate} onChange={(event) => setAssessmentForm((current) => ({ ...current, assessDate: event.target.value }))} required />
             {mounted ? (
-              <div className="flex flex-col gap-1.5"><label className="text-sm font-medium text-fg-muted" htmlFor="assessment-assessor">评估人</label><select id="assessment-assessor" className={selectClass} value={assessmentForm.assessor} onChange={(event) => setAssessmentForm((current) => ({ ...current, assessor: event.target.value }))}><option value="">请选择评估人</option>{subjects.map((subject) => <option key={subject.id} value={subject.id}>{subject.display_name}</option>)}</select></div>
+              <OperatorPicker
+                id="assessment-assessor"
+                label="评估人"
+                currentUser={currentUser}
+                subjects={subjects}
+                value={assessmentForm.assessor}
+                onChange={(assessor) => setAssessmentForm((current) => ({ ...current, assessor }))}
+                directoryError={operatorDirectoryError}
+              />
             ) : (
               <Input label="评估人" value="" placeholder="加载中..." onChange={() => {}} />
             )}
@@ -2785,7 +2829,15 @@ export default function NursingPage() {
 
       <Modal open={planOpen} onClose={() => !saving && setPlanOpen(false)} title="制定照护计划">
         <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void handleCreatePlan(); }}>
-          <div className="grid gap-4 sm:grid-cols-2"><Input label="计划名称" value={planForm.planName} onChange={(event) => setPlanForm((current) => ({ ...current, planName: event.target.value }))} placeholder="例如：日常生活照护计划" required />{mounted ? (<div className="flex flex-col gap-1.5"><label className="text-sm font-medium text-fg-muted" htmlFor="plan-created-by">制定人</label><select id="plan-created-by" className={selectClass} value={planForm.createdBy} onChange={(event) => setPlanForm((current) => ({ ...current, createdBy: event.target.value }))}><option value="">请选择制定人</option>{subjects.map((subject) => <option key={subject.id} value={subject.id}>{subject.display_name}</option>)}</select></div>) : (<Input label="制定人" value="" placeholder="加载中..." onChange={() => {}} />)}<Input label="开始日期" type="date" value={planForm.startDate} onChange={(event) => setPlanForm((current) => ({ ...current, startDate: event.target.value }))} /><Input label="结束日期" type="date" value={planForm.endDate} onChange={(event) => setPlanForm((current) => ({ ...current, endDate: event.target.value }))} /></div>
+          <div className="grid gap-4 sm:grid-cols-2"><Input label="计划名称" value={planForm.planName} onChange={(event) => setPlanForm((current) => ({ ...current, planName: event.target.value }))} placeholder="例如：日常生活照护计划" required />{mounted ? (<OperatorPicker
+              id="plan-created-by"
+              label="制定人"
+              currentUser={currentUser}
+              subjects={subjects}
+              value={planForm.createdBy}
+              onChange={(createdBy) => setPlanForm((current) => ({ ...current, createdBy }))}
+              directoryError={operatorDirectoryError}
+            />) : (<Input label="制定人" value="" placeholder="加载中..." onChange={() => {}} />)}<Input label="开始日期" type="date" value={planForm.startDate} onChange={(event) => setPlanForm((current) => ({ ...current, startDate: event.target.value }))} /><Input label="结束日期" type="date" value={planForm.endDate} onChange={(event) => setPlanForm((current) => ({ ...current, endDate: event.target.value }))} /></div>
           <div className="flex flex-col gap-1.5"><label className="text-sm font-medium text-fg-muted" htmlFor="plan-goals">照护目标</label><textarea id="plan-goals" rows={3} className={textareaClass} value={planForm.goals} onChange={(event) => setPlanForm((current) => ({ ...current, goals: event.target.value }))} placeholder="例如：维持日常生活能力，预防跌倒" /></div>
           <div className="space-y-3"><div className="flex items-center justify-between"><h4 className="text-sm font-semibold text-fg-emphasis">护理措施</h4><Button type="button" size="sm" variant="secondary" onClick={() => setPlanForm((current) => ({ ...current, items: [...current.items, { action: "", frequencyCode: "", frequencyName: "", durationDays: undefined, remark: "" }] }))}>增加措施</Button></div>{planForm.items.map((item, index) => <div key={index} className="rounded-md border border-border p-3"><div className="grid gap-3 grid-cols-1 sm:grid-cols-3"><Input label="措施" value={item.action} onChange={(event) => setPlanForm((current) => ({ ...current, items: current.items.map((planItem, itemIndex) => itemIndex === index ? { ...planItem, action: event.target.value } : planItem) }))} placeholder="例如：协助晨间洗漱" /><Input label="频次" value={item.frequencyName ?? ""} onChange={(event) => setPlanForm((current) => ({ ...current, items: current.items.map((planItem, itemIndex) => itemIndex === index ? { ...planItem, frequencyName: event.target.value } : planItem) }))} placeholder="每日一次" /><Input label="天数" type="number" value={item.durationDays ?? ""} onChange={(event) => setPlanForm((current) => ({ ...current, items: current.items.map((planItem, itemIndex) => itemIndex === index ? { ...planItem, durationDays: event.target.value ? Number(event.target.value) : undefined } : planItem) }))} placeholder="可选" /></div><div className="mt-3 flex items-end gap-3"><div className="flex-1"><Input label="措施备注" value={item.remark ?? ""} onChange={(event) => setPlanForm((current) => ({ ...current, items: current.items.map((planItem, itemIndex) => itemIndex === index ? { ...planItem, remark: event.target.value } : planItem) }))} placeholder="可选" /></div>{planForm.items.length > 1 && <Button type="button" size="sm" variant="link" onClick={() => setPlanForm((current) => ({ ...current, items: current.items.filter((_, itemIndex) => itemIndex !== index) }))}>移除</Button>}</div></div>)}</div>
           <div className="flex justify-end gap-3"><Button type="button" variant="ghost" onClick={() => setPlanOpen(false)} disabled={saving}>取消</Button><Button type="submit" loading={saving}>保存计划</Button></div>
@@ -2803,7 +2855,15 @@ export default function NursingPage() {
               <div className="flex flex-col gap-1.5"><label className="text-sm font-medium text-fg-muted" htmlFor="revision-type">评估类型</label><select id="revision-type" className={selectClass} value={revisionForm.assessType} onChange={(event) => setRevisionForm((current) => ({ ...current, assessType: event.target.value }))}><option value="BARTHEL">Barthel 指数</option><option value="FALL_RISK">跌倒风险</option><option value="PRESSURE_SORE">压疮风险</option><option value="NUTRITION">营养评估</option><option value="PAIN">疼痛评估</option><option value="HOME_ENVIRONMENT">居家环境</option><option value="OTHER">其他评估</option></select></div>
               <Input label="评估日期" type="date" value={revisionForm.assessDate} onChange={(event) => setRevisionForm((current) => ({ ...current, assessDate: event.target.value }))} required />
               {mounted ? (
-                <div className="flex flex-col gap-1.5"><label className="text-sm font-medium text-fg-muted" htmlFor="revision-assessor">评估人</label><select id="revision-assessor" className={selectClass} value={revisionForm.assessor} onChange={(event) => setRevisionForm((current) => ({ ...current, assessor: event.target.value }))}><option value="">请选择评估人</option>{subjects.map((subject) => <option key={subject.id} value={subject.id}>{subject.display_name}</option>)}</select></div>
+                <OperatorPicker
+                  id="revision-assessor"
+                  label="评估人"
+                  currentUser={currentUser}
+                  subjects={subjects}
+                  value={revisionForm.assessor}
+                  onChange={(assessor) => setRevisionForm((current) => ({ ...current, assessor }))}
+                  directoryError={operatorDirectoryError}
+                />
               ) : (
                 <Input label="评估人" value="" placeholder="加载中..." onChange={() => {}} />
               )}
@@ -2814,7 +2874,15 @@ export default function NursingPage() {
           </div>
           <div>
             <h4 className="text-sm font-semibold text-fg-emphasis">新计划版本</h4>
-            <div className="mt-3 grid gap-4 sm:grid-cols-2"><Input label="计划名称" value={revisionForm.planName} onChange={(event) => setRevisionForm((current) => ({ ...current, planName: event.target.value }))} placeholder="例如：第二阶段照护计划" required />{mounted ? (<div className="flex flex-col gap-1.5"><label className="text-sm font-medium text-fg-muted" htmlFor="revision-created-by">制定人</label><select id="revision-created-by" className={selectClass} value={revisionForm.createdBy} onChange={(event) => setRevisionForm((current) => ({ ...current, createdBy: event.target.value }))}><option value="">请选择制定人</option>{subjects.map((subject) => <option key={subject.id} value={subject.id}>{subject.display_name}</option>)}</select></div>) : (<Input label="制定人" value="" placeholder="加载中..." onChange={() => {}} />)}<Input label="开始日期" type="date" value={revisionForm.startDate} onChange={(event) => setRevisionForm((current) => ({ ...current, startDate: event.target.value }))} required /><Input label="结束日期" type="date" value={revisionForm.endDate} onChange={(event) => setRevisionForm((current) => ({ ...current, endDate: event.target.value }))} /></div>
+            <div className="mt-3 grid gap-4 sm:grid-cols-2"><Input label="计划名称" value={revisionForm.planName} onChange={(event) => setRevisionForm((current) => ({ ...current, planName: event.target.value }))} placeholder="例如：第二阶段照护计划" required />{mounted ? (<OperatorPicker
+              id="revision-created-by"
+              label="制定人"
+              currentUser={currentUser}
+              subjects={subjects}
+              value={revisionForm.createdBy}
+              onChange={(createdBy) => setRevisionForm((current) => ({ ...current, createdBy }))}
+              directoryError={operatorDirectoryError}
+            />) : (<Input label="制定人" value="" placeholder="加载中..." onChange={() => {}} />)}<Input label="开始日期" type="date" value={revisionForm.startDate} onChange={(event) => setRevisionForm((current) => ({ ...current, startDate: event.target.value }))} required /><Input label="结束日期" type="date" value={revisionForm.endDate} onChange={(event) => setRevisionForm((current) => ({ ...current, endDate: event.target.value }))} /></div>
             <div className="mt-3 flex flex-col gap-1.5"><label className="text-sm font-medium text-fg-muted" htmlFor="revision-goals">照护目标</label><textarea id="revision-goals" rows={2} className={textareaClass} value={revisionForm.goals} onChange={(event) => setRevisionForm((current) => ({ ...current, goals: event.target.value }))} placeholder="例如：提高日常活动能力，预防跌倒" /></div>
             <div className="mt-3 space-y-3"><div className="flex items-center justify-between"><h5 className="text-sm font-medium text-fg-emphasis">护理措施</h5><Button type="button" size="sm" variant="secondary" onClick={() => setRevisionForm((current) => ({ ...current, items: [...current.items, { action: "", frequencyCode: "", frequencyName: "", durationDays: undefined, remark: "" }] }))}>增加措施</Button></div>{revisionForm.items.map((item, index) => <div key={index} className="rounded-md border border-border p-3"><div className="grid gap-3 grid-cols-1 sm:grid-cols-3"><Input label="措施" value={item.action} onChange={(event) => setRevisionForm((current) => ({ ...current, items: current.items.map((revisionItem, itemIndex) => itemIndex === index ? { ...revisionItem, action: event.target.value } : revisionItem) }))} placeholder="例如：每日协助步行训练" /><div className="flex flex-col gap-1.5"><label className="text-xs text-fg-muted" htmlFor={`revision-freq-${index}`}>频次</label><select id={`revision-freq-${index}`} className={selectClass} value={item.frequencyCode} onChange={(event) => { const code = event.target.value; const name = frequencyOptions.find(([c]) => c === code)?.[1] ?? ""; setRevisionForm((current) => ({ ...current, items: current.items.map((revisionItem, itemIndex) => itemIndex === index ? { ...revisionItem, frequencyCode: code, frequencyName: name } : revisionItem) })); }}><option value="">请选择</option>{frequencyOptions.map(([code, name]) => <option key={code} value={code}>{code} — {name}</option>)}</select></div><Input label="天数" type="number" value={item.durationDays ?? ""} onChange={(event) => setRevisionForm((current) => ({ ...current, items: current.items.map((revisionItem, itemIndex) => itemIndex === index ? { ...revisionItem, durationDays: event.target.value ? Number(event.target.value) : undefined } : revisionItem) }))} placeholder="可选" /></div><div className="mt-3 flex items-end gap-3"><div className="flex-1"><Input label="措施备注" value={item.remark ?? ""} onChange={(event) => setRevisionForm((current) => ({ ...current, items: current.items.map((revisionItem, itemIndex) => itemIndex === index ? { ...revisionItem, remark: event.target.value } : revisionItem) }))} placeholder="可选" /></div>{revisionForm.items.length > 1 && <Button type="button" size="sm" variant="link" onClick={() => setRevisionForm((current) => ({ ...current, items: current.items.filter((_, itemIndex) => itemIndex !== index) }))}>移除</Button>}</div></div>)}</div>
           </div>
@@ -2889,7 +2957,15 @@ export default function NursingPage() {
         <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void handleCreateExecution(); }}>
           <div className="rounded-md bg-surface-alt px-3 py-2 text-sm text-fg-muted">{executionTask?.description}</div>
           <Input label="计划执行时间" type="datetime-local" value={executionForm.plannedTime} onChange={(event) => setExecutionForm((current) => ({ ...current, plannedTime: event.target.value }))} />
-          {mounted ? (<div className="flex flex-col gap-1.5"><label className="text-sm font-medium text-fg-muted" htmlFor="execution-executor">执行人</label><select id="execution-executor" className={selectClass} value={executionForm.executor} onChange={(event) => setExecutionForm((current) => ({ ...current, executor: event.target.value }))}><option value="">请选择执行人</option>{subjects.map((subject) => <option key={subject.id} value={subject.id}>{subject.display_name}</option>)}</select></div>) : (<Input label="执行人" value="" placeholder="加载中..." onChange={() => {}} />)}
+          {mounted ? (<OperatorPicker
+            id="execution-executor"
+            label="执行人"
+            currentUser={currentUser}
+            subjects={subjects}
+            value={executionForm.executor}
+            onChange={(executor) => setExecutionForm((current) => ({ ...current, executor }))}
+            directoryError={operatorDirectoryError}
+          />) : (<Input label="执行人" value="" placeholder="加载中..." onChange={() => {}} />)}
           <div className="flex flex-col gap-1.5"><label className="text-sm font-medium text-fg-muted" htmlFor="execution-note">执行备注</label><textarea id="execution-note" rows={3} className={textareaClass} value={executionForm.note} onChange={(event) => setExecutionForm((current) => ({ ...current, note: event.target.value }))} placeholder={`记录执行情况、异常和${person}反馈`} /></div>
           <div className="flex justify-end gap-3"><Button type="button" variant="ghost" onClick={() => setExecutionTask(null)} disabled={saving}>取消</Button><Button type="submit" loading={saving}>保存完成记录</Button></div>
         </form>

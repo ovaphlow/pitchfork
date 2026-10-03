@@ -32,10 +32,54 @@ internal val DECLARED_PERMISSIONS: List<DeclaredPermission> = listOf(
 internal data class PermissionCatalogEntry(
     val code: String,
     val description: String,
+    /**
+     * 043：该码由哪一层真实门禁——`"aceso"`（产品后端路由）/ `"nexus"`（共享服务写路由）/ `null`（尚未接线）。
+     *
+     * 权限的**权威目录**在 Nexus 角色目录；这里只声明"这套部署里哪些码真的接上了"。
+     * 角色管理页用它把未接线的码标出来（040 D2：保留"先建角色再接线"的放量能力）。
+     */
+    val enforcedBy: String?,
+)
+
+/**
+ * 043：Nexus 侧门禁声明。
+ *
+ * 这些路由不在 Aceso 的路由表里（它们是 Nexus 自己的写路由），但角色管理页必须能选到对应权限码，
+ * 否则"把部门维护委派给业务角色"这件事无从配置。字段形状与 [DeclaredPermission] 对齐，
+ * 只是多了 `code` 在前。
+ */
+internal data class NexusEnforcedPermission(
+    val permissionCode: String,
+    val method: String,
+    val path: String,
 )
 
 internal const val PHARMACY_DISPENSE_PERMISSION = "pharmacy:dispense"
 internal const val BILLING_WRITE_PERMISSION = "billing:write"
+
+/** 043：账号与授权管理（角色、用户↔角色、用户↔部门）。 */
+internal const val ACCESS_MANAGE_PERMISSION = "access:manage"
+
+/** 043：基础数据管理（部门目录；后续物资/床位/费用项/仓库并入时沿用此码）。 */
+internal const val BASE_DATA_MANAGE_PERMISSION = "base_data:manage"
+
+/**
+ * Nexus 侧已接线的写路由（043 §4.1 冻结矩阵）。
+ *
+ * 与 `service-nexus-shared/src/{roles,departments,subject_roles,subject_departments}/mod.rs`
+ * 的 `write_router()` 一一对应；`GET /shared/v1/subject-permissions` 的"仅本人"收紧
+ * 也由 `access:manage` 控制（查自己不需要该码，因此不计入本清单）。
+ */
+internal val NEXUS_ENFORCED_PERMISSIONS: List<NexusEnforcedPermission> = listOf(
+    NexusEnforcedPermission(ACCESS_MANAGE_PERMISSION, "POST", "/shared/v1/roles"),
+    NexusEnforcedPermission(ACCESS_MANAGE_PERMISSION, "PUT", "/shared/v1/roles/:id"),
+    NexusEnforcedPermission(ACCESS_MANAGE_PERMISSION, "DELETE", "/shared/v1/roles/:id"),
+    NexusEnforcedPermission(ACCESS_MANAGE_PERMISSION, "PUT", "/shared/v1/subject-roles/subjects/:id"),
+    NexusEnforcedPermission(ACCESS_MANAGE_PERMISSION, "PUT", "/shared/v1/subject-departments/subjects/:id"),
+    NexusEnforcedPermission(BASE_DATA_MANAGE_PERMISSION, "POST", "/shared/v1/departments"),
+    NexusEnforcedPermission(BASE_DATA_MANAGE_PERMISSION, "PUT", "/shared/v1/departments/:id"),
+    NexusEnforcedPermission(BASE_DATA_MANAGE_PERMISSION, "DELETE", "/shared/v1/departments/:id"),
+)
 
 /**
  * 产品权限目录：Aceso 声明的全部权限码，含**尚未接线**的码。
@@ -45,9 +89,15 @@ internal const val BILLING_WRITE_PERMISSION = "billing:write"
  * 每个已接线的码都必须出现在这里，漂移由 `DeclaredPermissionsTest` 兜住。
  */
 internal val PERMISSION_CATALOG: List<PermissionCatalogEntry> = listOf(
-    PermissionCatalogEntry(NURSING_EXECUTE_PERMISSION, "护理执行（记录给药、更新执行状态）"),
-    PermissionCatalogEntry(PHARMACY_DISPENSE_PERMISSION, "发药确认"),
-    PermissionCatalogEntry(BILLING_WRITE_PERMISSION, "账单写操作（生成、加项、红冲、结算）"),
+    PermissionCatalogEntry(NURSING_EXECUTE_PERMISSION, "护理执行（记录给药、更新执行状态）", "aceso"),
+    PermissionCatalogEntry(PHARMACY_DISPENSE_PERMISSION, "发药确认", null),
+    PermissionCatalogEntry(BILLING_WRITE_PERMISSION, "账单写操作（生成、加项、红冲、结算）", null),
+    PermissionCatalogEntry(
+        ACCESS_MANAGE_PERMISSION,
+        "账号与授权管理（角色、用户↔角色、用户↔部门）",
+        "nexus",
+    ),
+    PermissionCatalogEntry(BASE_DATA_MANAGE_PERMISSION, "基础数据管理（部门等组织主数据）", "nexus"),
 )
 
 /**
@@ -69,11 +119,20 @@ internal object AccessRoutes {
                         .put("permission_code", declared.permissionCode),
                 )
             }
-            val wired = DECLARED_PERMISSIONS.map { it.permissionCode }.toSet()
+            val wired = DECLARED_PERMISSIONS.map { it.permissionCode }.toSet() +
+                NEXUS_ENFORCED_PERMISSIONS.map { it.permissionCode }.toSet()
             val catalog = JsonArray()
             PERMISSION_CATALOG.forEach { entry ->
                 val entryRoutes = JsonArray()
                 DECLARED_PERMISSIONS
+                    .filter { it.permissionCode == entry.code }
+                    .forEach { declared ->
+                        entryRoutes.add(
+                            JsonObject().put("method", declared.method).put("path", declared.path),
+                        )
+                    }
+                // 043：Nexus 侧门禁的路由同样列出来，形状与 Aceso 路由一致
+                NEXUS_ENFORCED_PERMISSIONS
                     .filter { it.permissionCode == entry.code }
                     .forEach { declared ->
                         entryRoutes.add(
@@ -85,6 +144,7 @@ internal object AccessRoutes {
                         .put("code", entry.code)
                         .put("description", entry.description)
                         .put("wired", wired.contains(entry.code))
+                        .put("enforced_by", entry.enforcedBy ?: "")
                         .put("routes", entryRoutes),
                 )
             }

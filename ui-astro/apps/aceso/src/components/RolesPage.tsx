@@ -250,11 +250,11 @@ export default function RolesPage() {
         </div>
       )}
 
-      <Card title="产品角色" actions={<span className="text-sm text-fg-dimmed">共 {roles.length} 个</span>}>
+      <Card title="产品角色" actions={pageError ? null : <span className="text-sm text-fg-dimmed">共 {roles.length} 个</span>}>
         <p className="mb-4 text-sm text-fg-muted">
           存放在共享角色目录（Nexus），可在「用户管理」中分配给用户；权限码用于接口准入，标为「未接线」的权限码目前没有任何接口在判定它。
         </p>
-        <Table columns={columns} data={roles} loading={loading} emptyMessage="暂无产品角色" />
+        <Table columns={columns} data={roles} loading={loading} error={pageError} emptyMessage="暂无产品角色" />
       </Card>
 
       <Modal open={editorOpen} onClose={() => !saving && setEditorOpen(false)} title={editTarget ? "编辑角色" : "添加角色"}>

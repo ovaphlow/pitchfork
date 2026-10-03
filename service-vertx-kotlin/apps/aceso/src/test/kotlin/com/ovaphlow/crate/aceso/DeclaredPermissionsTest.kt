@@ -52,7 +52,31 @@ class DeclaredPermissionsTest {
         val codes = DECLARED_PERMISSIONS.map { it.permissionCode }.toSet()
 
         assertTrue(codes.contains(NURSING_EXECUTE_PERMISSION), "护理执行码必须登记在清单里，否则角色页会把它标成未接线")
-        assertEquals(listOf(NURSING_EXECUTE_PERMISSION), codes.toList(), "新增接线时必须同步更新清单与本断言")
+        assertEquals(
+            listOf(NURSING_EXECUTE_PERMISSION),
+            codes.toList(),
+            "Aceso 路由接线必须与清单一致（新增接线时同步更新本断言）",
+        )
+    }
+
+    @Test
+    fun `the nexus gate list covers the authorization codes declared as wired by nexus`() {
+        val nexusCodes = NEXUS_ENFORCED_PERMISSIONS.map { it.permissionCode }.toSet()
+
+        assertEquals(
+            setOf(ACCESS_MANAGE_PERMISSION, BASE_DATA_MANAGE_PERMISSION),
+            nexusCodes,
+            "Nexus 门禁码必须与清单一致（043 §4.1 冻结矩阵）",
+        )
+        assertEquals(
+            nexusCodes,
+            PERMISSION_CATALOG.filter { it.enforcedBy == "nexus" }.map { it.code }.toSet(),
+            "目录里标 enforced_by=nexus 的条目必须真的在 Nexus 侧接线，否则角色页会展示一个假的已接线码",
+        )
+        assertTrue(
+            NEXUS_ENFORCED_PERMISSIONS.all { it.path.startsWith("/shared/v1/") },
+            "Nexus 门禁路由都在 /shared/v1/ 下：${NEXUS_ENFORCED_PERMISSIONS.map { it.path }}",
+        )
     }
 
     @Test
@@ -74,7 +98,9 @@ class DeclaredPermissionsTest {
     @Test
     fun `the catalog covers every wired code and keeps unwired codes selectable`() {
         val catalogCodes = PERMISSION_CATALOG.map { it.code }.toSet()
-        val wiredCodes = DECLARED_PERMISSIONS.map { it.permissionCode }.toSet()
+        // 043："已接线"含两层——Aceso 路由（DECLARED_PERMISSIONS）与 Nexus 写门禁（NEXUS_ENFORCED_PERMISSIONS）
+        val wiredCodes = DECLARED_PERMISSIONS.map { it.permissionCode }.toSet() +
+            NEXUS_ENFORCED_PERMISSIONS.map { it.permissionCode }.toSet()
         assertTrue(
             catalogCodes.containsAll(wiredCodes),
             "每个已接线的码都必须在产品权限目录里，否则角色页选不到它：wired=$wiredCodes catalog=$catalogCodes",
@@ -101,6 +127,19 @@ class DeclaredPermissionsTest {
         assertTrue(
             entries.all { !it.getString("description").isNullOrBlank() },
             "每条目录都要有说明，角色页照着它选：$entries",
+        )
+        // 043：新增的 enforced_by 必须与 PERMISSION_CATALOG 一一对应（空串表示未接线）
+        PERMISSION_CATALOG.forEach { entry ->
+            assertEquals(
+                entry.enforcedBy ?: "",
+                byCode[entry.code]?.getString("enforced_by"),
+                "${entry.code} 的 enforced_by 必须与清单一致",
+            )
+        }
+        // 已接线的 Nexus 码必须能在 catalog.routes 里看到它拦的路由
+        assertTrue(
+            byCode[ACCESS_MANAGE_PERMISSION]!!.getJsonArray("routes").size() >= 5,
+            "access:manage 必须列出它拦住的写路由，实际 ${byCode[ACCESS_MANAGE_PERMISSION]}",
         )
     }
 

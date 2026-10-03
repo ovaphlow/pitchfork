@@ -57,7 +57,7 @@ class AssessmentService(
         }
     }
 
-    fun create(body: JsonObject): Future<JsonObject> {
+    fun create(body: JsonObject, assessor: String?): Future<JsonObject> {
         val assessType = body.getString("assess_type")
         val encounterId = body.getString("encounter_id")
         val periodId = body.getString("period_id")
@@ -78,7 +78,7 @@ class AssessmentService(
             .set(cPeriodId, periodId?.takeIf { it.isNotBlank() })
             .set(cAssessType, assessType)
             .set(cAssessDate, LocalDate.parse(body.getString("assess_date")))
-            .set(cAssessor, body.getString("assessor"))
+            .set(cAssessor, assessor)
             .set(cTotalScore, body.getDouble("total_score")?.let { BigDecimal.valueOf(it) })
             .set(cResultLevel, body.getString("result_level"))
             .set(cDetail, body.containsKey("detail")
@@ -97,7 +97,7 @@ class AssessmentService(
                     .put("period_id", periodId?.takeIf { it.isNotBlank() })
                     .put("assess_type", assessType)
                     .put("assess_date", body.getString("assess_date"))
-                    .put("assessor", body.getString("assessor"))
+                    .put("assessor", assessor)
                     .put("total_score", body.getDouble("total_score"))
                     .put("result_level", body.getString("result_level"))
                     .put("detail", body.getJsonObject("detail"))
@@ -152,9 +152,9 @@ class AssessmentService(
             }
     }
 
-    fun update(id: String, body: JsonObject): Future<JsonObject> {
+    fun update(id: String, body: JsonObject, assessor: String?): Future<JsonObject> {
         return get(id).flatMap { _ ->
-            var q = ctx.update(t).set(cAssessor, body.getString("assessor"))
+            var q = ctx.update(t).set(cAssessor, assessor)
 
             if (body.containsKey("total_score"))
                 q = q.set(cTotalScore, body.getDouble("total_score")?.let { BigDecimal.valueOf(it) })

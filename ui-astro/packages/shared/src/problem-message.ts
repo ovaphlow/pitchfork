@@ -32,8 +32,13 @@ export function problemMessage(
   responseText: string,
 ): string {
   const requiredPermission = problem?.required_permission?.trim();
-  if (status === 403 && requiredPermission) {
-    return `权限不足：需要「${requiredPermission}」权限。请联系管理员在「角色管理」中把带有该权限码的角色分配给你。`;
+  if (status === 403) {
+    if (requiredPermission) {
+      return `权限不足：需要「${requiredPermission}」权限。请联系管理员在「角色管理」中把带有该权限码的角色分配给你。`;
+    }
+    // 043：没有权限码的 403（IDP 的管理员接口、Nexus 的平台管理员门禁）此前会原样透出英文
+    // `not authorized`，业务账号只看到一句英文、不知道是权限问题还是数据为空。
+    return "权限不足：该操作需要管理员权限，请联系平台管理员。";
   }
   if (status === 503) {
     if (problem?.error === "permission service unavailable") {

@@ -17,10 +17,17 @@ use crate::{AppState, PageQuery};
 
 const MAX_ROLE_CODES_PER_SUBJECT: usize = 100;
 
+/// 只读路由：任何有效会话可读（用户页需按 subject 展示角色徒标）。
 pub fn router() -> Router<AppState> {
-    Router::new()
-        .route("/", get(list))
-        .route("/subjects/{subject_id}", put(replace))
+    Router::new().route("/", get(list))
+}
+
+/// 043：写路由单独成组，由 App 编排层挂 `access:manage` 门禁。
+///
+/// 这是**提权链的第二半**：`PUT /subject-roles/subjects/{自己}` 把角色分给自己；
+/// 与 `roles::write_router`（可建带任意权限码的角色）合起来即"三步提权"。
+pub fn write_router() -> Router<AppState> {
+    Router::new().route("/subjects/{subject_id}", put(replace))
 }
 
 /// 产品后端取"当前主体能用什么"的入口：只需一次调用，不必自己 join 角色与权限码。
@@ -275,11 +282,29 @@ fn normalize_role_codes(codes: Vec<String>) -> Vec<String> {
 }
 
 /// 取主体的有效权限：角色码 + 角色权限码的并集（去重、保持角色顺序稳定）。
+///
+/// 043 D5：**只能查自己**。原先任何登录用户都能读**任意主体**的角色与权限
+/// （实测：`nurse01` 读 `ovaphlow`、读系统管理员均 200），属水平越权信息泄露。
+/// 查他人需平台管理员或 `access:manage`；Aceso 的权限闸门传的就是会话主体，故无回归。
 async fn permissions(
     State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
     Query(query): Query<PermissionsQuery>,
 ) -> ApiResult<Json<SubjectPermissions>> {
     let subject_id = validate_subject_id(&query.subject_id)?;
+
+    if subject_id != identity.subject_id
+        && !crate::authorization::is_allowed(
+            &state,
+            &identity,
+            crate::authorization::ACCESS_MANAGE_PERMISSION,
+        )
+        .await?
+    {
+        return Err(ApiError::ForbiddenPermission(
+            crate::authorization::ACCESS_MANAGE_PERMISSION.to_owned(),
+        ));
+    }
 
     let rows = sqlx::query_as::<_, RolePermissionsRow>(
         "SELECT role.role_code, role.permission_codes \

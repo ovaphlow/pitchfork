@@ -181,19 +181,27 @@ class DispenseServiceTest {
 
     @Test
     fun `review requires operator before touching database`() {
-        val error = failureOf(service.review("dispense-1", JsonObject()))
+        val error = failureOf(service.review("dispense-1", JsonObject(), null))
         assertTrue(error.message!!.contains("operator"))
     }
 
     @Test
     fun `start requires operator before touching database`() {
-        val error = failureOf(service.start("dispense-1", JsonObject()))
+        val error = failureOf(service.start("dispense-1", JsonObject(), null))
         assertTrue(error.message!!.contains("operator"))
     }
 
     @Test
+    fun `review ignores a body operator when no resolved operator is passed`() {
+        // 042：请求体里的 operator 只是"请求"，权威值由路由层从会话派生后以参数传入。
+        // 参数为 null 时必须仍然拒绝，否则非管理员提交他人就能绕过代操作门禁直接落库。
+        val error = failureOf(service.review("dispense-1", JsonObject().put("operator", "审方药师"), null))
+        assertTrue(error.message!!.contains("operator"), "got: ${error.message}")
+    }
+
+    @Test
     fun `updateStatus rejects blank status`() {
-        val error = failureOf(service.updateStatus("dispense-1", JsonObject()))
+        val error = failureOf(service.updateStatus("dispense-1", JsonObject(), null))
         assertTrue(error.message!!.contains("status"))
     }
 

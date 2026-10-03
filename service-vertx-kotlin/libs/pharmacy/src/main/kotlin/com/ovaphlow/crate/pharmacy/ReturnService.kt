@@ -69,21 +69,23 @@ class ReturnService(
             .put("metadata", row.getValue("metadata") as? JsonObject)
     }
 
-    fun createFromDispense(body: JsonObject): Future<JsonObject> {
+    fun createFromDispense(body: JsonObject, operator: String?): Future<JsonObject> {
         rejectUnknown(body, setOf("dispense_id", "dispense_item_id", "quantity", "return_reason", "operator", "restockable", "remark"))?.let {
             return Future.failedFuture(it)
         }
         val dispenseId = body.getString("dispense_id")?.trim().orEmpty()
         val dispenseItemId = body.getString("dispense_item_id")?.trim().orEmpty()
         val returnReason = body.getString("return_reason")?.trim().orEmpty()
-        val operator = body.getString("operator")?.trim().orEmpty()
+        // 042：操作人由路由层从认证会话派生（`operator` 参数），请求体里的 `operator`
+        // 只是它的来源之一（平台管理员代操作 / 无认证挂载回落），不再作为权威值直接落库。
+        val operatorValue = operator?.trim().orEmpty()
         val quantity = requestDecimalText(body.getValue("quantity"))
         val restockable = body.getBoolean("restockable")
 
         if (dispenseId.isBlank()) return Future.failedFuture(IllegalArgumentException("dispense_id is required"))
         if (dispenseItemId.isBlank()) return Future.failedFuture(IllegalArgumentException("dispense_item_id is required"))
         if (returnReason.isBlank()) return Future.failedFuture(IllegalArgumentException("return_reason is required"))
-        if (operator.isBlank()) return Future.failedFuture(IllegalArgumentException("operator is required"))
+        if (operatorValue.isBlank()) return Future.failedFuture(IllegalArgumentException("operator is required"))
         if (quantity == null) return Future.failedFuture(IllegalArgumentException("quantity must be decimal text"))
         if (quantity <= BigDecimal.ZERO) return Future.failedFuture(IllegalArgumentException("quantity must be positive"))
         try {
@@ -107,7 +109,7 @@ class ReturnService(
                             source,
                             requested,
                             returnReason,
-                            operator,
+                            operatorValue,
                             body,
                         )
                     }
@@ -182,10 +184,11 @@ class ReturnService(
             }
     }
 
-    fun confirm(id: String, body: JsonObject): Future<JsonObject> {
+    fun confirm(id: String, body: JsonObject, operator: String?): Future<JsonObject> {
         rejectUnknown(body, setOf("operator", "remark"))?.let { return Future.failedFuture(it) }
-        val operator = body.getString("operator")?.trim().orEmpty()
-        if (operator.isBlank()) return Future.failedFuture(IllegalArgumentException("operator is required"))
+        // 042：口径同 [createFromDispense]。
+        val operatorValue = operator?.trim().orEmpty()
+        if (operatorValue.isBlank()) return Future.failedFuture(IllegalArgumentException("operator is required"))
 
         return pool.withTransaction<JsonObject> { connection ->
             lockReturn(connection, id).compose { current ->
@@ -230,7 +233,7 @@ class ReturnService(
                                             .where(PHARMACY_RETURN_ITEMS.ID.eq(source.returnItemId))
                                         val headerUpdate = ctx.update(PHARMACY_RETURNS)
                                             .set(PHARMACY_RETURNS.STATUS, "CONFIRMED")
-                                            .set(PHARMACY_RETURNS.OPERATOR, operator)
+                                            .set(PHARMACY_RETURNS.OPERATOR, operatorValue)
                                             .set(PHARMACY_RETURNS.CONFIRMED_AT, now)
                                             .where(PHARMACY_RETURNS.ID.eq(id))
                                         connection.preparedQuery(DatabaseConfig.sql(itemUpdate))

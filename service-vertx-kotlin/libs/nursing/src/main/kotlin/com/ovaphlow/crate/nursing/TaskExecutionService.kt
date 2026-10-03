@@ -313,7 +313,7 @@ class TaskExecutionService(
     //  现有 CRUD — 保持不变，但保护旧库存字段
     // ========================================================================
 
-    fun create(body: JsonObject): Future<JsonObject> {
+    fun create(body: JsonObject, executor: String?): Future<JsonObject> {
         val taskId = body.getString("task_id")
         if (taskId.isNullOrBlank()) {
             return Future.failedFuture(IllegalArgumentException("task_id is required"))
@@ -330,7 +330,7 @@ class TaskExecutionService(
                 .set(cTaskId, taskId)
                 .set(cPlannedTime, body.getString("planned_time")?.let { OffsetDateTime.parse(it) })
                 .set(cActualTime, body.getString("actual_time")?.let { OffsetDateTime.parse(it) })
-                .set(cExecutor, body.getString("executor"))
+                .set(cExecutor, executor)
                 .set(cStatus, "PENDING")
                 .set(cNote, body.getString("note"))
                 .set(
@@ -349,7 +349,7 @@ class TaskExecutionService(
                     .put("task_id", taskId)
                     .put("planned_time", body.getString("planned_time"))
                     .put("actual_time", body.getString("actual_time"))
-                    .put("executor", body.getString("executor"))
+                    .put("executor", executor)
                     .put("status", "PENDING")
                     .put("note", body.getString("note"))
                     .put("metadata", body.getJsonObject("metadata"))
@@ -482,9 +482,10 @@ class TaskExecutionService(
     fun update(
         id: String,
         body: JsonObject,
+        executor: String?,
     ): Future<JsonObject> =
         get(id).flatMap { _ ->
-            var q = ctx.update(t).set(cExecutor, body.getString("executor"))
+            var q = ctx.update(t).set(cExecutor, executor)
 
             if (body.containsKey("actual_time")) {
                 q = q.set(cActualTime, body.getString("actual_time")?.let { OffsetDateTime.parse(it) })

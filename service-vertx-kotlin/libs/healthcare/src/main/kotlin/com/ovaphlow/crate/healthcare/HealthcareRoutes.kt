@@ -1,5 +1,7 @@
 package com.ovaphlow.crate.healthcare
 
+import com.ovaphlow.crate.common.OperatorResolution
+import com.ovaphlow.crate.common.resolveOperator
 import com.ovaphlow.crate.nursing.ConflictException
 import com.ovaphlow.crate.nursing.NotFoundException
 import com.ovaphlow.crate.nursing.TaskService
@@ -250,7 +252,34 @@ object HealthcareRoutes {
         }
         // 复评与照护计划修订：具体路由必须位于泛型 encounter 详情路由之前
         router.post("/encounters/:id/care-plan-revisions").handler { ctx ->
-            service.createCarePlanRevision(requiredId(ctx), body(ctx))
+            val revisionBody = body(ctx)
+            // 042：复评的评估人与计划制定人同护理 5 处的口径——权威来源是认证会话；
+            // 只有平台管理员可以代操作，非管理员提交他人 → 400（fail-closed，不静默改写）。
+            // 两个嵌套字段（`assessment.assessor` / `plan.created_by`）各自独立判定。
+            val actorId = ctx.get<String>("userId")
+            val platformAdmin = ctx.get<Boolean>("platformAdmin") ?: false
+            val assessorResolution = resolveOperator(
+                actorId,
+                platformAdmin,
+                (revisionBody.getValue("assessment") as? JsonObject)?.getString("assessor"),
+            )
+            val createdByResolution = resolveOperator(
+                actorId,
+                platformAdmin,
+                (revisionBody.getValue("plan") as? JsonObject)?.getString("created_by"),
+            )
+            if (assessorResolution is OperatorResolution.NotDelegatable ||
+                createdByResolution is OperatorResolution.NotDelegatable
+            ) {
+                respond(ctx, 400, "operator cannot be delegated")
+                return@handler
+            }
+            service.createCarePlanRevision(
+                requiredId(ctx),
+                revisionBody,
+                assessorResolution.resolvedOperatorOrNull(),
+                createdByResolution.resolvedOperatorOrNull(),
+            )
                 .onSuccess { ctx.response().setStatusCode(201); ctx.json(it) }
                 .onFailure { respondFailure(ctx, it) }
         }
@@ -1112,6 +1141,18 @@ object HealthcareRoutes {
             return null
         }
         return value
+    }
+
+    /**
+     * 042：把操作人判定结果映射为写库值。
+     *
+     * `NotDelegatable` 在调用点已经被拒（400），这里回落 `null` 只是让映射保持全函数；
+     * `Absent` 与它同义：不写该字段（可空列，与"未提交"语义一致）。
+     */
+    private fun OperatorResolution.resolvedOperatorOrNull(): String? = when (this) {
+        is OperatorResolution.Resolved -> subjectId
+        is OperatorResolution.Delegated -> requested
+        OperatorResolution.Absent, OperatorResolution.NotDelegatable -> null
     }
 
     private fun body(ctx: RoutingContext): JsonObject = ctx.body().asJsonObject() ?: JsonObject()

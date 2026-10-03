@@ -148,3 +148,71 @@ func loginWithSource(ctx context.Context, databaseConnection *sql.DB, identifier
 		SourceAddress: sourceAddress,
 	}, testSessionSettings, testLoginThrottleSettings)
 }
+
+// TestCurrentSessionReportsPlatformAdminAndDisplayName 锁定计划 042 §4.1 的两个新增字段：
+//
+//	platform_admin —— 代操作门禁的**唯一依据**，必须是主体事实而不是会话属性；
+//	display_name   —— 下游渲染"当前登录用户"用。
+//
+// 两者都必须随**主体**而非随会话变化，所以本用例在同一张库上对比平台管理员与普通主体。
+func TestCurrentSessionReportsPlatformAdminAndDisplayName(t *testing.T) {
+	ctx := context.Background()
+	databaseConnection := migratedDatabase(t)
+	if _, err := identity.EnsureBootstrap(ctx, databaseConnection, identity.BootstrapInput{
+		Identifier: "admin",
+		Password:   "correct horse battery staple",
+	}); err != nil {
+		t.Fatalf("ensure bootstrap: %v", err)
+	}
+
+	bootstrapSubjects, err := identity.ListSubjects(ctx, databaseConnection, identity.ListSubjectsInput{Limit: 10, Offset: 0})
+	if err != nil {
+		t.Fatalf("list subjects: %v", err)
+	}
+	if len(bootstrapSubjects.Subjects) != 1 {
+		t.Fatalf("bootstrap subject count = %d, want 1", len(bootstrapSubjects.Subjects))
+	}
+	administrator := bootstrapSubjects.Subjects[0]
+
+	administratorLogin, err := loginWithSource(ctx, databaseConnection, "admin", "correct horse battery staple", "192.0.2.1")
+	if err != nil {
+		t.Fatalf("login administrator: %v", err)
+	}
+	administratorSession, err := identity.CurrentSession(ctx, databaseConnection, administratorLogin.SessionToken, testSessionSettings)
+	if err != nil {
+		t.Fatalf("load administrator session: %v", err)
+	}
+	if !administratorSession.PlatformAdmin {
+		t.Fatal("引导出来的主体必须被判为平台管理员，否则代操作门禁没有引导者")
+	}
+	if administratorSession.DisplayName != "系统管理员" {
+		t.Fatalf("administrator display name = %q, want %q", administratorSession.DisplayName, "系统管理员")
+	}
+
+	created, err := identity.CreateSubject(ctx, databaseConnection, administrator.ID, identity.CreateSubjectInput{
+		DisplayName: "护理员一号",
+		Identifier:  "nurse01",
+		Password:    "nurse one password",
+	})
+	if err != nil {
+		t.Fatalf("create subject: %v", err)
+	}
+
+	staffLogin, err := loginWithSource(ctx, databaseConnection, "nurse01", "nurse one password", "192.0.2.2")
+	if err != nil {
+		t.Fatalf("login staff subject: %v", err)
+	}
+	staffSession, err := identity.CurrentSession(ctx, databaseConnection, staffLogin.SessionToken, testSessionSettings)
+	if err != nil {
+		t.Fatalf("load staff session: %v", err)
+	}
+	if staffSession.PlatformAdmin {
+		t.Fatal("普通主体不得被判为平台管理员（fail-closed：判定不出管理员就不得代操作）")
+	}
+	if staffSession.DisplayName != "护理员一号" {
+		t.Fatalf("staff display name = %q, want %q", staffSession.DisplayName, "护理员一号")
+	}
+	if staffSession.SubjectID != created.ID {
+		t.Fatalf("staff session subject = %q, want %q", staffSession.SubjectID, created.ID)
+	}
+}

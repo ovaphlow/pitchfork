@@ -25,8 +25,16 @@ test("403 带 required_permission → 中文提示含权限码", () => {
 	assert.match(message, /角色管理/);
 });
 
-test("403 无 required_permission → 保持服务端错误码，不编造权限名", () => {
-	assert.equal(problemMessage(403, { error: "forbidden" }, ""), "forbidden");
+test("403 无 required_permission → 中文兜底，不透出英文 not authorized", () => {
+	// 043：IDP 的管理员接口与 Nexus 的平台管理员门禁回的是不带权限码的 403
+	// （`{title:"Forbidden", detail:"not authorized"}`）。此前会原样透出英文，业务账号
+	// 只看到一句英文、分不清是"没权限"还是"库里没数据"。
+	const fromIdp = problemMessage(403, { title: "Forbidden", detail: "not authorized" }, "");
+	assert.match(fromIdp, /权限不足/);
+	assert.match(fromIdp, /平台管理员/);
+	assert.doesNotMatch(fromIdp, /not authorized/);
+
+	assert.equal(problemMessage(403, { error: "forbidden" }, ""), "权限不足：该操作需要管理员权限，请联系平台管理员。");
 });
 
 test("503 权限服务不可用 → 明确「本次操作未执行」且不提示登出", () => {

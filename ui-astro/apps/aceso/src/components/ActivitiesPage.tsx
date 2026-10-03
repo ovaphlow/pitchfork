@@ -3,7 +3,6 @@ import { Badge, Button, Card, EmptyState, Input, Modal, type Column } from "@pit
 import {
   createNursingTask,
   generateNursingExecutions,
-  listIdentitySubjects,
   listNursingExecutionStatistics,
   listNursingServicePeriods,
   listNursingTaskExecutions,
@@ -13,7 +12,6 @@ import {
   listPatients,
   updateNursingTaskExecutionStatus,
   updateNursingTaskStatus,
-  type IdentitySubject,
   type NursingExecutionStatistics,
   type NursingExecutionStatisticsPage,
   type NursingServicePeriod,
@@ -24,6 +22,7 @@ import {
 } from "@pitchfork/shared/aceso";
 import { executionRateCards, formatCompletionRate, type ExecutionStatCard } from "./executionStatistics";
 import { daysAgoLocal, formatDate, formatDateTime, formatTime, todayLocal } from "../lib/datetime";
+import { useSubjectDirectory } from "../lib/identity";
 
 const PAGE_SIZE = 10;
 
@@ -134,16 +133,15 @@ export default function ActivitiesPage() {
   const [patients, setPatients] = useState<Patient[]>([]);
   const [periodByPatient, setPeriodByPatient] = useState<Map<string, NursingServicePeriod>>(new Map());
   const [patientNameById, setPatientNameById] = useState<Map<string, string>>(new Map());
-  const [subjects, setSubjects] = useState<IdentitySubject[]>([]);
-  const subjectMap = useMemo(() => new Map(subjects.map((s) => [s.id, s.display_name])), [subjects]);
+  /** 044：执行人姓名改用**业务人员目录**（非管理员可读）；未命中回退原始 ID */
+  const { subjectMap } = useSubjectDirectory();
 
   useEffect(() => {
     void (async () => {
       try {
-        const [patientRes, periodRes, subjectRes] = await Promise.all([
+        const [patientRes, periodRes] = await Promise.all([
           listPatients({ status: "ACTIVE", limit: 500 }),
           listNursingServicePeriods({ status: "ACTIVE", limit: 1000 }),
-          listIdentitySubjects(1, 100),
         ]);
         setPatients(patientRes.records);
         const periodMap = new Map<string, NursingServicePeriod>();
@@ -152,7 +150,6 @@ export default function ActivitiesPage() {
         }
         setPeriodByPatient(periodMap);
         setPatientNameById(new Map(patientRes.records.map((p) => [p.id, p.name])));
-        setSubjects(subjectRes.records);
       } catch {
         // 基础数据加载失败不影响页面主体，创建时选择长者会提示重试
       }

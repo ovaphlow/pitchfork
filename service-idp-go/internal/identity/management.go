@@ -175,6 +175,100 @@ func ListSubjects(ctx context.Context, database *sql.DB, input ListSubjectsInput
 	return ListSubjectsResult{Subjects: subjects, Total: total}, nil
 }
 
+// DirectoryEntry 是**业务人员目录**条目：只暴露「主体 ID + 姓名」。
+//
+// 刻意不含 identifier（登录账号）、status、security_version、platform_admin、created_at 等
+// 管理字段：本端点对**所有登录用户**开放（业务账号要在表单里挑同事、在列表里看责任人姓名），
+// 暴露面必须控制在「组织内通讯录」级别（计划 044 D1/D2）。
+type DirectoryEntry struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name"`
+}
+
+type ListDirectoryInput struct {
+	Limit  int64
+	Offset int64
+	// Search 按 display_name 模糊匹配（空串表示不过滤）；SQLite 的 LIKE 对 ASCII 不区分大小写
+	Search string
+}
+
+type ListDirectoryResult struct {
+	Entries []DirectoryEntry
+	Total   int64
+}
+
+// directoryRow 是目录查询的最小视图（字段与响应一一对应）。
+type directoryRow struct {
+	ID          string `db:"id"`
+	DisplayName string `db:"display_name"`
+}
+
+// countDirectorySubjects / listDirectorySubjects：只取**启用**主体，避免把已禁用账号
+// 当作可选操作人。INNER JOIN identity_profiles 是刻意的——没有档案的主体无法展示姓名，
+// 而本端点的唯一用途就是展示姓名。
+//
+// `ESCAPE '\'` 与 escapeLikePattern 成对：用户输入的 % / _ 不得变成通配符。
+const countDirectorySubjects = `
+SELECT COUNT(*)
+FROM identity_subjects s
+JOIN identity_profiles p ON p.subject_id = s.id
+WHERE s.status = :status
+  AND (:search = '' OR p.display_name LIKE :pattern ESCAPE '\')`
+
+const listDirectorySubjects = `
+SELECT s.id, p.display_name
+FROM identity_subjects s
+JOIN identity_profiles p ON p.subject_id = s.id
+WHERE s.status = :status
+  AND (:search = '' OR p.display_name LIKE :pattern ESCAPE '\')
+ORDER BY p.display_name, s.id
+LIMIT :page_limit OFFSET :page_offset`
+
+// ListDirectory 是业务侧唯一可读的主体目录（计划 044）。
+// 与 ListSubjects（管理台，需平台管理员）的区别只有两点：字段最小化 + 只含启用主体。
+func ListDirectory(ctx context.Context, database *sql.DB, input ListDirectoryInput) (ListDirectoryResult, error) {
+	if input.Limit <= 0 || input.Offset < 0 {
+		return ListDirectoryResult{}, fmt.Errorf("invalid directory pagination")
+	}
+	search := strings.TrimSpace(input.Search)
+	pattern := "%" + escapeLikePattern(search) + "%"
+
+	queries := newQuerier(database)
+	var total int64
+	// 参数一律内联成 map 字面量：sqlx_test.go 的 TestSQLNamedParametersAreProvided
+	// 会静态比对 SQL 常量里的命名参数与调用点实参，变量形式会被判为不可校验。
+	if err := namedGet(ctx, queries, &total, countDirectorySubjects, map[string]any{
+		"status":  StatusEnabled,
+		"search":  search,
+		"pattern": pattern,
+	}); err != nil {
+		return ListDirectoryResult{}, fmt.Errorf("count directory subjects: %w", err)
+	}
+	var rows []directoryRow
+	if err := namedSelect(ctx, queries, &rows, listDirectorySubjects, map[string]any{
+		"status":      StatusEnabled,
+		"search":      search,
+		"pattern":     pattern,
+		"page_limit":  input.Limit,
+		"page_offset": input.Offset,
+	}); err != nil {
+		return ListDirectoryResult{}, fmt.Errorf("list directory subjects: %w", err)
+	}
+
+	entries := make([]DirectoryEntry, 0, len(rows))
+	for _, row := range rows {
+		entries = append(entries, DirectoryEntry{ID: row.ID, DisplayName: row.DisplayName})
+	}
+	return ListDirectoryResult{Entries: entries, Total: total}, nil
+}
+
+// escapeLikePattern 把 LIKE 的通配符转义掉，避免用户输入的 % / _ 把检索变成全表匹配。
+// 反斜杠同时需要转义；SQL 里配合 ESCAPE '\\' 使用。
+func escapeLikePattern(value string) string {
+	replacer := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return replacer.Replace(value)
+}
+
 func GetSubject(ctx context.Context, database *sql.DB, subjectID string) (Subject, error) {
 	return getSubject(ctx, newQuerier(database), subjectID)
 }

@@ -280,9 +280,9 @@ export default function MaterialsPage() {
 
       {pageError && <div className="rounded-lg border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">{pageError}</div>}
 
-      <Card title="物资与基础单位" actions={<span className="text-sm text-fg-dimmed">共 {materials.length} 个</span>}>
+      <Card title="物资与基础单位" actions={pageError ? null : <span className="text-sm text-fg-dimmed">共 {materials.length} 个</span>}>
         <div className="overflow-x-auto">
-          <Table columns={materialColumns} data={materials} loading={loading} emptyMessage="暂无物资" />
+          <Table columns={materialColumns} data={materials} loading={loading} error={pageError} emptyMessage="暂无物资" />
         </div>
       </Card>
 

@@ -9,7 +9,6 @@ import {
   listBedOccupancy,
   listBeds,
   listElderlyAdmissions,
-  listIdentitySubjects,
   listPatients,
   markEncounterDeath,
   type Bed,
@@ -18,12 +17,12 @@ import {
   type ElderlyDischargeHandover,
   type ElderlyDischargeHandoverSnapshot,
   type Encounter,
-  type IdentitySubject,
   type Patient,
 } from "@pitchfork/shared/aceso";
 import { admissionErrorMessage } from "./admissionMessages";
 import { DOMAIN_ENTITY, currentEntityLabels } from "../lib/domain";
 import { dayBoundary, formatDate, formatDateTime, toOffsetDateTime, todayLocal } from "../lib/datetime";
+import { useSubjectDirectory } from "../lib/identity";
 import { useDomain } from "../lib/useDomain";
 
 interface AdmissionForm {
@@ -427,29 +426,22 @@ export default function AdmissionsPage() {
   const [dischargeError, setDischargeError] = useState("");
   const [dischargeSubmitting, setDischargeSubmitting] = useState(false);
 
-  const [subjects, setSubjects] = useState<IdentitySubject[]>([]);
+  /**
+   * 044：责任医生/照护师存的是主体 ID，改用**业务人员目录**（非管理员可读）映射为姓名。
+   * 此前用管理员接口，业务账号 403 → 空 map → 该列直接显示 ULID。存量自由文本按原值回退。
+   */
+  const { subjectLabel } = useSubjectDirectory();
 
-  const subjectMap = useMemo(
-    () => new Map(subjects.map((subject) => [subject.id, subject.display_name])),
-    [subjects],
-  );
-  /** 责任医生/照护师存的是主体 ID；这里映射为姓名，存量自由文本按原值回退 */
-  const subjectLabel = useCallback(
-    (value: string | null | undefined) => (value ? subjectMap.get(value) ?? value : "-"),
-    [subjectMap],
-  );
   const load = useCallback(async () => {
     setLoading(true);
     setPageError("");
     try {
-      const [patientResponse, encounterResponse, subjectResponse] = await Promise.all([
+      const [patientResponse, encounterResponse] = await Promise.all([
         listPatients({ status: "ACTIVE", limit: 100 }),
         listActiveElderlyAdmissions({ limit: 100 }),
-        listIdentitySubjects(1, 100),
       ]);
       const patientById = new Map(patientResponse.records.map((patient) => [patient.id, patient]));
       setPatients(patientResponse.records);
-      setSubjects(subjectResponse.records);
       setAdmissions(encounterResponse.records.map((encounter) => ({
         ...encounter,
         patientName: patientById.get(encounter.patient_id)?.name ?? encounter.patient_id,

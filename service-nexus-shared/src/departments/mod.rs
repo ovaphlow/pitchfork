@@ -4,7 +4,7 @@
 //! 以 `ON DELETE RESTRICT` 外键引用。业务侧的床位/入住/申领里的 `department`
 //! 是「照护单元/病区」，与本目录无关。
 use axum::extract::{Path, Query, State};
-use axum::routing::get;
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqlitePool};
@@ -13,10 +13,21 @@ use ulid::Ulid;
 use crate::error::{ApiError, ApiResult};
 use crate::{AppState, PageQuery};
 
+/// 只读路由：任何有效会话可读（申领科室下拉等业务页面依赖部门目录渲染）。
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/", get(list).post(create))
-        .route("/{id}", get(get_one).put(replace).delete(delete))
+        .route("/", get(list))
+        .route("/{id}", get(get_one))
+}
+
+/// 043：写路由单独成组，由 App 编排层挂 `base_data:manage` 门禁。
+///
+/// 与 [router] 分开的理由同 `roles::write_router`（`route_layer` 粒度是路径而非方法）。
+/// **新增写路由必须加在这里**。
+pub fn write_router() -> Router<AppState> {
+    Router::new()
+        .route("/", post(create))
+        .route("/{id}", put(replace).delete(delete))
 }
 
 #[derive(Deserialize)]

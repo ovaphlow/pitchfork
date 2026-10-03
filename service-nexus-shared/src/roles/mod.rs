@@ -1,5 +1,5 @@
 use axum::extract::{Path, Query, State};
-use axum::routing::get;
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
@@ -8,10 +8,22 @@ use ulid::Ulid;
 use crate::error::{ApiError, ApiResult};
 use crate::{AppState, PageQuery};
 
+/// 只读路由：任何有效会话可读（角色目录是产品元数据，用户页/角色页依赖它渲染）。
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/", get(list).post(create))
-        .route("/{id}", get(get_one).put(replace).delete(delete))
+        .route("/", get(list))
+        .route("/{id}", get(get_one))
+}
+
+/// 043：写路由单独成组，由 App 编排层挂 `access:manage` 门禁。
+///
+/// 为什么不把 `route_layer` 挂在 [router] 上：axum 的 `route_layer` 粒度是**路径**而不是
+/// "路径 + 方法"，挂上去会连 `GET /roles` 一起锁死，业务页面立刻回归（043 D7）。
+/// **新增写路由必须加在这里**，否则就是新的提权面（`tests/authorization.rs` 兜底）。
+pub fn write_router() -> Router<AppState> {
+    Router::new()
+        .route("/", post(create))
+        .route("/{id}", put(replace).delete(delete))
 }
 
 #[derive(Deserialize)]

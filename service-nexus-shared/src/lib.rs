@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod authorization;
 pub mod config;
 pub mod departments;
 pub mod error;
@@ -53,15 +54,42 @@ impl PageQuery {
 }
 
 pub fn app(state: AppState, max_upload_bytes: usize) -> Router {
+    // 043：写门禁的中间件实例（与只读路由分开挂：axum 的 route_layer 粒度是路径而非方法）。
+    //
+    // 只读目录（角色/部门/用户↔角色/用户↔部门）继续只要求有效会话：它们是产品元数据，
+    // 用户页、角色页、申领科室下拉都依赖它渲染；收紧读会制造新的 403 面（043 D7）。
+    let access_manage = middleware::from_fn_with_state(
+        state.clone(),
+        authorization::require_access_manage,
+    );
+    let base_data_manage = middleware::from_fn_with_state(
+        state.clone(),
+        authorization::require_base_data_manage,
+    );
+
     let protected = Router::new()
         .nest("/settings", settings::router())
         .nest("/messages", messages::router())
         .nest("/files", files::router())
         .nest("/interactions", interactions::router())
-        .nest("/roles", roles::router())
-        .nest("/subject-roles", subject_roles::router())
-        .nest("/departments", departments::router())
-        .nest("/subject-departments", subject_departments::router())
+        .nest(
+            "/roles",
+            roles::router().merge(roles::write_router().route_layer(access_manage.clone())),
+        )
+        .nest(
+            "/subject-roles",
+            subject_roles::router()
+                .merge(subject_roles::write_router().route_layer(access_manage.clone())),
+        )
+        .nest(
+            "/departments",
+            departments::router().merge(departments::write_router().route_layer(base_data_manage)),
+        )
+        .nest(
+            "/subject-departments",
+            subject_departments::router()
+                .merge(subject_departments::write_router().route_layer(access_manage)),
+        )
         .nest("/subject-permissions", subject_roles::permissions_router())
         .route_layer(middleware::from_fn_with_state(
             state.clone(),

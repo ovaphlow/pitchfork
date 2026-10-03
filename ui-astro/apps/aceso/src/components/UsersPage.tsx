@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   createIdentitySubject,
   disableIdentitySubject,
+  getCurrentSession,
   getSubjectPermissions,
   listDepartments,
   listIdentitySubjects,
@@ -86,6 +87,14 @@ export default function UsersPage() {
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [pageError, setPageError] = useState("");
+  /**
+   * 043：是否平台管理员。`null` 表示还没问出来。
+   *
+   * 用户管理走的是 IDP 管理员接口（`/identity/v1/subjects`），业务账号必然 403。
+   * 与其发一个注定失败的请求再把英文错误和"共 0 条 / 暂无用户"摆给用户，
+   * 不如先问会话、直接渲染无权限态——这也顺手去掉了一次无意义的请求。
+   */
+  const [platformAdmin, setPlatformAdmin] = useState<boolean | null>(null);
   const [assignments, setAssignments] = useState<Record<string, string[]>>({});
   const [roleCatalog, setRoleCatalog] = useState<NexusRole[]>([]);
   const [roleCatalogLoading, setRoleCatalogLoading] = useState(true);
@@ -193,7 +202,27 @@ export default function UsersPage() {
   }, [loadAssignments, loadDepartmentAssignments]);
 
   useEffect(() => {
-    void load(page);
+    let active = true;
+    void getCurrentSession(false)
+      .then((session) => {
+        if (!active) return;
+        const administrator = session.platform_admin === true;
+        setPlatformAdmin(administrator);
+        if (!administrator) {
+          setSubjects([]);
+          setTotal(0);
+          setPageError("");
+          return;
+        }
+        void load(page);
+      })
+      .catch(() => {
+        if (!active) return;
+        setPlatformAdmin(false);
+      });
+    return () => {
+      active = false;
+    };
   }, [load, page]);
 
   useEffect(() => {
@@ -476,6 +505,26 @@ export default function UsersPage() {
     },
   ];
 
+  // 043：非平台管理员渲染无权限态，不渲染列表与"添加用户"（否则会被读成"系统里没有用户"）
+  if (platformAdmin === false) {
+    return (
+      <div className="space-y-6">
+        <div>
+          <h2 className="text-lg font-semibold text-fg-emphasis">用户管理</h2>
+          <p className="mt-1 text-sm text-fg-muted">管理员核验身份后，可将账号重置为仅能改密的临时密码，并分配产品角色</p>
+        </div>
+        <Card title="无访问权限">
+          <div className="space-y-2 py-6 text-center">
+            <p className="text-sm font-medium text-fg-emphasis">仅平台管理员可管理用户</p>
+            <p className="text-sm text-fg-muted">
+              当前账号不是平台管理员，无法查看或创建用户。需要权限请联系平台管理员。
+            </p>
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -488,8 +537,8 @@ export default function UsersPage() {
 
       {pageError && <div className="rounded-lg border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">{pageError}</div>}
 
-      <Card title="用户列表" actions={<span className="text-sm text-fg-dimmed">共 {total} 条</span>}>
-        <Table columns={columns} data={subjects} loading={loading} emptyMessage="暂无用户" />
+      <Card title="用户列表" actions={pageError ? null : <span className="text-sm text-fg-dimmed">共 {total} 条</span>}>
+        <Table columns={columns} data={subjects} loading={loading} error={pageError} emptyMessage="暂无用户" />
         <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
           <span className="text-sm text-fg-muted">第 {page} / {pageCount} 页</span>
           <div className="flex items-center gap-2">

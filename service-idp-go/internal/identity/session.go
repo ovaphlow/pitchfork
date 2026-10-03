@@ -36,9 +36,14 @@ type LoginInput struct {
 }
 
 type Session struct {
-	ID            string
-	SubjectID     string
-	Access        string
+	ID        string
+	SubjectID string
+	Access    string
+	// PlatformAdmin 是代操作（把操作人指定为他人）的唯一门禁（计划 042）。
+	// 与 identity_subjects.is_platform_admin 同源，由 CurrentSession 一并取出。
+	PlatformAdmin bool
+	// DisplayName 供下游渲染"当前登录用户"；档案缺失时为空串（不影响会话有效性）。
+	DisplayName   string
 	csrfTokenHash []byte
 }
 
@@ -59,6 +64,14 @@ type activeSessionRow struct {
 	ExpiresAt              time.Time `db:"expires_at"`
 }
 
+// sessionSubjectFacts 是浏览器会话校验需要的主体事实：security_version 用于会话有效性判定，
+// is_platform_admin 与 display_name 供下游（Aceso / Nexus）做代操作门禁与"我是谁"展示。
+type sessionSubjectFacts struct {
+	SecurityVersion int64  `db:"security_version"`
+	PlatformAdmin   bool   `db:"is_platform_admin"`
+	DisplayName     string `db:"display_name"`
+}
+
 // 枚举值一律经 enums.go 常量以命名参数传入，不写死在 SQL 里，
 // 这样 internal/identity/enums.go 始终是枚举的唯一来源。
 const getLoginCredentialByNormalizedIdentifier = `
@@ -74,6 +87,20 @@ const getEnabledSubjectSecurityVersion = `
 SELECT security_version
 FROM identity_subjects
 WHERE id = :id AND status = :status`
+
+// getEnabledSubjectSessionFacts 与 getEnabledSubjectSecurityVersion 同口径（启用主体），
+// 额外带出平台管理员标记与显示名。
+//
+// display_name 用 LEFT JOIN + COALESCE：档案缺失时**保持会话有效**（与改动前一致，
+// 不因新增字段把已有会话变成失效），只把姓名置为空串。
+// 登录路径继续用 getEnabledSubjectSecurityVersion，不因本变更扩大查询面。
+const getEnabledSubjectSessionFacts = `
+SELECT s.security_version,
+       s.is_platform_admin,
+       COALESCE(p.display_name, '') AS display_name
+FROM identity_subjects s
+LEFT JOIN identity_profiles p ON p.subject_id = s.id
+WHERE s.id = :id AND s.status = :status`
 
 const createSession = `
 INSERT INTO identity_sessions(
@@ -290,8 +317,8 @@ func CurrentSession(ctx context.Context, database *sql.DB, rawToken string, sett
 		return Session{}, fmt.Errorf("load browser session: %w", err)
 	}
 
-	var subjectSecurityVersion int64
-	err = namedGet(ctx, queries, &subjectSecurityVersion, getEnabledSubjectSecurityVersion, map[string]any{
+	var subject sessionSubjectFacts
+	err = namedGet(ctx, queries, &subject, getEnabledSubjectSessionFacts, map[string]any{
 		"id":     sessionRecord.SubjectID,
 		"status": StatusEnabled,
 	})
@@ -301,7 +328,7 @@ func CurrentSession(ctx context.Context, database *sql.DB, rawToken string, sett
 	if err != nil {
 		return Session{}, fmt.Errorf("load browser session subject: %w", err)
 	}
-	if sessionRecord.SubjectSecurityVersion != subjectSecurityVersion {
+	if sessionRecord.SubjectSecurityVersion != subject.SecurityVersion {
 		return Session{}, ErrInvalidSession
 	}
 
@@ -309,6 +336,8 @@ func CurrentSession(ctx context.Context, database *sql.DB, rawToken string, sett
 		ID:            sessionRecord.ID,
 		SubjectID:     sessionRecord.SubjectID,
 		Access:        sessionRecord.SessionAccess,
+		PlatformAdmin: subject.PlatformAdmin,
+		DisplayName:   subject.DisplayName,
 		csrfTokenHash: sessionRecord.CsrfTokenHash,
 	}
 	expiresAt := sessionRecord.ExpiresAt

@@ -382,6 +382,7 @@ export default function DepartmentsPage() {
         }
       >
         <Table
+          error={pageError}
           columns={columns}
           data={visibleRows}
           loading={loading}

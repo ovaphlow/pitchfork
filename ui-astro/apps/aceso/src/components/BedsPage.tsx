@@ -416,7 +416,7 @@ export default function BedsPage() {
                 </option>
               ))}
             </select>
-            <span className="text-sm text-fg-dimmed">共 {total} 条</span>
+            {pageError ? null : <span className="text-sm text-fg-dimmed">共 {total} 条</span>}
           </div>
         }
         bodyClassName={emptyDictionary ? "p-0" : undefined}
@@ -437,7 +437,7 @@ export default function BedsPage() {
           />
         ) : (
           <div className="overflow-x-auto">
-            <Table columns={columns} data={items} loading={loading} emptyMessage="暂无匹配的床位" />
+            <Table columns={columns} data={items} loading={loading} error={pageError} emptyMessage="暂无匹配的床位" />
           </div>
         )}
         {!emptyDictionary && total > PAGE_SIZE && (

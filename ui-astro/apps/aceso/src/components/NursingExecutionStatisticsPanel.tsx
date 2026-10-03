@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Card, Table, type Column } from "@pitchfork/ui";
 import {
   listNursingExecutionStatistics,
-  type IdentitySubject,
+  type IdentityDirectoryEntry,
   type NursingExecutionStatistics,
 } from "@pitchfork/shared/aceso";
 import { executionRateCards, formatCompletionRate } from "./executionStatistics";
@@ -29,7 +29,8 @@ const selectClass = "h-10 rounded-md border border-border bg-surface px-3 text-s
 // ========================================================================
 
 interface Props {
-  subjects: IdentitySubject[];
+  /** 044：执行人筛选候选来自**业务人员目录**（非管理员可读），只含 id + 姓名 */
+  subjects: IdentityDirectoryEntry[];
   /** 外部版本号自增时触发重新加载（用于状态操作后刷新） */
   reloadKey?: number;
 }

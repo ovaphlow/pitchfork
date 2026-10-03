@@ -44,18 +44,27 @@ object DispenseRoutes {
         }
 
         // ─── 4.3 审方、开始调配、发药确认和取消 ────────────────────────────
+        // 042：操作人一律取服务端解析的认证身份（`PharmacyRoutes.withOperator`），
+        // 请求体里的 `operator` 只在“平台管理员代操作”与“无认证挂载回落”两种情形下被采纳；
+        // 非管理员提交他人 → 400 `operator cannot be delegated`（不静默改写）。
         router.post("/:id/review").handler { ctx ->
             val id = ctx.pathParam("id") ?: return@handler PharmacyRoutes.respond(ctx, 400, "id required")
-            service.review(id, PharmacyRoutes.body(ctx))
-                .onSuccess { ctx.json(it) }
-                .onFailure { respondFailure(ctx, it) }
+            val body = PharmacyRoutes.body(ctx)
+            PharmacyRoutes.withOperator(ctx, body) { operator ->
+                service.review(id, body, operator)
+                    .onSuccess { ctx.json(it) }
+                    .onFailure { respondFailure(ctx, it) }
+            }
         }
 
         router.post("/:id/start").handler { ctx ->
             val id = ctx.pathParam("id") ?: return@handler PharmacyRoutes.respond(ctx, 400, "id required")
-            service.start(id, PharmacyRoutes.body(ctx))
-                .onSuccess { ctx.json(it) }
-                .onFailure { respondFailure(ctx, it) }
+            val body = PharmacyRoutes.body(ctx)
+            PharmacyRoutes.withOperator(ctx, body) { operator ->
+                service.start(id, body, operator)
+                    .onSuccess { ctx.json(it) }
+                    .onFailure { respondFailure(ctx, it) }
+            }
         }
 
         router.post("/:id/confirm").handler { ctx ->
@@ -104,9 +113,12 @@ object DispenseRoutes {
 
         router.put("/:id/status").handler { ctx ->
             val id = ctx.pathParam("id") ?: return@handler PharmacyRoutes.respond(ctx, 400, "id required")
-            service.updateStatus(id, PharmacyRoutes.body(ctx))
-                .onSuccess { ctx.json(it) }
-                .onFailure { respondFailure(ctx, it) }
+            val body = PharmacyRoutes.body(ctx)
+            PharmacyRoutes.withOperator(ctx, body) { operator ->
+                service.updateStatus(id, body, operator)
+                    .onSuccess { ctx.json(it) }
+                    .onFailure { respondFailure(ctx, it) }
+            }
         }
 
         return router

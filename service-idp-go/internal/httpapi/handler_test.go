@@ -197,14 +197,23 @@ func TestLoginDashboardAndCSRFFlow(t *testing.T) {
 		t.Fatalf("current session status = %d, body = %s", currentSessionResponse.Code, currentSessionResponse.Body.String())
 	}
 	var currentSession struct {
-		SubjectID string `json:"subject_id"`
-		Access    string `json:"access"`
+		SubjectID     string `json:"subject_id"`
+		Access        string `json:"access"`
+		PlatformAdmin bool   `json:"platform_admin"`
+		DisplayName   string `json:"display_name"`
 	}
 	if err := json.Unmarshal(currentSessionResponse.Body.Bytes(), &currentSession); err != nil {
 		t.Fatalf("decode current session: %v", err)
 	}
 	if currentSession.SubjectID == "" || currentSession.Access != "完整" {
 		t.Fatalf("current session = %#v", currentSession)
+	}
+	// 042：代操作门禁与"我是谁"展示依赖这两个新增字段，不能悄悄缺失。
+	if !currentSession.PlatformAdmin {
+		t.Fatalf("current session platform_admin = false, want true for the bootstrap administrator")
+	}
+	if currentSession.DisplayName != "系统管理员" {
+		t.Fatalf("current session display_name = %q, want %q", currentSession.DisplayName, "系统管理员")
 	}
 
 	dashboardRequest := httptest.NewRequest(http.MethodGet, "/crate-api/identity/v1/dashboard", nil)
@@ -767,5 +776,142 @@ func assertProblemDetails(t *testing.T, response *httptest.ResponseRecorder, wan
 	}
 	if _, ok := fields["error"]; ok {
 		t.Error("problem response contains legacy error field")
+	}
+}
+
+// TestDirectoryIsReadableByBusinessAccountsWithMinimalFields 锁定计划 044 的核心契约：
+// 业务账号（非平台管理员）**读不到**管理接口 `/subjects`，但**读得到**业务人员目录
+// `/directory`，且目录只暴露 `id` + `display_name`、只含启用主体。
+//
+// 这条护栏的存在理由：本端点存在的唯一原因就是"业务账号需要把主体 ID 显示成姓名"
+// （药房护士核对列、病程记录、配餐名单、执行人筛选）。一旦有人把它改成管理员接口，
+// 或者顺手把管理字段带进响应，业务侧会立刻退回显示 ULID 或泄露账号信息。
+func TestDirectoryIsReadableByBusinessAccountsWithMinimalFields(t *testing.T) {
+	databaseConnection, err := database.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "identityd.sqlite"))
+	if err != nil {
+		t.Fatalf("open SQLite database: %v", err)
+	}
+	t.Cleanup(func() {
+		databaseConnection.Close()
+	})
+	if _, err := database.Migrate(context.Background(), databaseConnection, migrations.Files); err != nil {
+		t.Fatalf("migrate database: %v", err)
+	}
+	if _, err := identity.EnsureBootstrap(context.Background(), databaseConnection, identity.BootstrapInput{
+		Identifier: "admin",
+		Password:   "correct horse battery staple",
+	}); err != nil {
+		t.Fatalf("ensure bootstrap: %v", err)
+	}
+
+	mux := httpapi.NewMux(databaseConnection, httpapi.Options{
+		SessionSettings: identity.SessionSettings{TTL: time.Hour, IdleTTL: 30 * time.Minute},
+		LoginThrottle:   testLoginThrottle,
+	})
+	var administratorID string
+	if err := databaseConnection.QueryRow(`
+		SELECT subject_id
+		FROM identity_identifiers
+		WHERE identifier_type = '账号' AND normalized_value = 'admin'
+	`).Scan(&administratorID); err != nil {
+		t.Fatalf("read administrator ID: %v", err)
+	}
+	active, err := identity.CreateSubject(context.Background(), databaseConnection, administratorID, identity.CreateSubjectInput{
+		DisplayName: "护理员一号",
+		Identifier:  "nurse01",
+		Password:    "sufficiently long password",
+	})
+	if err != nil {
+		t.Fatalf("create active subject: %v", err)
+	}
+	disabled, err := identity.CreateSubject(context.Background(), databaseConnection, administratorID, identity.CreateSubjectInput{
+		DisplayName: "离职员工",
+		Identifier:  "gone01",
+		Password:    "sufficiently long password",
+	})
+	if err != nil {
+		t.Fatalf("create disabled subject: %v", err)
+	}
+	if _, err := identity.DisableSubject(context.Background(), databaseConnection, administratorID, disabled.ID); err != nil {
+		t.Fatalf("disable subject: %v", err)
+	}
+
+	businessSession, _ := loginCookiesWithRedirect(t, mux, "nurse01", "sufficiently long password", "/crate-api/identity/v1/dashboard")
+
+	// 管理接口对业务账号必须是 403（目录端点存在的前提）
+	subjectsRequest := httptest.NewRequest(http.MethodGet, "/crate-api/identity/v1/subjects", nil)
+	subjectsRequest.AddCookie(businessSession)
+	subjectsResponse := httptest.NewRecorder()
+	mux.ServeHTTP(subjectsResponse, subjectsRequest)
+	if subjectsResponse.Code != http.StatusForbidden {
+		t.Fatalf("business account /subjects status = %d, want 403", subjectsResponse.Code)
+	}
+
+	directoryRequest := httptest.NewRequest(http.MethodGet, "/crate-api/identity/v1/directory?limit=200", nil)
+	directoryRequest.AddCookie(businessSession)
+	directoryResponse := httptest.NewRecorder()
+	mux.ServeHTTP(directoryResponse, directoryRequest)
+	if directoryResponse.Code != http.StatusOK {
+		t.Fatalf("business account /directory status = %d, body = %s", directoryResponse.Code, directoryResponse.Body.String())
+	}
+
+	var payload struct {
+		Records []map[string]any `json:"records"`
+		Meta    struct {
+			Total int64 `json:"total"`
+		} `json:"meta"`
+	}
+	if err := json.Unmarshal(directoryResponse.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode directory: %v", err)
+	}
+
+	names := map[string]bool{}
+	for _, record := range payload.Records {
+		if len(record) != 2 {
+			t.Fatalf("directory record must expose exactly id + display_name, got %#v", record)
+		}
+		if _, ok := record["id"]; !ok {
+			t.Fatalf("directory record missing id: %#v", record)
+		}
+		name, ok := record["display_name"].(string)
+		if !ok {
+			t.Fatalf("directory record missing display_name: %#v", record)
+		}
+		for _, forbidden := range []string{"identifier", "status", "security_version", "platform_admin", "created_at"} {
+			if _, leaked := record[forbidden]; leaked {
+				t.Fatalf("directory must not expose management field %q: %#v", forbidden, record)
+			}
+		}
+		names[name] = true
+	}
+	if !names["护理员一号"] || !names["系统管理员"] {
+		t.Fatalf("directory must contain every enabled subject, got %#v", names)
+	}
+	if names["离职员工"] {
+		t.Fatal("directory must exclude disabled subjects（已禁用账号不得作为可选操作人）")
+	}
+	if payload.Meta.Total != int64(len(payload.Records)) {
+		t.Fatalf("directory meta.total = %d, records = %d", payload.Meta.Total, len(payload.Records))
+	}
+
+	searchRequest := httptest.NewRequest(http.MethodGet, "/crate-api/identity/v1/directory?search=%E6%8A%A4%E7%90%86", nil)
+	searchRequest.AddCookie(businessSession)
+	searchResponse := httptest.NewRecorder()
+	mux.ServeHTTP(searchResponse, searchRequest)
+	var searched struct {
+		Records []map[string]any `json:"records"`
+	}
+	if err := json.Unmarshal(searchResponse.Body.Bytes(), &searched); err != nil {
+		t.Fatalf("decode searched directory: %v", err)
+	}
+	if len(searched.Records) != 1 || searched.Records[0]["id"] != active.ID {
+		t.Fatalf("directory search must filter by display_name, got %#v", searched.Records)
+	}
+
+	anonymousRequest := httptest.NewRequest(http.MethodGet, "/crate-api/identity/v1/directory", nil)
+	anonymousResponse := httptest.NewRecorder()
+	mux.ServeHTTP(anonymousResponse, anonymousRequest)
+	if anonymousResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous /directory status = %d, want 401", anonymousResponse.Code)
 	}
 }

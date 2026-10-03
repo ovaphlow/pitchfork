@@ -13,10 +13,17 @@ use crate::auth::Identity;
 use crate::error::{ApiError, ApiResult};
 use crate::{AppState, PageQuery};
 
+/// 只读路由：任何有效会话可读（用户页展示所属部门）。
 pub fn router() -> Router<AppState> {
-    Router::new()
-        .route("/", get(list))
-        .route("/subjects/{subject_id}", put(replace))
+    Router::new().route("/", get(list))
+}
+
+/// 043：写路由单独成组，由 App 编排层挂 `access:manage` 门禁。
+///
+/// "设置某人的主部门"是**改人**（账号管理），与改目录（`base_data:manage`）分离：
+/// 组织管理员能维护部门目录，但动不了人员归属（043 §11 裁定 2）。
+pub fn write_router() -> Router<AppState> {
+    Router::new().route("/subjects/{subject_id}", put(replace))
 }
 
 #[derive(Deserialize)]

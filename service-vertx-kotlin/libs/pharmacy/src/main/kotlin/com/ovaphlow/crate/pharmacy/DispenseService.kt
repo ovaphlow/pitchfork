@@ -376,10 +376,12 @@ class DispenseService(
     //  4.3 审方、开始调配、发药确认和取消
     // ========================================================================
 
-    fun review(id: String, body: JsonObject): Future<JsonObject> {
+    fun review(id: String, body: JsonObject, operator: String?): Future<JsonObject> {
         rejectUnknown(body, setOf("operator", "remark"))?.let { return Future.failedFuture(it) }
-        val operator = try {
-            requiredOperator(body)
+        // 042：操作人由路由层从认证会话派生（`operator` 参数），请求体里的 `operator` 只是
+        // 它的来源之一（平台管理员代操作 / 无认证挂载回落），不再作为权威值直接落库。
+        val reviewer = try {
+            requiredOperator(operator)
         } catch (error: IllegalArgumentException) {
             return Future.failedFuture(error)
         }
@@ -391,7 +393,7 @@ class DispenseService(
                     )
                 }
                 val updateQuery = ctx.update(PHARMACY_DISPENSES)
-                    .set(PHARMACY_DISPENSES.REVIEWER, operator)
+                    .set(PHARMACY_DISPENSES.REVIEWER, reviewer)
                     .set(PHARMACY_DISPENSES.STATUS, "REVIEWED")
                     .where(PHARMACY_DISPENSES.ID.eq(id))
                 connection.preparedQuery(DatabaseConfig.sql(updateQuery))
@@ -401,10 +403,11 @@ class DispenseService(
         }
     }
 
-    fun start(id: String, body: JsonObject): Future<JsonObject> {
+    fun start(id: String, body: JsonObject, operator: String?): Future<JsonObject> {
         rejectUnknown(body, setOf("operator", "remark"))?.let { return Future.failedFuture(it) }
-        val operator = try {
-            requiredOperator(body)
+        // 042：口径同 [review]。
+        val pharmacist = try {
+            requiredOperator(operator)
         } catch (error: IllegalArgumentException) {
             return Future.failedFuture(error)
         }
@@ -416,7 +419,7 @@ class DispenseService(
                     )
                 }
                 val updateQuery = ctx.update(PHARMACY_DISPENSES)
-                    .set(PHARMACY_DISPENSES.PHARMACIST, operator)
+                    .set(PHARMACY_DISPENSES.PHARMACIST, pharmacist)
                     .set(PHARMACY_DISPENSES.STATUS, "DISPENSING")
                     .where(PHARMACY_DISPENSES.ID.eq(id))
                 connection.preparedQuery(DatabaseConfig.sql(updateQuery))
@@ -545,15 +548,15 @@ class DispenseService(
      * 兼容 `PUT /dispenses/:id/status`：不允许直接跳到终态，DISPENSED/REVIEWED/
      * DISPENSING 目标一律转发到与动作接口相同的校验和事务逻辑。
      */
-    fun updateStatus(id: String, body: JsonObject): Future<JsonObject> {
+    fun updateStatus(id: String, body: JsonObject, operator: String?): Future<JsonObject> {
         rejectUnknown(body, setOf("status", "operator", "remark", "reason"))?.let { return Future.failedFuture(it) }
         val target = body.getString("status")?.trim().orEmpty()
         if (target.isBlank()) {
             return Future.failedFuture(IllegalArgumentException("status is required"))
         }
         return when (target) {
-            "REVIEWED" -> review(id, body)
-            "DISPENSING" -> start(id, body)
+            "REVIEWED" -> review(id, body, operator)
+            "DISPENSING" -> start(id, body, operator)
             "DISPENSED" -> confirm(id, body)
             "CANCELLED" -> cancel(id, body)
             else -> Future.failedFuture(
@@ -837,8 +840,8 @@ class DispenseService(
             .map { it.size() > 0 }
     }
 
-    private fun requiredOperator(body: JsonObject): String =
-        body.getString("operator")?.trim()?.takeIf(String::isNotBlank)
+    private fun requiredOperator(value: String?): String =
+        value?.trim()?.takeIf(String::isNotBlank)
             ?: throw IllegalArgumentException("operator is required")
 
     private fun rejectUnknown(body: JsonObject, allowed: Set<String>): IllegalArgumentException? {

@@ -938,7 +938,12 @@ class HealthcareService(
      * 检查 IN_PROGRESS 执行 → 写入复评 → 收束旧计划/措施/任务 →
      * 创建新计划/措施/任务 → 写入修订关系。任一步失败整笔回滚。
      */
-    fun createCarePlanRevision(encounterId: String, body: JsonObject): Future<JsonObject> {
+    fun createCarePlanRevision(
+        encounterId: String,
+        body: JsonObject,
+        assessor: String? = null,
+        createdBy: String? = null,
+    ): Future<JsonObject> {
         val input = try {
             validateCarePlanRevisionInput(body)
         } catch (error: IllegalArgumentException) {
@@ -992,7 +997,8 @@ class HealthcareService(
                                                     periodId = periodId,
                                                     assessType = input.assessment.assessType,
                                                     assessDate = input.assessment.assessDate,
-                                                    assessor = input.assessment.assessor,
+                                                    // 042：评估人由路由层从认证会话派生后传入（请求体同名键不再作为权威值）
+                                                    assessor = assessor,
                                                     totalScore = input.assessment.totalScore,
                                                     resultLevel = input.assessment.resultLevel,
                                                     detail = input.assessment.detail,
@@ -1008,7 +1014,8 @@ class HealthcareService(
                                                                 encounterId = encounterId,
                                                                 planName = input.plan.planName,
                                                                 goals = input.plan.goals,
-                                                                createdBy = input.plan.createdBy,
+                                                                // 042：制定人同评估人口径，由路由层注入
+                                                                createdBy = createdBy,
                                                                 startDate = input.plan.startDate,
                                                                 endDate = input.plan.endDate,
                                                                 items = input.plan.items.map { item ->

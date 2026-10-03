@@ -1,5 +1,7 @@
 package com.ovaphlow.crate.nursing
 
+import com.ovaphlow.crate.common.OperatorResolution
+import com.ovaphlow.crate.common.resolveOperator
 import io.vertx.core.Handler
 import io.vertx.core.Vertx
 import io.vertx.core.json.JsonObject
@@ -78,6 +80,40 @@ object NursingRoutes {
         ctx.response().setStatusCode(status)
             .putHeader("Content-Type", "application/json")
             .end(JsonObject().put("error", message).encode())
+    }
+
+    /**
+     * 042：解析本次请求的**有效操作人**并把"非管理员代操作"当场拒掉。
+     *
+     * 与药房 `PharmacyRoutes.withOperator` 完全同源（同一个 `resolveOperator` 纯策略）：
+     * 权威来源是认证会话（`ctx["userId"]`），请求体里的字段只是"请求"；
+     * 只有平台管理员（`ctx["platformAdmin"]`，来自 IDP `/session`）可以指定他人；
+     * 非管理员提交他人 → `400 operator cannot be delegated`（fail-closed，**不静默改写**）；
+     * 无认证挂载（嵌入式/集成测试路由）时回落请求体，保持既有测试语义（042 D4）。
+     *
+     * [block] 只在解析成功后执行，参数为有效操作人；`null` 表示既无会话也未提交，
+     * 此时**不写该字段**（评估人/制定人/执行人都是可空列，与改动前"未提交"语义一致）。
+     *
+     * @param field 请求体里的操作人字段名：`assessor`（评估人）/ `created_by`（制定人）/ `executor`（执行人）
+     */
+    internal fun withOperator(
+        ctx: RoutingContext,
+        body: JsonObject,
+        field: String,
+        block: (String?) -> Unit,
+    ) {
+        when (
+            val resolution = resolveOperator(
+                actorId = ctx.get<String>("userId"),
+                platformAdmin = ctx.get<Boolean>("platformAdmin") ?: false,
+                requested = body.getString(field),
+            )
+        ) {
+            is OperatorResolution.Resolved -> block(resolution.subjectId)
+            is OperatorResolution.Delegated -> block(resolution.requested)
+            OperatorResolution.Absent -> block(null)
+            OperatorResolution.NotDelegatable -> respond(ctx, 400, "operator cannot be delegated")
+        }
     }
 
     internal fun respondError(ctx: RoutingContext, err: Throwable?) {

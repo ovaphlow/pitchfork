@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Badge, Button, Card, EmptyState, Input, Modal, Table, type Column } from "@pitchfork/ui";
 import PurchaseOrdersSection from "./PurchaseOrdersSection";
 import RequisitionsSection from "./RequisitionsSection";
+import OperatorPicker, { type CurrentUser } from "./OperatorPicker";
+import { useSubjectDirectory } from "../lib/identity";
 import { DOMAIN_ENTITY } from "../lib/domain";
 import { useDomain } from "../lib/useDomain";
 import {
@@ -13,6 +15,7 @@ import {
   confirmPharmacyReturn,
   createPharmacyReturnFromDispense,
   createPharmacyDispenseFromMedicalOrder,
+  getCurrentSession,
   getPharmacyDispense,
   listActiveElderlyAdmissions,
   listIdentitySubjects,
@@ -51,16 +54,18 @@ interface DispenseForm {
   materialId: string;
   lotId: string;
   quantity: string;
-  operator: string;
 }
 
 interface ReturnForm {
   itemId: string;
   quantity: string;
   reason: string;
+  /** 042：仅平台管理员代操作时才填写；业务账号留空，由服务端按会话落库 */
   operator: string;
   remark: string;
 }
+
+/** 042：当前登录主体 + 是否平台管理员（代操作门禁）—— 组件定义见 ./OperatorPicker。 */
 
 const DISPENSE_STATUS: Record<string, { label: string; variant: "default" | "success" | "warning" | "danger" | "info" }> = {
   PENDING: { label: "待审方", variant: "default" },
@@ -209,6 +214,9 @@ export default function PharmacyPage() {
 
   // ── 人员与入住（操作人下拉、发药单长者名映射）─────────────────────
   const [subjects, setSubjects] = useState<IdentitySubject[]>([]);
+  /** 042：当前登录主体（只读展示与代操作判定）与目录加载失败提示 */
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
+  const [operatorDirectoryError, setOperatorDirectoryError] = useState("");
   const [admissions, setAdmissions] = useState<ActiveAdmission[]>([]);
 
   // ── 待接方用药医嘱 ────────────────────────────────────────────────
@@ -241,7 +249,7 @@ export default function PharmacyPage() {
 
   // ── 创建发药单弹窗 ────────────────────────────────────────────────
   const [createTarget, setCreateTarget] = useState<PharmacyMedicationOrder | null>(null);
-  const [createForm, setCreateForm] = useState<DispenseForm>({ warehouse: "", stockId: "", materialId: "", lotId: "", quantity: "1", operator: "" });
+  const [createForm, setCreateForm] = useState<DispenseForm>({ warehouse: "", stockId: "", materialId: "", lotId: "", quantity: "1" });
   const [createError, setCreateError] = useState("");
   const [createSaving, setCreateSaving] = useState(false);
   const [warehouses, setWarehouses] = useState<WarehouseOption[]>([]);
@@ -316,30 +324,43 @@ export default function PharmacyPage() {
   const materialUnit = useMemo(() => new Map(Object.entries(materialUnits)), [materialUnits]);
 
   /**
-   * 主体 ID → 姓名，复用本页既有的 `subjects`（`loadSubjects` 只为操作人下拉拉过一次目录，
-   * 这里不再发第二次请求）。解析不到时回退原始 ID、空值回退 "-"，与 `lib/identity.ts`
-   * 的 `useSubjectDirectory` 同口径：`medical_orders.nurse_checked_by` 存的是认证主体 ID。
+   * 044：主体 ID → 姓名改用**业务人员目录**（`useSubjectDirectory`）。
+   *
+   * 此前复用本页的 `subjects`——它来自管理员接口 `/identity/v1/subjects`，业务账号 403
+   * → 空 map → 「护士核对」等列直接显示 ULID。目录接口对任何登录用户开放，只返回
+   * id + 姓名；未命中仍回退原始 ID（不隐藏信息）。
    */
-  const subjectMap = useMemo(
-    () => new Map(subjects.map((subject) => [subject.id, subject.display_name])),
-    [subjects],
-  );
+  const { subjectLabel, error: subjectDirectoryError } = useSubjectDirectory();
 
-  const subjectLabel = useCallback(
-    (value: string | null | undefined) => {
-      const trimmed = value?.trim();
-      if (!trimmed) return "-";
-      return subjectMap.get(trimmed) ?? trimmed;
-    },
-    [subjectMap],
-  );
-
-  const loadSubjects = useCallback(async () => {
+  /**
+   * 042：操作人候选只在**平台管理员**下才有意义——`/identity/v1/subjects` 是管理员接口，
+   * 业务账号调用会 403。因此先取会话（拿"我是谁"与是否管理员），只有平台管理员才拉目录；
+   * 目录失败给出可见提示（不再静默吞错）。
+   */
+  const loadOperatorDirectory = useCallback(async () => {
     try {
-      const response = await listIdentitySubjects(1, 100);
-      setSubjects(response.records);
+      const session = await getCurrentSession(false);
+      setCurrentUser({
+        id: session.subject_id,
+        name: session.display_name?.trim() || session.subject_id,
+        platformAdmin: session.platform_admin === true,
+      });
+      if (session.platform_admin !== true) {
+        setSubjects([]);
+        setOperatorDirectoryError("");
+        return;
+      }
+      try {
+        const response = await listIdentitySubjects(1, 100);
+        setSubjects(response.records);
+        setOperatorDirectoryError("");
+      } catch (error) {
+        setSubjects([]);
+        setOperatorDirectoryError(errorMessage(error, "无法加载人员目录"));
+      }
     } catch {
-      // 操作人下拉失败不影响页面主体
+      setCurrentUser(null);
+      setOperatorDirectoryError("无法读取当前登录用户");
     }
   }, []);
 
@@ -440,9 +461,9 @@ export default function PharmacyPage() {
   }, [unboundEncounterFilter, unboundSearch, unboundOffset]);
 
   useEffect(() => {
-    void loadSubjects();
+    void loadOperatorDirectory();
     void loadAdmissions();
-  }, [loadSubjects, loadAdmissions]);
+  }, [loadOperatorDirectory, loadAdmissions]);
 
   useEffect(() => {
     void loadOrders();
@@ -479,7 +500,6 @@ export default function PharmacyPage() {
       lotId: "",
       // 服务端能可信推导疗程总量时预填（032 P4）；推不出时维持 031 的默认 1，交药师手填
       quantity: order.prescribed_total_quantity?.trim() || "1",
-      operator: "",
     });
     setStocks([]);
     setCreateError("");
@@ -606,10 +626,8 @@ export default function PharmacyPage() {
   const handleCreateDispense = async () => {
     if (!createTarget) return;
     const quantity = Number(createForm.quantity);
-    if (!createForm.operator.trim()) {
-      setCreateError("请选择操作人");
-      return;
-    }
+    // 042：发药单创建不再要求操作人——该字段服务端从来不接收（补绑操作人早已由会话派生），
+    // 旧表单的必填校验只是把业务账号挡在了创建之前（计划 042 D5）。
     if (!createForm.materialId) {
       setCreateError(createTarget.material_id ? "医嘱绑定的药品缺失，请关闭后重新创建发药单" : "请选择药品目录物资");
       return;
@@ -716,14 +734,14 @@ export default function PharmacyPage() {
 
   const handleAction = async () => {
     if (!actionTarget || !actionKind) return;
-    if (!actionOperator.trim()) {
-      setActionError("请选择操作人");
-      return;
-    }
     setActionSaving(true);
     setActionError("");
     try {
-      const input = { operator: actionOperator.trim(), ...(actionRemark.trim() ? { remark: actionRemark.trim() } : {}) };
+      // 042：只有平台管理员代操作时才提交 operator；其余账号一律不传，服务端按会话落库。
+      const input = {
+        ...(currentUser?.platformAdmin && actionOperator.trim() ? { operator: actionOperator.trim() } : {}),
+        ...(actionRemark.trim() ? { remark: actionRemark.trim() } : {}),
+      };
       if (actionKind === "review") await reviewPharmacyDispense(actionTarget.id, input);
       if (actionKind === "start") await startPharmacyDispense(actionTarget.id, input);
       if (actionKind === "confirm") await confirmPharmacyDispense(actionTarget.id, input);
@@ -776,7 +794,6 @@ export default function PharmacyPage() {
     const quantity = Number(returnForm.quantity);
     if (!returnForm.itemId) return setReturnError("请选择退药明细");
     if (!returnForm.reason.trim()) return setReturnError("请填写退药原因");
-    if (!returnForm.operator.trim()) return setReturnError("请选择操作人");
     const selectedItem = returnTarget.items.find((item) => item.id === returnForm.itemId);
     if (!selectedItem) return setReturnError("请选择退药明细");
     if (!quantity || quantity <= 0) return setReturnError("退药数量必须大于 0");
@@ -795,7 +812,8 @@ export default function PharmacyPage() {
         dispense_item_id: returnForm.itemId,
         quantity: returnForm.quantity.trim(),
         return_reason: returnForm.reason.trim(),
-        operator: returnForm.operator.trim(),
+        // 042：仅平台管理员代操作时提交；其余账号由服务端按会话落库
+        ...(currentUser?.platformAdmin && returnForm.operator.trim() ? { operator: returnForm.operator.trim() } : {}),
         restockable: true,
         ...(returnForm.remark.trim() ? { remark: returnForm.remark.trim() } : {}),
       });
@@ -818,15 +836,16 @@ export default function PharmacyPage() {
 
   const handleReturnAction = async () => {
     if (!returnAction || !returnActionKind) return;
-    if (returnActionKind === "confirm" && !returnActionOperator.trim()) {
-      setReturnActionError("请选择操作人");
-      return;
-    }
     setReturnActionSaving(true);
     setReturnActionError("");
     try {
-      if (returnActionKind === "confirm") await confirmPharmacyReturn(returnAction.id, returnActionOperator.trim());
-      else await cancelPharmacyReturn(returnAction.id);
+      if (returnActionKind === "confirm") {
+        // 042：仅平台管理员代操作时传人；其余账号不传，服务端按会话落库。
+        await confirmPharmacyReturn(
+          returnAction.id,
+          currentUser?.platformAdmin && returnActionOperator.trim() ? returnActionOperator.trim() : undefined,
+        );
+      } else await cancelPharmacyReturn(returnAction.id);
       setReturnAction(null);
       setReturnActionKind("");
       void loadReturns();
@@ -1373,16 +1392,22 @@ export default function PharmacyPage() {
         >
           {dispensesError ? (
             <p className="py-10 text-center text-sm text-danger">{dispensesError}</p>
-          ) : dispenses.length === 0 && !dispensesLoading ? (
-            <EmptyState icon="🧾" title="暂无发药单" description="从待接方用药医嘱创建发药单后在此流转状态。" />
           ) : (
-            <Table
-              className="min-w-[900px]"
-              columns={dispenseColumns}
-              data={dispenses}
-              loading={dispensesLoading}
-              emptyMessage="暂无匹配的发药单"
-            />
+            <>
+              {/* 044：人员目录失败不再静默——否则「护士核对」列会只剩 ULID 而看不出原因 */}
+              {subjectDirectoryError ? <p className="mb-2 text-xs text-warning">{subjectDirectoryError}</p> : null}
+              {dispenses.length === 0 && !dispensesLoading ? (
+                <EmptyState icon="🧾" title="暂无发药单" description="从待接方用药医嘱创建发药单后在此流转状态。" />
+              ) : (
+                <Table
+                  className="min-w-[900px]"
+                  columns={dispenseColumns}
+                  data={dispenses}
+                  loading={dispensesLoading}
+                  emptyMessage="暂无匹配的发药单"
+                />
+              )}
+            </>
           )}
           {dispensesTotal > DISPENSES_PAGE && (
             <div className="flex items-center justify-between px-5 py-3 border-t border-border">
@@ -1463,13 +1488,16 @@ export default function PharmacyPage() {
               <div className="mt-1 text-fg-muted">{returnAction.return_reason || "—"}</div>
             </div>
             {returnActionKind === "confirm" && <p className="text-sm text-warning">确认后将包装退回原仓库并增加库存，操作不可撤销。</p>}
-            {returnActionKind === "confirm" && <div className="flex flex-col gap-1.5">
-              <label className="text-sm font-medium text-fg-muted" htmlFor="return-action-operator">操作人</label>
-              <select id="return-action-operator" className={selectClass} value={returnActionOperator} onChange={(event) => setReturnActionOperator(event.target.value)}>
-                <option value="">请选择操作人</option>
-                {subjects.map((subject) => <option key={subject.id} value={subject.display_name}>{subject.display_name}</option>)}
-              </select>
-            </div>}
+            {returnActionKind === "confirm" && (
+              <OperatorPicker
+                id="return-action-operator"
+                currentUser={currentUser}
+                subjects={subjects}
+                value={returnActionOperator}
+                onChange={setReturnActionOperator}
+                directoryError={operatorDirectoryError}
+              />
+            )}
             {returnActionError && <p className="text-sm text-danger">{returnActionError}</p>}
             <div className="flex justify-end gap-2 pt-2">
               <Button variant="secondary" onClick={() => setReturnAction(null)}>取消</Button>
@@ -1661,22 +1689,6 @@ export default function PharmacyPage() {
                 onChange={(event) => setCreateForm((current) => ({ ...current, quantity: event.target.value }))}
                 placeholder="1"
               />
-              <div className="flex flex-col gap-1.5">
-                <label className="text-sm font-medium text-fg-muted" htmlFor="dispense-operator">操作人</label>
-                <select
-                  id="dispense-operator"
-                  className={selectClass}
-                  value={createForm.operator}
-                  onChange={(event) => setCreateForm((current) => ({ ...current, operator: event.target.value }))}
-                >
-                  <option value="">请选择操作人</option>
-                  {subjects.map((subject) => (
-                    <option key={subject.id} value={subject.display_name}>
-                      {subject.display_name}
-                    </option>
-                  ))}
-                </select>
-              </div>
             </div>
 
             {createError && <p className="text-sm text-danger">{createError}</p>}
@@ -1714,22 +1726,14 @@ export default function PharmacyPage() {
               <p className="text-sm text-warning">取消后发药单转为已取消，该医嘱可重新接方。</p>
             )}
 
-            <div className="flex flex-col gap-1.5">
-              <label className="text-sm font-medium text-fg-muted" htmlFor="action-operator">操作人</label>
-              <select
-                id="action-operator"
-                className={selectClass}
-                value={actionOperator}
-                onChange={(event) => setActionOperator(event.target.value)}
-              >
-                <option value="">请选择操作人</option>
-                {subjects.map((subject) => (
-                  <option key={subject.id} value={subject.display_name}>
-                    {subject.display_name}
-                  </option>
-                ))}
-              </select>
-            </div>
+            <OperatorPicker
+              id="action-operator"
+              currentUser={currentUser}
+              subjects={subjects}
+              value={actionOperator}
+              onChange={setActionOperator}
+              directoryError={operatorDirectoryError}
+            />
 
             <Input
               label="备注（可选）"
@@ -1863,13 +1867,14 @@ export default function PharmacyPage() {
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <Input label="退药数量" type="number" min={1} value={returnForm.quantity} onChange={(event) => setReturnForm((current) => ({ ...current, quantity: event.target.value }))} />
-              <div className="flex flex-col gap-1.5">
-                <label className="text-sm font-medium text-fg-muted" htmlFor="return-operator">操作人</label>
-                <select id="return-operator" className={selectClass} value={returnForm.operator} onChange={(event) => setReturnForm((current) => ({ ...current, operator: event.target.value }))}>
-                  <option value="">请选择操作人</option>
-                  {subjects.map((subject) => <option key={subject.id} value={subject.display_name}>{subject.display_name}</option>)}
-                </select>
-              </div>
+              <OperatorPicker
+                id="return-operator"
+                currentUser={currentUser}
+                subjects={subjects}
+                value={returnForm.operator}
+                onChange={(operator) => setReturnForm((current) => ({ ...current, operator }))}
+                directoryError={operatorDirectoryError}
+              />
             </div>
             <Input label="退药原因" value={returnForm.reason} onChange={(event) => setReturnForm((current) => ({ ...current, reason: event.target.value }))} placeholder={`例如：${person}未使用`} />
             <Input label="备注（可选）" value={returnForm.remark} onChange={(event) => setReturnForm((current) => ({ ...current, remark: event.target.value }))} />

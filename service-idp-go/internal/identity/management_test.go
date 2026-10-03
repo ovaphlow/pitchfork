@@ -284,3 +284,84 @@ func bootstrapAdministrator(t *testing.T, databaseConnection *sql.DB) identity.S
 	}
 	return listed.Subjects[0]
 }
+
+// TestListDirectoryPaginationSearchAndWildcardEscaping 锁定业务人员目录的查询口径（计划 044）：
+// 只含启用主体、分页计数与页大小一致、检索按 display_name 模糊匹配，
+// 且用户输入的 LIKE 通配符（% / _）必须被转义——否则一个 `%` 就能把检索退化成全表枚举。
+func TestListDirectoryPaginationSearchAndWildcardEscaping(t *testing.T) {
+	ctx := context.Background()
+	databaseConnection := migratedDatabase(t)
+	if _, err := identity.EnsureBootstrap(ctx, databaseConnection, identity.BootstrapInput{
+		Identifier: "admin",
+		Password:   "correct horse battery staple",
+	}); err != nil {
+		t.Fatalf("ensure bootstrap: %v", err)
+	}
+	administrators, err := identity.ListSubjects(ctx, databaseConnection, identity.ListSubjectsInput{Limit: 10, Offset: 0})
+	if err != nil {
+		t.Fatalf("list subjects: %v", err)
+	}
+	administratorID := administrators.Subjects[0].ID
+
+	// 三个启用主体 + 一个禁用主体；名字里带 % 与 _ 的两个用于锁定通配符转义。
+	for _, subject := range []struct {
+		displayName string
+		identifier  string
+	}{
+		{"护理员一号", "nurse01"},
+		{"护理员二号", "nurse02"},
+		{"百分之%三号", "nurse03"},
+		{"下划线_四号", "nurse04"},
+	} {
+		if _, err := identity.CreateSubject(ctx, databaseConnection, administratorID, identity.CreateSubjectInput{
+			DisplayName: subject.displayName,
+			Identifier:  subject.identifier,
+			Password:    "sufficiently long password",
+		}); err != nil {
+			t.Fatalf("create subject %s: %v", subject.identifier, err)
+		}
+	}
+
+	all, err := identity.ListDirectory(ctx, databaseConnection, identity.ListDirectoryInput{Limit: 200, Offset: 0})
+	if err != nil {
+		t.Fatalf("list directory: %v", err)
+	}
+	if all.Total != 5 || len(all.Entries) != 5 {
+		t.Fatalf("directory total = %d, entries = %d, want 5 (引导管理员 + 4 个启用主体)", all.Total, len(all.Entries))
+	}
+
+	// 分页：计数与页大小必须各自独立
+	page, err := identity.ListDirectory(ctx, databaseConnection, identity.ListDirectoryInput{Limit: 2, Offset: 2})
+	if err != nil {
+		t.Fatalf("list directory page: %v", err)
+	}
+	if page.Total != 5 || len(page.Entries) != 2 {
+		t.Fatalf("directory page total = %d, entries = %d, want total 5 / 2 entries", page.Total, len(page.Entries))
+	}
+
+	// 模糊匹配：按姓名片段命中两个
+	matched, err := identity.ListDirectory(ctx, databaseConnection, identity.ListDirectoryInput{Limit: 200, Search: "护理员"})
+	if err != nil {
+		t.Fatalf("search directory: %v", err)
+	}
+	if len(matched.Entries) != 2 {
+		t.Fatalf("search 护理员 entries = %d, want 2", len(matched.Entries))
+	}
+
+	// 通配符转义：`%` 只能命中名字里真的带 % 的那一个，绝不能变成"匹配全部"
+	wildcard, err := identity.ListDirectory(ctx, databaseConnection, identity.ListDirectoryInput{Limit: 200, Search: "%"})
+	if err != nil {
+		t.Fatalf("search wildcard: %v", err)
+	}
+	if len(wildcard.Entries) != 1 || wildcard.Entries[0].DisplayName != "百分之%三号" {
+		t.Fatalf("search %% must be escaped to a literal, got %#v", wildcard.Entries)
+	}
+
+	underscore, err := identity.ListDirectory(ctx, databaseConnection, identity.ListDirectoryInput{Limit: 200, Search: "_"})
+	if err != nil {
+		t.Fatalf("search underscore: %v", err)
+	}
+	if len(underscore.Entries) != 1 || underscore.Entries[0].DisplayName != "下划线_四号" {
+		t.Fatalf("search _ must be escaped to a literal, got %#v", underscore.Entries)
+	}
+}

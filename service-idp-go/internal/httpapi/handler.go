@@ -27,9 +27,11 @@ const (
 )
 
 const (
-	defaultSubjectListLimit int64 = 20
-	maximumSubjectListLimit int64 = 100
-	maximumJSONBodyBytes          = 1 << 20
+	defaultSubjectListLimit   int64 = 20
+	maximumSubjectListLimit   int64 = 100
+	defaultDirectoryListLimit int64 = 50
+	maximumDirectoryListLimit int64 = 200
+	maximumJSONBodyBytes            = 1 << 20
 )
 
 const (
@@ -77,6 +79,9 @@ func NewMux(database *sql.DB, options Options) http.Handler {
 	mux.HandleFunc("POST "+identityPrefix+"/password", handler.changePassword)
 	mux.HandleFunc("GET "+identityPrefix+"/dashboard", handler.dashboard)
 	mux.HandleFunc("GET "+identityPrefix+"/subjects", handler.listSubjects)
+	// 044：业务人员目录——**仅需有效会话**（不是管理员接口），只返回 id + display_name。
+	// 业务账号要在表单里挑同事、在列表里看责任人姓名，而管理接口 /subjects 会 403。
+	mux.HandleFunc("GET "+identityPrefix+"/directory", handler.listDirectory)
 	mux.HandleFunc("POST "+identityPrefix+"/subjects", handler.createSubject)
 	mux.HandleFunc("GET "+identityPrefix+"/subjects/{subjectID}", handler.getSubject)
 	mux.HandleFunc("PATCH "+identityPrefix+"/subjects/{subjectID}", handler.updateSubject)
@@ -94,15 +99,21 @@ func (handler Handler) health(responseWriter http.ResponseWriter, request *http.
 // getCurrentSession is the service-to-service identity boundary. Downstream
 // services forward the browser Cookie header here instead of interpreting the
 // opaque session token themselves.
+//
+// 042：响应额外带 `platform_admin`（代操作门禁的唯一依据）与 `display_name`
+// （下游渲染"当前登录用户"）。两者均为**新增字段**，既有消费方（Aceso 只读
+// `subject_id`，Nexus 只读 `subject_id` + `access`）行为不变。
 func (handler Handler) getCurrentSession(responseWriter http.ResponseWriter, request *http.Request) {
 	session, err := handler.currentSession(request)
 	if err != nil || session.Access != identity.SessionAccessFull {
 		writeProblem(responseWriter, request, http.StatusUnauthorized, "not-authenticated", "not authenticated")
 		return
 	}
-	writeJSON(responseWriter, http.StatusOK, map[string]string{
-		"subject_id": session.SubjectID,
-		"access":     session.Access,
+	writeJSON(responseWriter, http.StatusOK, map[string]any{
+		"subject_id":     session.SubjectID,
+		"access":         session.Access,
+		"platform_admin": session.PlatformAdmin,
+		"display_name":   session.DisplayName,
 	})
 }
 
@@ -302,6 +313,37 @@ func (handler Handler) listSubjects(responseWriter http.ResponseWriter, request 
 	}
 	writeJSON(responseWriter, http.StatusOK, map[string]any{
 		"records": result.Subjects,
+		"meta":    map[string]int64{"total": result.Total},
+	})
+}
+
+// listDirectory 是**业务人员目录**（计划 044）：与 listSubjects 的区别只有两点——
+//
+//  1. **不要求平台管理员**：任何有效完整会话都可读（默认拒绝总闸内），这正是它存在的理由；
+//  2. 字段最小化：只返回 id + display_name，只含启用主体（暴露面控制在“组织内通讯录”级别）。
+//
+// 响应沿用仓库列表契约：`{ "records": [...], "meta": { "total": N } }`。
+func (handler Handler) listDirectory(responseWriter http.ResponseWriter, request *http.Request) {
+	if _, err := handler.currentSession(request); err != nil {
+		writeProblem(responseWriter, request, http.StatusUnauthorized, "not-authenticated", "not authenticated")
+		return
+	}
+	limit, offset, err := directoryListPagination(request)
+	if err != nil {
+		writeProblem(responseWriter, request, http.StatusBadRequest, "invalid-request", "invalid pagination")
+		return
+	}
+	result, err := identity.ListDirectory(request.Context(), handler.database, identity.ListDirectoryInput{
+		Limit:  limit,
+		Offset: offset,
+		Search: request.URL.Query().Get("search"),
+	})
+	if err != nil {
+		writeProblem(responseWriter, request, http.StatusInternalServerError, "internal-error", "could not list directory")
+		return
+	}
+	writeJSON(responseWriter, http.StatusOK, map[string]any{
+		"records": result.Entries,
 		"meta":    map[string]int64{"total": result.Total},
 	})
 }
@@ -613,6 +655,20 @@ func (handler Handler) writeSubjectManagementError(responseWriter http.ResponseW
 func subjectListPagination(request *http.Request) (int64, int64, error) {
 	limit, err := parseNonnegativeQueryInteger(request, "limit", defaultSubjectListLimit)
 	if err != nil || limit < 1 || limit > maximumSubjectListLimit {
+		return 0, 0, errors.New("invalid limit")
+	}
+	offset, err := parseNonnegativeQueryInteger(request, "offset", 0)
+	if err != nil {
+		return 0, 0, errors.New("invalid offset")
+	}
+	return limit, offset, nil
+}
+
+// directoryListPagination 与 subjectListPagination 同口径，只是上限不同（200 而非 100）：
+// 目录要一次性填满表单下拉与筛选选项。
+func directoryListPagination(request *http.Request) (int64, int64, error) {
+	limit, err := parseNonnegativeQueryInteger(request, "limit", defaultDirectoryListLimit)
+	if err != nil || limit < 1 || limit > maximumDirectoryListLimit {
 		return 0, 0, errors.New("invalid limit")
 	}
 	offset, err := parseNonnegativeQueryInteger(request, "offset", 0)
