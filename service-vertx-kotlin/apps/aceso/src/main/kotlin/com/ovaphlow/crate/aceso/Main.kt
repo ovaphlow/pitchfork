@@ -2,6 +2,8 @@ package com.ovaphlow.crate.aceso
 
 import com.ovaphlow.crate.database.DatabaseConfig
 import com.ovaphlow.crate.dining.DiningRoutes
+import com.ovaphlow.crate.healthcare.AuditLogService
+import com.ovaphlow.crate.healthcare.BaseDataService
 import com.ovaphlow.crate.healthcare.DrugCatalogMaterial
 import com.ovaphlow.crate.healthcare.DrugCatalogPort
 import com.ovaphlow.crate.healthcare.HealthcareRoutes
@@ -136,6 +138,15 @@ fun main() {
         buildApiRouter(vertx, pool, idpBaseUrl, nexusBaseUrl, idpSessionTimeoutMs),
     )
 
+    // 054 F2：**应用启动**时加载基础数据内容（读库优先、常量回落）。
+    // 刻意放在 `main()` 而**不在 `buildApiRouter` 内**：后者是 DB-free 路由测试共用的装配入口，
+    // 若在其中发查询，每个测试装配都会多出 2 条 SQL，撞「未认证/非法入参不得触发任何 SQL」断言。
+    // 冷启动到首次内容写入/管理页访问之间消费方走常量回落（库空等价性成立，仅"读库优先"延迟生效）；
+    // refreshAll() 失败只 warn，不影响启动。
+    BaseDataService(pool).refreshAll().onFailure {
+        log.warn("054 F2 基础数据启动加载失败，消费方继续走常量回落: {}", it.message)
+    }
+
     mainRouter.route("/health").handler { ctx ->
         ctx.json(JsonObject().put("status", "ok").put("app", "aceso"))
     }
@@ -212,6 +223,30 @@ internal fun buildApiRouter(
     val sessionAuth = idpSessionAuthHandler(vertx, idpBaseUrl, idpSessionTimeoutMs)
     apiRouter.route().handler(apiAuthenticationGate(sessionAuth))
 
+    // 054 F3：集中式**旁路**审计中间件——在认证总闸**之后**（`ctx["userId"]`/`platformAdmin` 已就绪）、
+    // 集中式门禁循环**之前**注册：门禁自身 `end()` 的 403 尝试同样入账（§8.6 ⑤）。
+    // 只记元数据（method/path/status/actor/resource_id/occurred_at），**绝不读取请求体**（PHI 不落库）；
+    // 落库失败只 log.warn，不阻断主请求、不改状态码。**不插 BodyHandler、不改既有注册顺序**（P0 护栏）。
+    apiRouter.route().handler(auditMiddleware(AuditLogService(pool)))
+
+    // 046 D2：集中式声明驱动门禁——在认证总闸**之后**、所有模块子路由**之前**，按
+    // `DECLARED_PERMISSIONS` 注册写路由门禁。声明与实际接线共用同一份数据（自省端点
+    // `GET /access/v1/permissions` 也由它派生），二者天然不可漂移；4 个 lib 的 `create()`
+    // 与嵌入式测试挂载完全不动（healthcare 的 11 个 auth 形参、inventories 无 auth 形参等均不改）。
+    //
+    // `wiring == INJECTED` 的护理 3 条跳过：它们由 `TaskExecutionRoutes` 的注入式门禁承载
+    // （打卡需按执行记录 `task_type` 读库选码），集中式重复注册虽不弱化判定，但会让 403 的
+    // `required_permission` 文案退化。请求体读取仍由最顶层的 `BodyHandler` 保证在总闸之前完成，
+    // 异步门禁 `ctx.next()` 恢复时不会再触发"首个 BodyHandler 且请求已结束"的挂起路径（见 §2.3/P0）。
+    val permissionClient = SubjectPermissionClient(vertx, nexusBaseUrl, idpSessionTimeoutMs)
+    DECLARED_PERMISSIONS
+        .filter { it.wiring == PermissionWiring.CENTRAL }
+        .groupBy { it.method to it.path }
+        .forEach { (key, declarations) ->
+            apiRouter.route(HttpMethod.valueOf(key.first), key.second)
+                .handler(requireAnyPermission(permissionClient, declarations.map { it.permissionCode }))
+        }
+
     apiRouter.route("/identity/v1/*").subRouter(
         ServiceProxyRoutes.create(
             vertx,
@@ -245,6 +280,7 @@ internal fun buildApiRouter(
             idpSessionAuthHandler(vertx, idpBaseUrl, idpSessionTimeoutMs),
             idpSessionAuthHandler(vertx, idpBaseUrl, idpSessionTimeoutMs),
             drugCatalogPort = healthcareDrugCatalogPort(materialService),
+            childHealthMessagePort = NexusMessageClient(vertx, nexusBaseUrl, idpSessionTimeoutMs),
         ),
     )
     apiRouter.route("/nursing/v1/*").subRouter(
@@ -252,10 +288,13 @@ internal fun buildApiRouter(
             vertx,
             pool,
             idpSessionAuthHandler(vertx, idpBaseUrl, idpSessionTimeoutMs),
-            requirePermission(
-                SubjectPermissionClient(vertx, nexusBaseUrl, idpSessionTimeoutMs),
-                NURSING_EXECUTE_PERMISSION,
-            ),
+            // 记录给药：固定护理执行码（`POST /executions/:id/administration`）。
+            requirePermission(permissionClient, NURSING_EXECUTE_PERMISSION),
+            // 045 打卡状态更新：按执行记录的 task_type 选码——康复活动（REHABILITATION）
+            // 允许康复岗（rehab:execute）或护理岗（nursing:execute）完成，其余任务类型只认护理执行码。
+            permissionHandlerForTaskType = { taskType ->
+                requireAnyPermission(permissionClient, executionPermissionCodesFor(taskType))
+            },
         ),
     )
     apiRouter.route("/access/v1/*").subRouter(AccessRoutes.create(vertx))
@@ -278,6 +317,8 @@ internal fun buildApiRouter(
             idpSessionAuthHandler(vertx, idpBaseUrl, idpSessionTimeoutMs),
             drugCatalogPort = pharmacyDrugCatalogPort(materialService),
             departmentDirectoryPort = DepartmentDirectoryClient(vertx, nexusBaseUrl, idpSessionTimeoutMs),
+            // 054 D3：发药确认前调用 053 既有药物过敏检查（分级提醒 + 严重项二次确认）
+            drugAllergyCheckPort = pharmacyDrugAllergyCheckPort(pool, healthcareDrugCatalogPort(materialService)),
         ),
     )
     return apiRouter

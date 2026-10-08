@@ -6,11 +6,13 @@
  *
  *   node --test apps/aceso/tests/execution-statistics.test.ts
  *
- * 锁定的验收口径（2026-10-01 QA「康复活动两处显示不同步」）：
- *   - 完成率 null（范围内没有已到计划时间的执行）渲染为「暂无应完成任务」，
+ * 锁定的验收口径（2026-10-01 QA「康复活动两处显示不同步」；2026-10-04 QA 分母口径修订）：
+ *   - 完成率 null（范围内既没到计划时间、也没有已完成记录）渲染为「暂无应完成任务」，
  *     不是破折号，也不与「计划任务 / 已完成」并排产生 1/1 却是 — 的矛盾；
  *   - 非 null 一律两位小数（照护管理与康复活动同文案）；
- *   - 完成率卡必须同时给出分母「应完成」与分子「已完成（应完成口径）」。
+ *   - 完成率卡必须同时给出分母「应完成」与分子「已完成（应完成口径）」；
+ *   - 应完成 = 已到计划时间 或 已完成 → 提前完成的条必须同时出现在分子与分母，
+ *     再也不能出现「已完成 1 却 0.00%」。
  */
 
 import { test } from "node:test";
@@ -55,8 +57,9 @@ test("应完成与已完成全部达成时，卡片显示 100.00%", () => {
 	assert.equal(byLabel.get("计划完成率"), "100.00%");
 });
 
-test("尚无可执行任务时：计划 1 / 已完成 1 不再显示成完成率破折号矛盾", () => {
-	// QA 场景：今天排了 1 条、提前打卡完成，但计划时间还没到 → due_total = 0、completion_rate = null。
+test("范围内只有未到计划时间的待执行任务时，完成率记「暂无应完成任务」", () => {
+	// 045 后的后端口径：应完成 = 已到计划时间 或 已完成。
+	// 分母为 0 只剩一种情形：范围内既没有已到计划时间、也没有已完成的执行（例如今天排了 1 条还没打卡）。
 	const cards = executionRateCards(meta({ scheduled_total: 1, due_total: 0, completed_due_total: 0, completion_rate: null }));
 	const byLabel = new Map(cards.map((card) => [card.label, card.value]));
 
@@ -64,6 +67,21 @@ test("尚无可执行任务时：计划 1 / 已完成 1 不再显示成完成率
 	assert.equal(byLabel.get("应完成"), "0", "分母必须可见，才能解释完成率为何没有数值");
 	assert.equal(byLabel.get("已完成"), "0");
 	assert.equal(byLabel.get("计划完成率"), "暂无应完成任务");
+});
+
+test("提前完成计入应完成与分子：不再出现「已完成 1 却 0.00%」", () => {
+	// 045 现场场景（2026-10-04）：活动 10-03 起每日一次，10-03 那条逾期未做、10-04 那条提前打完卡。
+	// 旧口径下 due_total = 1（只有 10-03）、completed_due_total = 0 → 康复师看到
+	// 「已完成 0 / 0.00% / 执行人分组：暂无应完成任务」，直接否定了他刚完成的工作。
+	const cards = executionRateCards(
+		meta({ scheduled_total: 2, due_total: 2, completed_due_total: 1, overdue_total: 1, completion_rate: 50 }),
+	);
+	const byLabel = new Map(cards.map((card) => [card.label, card.value]));
+
+	assert.equal(byLabel.get("应完成"), "2", "逾期未做 + 提前完成都算应完成");
+	assert.equal(byLabel.get("已完成"), "1", "刚打完的那条必须在分子里");
+	assert.equal(byLabel.get("逾期"), "1");
+	assert.equal(byLabel.get("计划完成率"), "50.00%");
 });
 
 test("完成率卡始终成组给出分母与分子", () => {

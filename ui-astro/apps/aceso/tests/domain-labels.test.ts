@@ -79,6 +79,20 @@ const NON_ELDERLY_VISIBLE_COMPONENTS = [
 	// 041 Q4：两项补进医疗域后同样在医疗模式打开，文案不得再写死「长者」
 	"OrdersPage.tsx",
 	"OrdersCheckPage.tsx",
+	// 054 A6（R9）：营养师工作台在儿保域可见，文案必须走 DOMAIN_ENTITY（儿童），
+	// 不得写死「长者」——否则儿保模式下会出现「长者」措辞。
+	"DietitianWorkbenchPage.tsx",
+	// 054 B5（R9）：康复师工作台同样在儿保域可见，文案不得写死「长者」。
+	"ChildRehabPage.tsx",
+	// 054 D4（R9）：药师工作台同样在儿保域可见，文案不得写死「长者」。
+	"PharmacistWorkbenchPage.tsx",
+	// 054 C3（R9）：保育员工作台同样在儿保域可见，文案不得写死「长者」。
+	"ChildcareWorkbenchPage.tsx",
+	// 054 E4（R9）：收银工作台同样在儿保域可见，文案不得写死「长者」。
+	"CashierWorkbenchPage.tsx",
+	// 054 F 链（R9）：基础数据维护与操作审计同样在儿保域可见，文案不得写死「长者」。
+	"BaseDataPage.tsx",
+	"AuditLogPage.tsx",
 ];
 
 test("非养老域可见页面不再硬编码「长者」文案", () => {

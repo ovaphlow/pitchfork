@@ -179,6 +179,14 @@ export default function NursingExecutionStatisticsPanel({ subjects, reloadKey = 
         </div>
       )}
 
+      {/* 045：窗口与口径标注——这些数字只属于已提交的日期范围，与「今日待办」不是同一窗口 */}
+      {meta && !loading && (
+        <p className="text-xs text-fg-dimmed">
+          统计范围 {meta.date_from} 至 {meta.date_to}｜应完成 = 已到计划时间或已完成（提前完成也计入）；
+          逾期 = 已过计划时间且未结束
+        </p>
+      )}
+
       {/* 加载态 */}
       {loading && (
         <div className="py-8 text-center text-sm text-fg-dimmed">正在加载统计数据…</div>

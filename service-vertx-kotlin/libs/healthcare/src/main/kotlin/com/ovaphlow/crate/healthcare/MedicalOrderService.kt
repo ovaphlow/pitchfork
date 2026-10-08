@@ -19,6 +19,7 @@ import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.RowSet
 import io.vertx.sqlclient.SqlClient
+import io.vertx.sqlclient.Tuple
 import org.jooq.Condition
 import org.jooq.DSLContext
 import org.jooq.JSONB
@@ -72,6 +73,20 @@ private fun prescribedTotalQuantityText(
  * （约一半概率触发）。这里统一先截断到微秒，使两种落库形态逐位一致。
  */
 private fun auditNow(): OffsetDateTime = OffsetDateTime.now().truncatedTo(ChronoUnit.MICROS)
+
+/**
+ * 053 D3：开嘱时命中**未确认的严重**药物过敏/禁忌提醒。
+ *
+ * 由 [MedicalOrderService.createOrder] 在 `MEDICATION` 分支、目录覆写成功后抛出；
+ * 外层事务整体回滚（不产生医嘱/护理任务），路由映射 **409**。默认非阻塞：一般提醒只提示，
+ * 只有严重项未在 `acknowledged_warnings` 中确认才拒绝（053 §11 裁定 4）。
+ *
+ * @param warnings 未确认的严重提醒（`matched` 为需确认的键）。
+ */
+class DrugAllergyWarningException(
+    message: String,
+    val warnings: List<DrugAllergyWarning>,
+) : Exception(message)
 
 class MedicalOrderService(
     private val pool: Pool,
@@ -145,6 +160,15 @@ class MedicalOrderService(
         const val DRUG_CATEGORY = "药品"
         const val ACTIVE_STATUS = "ACTIVE"
 
+        /** 053 D3：患者有效过敏史读取（原生参数化 SQL，跨 schema 显式限定）。 */
+        private const val ALLERGY_RECORDS_SQL =
+            "SELECT allergen_type, allergen_name, allergen_code, severity, status " +
+                "FROM healthcare.patient_allergies WHERE patient_id = \$1 AND status = '有效'"
+
+        /** 053 D3：患者出生日期读取（月龄派生用；无行或空值 → null，跳过年龄禁忌）。 */
+        private const val PATIENT_BIRTH_DATE_SQL =
+            "SELECT birth_date FROM healthcare.patients WHERE id = \$1"
+
         /** 030 §4.4 批量补绑单次上限：超过一律 400，不做分批隐式拆分 */
         const val MAX_BIND_BATCH_SIZE = 100
 
@@ -168,6 +192,42 @@ class MedicalOrderService(
                 return false to null
             }
             return true to Duration.between(endTime, now).toMinutes().toInt()
+        }
+
+        // ====================================================================
+        //  053 D3：过敏提醒分级与二次确认（纯辅助，供单测）
+        // ====================================================================
+
+        /** 仅保留**严重**提醒（一般提醒默认不阻塞，053 §11 裁定 4）。 */
+        fun severeWarnings(warnings: List<DrugAllergyWarning>): List<DrugAllergyWarning> =
+            warnings.filter { it.severity == DrugAllergyChecker.SEVERITY_SEVERE }
+
+        /**
+         * 未确认的严重提醒：严重项中 `matched` 不在 [acknowledged] 里的部分。
+         *
+         * 一般提醒永不进入结果（绝不硬拦一般项）；[acknowledged] 为客户端二次确认的 `matched` 集合。
+         */
+        fun unacknowledgedSevere(
+            warnings: List<DrugAllergyWarning>,
+            acknowledged: Set<String>,
+        ): List<DrugAllergyWarning> =
+            severeWarnings(warnings).filter { it.matched !in acknowledged }
+
+        /**
+         * 解析可选顶层键 `acknowledged_warnings`（字符串数组）。
+         *
+         * `null`（未提交）→ 空集；非数组 → 400；含非字符串元素 → 400。
+         * 仅 `MEDICATION` 医嘱消费该键（非用药类型忽略，见 [validateCreateInput]）。
+         */
+        fun parseAcknowledgedWarnings(value: Any?): Set<String> {
+            if (value == null) return emptySet()
+            if (value !is JsonArray) {
+                throw IllegalArgumentException("acknowledged_warnings must be an array of strings")
+            }
+            return value.mapIndexed { index, element ->
+                element as? String
+                    ?: throw IllegalArgumentException("acknowledged_warnings[$index] must be a string")
+            }.toSet()
         }
 
         private val businessZone = ZoneId.of("Asia/Shanghai")
@@ -203,7 +263,39 @@ class MedicalOrderService(
                     // 025 目录校验与 drug_name/material_code/material_name 覆写必须先于写医嘱：
                     // 任何一步失败（404/409/400/503）都由外层事务整体回滚，不产生医嘱与护理任务。
                     resolveDrugMaterialDetails(connection, input.orderType, input.orderDetails)
-                        .compose { insertOrderWithTask(connection, encounterId, period, input) }
+                        .compose { material ->
+                            // 非 MEDICATION：material 为 null，跳过过敏检查，直接写医嘱。
+                            if (material == null) {
+                                return@compose insertOrderWithTask(
+                                    connection, encounterId, period, input, emptyList(),
+                                )
+                            }
+                            // 053 D3：目录覆写成功后、写医嘱之前，叠加过敏/禁忌检查。
+                            // 一般提醒放行；严重项未在 acknowledged_warnings 中确认 → 409，事务整体回滚。
+                            val patientId = encounter.getString("patient_id")
+                            loadAllergyRecords(connection, patientId).compose { allergies ->
+                                loadAgeMonths(connection, patientId).compose { ageMonths ->
+                                    val warnings = DrugAllergyChecker.check(
+                                        material.name, material.code, allergies, ageMonths,
+                                    )
+                                    val unacknowledged = unacknowledgedSevere(
+                                        warnings, input.acknowledgedWarnings,
+                                    )
+                                    if (unacknowledged.isNotEmpty()) {
+                                        return@compose Future.failedFuture(
+                                            DrugAllergyWarningException(
+                                                "drug allergy warning requires acknowledgment: " +
+                                                    unacknowledged.joinToString(", ") { it.matched },
+                                                unacknowledged,
+                                            ),
+                                        )
+                                    }
+                                    insertOrderWithTask(
+                                        connection, encounterId, period, input, warnings,
+                                    )
+                                }
+                            }
+                        }
                 }
             }
         }
@@ -212,12 +304,16 @@ class MedicalOrderService(
     /**
      * 025 落库医嘱 + 派生护理任务 + 回读，全部复用外层事务连接。
      * `input.orderDetails` 已由 [resolveDrugMaterialDetails] 完成目录覆写。
+     *
+     * 053 D3：`warnings`（过敏/禁忌提醒，`MEDICATION` 分支传入）非空时并入 `metadata.allergy_warnings`
+     * 并在响应 JSON 附加 `allergy_warnings`；`MEDICATION` 响应即使无提醒也稳定附加空数组。
      */
     private fun insertOrderWithTask(
         connection: SqlClient,
         encounterId: String,
         period: JsonObject,
         input: CreateOrderInput,
+        warnings: List<DrugAllergyWarning>,
     ): Future<JsonObject> {
         val orderId = Ulid.generate()
         val now = OffsetDateTime.now()
@@ -234,6 +330,11 @@ class MedicalOrderService(
             .set(MEDICAL_ORDERS.CREATED_AT, now)
             .set(MEDICAL_ORDERS.UPDATED_AT, now)
         input.endTime?.let { insertQuery = insertQuery.set(MEDICAL_ORDERS.END_TIME, it) }
+        // 053 D3：仅在有提醒时写 metadata（新医嘱 metadata 原为 NULL，不存在被覆盖的既有内容）。
+        if (warnings.isNotEmpty()) {
+            val metadata = JsonObject().put("allergy_warnings", warningsJson(warnings))
+            insertQuery = insertQuery.set(MEDICAL_ORDERS.METADATA, JSONB.valueOf(metadata.encode()))
+        }
 
         return execute(connection, insertQuery).compose {
             val startDate = businessDate(input.startTime)
@@ -265,7 +366,12 @@ class MedicalOrderService(
         }.compose {
             // 027 响应内固定同一个 now：到期派生字段与写入时间同源
             readOrderWithTask(connection, orderId).map { row ->
-                orderJson(row, row.getString("task_id"), now)
+                val order = orderJson(row, row.getString("task_id"), now)
+                // 053 D3：MEDICATION 响应稳定附带 allergy_warnings（无提醒时为空数组）。
+                if (input.orderType == "MEDICATION") {
+                    order.put("allergy_warnings", warningsJson(warnings))
+                }
+                order
             }
         }
     }
@@ -278,13 +384,16 @@ class MedicalOrderService(
      * 3. `drug_name` 显式提供且与目录药名不一致 → 400，避免前端与目录静默漂移；
      * 4. 覆写 `drug_name` / `material_code` / `material_name`（忽略客户端同名入参）。
      *
-     * 其余医嘱类型直接放行，不做任何目录读取。
+     * 其余医嘱类型直接放行（返回 null），不做任何目录读取。
+     *
+     * @return 解析成功且覆写后的目录快照；非 `MEDICATION` 返回 null。053 D3 供过敏检查复用，
+     *   但**不改变**本函数的 fail-closed 目录校验语义。
      */
     private fun resolveDrugMaterialDetails(
         client: SqlClient,
         orderType: String,
         orderDetails: JsonObject,
-    ): Future<Void?> {
+    ): Future<DrugCatalogMaterial?> {
         if (orderType != "MEDICATION") {
             return Future.succeededFuture(null)
         }
@@ -324,9 +433,103 @@ class MedicalOrderService(
             } else {
                 orderDetails.put("material_code", material.code)
             }
-            Future.succeededFuture(null)
+            Future.succeededFuture(material)
         }
     }
+
+    // ========================================================================
+    //  053 D3：开嘱前药物过敏/禁忌检查（只读 + 提醒分级）
+    // ========================================================================
+
+    /**
+     * 053 D3 只读过敏检查（供 `GET /drug-allergy-check`）。
+     *
+     * 目录校验与开嘱**同口径**（端口未注入 503 / 物资不存在 404 / 非药品或非启用 409），
+     * 过敏检查是**叠加**，不替代 [DrugCatalogPort] 的 fail-closed 语义（053 §6）。
+     * 返回 `{patient_id, material_id, drug_name, drug_code, warnings[], severe}`；
+     * `warnings` 元素为 `{severity, reason, source, matched}`，`severe` 表示存在严重提醒。
+     *
+     * @throws IllegalArgumentException `patient_id` / `material_id` 为空（路由 400）。
+     */
+    fun checkDrugAllergy(patientId: String, materialId: String): Future<JsonObject> {
+        val patient = patientId.trim().takeIf(String::isNotBlank)
+            ?: return Future.failedFuture(IllegalArgumentException("patient_id is required"))
+        val material = materialId.trim().takeIf(String::isNotBlank)
+            ?: return Future.failedFuture(IllegalArgumentException("material_id is required"))
+        val port = drugCatalogPort
+            ?: return Future.failedFuture(
+                DrugCatalogUnavailableException("drug catalog port is not configured"),
+            )
+        return port.findDrugMaterial(pool, material).compose { snapshot ->
+            if (snapshot == null) {
+                return@compose Future.failedFuture(
+                    HealthcareNotFoundException("material not found: $material"),
+                )
+            }
+            if (snapshot.category != DRUG_CATEGORY) {
+                return@compose Future.failedFuture(
+                    ConflictException("material is not a drug: $material"),
+                )
+            }
+            if (snapshot.status != ACTIVE_STATUS) {
+                return@compose Future.failedFuture(
+                    ConflictException("material is not active: $material"),
+                )
+            }
+            loadAllergyRecords(pool, patient).compose { allergies ->
+                loadAgeMonths(pool, patient).map { ageMonths ->
+                    val warnings = DrugAllergyChecker.check(
+                        snapshot.name, snapshot.code, allergies, ageMonths,
+                    )
+                    JsonObject()
+                        .put("patient_id", patient)
+                        .put("material_id", material)
+                        .put("drug_name", snapshot.name)
+                        .put("drug_code", snapshot.code)
+                        .put("warnings", warningsJson(warnings))
+                        .put("severe", severeWarnings(warnings).isNotEmpty())
+                }
+            }
+        }
+    }
+
+    /** 053 D3：读取患者**有效**过敏史（原生参数化 SQL；跨 schema 显式 `healthcare.`）。 */
+    private fun loadAllergyRecords(client: SqlClient, patientId: String): Future<List<AllergyRecord>> =
+        client.preparedQuery(ALLERGY_RECORDS_SQL).execute(Tuple.of(patientId)).map { rows ->
+            rows.iterator().asSequence().map { row ->
+                AllergyRecord(
+                    allergenType = row.getString("allergen_type") ?: "",
+                    allergenName = row.getString("allergen_name") ?: "",
+                    allergenCode = row.getString("allergen_code"),
+                    severity = row.getString("severity") ?: DrugAllergyChecker.SEVERITY_GENERAL,
+                    status = row.getString("status") ?: "有效",
+                )
+            }.toList()
+        }
+
+    /**
+     * 053 D3：读取患者月龄（原生参数化 SQL）。
+     *
+     * 无该患者行或 `birth_date` 为空 → null（跳过年龄禁忌），不抛错；
+     * 月龄按业务今天（Asia/Shanghai）用 [ChildHealth.ageMonths] 派生，与 052/053 同口径。
+     */
+    private fun loadAgeMonths(client: SqlClient, patientId: String): Future<Int?> =
+        client.preparedQuery(PATIENT_BIRTH_DATE_SQL).execute(Tuple.of(patientId)).map { rows ->
+            val birthDate = rows.iterator().asSequence().firstOrNull()?.getLocalDate("birth_date")
+                ?: return@map null
+            ChildHealth.ageMonths(birthDate, ChildHealth.today())
+        }
+
+    /** 单条提醒 → JSON：`{severity, reason, source, matched}`（脱敏，不含 PHI）。 */
+    private fun warningJson(warning: DrugAllergyWarning): JsonObject = JsonObject()
+        .put("severity", warning.severity)
+        .put("reason", warning.reason)
+        .put("source", warning.source)
+        .put("matched", warning.matched)
+
+    /** 提醒列表 → JSON 数组（响应与 `metadata.allergy_warnings` 共用同一形状）。 */
+    private fun warningsJson(warnings: List<DrugAllergyWarning>): JsonArray =
+        JsonArray(warnings.map(::warningJson))
 
     fun listOrders(
         encounterId: String,
@@ -1664,7 +1867,17 @@ class MedicalOrderService(
         if (orderClass == "TEMPORARY" && endTime == null && !hasDuration && frequencyCode != "STAT") {
             throw IllegalArgumentException("TEMPORARY order requires end_time, duration_days, or STAT frequency")
         }
-        return CreateOrderInput(orderType, orderClass, orderContent, doctor, startTime, endTime, orderDetails)
+        // 053 D3：仅 MEDICATION 消费 acknowledged_warnings；非用药类型忽略该键（不校验、不报错）。
+        val acknowledgedWarnings =
+            if (orderType == "MEDICATION") {
+                parseAcknowledgedWarnings(body.getValue("acknowledged_warnings"))
+            } else {
+                emptySet()
+            }
+        return CreateOrderInput(
+            orderType, orderClass, orderContent, doctor, startTime, endTime, orderDetails,
+            acknowledgedWarnings,
+        )
     }
 
     private data class CreateOrderInput(
@@ -1675,6 +1888,8 @@ class MedicalOrderService(
         val startTime: OffsetDateTime,
         val endTime: OffsetDateTime?,
         val orderDetails: JsonObject,
+        /** 053 D3：客户端二次确认的严重过敏提醒 `matched` 集合；非 MEDICATION 恒为空集。 */
+        val acknowledgedWarnings: Set<String> = emptySet(),
     )
 
     private fun normalizeDetails(value: Any?, orderType: String): JsonObject {

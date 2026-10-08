@@ -881,7 +881,7 @@ class BillingSettlementTest {
             paymentService.createPayment("bill-1", JsonObject().put("amount", 100).put("method", "现金"), "cashier-1"),
         )
         assertInstanceOf(ConflictException::class.java, payCause)
-        assertTrue(payCause.message?.contains("settled") == true, "got: ${payCause.message}")
+        assertTrue(payCause.message?.contains("已结算") == true, "got: ${payCause.message}")
 
         // 冻结后任何写入都不得落库
         assertTrue(stub.tuples.none { it.first.contains("insert into healthcare.bills") })
@@ -1333,7 +1333,7 @@ class BillingSettlementTest {
                         ).map { (payStatus, payBody) ->
                             ctx.verify {
                                 assertEquals(409, payStatus, "冻结后缴费必须 409")
-                                assertTrue(payBody.getString("error")?.contains("settled") == true, "got: ${payBody.getString("error")}")
+                                assertTrue(payBody.getString("error")?.contains("已结算") == true, "got: ${payBody.getString("error")}")
                             }
                         }
                     }

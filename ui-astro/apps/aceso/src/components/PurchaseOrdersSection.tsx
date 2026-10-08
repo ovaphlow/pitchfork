@@ -62,7 +62,12 @@ interface ReceiptRow {
   unitCost: string;
 }
 
-export default function PurchaseOrdersSection() {
+export default function PurchaseOrdersSection({
+  subjectLabel,
+}: {
+  /** 044：主体 ID → 姓名（收货人 `received_by` 存的是认证主体 ID）。由 PharmacyPage 传入，避免重复拉一次人员目录。 */
+  subjectLabel: (value: string | null | undefined) => string;
+}) {
   // ── 列表 ────────────────────────────────────────────────────────────
   const [orders, setOrders] = useState<PharmacyPurchaseOrder[]>([]);
   const [total, setTotal] = useState(0);
@@ -785,7 +790,7 @@ export default function PurchaseOrdersSection() {
                 <Badge variant="success">已入库</Badge>
               </div>
               <div className="text-fg-muted">
-                {receiptDetail.supplier_name} · {receiptDetail.warehouse} · 收货人 {receiptDetail.received_by}
+                {receiptDetail.supplier_name} · {receiptDetail.warehouse} · 收货人 {subjectLabel(receiptDetail.received_by)}
               </div>
               <div className="text-xs text-fg-dimmed">
                 收货 {formatDateTime(receiptDetail.received_at)} · 库存操作 {receiptDetail.stock_operation_id}

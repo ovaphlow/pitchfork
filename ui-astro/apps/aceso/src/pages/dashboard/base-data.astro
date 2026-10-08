@@ -1,0 +1,8 @@
+---
+import DashboardLayout from "../../layouts/DashboardLayout.astro";
+import BaseDataPage from "../../components/BaseDataPage.tsx";
+---
+
+<DashboardLayout title="基础数据维护">
+  <BaseDataPage client:only="react" />
+</DashboardLayout>

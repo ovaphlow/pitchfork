@@ -20,6 +20,7 @@ import java.time.OffsetDateTime
  * - 依据启用饮食档案自动生成条目，快照长者姓名/餐食类型/忌口；
  * - 只纳入在院（ACTIVE）ELDERLY_CARE 入住，离院长者自动排除；
  * - 重复生成幂等：自动条目未登记就餐时刷新快照，手工调整条目不受影响；
+ *   **同时**刷新名单容器的生成留痕（`generated_by`/`generated_at` = 最近一次生成的人与时刻）；
  * - 手工调整：外出/请假（标记本餐不就餐）、临时加餐（新增）、删除手工条目；
  *   已登记就餐的条目不可删除（改用外出/请假标记），保证留痕。
  */
@@ -162,13 +163,19 @@ class RosterService(
         }
     }
 
-    /** 名单容器：按 (日期, 餐次) 幂等查找或创建 */
+    /**
+     * 名单容器：按 (日期, 餐次) 幂等查找或创建。
+     *
+     * 已存在时不是原样返回，而是先 [refreshGeneration] 把「生成人/生成时间」推进到本次：
+     * 重新生成（同一日期+餐次再调一次）既要刷新条目，也要刷新名单头上的生成留痕，
+     * 否则列表一直停在首次生成的人与时刻（UI 两列就是 `generated_by` / `generated_at`）。
+     */
     private fun getOrCreateRoster(date: LocalDate, mealTime: String, remark: String?, userId: String?): Future<JsonObject> {
         val query = ctx.selectFrom(t).where(cMenuDate.eq(date).and(cMealTime.eq(mealTime)))
         return execute(pool, query).compose { rows ->
             val existing = rows.iterator().asSequence().firstOrNull()
-            if (existing != null)
-                return@compose Future.succeededFuture(rosterJson(existing))
+            val existingId = existing?.getValue("id")?.toString()
+            if (existingId != null) return@compose refreshGeneration(existingId, userId)
             val id = Ulid.generate()
             val now = OffsetDateTime.now()
             val insert = ctx.insertInto(t)
@@ -187,16 +194,45 @@ class RosterService(
                 if (result.rowCount() > 0) {
                     get(id)
                 } else {
-                    // 并发创建冲突：读取既有名单
-                    execute(pool, query).map { rows2 ->
-                        rosterJson(rows2.iterator().next())
+                    // 并发创建冲突：既有名单同样按本次生成刷新生成留痕
+                    execute(pool, query).compose { rows2 ->
+                        val existingRow = rows2.iterator().asSequence().firstOrNull()
+                        val concurrentId = existingRow?.getValue("id")?.toString()
+                        if (concurrentId == null) get(id) else refreshGeneration(concurrentId, userId)
                     }
                 }
             }
         }
     }
 
-    /** 启用档案 ∩ 在院入住 的长者（配餐口径） */
+    /**
+     * 刷新名单容器的生成留痕（重新生成路径）。
+     *
+     * 语义：`generated_at` = **最近一次**生成/刷新时刻，`generated_by` = 最近一次触发的主体，
+     * 与 UI 「生成人/生成时间」两列逐字对应。
+     *
+     * 主体未知时（无认证挂载的嵌入式/直接服务调用）**不覆盖** `generated_by`，
+     * 沿用 042「操作人未知则不写」口径，保留上一个已知的生成人；
+     * 但 `generated_at`/`updated_at` 仍推进——本次生成确实发生了。
+     */
+    private fun refreshGeneration(rosterId: String, userId: String?): Future<JsonObject> {
+        val now = OffsetDateTime.now()
+        var update = ctx.update(t).set(cGeneratedAt, now).set(cUpdatedAt, now)
+        val generator = userId?.trim()?.takeIf(String::isNotBlank)
+        if (generator != null) update = update.set(cGeneratedBy, generator)
+        return execute(pool, update.where(cId.eq(rosterId))).compose { get(rosterId) }
+    }
+
+    /**
+     * 启用档案 ∩ 在院入住 的长者（配餐口径）。
+     *
+     * **在院口径是显式的**：`p JOIN e` 为 INNER JOIN + `e.status = 'ACTIVE'`；
+     * 另显式写出 `p.encounter_id IS NOT NULL`（被该 INNER JOIN 逻辑蕴含，**行为逐字不变**），
+     * 把「儿童档案（A4b 后 `encounter_id IS NULL`）**有意**不进养老配餐名单」固定为代码意图，
+     * 防止后人误改成 LEFT JOIN 时静默回归。
+     * **不得**再加 `e.encounter_type = 'ELDERLY_CARE'` / `pa.person_type <> '儿童'`：
+     * 现状没有 encounter_type 过滤，加它们会排除「绑定 ACTIVE 非 ELDERLY_CARE 入住」的档案 = 行为变更。
+     */
     private fun loadExpectedProfiles(): Future<List<JsonObject>> {
         val p = profiles.`as`("p")
         val e = encounters.`as`("e")
@@ -211,7 +247,11 @@ class RosterService(
             .from(p)
             .join(e).on(DSL.field(DSL.name("p", "encounter_id")).eq(DSL.field(DSL.name("e", "id"))))
             .join(pa).on(DSL.field(DSL.name("p", "patient_id")).eq(DSL.field(DSL.name("pa", "id"))))
-            .where(DSL.field(DSL.name("p", "status")).eq("启用").and(DSL.field(DSL.name("e", "status")).eq("ACTIVE")))
+            .where(
+                DSL.field(DSL.name("p", "status")).eq("启用")
+                    .and(DSL.field(DSL.name("p", "encounter_id")).isNotNull)
+                    .and(DSL.field(DSL.name("e", "status")).eq("ACTIVE")),
+            )
         return execute(pool, query).map { rows ->
             rows.map { row ->
                 JsonObject()
@@ -468,6 +508,9 @@ class RosterService(
             .join(pa).on(DSL.field(DSL.name("p", "patient_id")).eq(DSL.field(DSL.name("pa", "id"))))
             .where(DSL.field(DSL.name("p", "patient_id")).eq(patientId)
                 .and(DSL.field(DSL.name("p", "status")).eq("启用"))
+                // 与 loadExpectedProfiles 同一在院口径：显式 `encounter_id IS NOT NULL`
+                // （被 INNER JOIN 蕴含，行为不变；儿童档案有意不进养老配餐）
+                .and(DSL.field(DSL.name("p", "encounter_id")).isNotNull)
                 .and(DSL.field(DSL.name("e", "status")).eq("ACTIVE")))
 
         return execute(pool, query).compose { rows ->

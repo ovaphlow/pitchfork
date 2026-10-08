@@ -1,0 +1,46 @@
+---
+import DashboardLayout from "../../layouts/DashboardLayout.astro";
+import ChildReportPage from "../../components/ChildReportPage.tsx";
+---
+
+<DashboardLayout title="健康报告">
+  <ChildReportPage client:only="react" />
+
+  {/* 053 C2：打印时隐藏导航/顶栏并让报告主体铺满纸张，浏览器打印即为 PDF。 */}
+  <style is:global>
+    @media print {
+      html,
+      body {
+        background: #ffffff !important;
+        overflow: visible !important;
+      }
+      aside,
+      header {
+        display: none !important;
+      }
+      body > div > div[class*="ml-"] {
+        margin-left: 0 !important;
+      }
+      main {
+        overflow: visible !important;
+        padding: 0 !important;
+      }
+      #child-report-printable {
+        color: #111827 !important;
+      }
+      #child-report-printable * {
+        color: #111827 !important;
+        border-color: #9ca3af !important;
+      }
+      #child-report-printable table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      #child-report-printable th,
+      #child-report-printable td {
+        border: 1px solid #9ca3af !important;
+        padding: 4px 6px;
+      }
+    }
+  </style>
+</DashboardLayout>

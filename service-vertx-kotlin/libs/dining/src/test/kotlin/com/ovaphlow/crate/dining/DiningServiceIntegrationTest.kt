@@ -88,6 +88,14 @@ class DiningServiceIntegrationTest {
                     )
                     """.trimIndent()
                 )
+                // 054 A4b/A3：DietProfileService 按 `person_type` 分流、NutritionAnalysisService 读
+                // `birth_date`。同模块其它集成类可能已用更少列建过同名表，故用 ADD COLUMN IF NOT EXISTS
+                // 补齐（`person_type` 取值口径与 V525 一致：居民/长者/儿童，NOT NULL DEFAULT '居民'）。
+                stmt.execute("ALTER TABLE healthcare.patients ADD COLUMN IF NOT EXISTS birth_date DATE")
+                stmt.execute(
+                    "ALTER TABLE healthcare.patients ADD COLUMN IF NOT EXISTS " +
+                        "person_type VARCHAR NOT NULL DEFAULT '居民'"
+                )
                 stmt.execute(
                     """
                     CREATE TABLE IF NOT EXISTS healthcare.encounters (
@@ -150,9 +158,9 @@ class DiningServiceIntegrationTest {
         val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
         DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
             val stmt = conn.createStatement()
-            stmt.execute("INSERT INTO healthcare.patients (id, name, status) VALUES ('$PATIENT_1', '测试长者甲', 'ACTIVE')")
-            stmt.execute("INSERT INTO healthcare.patients (id, name, status) VALUES ('$PATIENT_2', '测试长者乙', 'ACTIVE')")
-            stmt.execute("INSERT INTO healthcare.patients (id, name, status) VALUES ('$PATIENT_3', '测试长者丙', 'ACTIVE')")
+            stmt.execute("INSERT INTO healthcare.patients (id, name, status, person_type) VALUES ('$PATIENT_1', '测试长者甲', 'ACTIVE', '长者')")
+            stmt.execute("INSERT INTO healthcare.patients (id, name, status, person_type) VALUES ('$PATIENT_2', '测试长者乙', 'ACTIVE', '长者')")
+            stmt.execute("INSERT INTO healthcare.patients (id, name, status, person_type) VALUES ('$PATIENT_3', '测试长者丙', 'ACTIVE', '长者')")
             stmt.execute("INSERT INTO healthcare.encounters (id, patient_id, encounter_type, status, admit_date) VALUES ('$ENC_1', '$PATIENT_1', 'ELDERLY_CARE', 'ACTIVE', now())")
             stmt.execute("INSERT INTO healthcare.encounters (id, patient_id, encounter_type, status, admit_date) VALUES ('$ENC_2', '$PATIENT_2', 'ELDERLY_CARE', 'DISCHARGED', now())")
             stmt.execute("INSERT INTO healthcare.encounters (id, patient_id, encounter_type, status, admit_date) VALUES ('$ENC_3', '$PATIENT_3', 'INPATIENT', 'ACTIVE', now())")

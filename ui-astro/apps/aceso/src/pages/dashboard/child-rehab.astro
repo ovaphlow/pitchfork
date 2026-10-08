@@ -1,0 +1,8 @@
+---
+import DashboardLayout from "../../layouts/DashboardLayout.astro";
+import ChildRehabPage from "../../components/ChildRehabPage.tsx";
+---
+
+<DashboardLayout title="康复师工作台">
+  <ChildRehabPage client:only="react" />
+</DashboardLayout>

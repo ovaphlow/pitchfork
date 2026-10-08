@@ -70,6 +70,14 @@ class DiningRoutesIntegrationTest {
                     )
                     """.trimIndent()
                 )
+                // 054 A4b/A3：DietProfileService 按 `person_type` 分流、NutritionAnalysisService 读
+                // `birth_date`。同模块其它集成类可能已用更少列建过同名表，故用 ADD COLUMN IF NOT EXISTS
+                // 补齐（`person_type` 取值口径与 V525 一致：居民/长者/儿童，NOT NULL DEFAULT '居民'）。
+                stmt.execute("ALTER TABLE healthcare.patients ADD COLUMN IF NOT EXISTS birth_date DATE")
+                stmt.execute(
+                    "ALTER TABLE healthcare.patients ADD COLUMN IF NOT EXISTS " +
+                        "person_type VARCHAR NOT NULL DEFAULT '居民'"
+                )
                 stmt.execute(
                     """
                     CREATE TABLE IF NOT EXISTS healthcare.encounters (
@@ -87,7 +95,7 @@ class DiningRoutesIntegrationTest {
                 stmt.execute("DELETE FROM dining.dining_diet_profiles WHERE patient_id LIKE '${FIXTURE_PREFIX}%'")
                 stmt.execute("DELETE FROM healthcare.encounters WHERE id LIKE '${FIXTURE_PREFIX}%'")
                 stmt.execute("DELETE FROM healthcare.patients WHERE id LIKE '${FIXTURE_PREFIX}%'")
-                stmt.execute("INSERT INTO healthcare.patients (id, name, status) VALUES ('$PATIENT_1', '路由测试长者', 'ACTIVE')")
+                stmt.execute("INSERT INTO healthcare.patients (id, name, status, person_type) VALUES ('$PATIENT_1', '路由测试长者', 'ACTIVE', '长者')")
                 stmt.execute("INSERT INTO healthcare.encounters (id, patient_id, encounter_type, status, admit_date) VALUES ('$ENC_1', '$PATIENT_1', 'ELDERLY_CARE', 'ACTIVE', now())")
                 stmt.execute("INSERT INTO healthcare.encounters (id, patient_id, encounter_type, status, admit_date) VALUES ('$ENC_2', '$PATIENT_1', 'ELDERLY_CARE', 'DISCHARGED', now())")
             }

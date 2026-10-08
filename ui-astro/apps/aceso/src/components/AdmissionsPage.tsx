@@ -220,7 +220,7 @@ function HandoverReadOnly({ handover, subjectLabel }: { handover: ElderlyDischar
                   <tr key={item.id}>
                     <td className="px-3 py-2">{item.assess_type || "-"}</td>
                     <td className="px-3 py-2">{formatDate(item.assess_date)}</td>
-                    <td className="px-3 py-2">{item.assessor || "-"}</td>
+                    <td className="px-3 py-2">{subjectLabel(item.assessor)}</td>
                     <td className="px-3 py-2">{item.total_score ?? "-"}</td>
                     <td className="px-3 py-2">{item.result_level || "-"}</td>
                     <td className="px-3 py-2">{item.remark || "-"}</td>
@@ -248,7 +248,7 @@ function HandoverReadOnly({ handover, subjectLabel }: { handover: ElderlyDischar
                   </span>
                 </p>
                 {plan.goals && <p className="mt-1 text-sm text-fg-muted">目标：{plan.goals}</p>}
-                {plan.created_by && <p className="mt-0.5 text-xs text-fg-dimmed">创建人：{plan.created_by}</p>}
+                {plan.created_by && <p className="mt-0.5 text-xs text-fg-dimmed">创建人：{subjectLabel(plan.created_by)}</p>}
                 {plan.items.length > 0 && (
                   <ul className="mt-2 space-y-1 border-t border-border pt-2 text-sm">
                     {plan.items.map((item) => (
@@ -305,7 +305,7 @@ function HandoverReadOnly({ handover, subjectLabel }: { handover: ElderlyDischar
                           <tr key={exec.id}>
                             <td className="px-3 py-2">{formatDateTime(exec.planned_time)}</td>
                             <td className="px-3 py-2">{formatDateTime(exec.actual_time)}</td>
-                            <td className="px-3 py-2">{exec.executor || "-"}</td>
+                            <td className="px-3 py-2">{exec.executor ? subjectLabel(exec.executor) : "-"}</td>
                             <td className="px-3 py-2">{EXECUTION_STATUS_LABEL[exec.status ?? ""] ?? exec.status ?? "-"}</td>
                             <td className="px-3 py-2">{exec.note || "-"}</td>
                           </tr>

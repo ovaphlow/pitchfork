@@ -407,6 +407,32 @@ class TaskExecutionService(
             }
     }
 
+    /**
+     * 045：单条执行记录所属任务的 `task_type`（`nursing_task_executions` → `nursing_tasks`）。
+     *
+     * 用途：打卡（`PATCH /executions/:id/status`）的权限门禁按任务类型选码，
+     * 而 task_type 在任务表上，所以门禁前必须先把"这条记录是什么任务"读出来。
+     * 只读一列，不做任何权限判定；记录不存在或 join 不到任务时回 `null`，
+     * 由调用方按最严的权限码处理（不借 403/404 差异泄露记录是否存在）。
+     */
+    fun taskTypeOf(id: String): Future<String?> {
+        val execTable = DSL.table(DSL.name("nursing", "nursing_task_executions")).`as`("e")
+        val taskTableAlias = DSL.table(DSL.name("nursing", "nursing_tasks")).`as`("t")
+        val query =
+            ctx
+                .select(DSL.field("t.task_type", String::class.java).`as`("task_type"))
+                .from(execTable)
+                .join(taskTableAlias)
+                .on(DSL.field("e.task_id", String::class.java).eq(DSL.field("t.id", String::class.java)))
+                .where(DSL.field("e.id", String::class.java).eq(id))
+        return pool
+            .preparedQuery(DatabaseConfig.sql(query))
+            .execute(DatabaseConfig.tuple(query))
+            .map { rows ->
+                if (rows.size() == 0) null else rows.iterator().next().getValue("task_type")?.toString()
+            }
+    }
+
     fun get(id: String): Future<JsonObject> {
         val query = ctx.selectFrom(t).where(cId.eq(id))
         return pool
@@ -1626,6 +1652,15 @@ class TaskExecutionService(
         executor?.let { baseConditions.add(eExecutor.eq(it)) }
         taskType?.let { baseConditions.add(DSL.field("t.task_type").eq(it)) }
 
+        // 045（2026-10-04 QA 口径修订）：应完成 = 已到计划时间 **或 已完成**，全局与按执行人分组共用同一份定义。
+        //
+        // 旧口径只认 `planned_time < now`，把"提前完成"排除在分子与分母之外：康复师按排期提前打完卡，
+        // 却看到 已完成 0 / 计划完成率 0.00% / 执行人分组「暂无应完成任务」（2026-10-04 康复活动页实测）。
+        // 提前跳过/取消不进分母（与"逾期只认 PENDING/IN_PROGRESS"同源），仍只进各自计数。
+        val dueCondition = ePlannedTime.lt(now).or(eStatus.eq("COMPLETED"))
+        // 在"应完成"新口径下，已完成必然算应完成 → 分子就是范围内全部完成数（等于 completed_total）。
+        val completedDueCondition = eStatus.eq("COMPLETED")
+
         // 全局汇总查询
         val globalQuery =
             ctx
@@ -1636,8 +1671,8 @@ class TaskExecutionService(
                     count().filterWhere(eStatus.eq("COMPLETED")).`as`("completed_total"),
                     count().filterWhere(eStatus.eq("SKIPPED")).`as`("skipped_total"),
                     count().filterWhere(eStatus.eq("CANCELLED")).`as`("cancelled_total"),
-                    count().filterWhere(ePlannedTime.lt(now)).`as`("due_total"),
-                    count().filterWhere(eStatus.eq("COMPLETED").and(ePlannedTime.lt(now))).`as`("completed_due_total"),
+                    count().filterWhere(dueCondition).`as`("due_total"),
+                    count().filterWhere(completedDueCondition).`as`("completed_due_total"),
                     count().filterWhere(eStatus.`in`("PENDING", "IN_PROGRESS").and(ePlannedTime.lt(now))).`as`("overdue_total"),
                 ).from(execTable)
                 .join(taskTableAlias)
@@ -1655,8 +1690,8 @@ class TaskExecutionService(
                     count().filterWhere(eStatus.eq("COMPLETED")).`as`("completed_total"),
                     count().filterWhere(eStatus.eq("SKIPPED")).`as`("skipped_total"),
                     count().filterWhere(eStatus.eq("CANCELLED")).`as`("cancelled_total"),
-                    count().filterWhere(ePlannedTime.lt(now)).`as`("due_total"),
-                    count().filterWhere(eStatus.eq("COMPLETED").and(ePlannedTime.lt(now))).`as`("completed_due_total"),
+                    count().filterWhere(dueCondition).`as`("due_total"),
+                    count().filterWhere(completedDueCondition).`as`("completed_due_total"),
                     count().filterWhere(eStatus.`in`("PENDING", "IN_PROGRESS").and(ePlannedTime.lt(now))).`as`("overdue_total"),
                 ).from(execTable)
                 .join(taskTableAlias)

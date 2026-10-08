@@ -579,7 +579,7 @@ export default function ActivitiesPage() {
         return (
           <div className="flex gap-1">
             <button type="button" className={btnClass + " bg-green-100 text-green-700 hover:bg-green-200"} onClick={() => openActionModal(record, "complete")}>
-              完成
+              完成打卡
             </button>
             <button type="button" className={btnClass + " bg-red-100 text-red-600 hover:bg-red-200"} onClick={() => openActionModal(record, "cancel")}>
               取消
@@ -661,8 +661,11 @@ export default function ActivitiesPage() {
         const cancelled = progress.records.filter((r) => r.status === "CANCELLED").length;
         if (total === 0) return <span className="text-xs text-fg-dimmed">未排期</span>;
         return (
-          <span className="text-xs text-fg-muted" title={`已完成 ${completed} · 已跳过 ${skipped} · 已取消 ${cancelled} · 共 ${total}`}>
-            已完成 {completed}/{total}
+          <span
+            className="text-xs text-fg-muted"
+            title={`该活动全部排期累计：已完成 ${completed} · 已跳过 ${skipped} · 已取消 ${cancelled} · 共 ${total}（看板另按「今日」统计）`}
+          >
+            累计 {completed}/{total}
             {skipped > 0 ? ` · 跳过 ${skipped}` : ""}
           </span>
         );
@@ -684,7 +687,7 @@ export default function ActivitiesPage() {
                 setTaskStatusError("");
               }}
             >
-              完成
+              完成活动
             </button>
             <button
               type="button"
@@ -721,7 +724,7 @@ export default function ActivitiesPage() {
       ];
     }
     // 完成率沿用与照护管理完全相同的口径与文案（executionRateCards）：
-    // 分母是「应完成（已到计划时间）」，所以必须与「应完成 / 已完成」同屏显示，
+    // 分母是「应完成（已到计划时间或已完成）」，所以必须与「应完成 / 已完成」同屏显示，
     // 否则「计划任务 1 / 已完成 1」会被读成 100%，与 completion_rate 打架。
     const [scheduled, due, completedDue, overdue, rate] = executionRateCards(meta);
     return [
@@ -748,7 +751,7 @@ export default function ActivitiesPage() {
     { key: "completed_total", header: "已完成", className: "min-w-[60px]", render: (row) => String(row.completed_total) },
     { key: "skipped_total", header: "已跳过", className: "min-w-[60px]", render: (row) => String(row.skipped_total) },
     { key: "cancelled_total", header: "已取消", className: "min-w-[60px]", render: (row) => String(row.cancelled_total) },
-    // 完成率的分母是「应完成（已到计划时间）」而不是「计划」：把应完成/逾期放在
+    // 完成率的分母是「应完成（已到计划时间或已完成）」而不是「计划」：把应完成/逾期放在
     // 完成率左侧，避免读者把完成率当成「已完成 / 计划」而读出与卡片不一致的口径。
     { key: "due_total", header: "应完成", className: "min-w-[60px]", render: (row) => String(row.due_total) },
     {
@@ -892,7 +895,7 @@ export default function ActivitiesPage() {
                   <div className="flex items-center gap-2 text-xs text-fg-muted">
                     <span>参与 {group.participants} 人</span>
                     <span>
-                      完成 {group.completed}/{group.records.length}
+                      今日完成 {group.completed}/{group.records.length}
                     </span>
                   </div>
                 </div>
@@ -1025,6 +1028,11 @@ export default function ActivitiesPage() {
         }
       >
         {statsError && <p className="mb-3 text-sm text-danger">{statsError}</p>}
+        {/* 窗口标注（045）：本卡片的数字只属于所选日期范围，与看板（今日）、任务列表（累计）不同窗口 */}
+        <p className="mb-4 text-xs text-fg-dimmed">
+          统计范围 {statsFrom || "—"} 至 {statsTo || "—"}｜应完成 = 已到计划时间或已完成（提前完成也计入）；
+          逾期 = 已过计划时间且未结束。本卡与下方表格同口径；看板按「今日」、上方列表「进度」按该活动全部排期累计，三者窗口不同。
+        </p>
         <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7">
           {statMetaItems.map((item) => (
             <div

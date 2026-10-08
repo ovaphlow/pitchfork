@@ -7,10 +7,13 @@ import io.vertx.ext.web.Router
 import io.vertx.ext.web.RoutingContext
 import io.vertx.ext.web.handler.BodyHandler
 import io.vertx.sqlclient.Pool
+import org.slf4j.LoggerFactory
 import java.math.BigDecimal
 import java.time.LocalDate
 
 object TaskExecutionRoutes {
+    private val log = LoggerFactory.getLogger(TaskExecutionRoutes::class.java)
+
     private val TERMINAL_STATUSES = setOf("COMPLETED", "SKIPPED", "CANCELLED")
 
     /** 逾期收口（030 §4.3）请求体白名单：未知键一律 400，不做静默忽略 */
@@ -90,13 +93,20 @@ object TaskExecutionRoutes {
      *   写入 ctx userId 作为操作人）：同时保护记录给药与打卡状态更新两条写路由；
      *   未注入时业务处理器保持原有行为（不强制登录，也不记录执行人）。
      * @param permissionHandler 权限中间件（由 App 编排层注入）：与 [authHandler] 同路径先后执行，
-     *   未注入时行为不变。判定失败时由该中间件自行结束响应（403/503）。
+     *   未注入时行为不变。判定失败时由该中间件自行结束响应（403/503）。用于**固定码**的写路由
+     *   （记录给药：只认护理执行码）。
+     * @param permissionHandlerForTaskType 045：按执行记录的任务类型选权限中间件的工厂
+     *   （由 App 编排层注入，因为"任务类型 → 权限码"是产品侧声明）。非 null 时，
+     *   打卡路由先读任务的 `task_type`，再用它换对应的权限中间件执行；
+     *   读不到（记录不存在 / 查询失败）时传 `null`，由 App 侧按最严处理。
+     *   未注入时打卡路由回退到 [permissionHandler] 的固定行为（与接线前完全一致）。
      */
     fun create(
         vertx: Vertx,
         pool: Pool,
         authHandler: Handler<RoutingContext>? = null,
         permissionHandler: Handler<RoutingContext>? = null,
+        permissionHandlerForTaskType: ((String?) -> Handler<RoutingContext>)? = null,
     ): Router {
         val router = Router.router(vertx)
         val service = TaskExecutionService(pool)
@@ -469,7 +479,28 @@ object TaskExecutionRoutes {
         if (authHandler != null) {
             router.patch("/:id/status").handler(authHandler)
         }
-        if (permissionHandler != null) {
+        if (permissionHandlerForTaskType != null) {
+            // 045：按执行记录的任务类型选码（康复活动 = 康复执行码/护理执行码任一，其余 = 护理执行码）。
+            // 每个请求各自构造中间件：构造本身只是拼一个字符串，真正昂贵的权限查询由
+            // SubjectPermissionClient 按主体 TTL 缓存。
+            // 这里刻意不做"按 task_type 缓存中间件"：Routes 对象跨 event loop 共享，
+            // 非同步的 Map 会被并发写（不同连接可能落在不同 event loop）。
+            router.patch("/:id/status").handler { ctx ->
+                val id = ctx.pathParam("id")
+                if (id.isNullOrBlank()) {
+                    NursingRoutes.respond(ctx, 400, "id required")
+                    return@handler
+                }
+                service.taskTypeOf(id).onComplete { result ->
+                    val taskType = result.result()
+                    if (result.failed()) {
+                        log.warn("task type lookup failed for execution {}: {}", id, result.cause()?.message)
+                    }
+                    // 读不到任务类型时传 null，由 App 侧按最严的权限码处理（不静默放行）。
+                    permissionHandlerForTaskType(taskType).handle(ctx)
+                }
+            }
+        } else if (permissionHandler != null) {
             router.patch("/:id/status").handler(permissionHandler)
         }
         router.patch("/:id/status").handler { ctx ->

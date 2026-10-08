@@ -2,6 +2,7 @@ package com.ovaphlow.crate.pharmacy
 
 import com.ovaphlow.crate.common.OperatorResolution
 import com.ovaphlow.crate.common.resolveOperator
+import io.vertx.core.Future
 import io.vertx.core.Vertx
 import io.vertx.core.json.JsonObject
 import io.vertx.ext.web.Router
@@ -33,6 +34,11 @@ object PharmacyRoutes {
          * 为 null 时保持旧行为（只校验非空）。
          */
         departmentDirectoryPort: DepartmentDirectoryPort? = null,
+        /**
+         * 054 D3 发药前过敏交叉检查端口：由 Aceso `Main.kt` 注入 healthcare 适配器。
+         * 为 null 时发药确认不做检查（行为与接线前一致）。
+         */
+        drugAllergyCheckPort: DrugAllergyCheckPort? = null,
     ): Router {
         val router = Router.router(vertx)
         val mPool = pool
@@ -45,7 +51,14 @@ object PharmacyRoutes {
 
         // 同时匹配 /dispenses 和 /dispenses/...：列表契约是无尾斜杠的 /dispenses
         router.route("/dispenses*").subRouter(
-            DispenseRoutes.create(vertx, mPool, medicalOrderReader, inventoryOutboundPort, drugCatalogPort),
+            DispenseRoutes.create(
+                vertx,
+                mPool,
+                medicalOrderReader,
+                inventoryOutboundPort,
+                drugCatalogPort,
+                drugAllergyCheckPort,
+            ),
         )
         router.route("/returns*").subRouter(ReturnRoutes.create(vertx, mPool, inventoryInboundPort))
         router.route("/requisitions*").subRouter(
@@ -66,7 +79,73 @@ object PharmacyRoutes {
         router.route("/purchase-orders*").subRouter(orderRouter)
         router.route("/purchase-receipts*").subRouter(receiptRouter)
 
+        // ====================================================================
+        //  054 D2 儿科用药规则库与用量计算
+        //  **直接挂聚合路由**（非子路由）：`DeclaredPermissionsTest` 的 BL2 门禁按聚合
+        //  `writeRoutes(PharmacyRoutes.create(...), "/pharmacy/v1")` 全等比对，故新增写路由
+        //  必须直接注册在本 router 上，否则门禁失效。
+        //  写路由（POST /pediatric-dose-rules、PUT /pediatric-dose-rules/:id）由 `Main.kt`
+        //  的集中式门禁按 `DECLARED_PERMISSIONS` 声明接线（`pharmacy:dispense`）；
+        //  `GET /pediatric-dose-calculations` 为读路由，读开放（054 §5.4）。
+        // ====================================================================
+        val pediatricDoseRuleService = PediatricDoseRuleService(mPool)
+
+        router.post("/pediatric-dose-rules").handler { ctx ->
+            api(ctx, { pediatricDoseRuleService.create(body(ctx), ctx.get<String>("userId")) }) { result ->
+                ctx.response().setStatusCode(201)
+                ctx.json(result)
+            }
+        }
+
+        router.get("/pediatric-dose-rules").handler { ctx ->
+            val params = ctx.request()
+            api(ctx, {
+                pediatricDoseRuleService.list(
+                    materialId = params.getParam("material_id"),
+                    status = params.getParam("status"),
+                    limit = params.getParam("limit")?.toIntOrNull()?.coerceIn(1, 100) ?: 50,
+                    offset = params.getParam("offset")?.toIntOrNull()?.coerceAtLeast(0) ?: 0,
+                )
+            }) { ctx.json(it) }
+        }
+
+        router.put("/pediatric-dose-rules/:id").handler { ctx ->
+            val id = ctx.pathParam("id")?.takeIf(String::isNotBlank)
+                ?: return@handler respond(ctx, 400, "id is required")
+            api(ctx, { pediatricDoseRuleService.update(id, body(ctx), ctx.get<String>("userId")) }) { ctx.json(it) }
+        }
+
+        router.get("/pediatric-dose-calculations").handler { ctx ->
+            val params = ctx.request()
+            val materialId = params.getParam("material_id")?.trim()
+            if (materialId.isNullOrEmpty()) return@handler respond(ctx, 400, "material_id is required")
+            api(ctx, {
+                pediatricDoseRuleService.calculate(
+                    materialId = materialId,
+                    weightKg = PediatricDoseCalculator.parseWeightKg(params.getParam("weight_kg")),
+                    ageMonths = PediatricDoseCalculator.parseAgeMonths(params.getParam("age_months")),
+                )
+            }) { ctx.json(it) }
+        }
+
         return router
+    }
+
+    /**
+     * 统一执行服务调用：同步抛出的参数校验异常（`IllegalArgumentException`，例如
+     * [PediatricDoseCalculator.parseWeightKg] 拒绝 NaN/无穷/非正数）也映射为 400，
+     * 避免 Vert.x 将其当作 500（与 dining 路由 `api()` 同口径）。
+     */
+    private fun <T> api(ctx: RoutingContext, action: () -> Future<T>, success: (T) -> Unit) {
+        try {
+            action()
+                .onSuccess(success)
+                .onFailure { DispenseRoutes.respondFailure(ctx, it) }
+        } catch (error: IllegalArgumentException) {
+            respond(ctx, 400, error.message)
+        } catch (error: Throwable) {
+            respondError(ctx, error)
+        }
     }
 
     internal fun body(ctx: RoutingContext): JsonObject =

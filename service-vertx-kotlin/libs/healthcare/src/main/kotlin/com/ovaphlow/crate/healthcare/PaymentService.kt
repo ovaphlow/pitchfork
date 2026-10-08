@@ -141,12 +141,12 @@ class PaymentService(
                 requireEncounter(connection, bill.getString("encounter_id")).compose { encounter ->
                     if (encounter.getOffsetDateTime("settled_at") != null) {
                         return@compose Future.failedFuture(
-                            ConflictException("encounter billing is settled, cannot pay"),
+                            ConflictException("本次入住的账单已结算，无法继续缴费"),
                         )
                     }
                     if (bill.getString("status") != BillingEngine.STATUS_PENDING) {
                         return@compose Future.failedFuture(
-                            IllegalArgumentException("bill status is not ${BillingEngine.STATUS_PENDING}, cannot pay"),
+                            IllegalArgumentException("账单当前状态不允许缴费（仅待缴费状态可缴）"),
                         )
                     }
                     // 034 §2.6：红字单 / 已红冲原单 / 非正金额账单不可缴费（400，不写流水）

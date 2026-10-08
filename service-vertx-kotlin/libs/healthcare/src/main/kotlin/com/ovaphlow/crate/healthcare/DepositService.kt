@@ -15,6 +15,7 @@ import org.jooq.JSONB
 import org.jooq.Query
 import org.jooq.impl.DSL
 import java.math.BigDecimal
+import java.math.RoundingMode
 import java.time.OffsetDateTime
 
 /**
@@ -146,7 +147,7 @@ class DepositService(
                     if (fields.amount > balance) {
                         Future.failedFuture(
                             IllegalArgumentException(
-                                "refund exceeds deposit balance: available $balance, requested ${fields.amount}",
+                                "退押金额超出押金余额（可用 ${balance.money()}，本次申请 ${fields.amount.money()}）",
                             ),
                         )
                     } else {
@@ -157,6 +158,9 @@ class DepositService(
             }
         }
     }
+
+    /** 金额文案统一两位小数（与 `amount must have at most 2 decimal places` 口径一致）。 */
+    private fun BigDecimal.money(): String = setScale(2, RoundingMode.HALF_UP).toPlainString()
 
     // ========================================================================
     //  台账

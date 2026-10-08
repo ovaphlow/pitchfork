@@ -28,6 +28,9 @@ import { formatDateTime, toOffsetDateTime, todayLocal } from "../lib/datetime";
 import { DOMAIN_ADMISSION_PHRASE, DOMAIN_ENTITY, PAGE_TITLE_DOMAIN_LABELS, displayLabel } from "../lib/domain";
 import { formatOrderDetailValue, formatOrderItemLabel } from "../lib/orderDetailDisplay";
 import { useDomain } from "../lib/useDomain";
+import { useSubjectDirectory } from "../lib/identity";
+import { useCurrentUser } from "../lib/currentUser";
+import OperatorPicker from "./OperatorPicker";
 
 interface ActiveAdmission extends Encounter {
   patientName: string;
@@ -37,7 +40,6 @@ interface OrderForm {
   orderType: string;
   orderClass: string;
   orderContent: string;
-  doctor: string;
   startTime: string;
   endTime: string;
   /** 药品目录物资 ID（仅 MEDICATION 必填，025 起取代自由文本药名） */
@@ -62,7 +64,6 @@ interface OrderForm {
 
 interface NoteForm {
   content: string;
-  physician: string;
   recordTime: string;
 }
 
@@ -71,7 +72,6 @@ interface DiagnosisForm {
   diagnosisText: string;
   icdCode: string;
   diagnosisDate: string;
-  physician: string;
   remark: string;
 }
 
@@ -86,7 +86,6 @@ const orderFormDefaults: OrderForm = {
   orderType: "MEDICATION",
   orderClass: "LONG_TERM",
   orderContent: "",
-  doctor: "",
   startTime: "",
   endTime: "",
   materialId: "",
@@ -112,8 +111,6 @@ function hasOrderFieldError(form: OrderForm, field: string): boolean {
   switch (field) {
     case "orderContent":
       return !form.orderContent.trim();
-    case "doctor":
-      return !form.doctor.trim();
     case "startTime":
       return !form.startTime.trim();
     case "materialId":
@@ -141,14 +138,13 @@ function hasOrderFieldError(form: OrderForm, field: string): boolean {
   }
 }
 
-const noteFormDefaults: NoteForm = { content: "", physician: "", recordTime: "" };
+const noteFormDefaults: NoteForm = { content: "", recordTime: "" };
 
 const diagnosisFormDefaults: DiagnosisForm = {
   diagnosisType: "PRIMARY",
   diagnosisText: "",
   icdCode: "",
   diagnosisDate: todayLocal(),
-  physician: "",
   remark: "",
 };
 
@@ -287,6 +283,11 @@ function orderClassVariant(orderClass: string | null): "default" | "success" | "
 }
 
 export default function OrdersPage() {
+  // 044：主体 ID → 姓名（MAR 「给药人」等列存的是认证主体 ID）
+  const { subjectLabel, error: subjectDirectoryError } = useSubjectDirectory();
+  // 046：临床署名字段只读展示当前登录用户（服务端按会话派生，不接受代签）。
+  const currentUser = useCurrentUser();
+
   // 本页在医疗/养老都可见：主体称呼与入院口径随域切换（居民/入院 ↔ 长者/养老入住）
   const domain = useDomain();
   const { person } = DOMAIN_ENTITY[domain];
@@ -502,9 +503,8 @@ export default function OrdersPage() {
 
   async function handleSaveNote() {
     const content = noteForm.content.trim();
-    const physician = noteForm.physician.trim();
-    if (!content || !physician) {
-      setNoteFormError("记录内容和医生不能为空");
+    if (!content) {
+      setNoteFormError("记录内容不能为空");
       return;
     }
     setNoteSaving(true);
@@ -514,7 +514,7 @@ export default function OrdersPage() {
       await createProgressNote(selectedEncounterId, {
         note_type: "DAILY",
         content,
-        physician,
+        // 046：不提交 physician —— 服务端按会话派生署名（只读、不可代签）
         ...(recordTime ? { record_time: toOffsetDateTime(recordTime) } : {}),
       });
       setNoteForm(noteFormDefaults);
@@ -536,10 +536,9 @@ export default function OrdersPage() {
 
   async function handleSaveDiagnosis() {
     const diagnosisText = diagnosisForm.diagnosisText.trim();
-    const physician = diagnosisForm.physician.trim();
     const diagnosisDate = diagnosisForm.diagnosisDate.trim();
-    if (!diagnosisText || !physician || !diagnosisDate) {
-      setDiagnosisFormError("诊断内容、医生和诊断日期不能为空");
+    if (!diagnosisText || !diagnosisDate) {
+      setDiagnosisFormError("诊断内容和诊断日期不能为空");
       return;
     }
     setDiagnosisSaving(true);
@@ -549,12 +548,12 @@ export default function OrdersPage() {
         diagnosis_type: diagnosisForm.diagnosisType === "SECONDARY" ? "SECONDARY" : "PRIMARY",
         diagnosis_text: diagnosisText,
         diagnosis_date: diagnosisDate,
-        physician,
+        // 046：不提交 physician —— 服务端按会话派生署名（只读、不可代签）
         ...(diagnosisForm.icdCode.trim() ? { icd_code: diagnosisForm.icdCode.trim() } : {}),
         // is_major 由服务端按 diagnosis_type 派生，不再由表单提交
         ...(diagnosisForm.remark.trim() ? { remark: diagnosisForm.remark.trim() } : {}),
       });
-      setDiagnosisForm((current) => ({ ...diagnosisFormDefaults, diagnosisDate: current.diagnosisDate, physician: current.physician }));
+      setDiagnosisForm((current) => ({ ...diagnosisFormDefaults, diagnosisDate: current.diagnosisDate }));
       setDiagnosisEditorOpen(false);
       await loadDiagnoses();
     } catch (error) {
@@ -594,9 +593,8 @@ export default function OrdersPage() {
 
   function buildOrderInput(): MedicalOrderInput | null {
     const orderContent = form.orderContent.trim();
-    const doctor = form.doctor.trim();
     const startTime = form.startTime.trim();
-    if (!orderContent || !doctor || !startTime) return null;
+    if (!orderContent || !startTime) return null;
 
     const details: Record<string, unknown> = {};
     if (form.orderType === "MEDICATION") {
@@ -644,7 +642,7 @@ export default function OrdersPage() {
       order_type: form.orderType,
       order_class: form.orderClass,
       order_content: orderContent,
-      doctor,
+      // 046：不提交 doctor —— 服务端按会话派生署名（只读、不可代签）
       start_time: toOffsetDateTime(startTime),
       ...(endTime ? { end_time: toOffsetDateTime(endTime) } : {}),
       ...(Object.keys(details).length > 0 ? { order_details: details } : {}),
@@ -654,8 +652,8 @@ export default function OrdersPage() {
   async function handleSave() {
     const input = buildOrderInput();
     if (!input) {
-      if (!form.orderContent.trim() || !form.doctor.trim() || !form.startTime.trim()) {
-        setFormError("医嘱说明、医生和开始时间不能为空");
+      if (!form.orderContent.trim() || !form.startTime.trim()) {
+        setFormError("医嘱说明和开始时间不能为空");
       } else if (form.orderType === "MEDICATION" && !form.materialId.trim()) {
         setFormError("用药医嘱必须从药品目录选择药品");
       } else if (form.orderType === "THERAPY" && !form.treatmentItem.trim()) {
@@ -832,7 +830,7 @@ export default function OrdersPage() {
       key: "doctor",
       header: "医生",
       className: "min-w-[110px]",
-      render: (row) => row.doctor || "-",
+      render: (row) => subjectLabel(row.doctor),
     },
     {
       key: "start_time",
@@ -902,7 +900,7 @@ export default function OrdersPage() {
       key: "physician",
       header: "医生",
       className: "min-w-[110px]",
-      render: (row) => row.physician || "-",
+      render: (row) => subjectLabel(row.physician),
     },
     {
       key: "is_major",
@@ -968,6 +966,9 @@ export default function OrdersPage() {
       </div>
 
       {pageError && <div className="rounded-lg border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">{pageError}</div>}
+
+      {/* 044：人员目录失败不再静默——否则「给药人」列只剩 ULID 而看不出原因 */}
+      {subjectDirectoryError ? <p className="text-xs text-warning">{subjectDirectoryError}</p> : null}
 
       {admissionsLoading ? (
         <Card>
@@ -1036,7 +1037,7 @@ export default function OrdersPage() {
                   <li key={note.id} className="rounded-md border border-border bg-surface-alt p-3">
                     <div className="mb-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-fg-muted">
                       <span className="font-medium text-fg">{formatDateTime(note.record_time)}</span>
-                      <span>{note.physician}</span>
+                      <span>{subjectLabel(note.physician)}</span>
                     </div>
                     <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-fg">{note.content}</p>
                   </li>
@@ -1192,13 +1193,15 @@ export default function OrdersPage() {
                 required
               />
             </div>
-            <Input
-              label="医生（必填）"
-              value={noteForm.physician}
-              onChange={(event) => setNoteForm((current) => ({ ...current, physician: event.target.value }))}
-              placeholder="请输入记录医生"
-              maxLength={100}
-              required
+            {/* 046：署名只读，服务端按会话派生；不开放代签（提交体不含该字段） */}
+            <OperatorPicker
+              id="note-physician"
+              label="记录人（只读，服务端按当前登录用户署名）"
+              allowDelegation={false}
+              currentUser={currentUser}
+              subjects={[]}
+              value=""
+              onChange={() => {}}
             />
             <Input
               label="记录时间（可选，缺省为当前时间）"
@@ -1270,13 +1273,15 @@ export default function OrdersPage() {
               placeholder="如 I10"
               maxLength={32}
             />
-            <Input
-              label="医生（必填）"
-              value={diagnosisForm.physician}
-              onChange={(event) => setDiagnosisForm((current) => ({ ...current, physician: event.target.value }))}
-              placeholder="请输入诊断医生"
-              maxLength={100}
-              required
+            {/* 046：署名只读，服务端按会话派生；不开放代签（提交体不含该字段） */}
+            <OperatorPicker
+              id="diagnosis-physician"
+              label="记录人（只读，服务端按当前登录用户署名）"
+              allowDelegation={false}
+              currentUser={currentUser}
+              subjects={[]}
+              value=""
+              onChange={() => {}}
             />
             <div className="flex flex-col gap-1.5 sm:col-span-2">
               <label className="text-sm font-medium text-fg-muted" htmlFor="diagnosis-remark">备注（可选）</label>
@@ -1380,16 +1385,15 @@ export default function OrdersPage() {
             </div>
 
             <div className="sm:col-span-2">
-              <Input
+              {/* 046：署名只读，服务端按会话派生；不开放代签（提交体不含该字段） */}
+              <OperatorPicker
                 id="order-doctor"
-                label="医生（必填）"
-                value={form.doctor}
-                onChange={(event) => setForm((current) => ({ ...current, doctor: event.target.value }))}
-                placeholder="请输入开嘱医生"
-                maxLength={100}
-                required
-                aria-invalid={formError && hasOrderFieldError(form, "doctor") ? true : undefined}
-                aria-describedby={formError && hasOrderFieldError(form, "doctor") ? "order-form-error" : undefined}
+                label="开嘱人（只读，服务端按当前登录用户署名）"
+                allowDelegation={false}
+                currentUser={currentUser}
+                subjects={[]}
+                value=""
+                onChange={() => {}}
               />
             </div>
 
@@ -1706,7 +1710,7 @@ export default function OrdersPage() {
                           <Badge variant={isConsumingResult(record.result) ? "success" as const : "default" as const}>{record.result}</Badge>
                           <span className="font-medium text-fg">{record.administered_quantity != null ? `${record.administered_quantity} ${record.unit ?? ""}` : "—"}</span>
                           <span className="text-fg-muted">{formatDateTime(record.administered_at)}</span>
-                          <span className="text-fg-muted">{record.administered_by ?? "-"}</span>
+                          <span className="text-fg-muted">{record.administered_by ? subjectLabel(record.administered_by) : "-"}</span>
                         </div>
                         <div className="mt-1 text-xs text-fg-muted">
                           {record.task_description ?? "-"}

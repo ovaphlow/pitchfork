@@ -12,7 +12,21 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { problemMessage } from "../../../packages/shared/src/problem-message.ts";
+import { looksLikeJsonBody, problemMessage } from "../../../packages/shared/src/problem-message.ts";
+
+test("Content-Type 缺失但正文是 JSON 时仍按 JSON 解析（045 闸门回归）", () => {
+	// 045：Aceso 权限闸门曾回 JSON 体但漏 Content-Type，导致 required_permission 丢失，
+	// 403 被翻成"该操作需要管理员权限"。后端已补头，前端再容错一次。
+	const gateForbidden = '{"error":"forbidden","required_permission":"rehab:execute"}';
+	assert.equal(looksLikeJsonBody("", gateForbidden), true);
+	assert.equal(looksLikeJsonBody("text/plain; charset=utf-8", gateForbidden), true);
+	assert.equal(looksLikeJsonBody("application/json", "{}"), true);
+	assert.equal(looksLikeJsonBody("application/problem+json", "{}"), true);
+	// 非 JSON 正文不得被当 JSON 用（HTML 错误页、空体、纯文本）
+	assert.equal(looksLikeJsonBody("text/html", "<html><body>502 Bad Gateway</body></html>"), false);
+	assert.equal(looksLikeJsonBody("", ""), false);
+	assert.equal(looksLikeJsonBody("", "forbidden"), false);
+});
 
 test("403 带 required_permission → 中文提示含权限码", () => {
 	const message = problemMessage(

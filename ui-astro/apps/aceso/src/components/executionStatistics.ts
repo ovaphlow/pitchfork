@@ -7,8 +7,12 @@
 //
 // 后端语义（本模块不改动、只做中文呈现）：completion_rate =
 // completed_due_total / due_total，其中 due_total = 计划时间已到
-// （planned_time < now）的条数，due_total = 0 时返回 null
-// （见 libs/nursing TaskExecutionService.completionRate）。
+// （planned_time < now）**或已完成** 的条数，due_total = 0 时返回 null
+// （见 libs/nursing TaskExecutionService.executionStatistics / completionRate）。
+//
+// 045（2026-10-04 QA）分母口径修订：旧口径只认 planned_time < now，把“提前完成”排除在
+// 分子与分母之外，于是当天提前打完卡的康复师看到 已完成 0 / 0.00% / 执行人分组“暂无应完成任务”。
+// 现在已完成一律计入应完成（提前跳过/取消仍只进各自计数）。
 //
 // 因此「完成率格式化」与「完成率指标卡」收敛到本模块，两个页面共用，
 // 同一份 meta 必然渲染成同一口径、同一文案，不会再各自漂移。
@@ -29,7 +33,7 @@ export interface ExecutionStatCard {
 }
 
 /**
- * 完成率展示：两位小数；null 表示范围内「还没有到执行时间的任务」，
+ * 完成率展示：两位小数；null 表示范围内「既没到执行时间、也没有已完成记录」，
  * 给中文说明而不是破折号，避免用户把它误读成「算不出来 / 0%」。
  */
 export function formatCompletionRate(value: number | null | undefined): string {
@@ -39,7 +43,7 @@ export function formatCompletionRate(value: number | null | undefined): string {
 
 /**
  * 完成率指标卡：「应完成 / 已完成」必须与「计划完成率」同时出现——
- * 完成率的分母是「应完成（已到计划时间）」而不是「计划任务」，
+ * 完成率的分母是「应完成（已到计划时间或已完成）」而不是「计划任务」，
  * 否则该卡会被读成「已完成 / 计划次数」，进而与本卡其它数字打架。
  */
 export function executionRateCards(meta: ExecutionStatisticsRateMeta): ExecutionStatCard[] {

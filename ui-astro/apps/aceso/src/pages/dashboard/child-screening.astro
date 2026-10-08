@@ -1,0 +1,8 @@
+---
+import DashboardLayout from "../../layouts/DashboardLayout.astro";
+import ChildScreeningPage from "../../components/ChildScreeningPage.tsx";
+---
+
+<DashboardLayout title="发育筛查">
+  <ChildScreeningPage client:only="react" />
+</DashboardLayout>

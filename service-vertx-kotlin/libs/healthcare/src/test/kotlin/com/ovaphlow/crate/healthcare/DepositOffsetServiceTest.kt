@@ -544,7 +544,7 @@ class DepositOffsetServiceTest {
             ),
         )
         assertInstanceOf(ConflictException::class.java, cause)
-        assertEquals("encounter billing is already settled", cause.message)
+        assertEquals("本次入住的账单已结算，不能重复结算", cause.message)
         assertTrue(stub.tuples.none { it.first.contains("insert into healthcare.payments") })
         assertTrue(stub.tuples.none { it.first.contains("insert into healthcare.deposit_records") })
     }

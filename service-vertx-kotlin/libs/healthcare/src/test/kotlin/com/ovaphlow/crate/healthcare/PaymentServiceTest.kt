@@ -830,7 +830,7 @@ class PaymentServiceTest {
         val cause = causeOf(PaymentService(frozen.pool)
             .createPayment("bill-1", paymentBody(mapOf("amount" to 100)), "cashier-1"))
         assertInstanceOf(ConflictException::class.java, cause)
-        assertTrue(cause.message?.contains("settled") == true, "got: ${cause.message}")
+        assertTrue(cause.message?.contains("已结算") == true, "got: ${cause.message}")
         assertTrue(
             frozen.tuples.none { it.first.contains("insert into healthcare.payments") },
             "冻结后缴费不得写入",

@@ -8,6 +8,7 @@ import io.vertx.core.buffer.Buffer
 import io.vertx.core.http.HttpClient
 import io.vertx.core.http.HttpClientOptions
 import io.vertx.core.http.HttpMethod
+import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
 import io.vertx.ext.web.Router
 import io.vertx.junit5.VertxExtension
@@ -151,6 +152,175 @@ class ApiBodyHandlingTest {
     }
 
     // ------------------------------------------------------------------
+    // 2b. 046：集中式权限门禁接上后，带体的**已接线**写路由仍必须返回响应
+    //     （认证总闸 + 权限门禁两段异步 + 顶层 BodyHandler 的组合不能再挂起）。
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `a wired write route with a body answers behind the permission gate`() {
+        val stub = DatabaseStub()
+        val port = startAcesoShape(stub.pool)
+
+        // 这条路由已接 `billing:write` 集中式门禁；假 Nexus 已授予该码，必须穿过门禁返回响应。
+        // 挂起（10s 无响应）会由 send() 抛 AssertionError；403 说明门禁误拒（假 Nexus 已授权）。
+        val response = send(
+            port,
+            HttpMethod.POST,
+            "/crate-api/healthcare/v1/encounters/01J0000000000000000000000/bills",
+            authenticatedCookie,
+            """{"month":"2026-09"}""",
+        )
+        assertTrue(
+            response.first in 200..599,
+            "已接线路由不得挂起，实际 status=${response.first} body=${response.second}",
+        )
+        assertTrue(
+            response.first != 403,
+            "假 Nexus 已授予 billing:write，集中式门禁不得误拒，实际 body=${response.second}",
+        )
+    }
+
+    @Test
+    fun `a nursing document write route with a body answers behind the permission gate`() {
+        val stub = DatabaseStub()
+        val port = startAcesoShape(stub.pool)
+
+        // 047：护理文书集合路径带尾斜杠（`/assessments/`），已接 nursing:document 集中式门禁。
+        // 假 Nexus 已授予该码 → 必须穿过门禁返回响应；挂起由 send() 抛 AssertionError，403 说明误拒。
+        val response = send(
+            port,
+            HttpMethod.POST,
+            "/crate-api/nursing/v1/assessments/",
+            authenticatedCookie,
+            """{"period_id":"01J0000000000000000000000","assess_type":"ADL"}""",
+        )
+        assertTrue(
+            response.first in 200..599,
+            "护理文书已接线路由不得挂起，实际 status=${response.first} body=${response.second}",
+        )
+        assertTrue(
+            response.first != 403,
+            "假 Nexus 已授予 nursing:document，集中式门禁不得误拒，实际 body=${response.second}",
+        )
+    }
+
+    @Test
+    fun `health management write routes with a body answer behind the permission gate`() {
+        val stub = DatabaseStub()
+        val port = startAcesoShape(stub.pool)
+
+        // 048：录入类（health:manage）与临床判断类（clinical:write）各自独立接线，假 Nexus 两码都授予。
+        val management = send(
+            port,
+            HttpMethod.POST,
+            "/crate-api/healthcare/v1/health-checkups",
+            authenticatedCookie,
+            """{"name":"2026 年度体检"}""",
+        )
+        assertTrue(
+            management.first in 200..599,
+            "体检建单已接线路由不得挂起，实际 status=${management.first} body=${management.second}",
+        )
+        assertTrue(
+            management.first != 403,
+            "假 Nexus 已授予 health:manage，集中式门禁不得误拒，实际 body=${management.second}",
+        )
+
+        // 体征复核是临床判断，走 clinical:write；同样必须穿过门禁返回响应。
+        val review = send(
+            port,
+            HttpMethod.POST,
+            "/crate-api/healthcare/v1/vital-signs/01J0000000000000000000000/review",
+            authenticatedCookie,
+            """{}""",
+        )
+        assertTrue(
+            review.first in 200..599,
+            "体征复核已接线路由不得挂起，实际 status=${review.first} body=${review.second}",
+        )
+        assertTrue(
+            review.first != 403,
+            "假 Nexus 已授予 clinical:write，集中式门禁不得误拒，实际 body=${review.second}",
+        )
+    }
+
+    @Test
+    fun `master data and admission write routes with a body answer behind the permission gate`() {
+        val stub = DatabaseStub()
+        val port = startAcesoShape(stub.pool)
+
+        // 049：登记（admission:write）与主数据（bed:manage / fee_item:manage）三条独立接线，
+        // 假 Nexus 三码都授予；挂起由 send() 抛 AssertionError，403 说明门禁误拒。
+        val admission = send(
+            port,
+            HttpMethod.POST,
+            "/crate-api/healthcare/v1/encounters",
+            authenticatedCookie,
+            """{"patient_id":"01J0000000000000000000000","encounter_type":"OUTPATIENT"}""",
+        )
+        assertTrue(
+            admission.first in 200..599 && admission.first != 403,
+            "办理入住已接线路由不得挂起、不得被误拒，实际 status=${admission.first} body=${admission.second}",
+        )
+
+        val bed = send(
+            port,
+            HttpMethod.POST,
+            "/crate-api/healthcare/v1/beds",
+            authenticatedCookie,
+            """{"ward":"A 区","code":"A-101"}""",
+        )
+        assertTrue(
+            bed.first in 200..599 && bed.first != 403,
+            "床位创建已接线路由不得挂起、不得被误拒，实际 status=${bed.first} body=${bed.second}",
+        )
+
+        val feeItem = send(
+            port,
+            HttpMethod.POST,
+            "/crate-api/healthcare/v1/fee-items",
+            authenticatedCookie,
+            """{"category":"床位费","name":"床位费-主数据","unit_price":120.00}""",
+        )
+        assertTrue(
+            feeItem.first in 200..599 && feeItem.first != 403,
+            "费用项创建已接线路由不得挂起、不得被误拒，实际 status=${feeItem.first} body=${feeItem.second}",
+        )
+    }
+
+    @Test
+    fun `requisition write routes with a body answer behind the permission gate`() {
+        val stub = DatabaseStub()
+        val port = startAcesoShape(stub.pool)
+
+        // 050：领用申领与出库调拨复用 pharmacy:dispense（假 Nexus 已授予）。
+        // 挂起由 send() 抛 AssertionError；403 说明门禁误拒。
+        val create = send(
+            port,
+            HttpMethod.POST,
+            "/crate-api/pharmacy/v1/requisitions",
+            authenticatedCookie,
+            """{"department":"护理站","items":[{"material_id":"01J0000000000000000000000","quantity":"1"}]}""",
+        )
+        assertTrue(
+            create.first in 200..599 && create.first != 403,
+            "申领创建已接线路由不得挂起、不得被误拒，实际 status=${create.first} body=${create.second}",
+        )
+
+        val approve = send(
+            port,
+            HttpMethod.PUT,
+            "/crate-api/pharmacy/v1/requisitions/01J0000000000000000000000/approve",
+            authenticatedCookie,
+            """{}""",
+        )
+        assertTrue(
+            approve.first in 200..599 && approve.first != 403,
+            "申领审批已接线路由不得挂起、不得被误拒，实际 status=${approve.first} body=${approve.second}",
+        )
+    }
+
+    // ------------------------------------------------------------------
     // 3. 认证红线不因本次修复松动：未认证写请求 401，且不产生任何 SQL
     //    注意：请求体在总闸之前已被读入缓冲区（这是修复的前提），
     //    但未认证请求仍然在进入业务处理器之前被拦下。
@@ -184,12 +354,45 @@ class ApiBodyHandlingTest {
             vertx,
             pool,
             "http://127.0.0.1:${startStubIdp()}",
-            "http://127.0.0.1:1",
+            "http://127.0.0.1:${startStubNexus()}",
         )
         val mainRouter = Router.router(vertx)
         mainRouter.route("/crate-api/*").subRouter(apiRouter)
         val server = vertx.createHttpServer().requestHandler(mainRouter)
             .listen(0).toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS)
+        servers += server
+        return server.actualPort()
+    }
+
+    /**
+     * 假 Nexus：只应答权限查询，授予本护栏会用到的全部写权限码。
+     *
+     * 046 集中式门禁接上后，`/encounters/:id/deposits` 等已接线路由会先查权限；给一个
+     * 恒授权的桩，让这些既有 P0 用例继续走到业务处理器（而不是在门禁处 503/403）。
+     * 桩无状态、幂等，不放宽认证语义——权限判定逻辑本身由 `SubjectPermissionGateTest` 覆盖。
+     */
+    private fun startStubNexus(): Int {
+        val granted = JsonArray()
+            .add("nursing:execute")
+            .add("rehab:execute")
+            .add("nursing:document")
+            .add("health:manage")
+            .add("clinical:write")
+            .add("admission:write")
+            .add("bed:manage")
+            .add("fee_item:manage")
+            .add("dining:manage")
+            .add("inventory:write")
+            .add("pharmacy:dispense")
+            .add("billing:write")
+        val server = vertx.createHttpServer().requestHandler { req ->
+            if (req.path().endsWith("/subject-permissions")) {
+                req.response().putHeader("Content-Type", "application/json")
+                    .end(JsonObject().put("subject_id", "guard-user").put("permission_codes", granted).encode())
+            } else {
+                req.response().setStatusCode(404).end()
+            }
+        }.listen(0).toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS)
         servers += server
         return server.actualPort()
     }

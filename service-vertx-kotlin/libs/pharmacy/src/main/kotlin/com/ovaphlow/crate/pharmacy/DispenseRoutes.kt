@@ -1,6 +1,7 @@
 package com.ovaphlow.crate.pharmacy
 
 import io.vertx.core.Vertx
+import io.vertx.core.json.JsonObject
 import io.vertx.ext.web.Router
 import io.vertx.ext.web.handler.BodyHandler
 import io.vertx.sqlclient.Pool
@@ -13,9 +14,15 @@ object DispenseRoutes {
         medicalOrderReader: MedicalOrderReader,
         inventoryOutboundPort: InventoryOutboundPort,
         drugCatalogPort: DrugCatalogPort? = null,
+        /**
+         * 054 D3 发药前过敏交叉检查端口：由 Aceso `Main.kt` 经 `PharmacyRoutes` 注入
+         * healthcare 适配器（053 `DrugAllergyChecker`）。为 null 时不做检查，
+         * 发药确认行为与接线前一致（响应不追加 `allergy_warnings`）。
+         */
+        drugAllergyCheckPort: DrugAllergyCheckPort? = null,
     ): Router {
         val router = Router.router(vertx)
-        val service = DispenseService(pool, medicalOrderReader, inventoryOutboundPort, drugCatalogPort)
+        val service = DispenseService(pool, medicalOrderReader, inventoryOutboundPort, drugCatalogPort, drugAllergyCheckPort)
 
         router.route().handler(BodyHandler.create())
 
@@ -133,6 +140,18 @@ object DispenseRoutes {
             is UnauthorizedException -> PharmacyRoutes.respond(ctx, 401, err.message)
             // 025 药品目录端口未接线：fail-closed，不降级为跳过校验/补绑
             is DrugCatalogUnavailableException -> PharmacyRoutes.respond(ctx, 503, err.message)
+            // 054 D3：严重过敏提醒未二次确认 → 409，且把提醒一并返回（前端可直接渲染，无需再查一次）
+            is AllergyAcknowledgementRequiredException -> {
+                ctx.response().setStatusCode(409)
+                    .putHeader("Content-Type", "application/json")
+                    .end(
+                        JsonObject()
+                            .put("error", err.message)
+                            .put("allergy_warnings", err.warnings)
+                            .put("requires_acknowledgement", true)
+                            .encode(),
+                    )
+            }
             else -> {
                 val msg = err?.message?.lowercase() ?: ""
                 if (msg.contains("unique") || msg.contains("duplicate")) {

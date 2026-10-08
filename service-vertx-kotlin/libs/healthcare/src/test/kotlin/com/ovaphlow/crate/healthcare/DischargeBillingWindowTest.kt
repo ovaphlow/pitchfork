@@ -283,7 +283,7 @@ class DischargeBillingWindowTest {
                     ).compose { (payStatus, payBody) ->
                         ctx.verify {
                             assertEquals(409, payStatus, "收束后缴费必须 409")
-                            assertTrue(payBody.getString("error")?.contains("settled") == true, "got: ${payBody.getString("error")}")
+                            assertTrue(payBody.getString("error")?.contains("已结算") == true, "got: ${payBody.getString("error")}")
                         }
                         httpRequest(
                             vertx, port, HttpMethod.POST,

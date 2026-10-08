@@ -31,6 +31,7 @@ import {
   type SettlementPreview,
 } from "@pitchfork/shared/aceso";
 import { formatDate, formatDateTime, todayLocal } from "../lib/datetime";
+import { useSubjectDirectory } from "../lib/identity";
 import { BILLING_BLOCKED_REASONS, FEE_ITEMS_PAGE_PATH, billingErrorMessage } from "./billingMessages";
 import DischargeSettlementWizard from "./DischargeSettlementWizard";
 
@@ -190,6 +191,10 @@ function readEncounterIdFromUrl(): string {
 }
 
 export default function BillingPage() {
+  // 044：主体 ID → 姓名。缴费流水的 operator 与红冲留痕的 reversed_by 都是认证主体 ID，
+  // 直接渲染会显示 ULID；目录接口对任何登录用户开放（业务账号亦可读）。
+  const { subjectLabel, error: subjectDirectoryError } = useSubjectDirectory();
+
   // 入住与费用字典
   const [admissions, setAdmissions] = useState<Admission[]>([]);
   const [admissionsLoading, setAdmissionsLoading] = useState(true);
@@ -895,7 +900,7 @@ export default function BillingPage() {
           {billIsReversed(row) && (
             <Badge variant="default" className="cursor-help">
               <span
-                title={`红冲时刻 ${formatDateTime(row.reversed_at, "—")}｜操作人 ${row.reversed_by ?? "—"}｜原因 ${row.reversal_reason ?? "—"}`}
+                title={`红冲时刻 ${formatDateTime(row.reversed_at, "—")}｜操作人 ${subjectLabel(row.reversed_by)}｜原因 ${row.reversal_reason ?? "—"}`}
               >
                 已红冲
               </span>
@@ -976,7 +981,7 @@ export default function BillingPage() {
       header: "金额（元）",
       render: (row) => <span className="text-success font-medium">−{formatAmount(row.amount)}</span>,
     },
-    { key: "operator", header: "操作人", render: (row) => <span className="text-fg-muted text-sm">{row.operator}</span> },
+    { key: "operator", header: "操作人", render: (row) => <span className="text-fg-muted text-sm">{subjectLabel(row.operator)}</span> },
     { key: "remark", header: "备注", render: (row) => <span className="text-fg-muted text-sm">{row.remark ?? "—"}</span> },
   ];
 
@@ -1088,6 +1093,9 @@ export default function BillingPage() {
       {pageError && (
         <div className="rounded-md border border-danger/30 bg-danger-bg px-4 py-3 text-sm text-danger">{pageError}</div>
       )}
+
+      {/* 044：人员目录失败不再静默——否则「操作人」列只剩 ULID 而看不出原因 */}
+      {subjectDirectoryError ? <p className="text-xs text-warning">{subjectDirectoryError}</p> : null}
 
       <Card title="入住选择" actions={
         <Button variant="ghost" size="sm" onClick={() => void loadAdmissions()} disabled={admissionsLoading}>
@@ -1486,7 +1494,7 @@ export default function BillingPage() {
               <div className="rounded-md border border-border bg-surface-alt px-4 py-3 text-sm text-fg-muted">
                 <p className="font-medium text-fg">已红冲</p>
                 <p className="mt-1">
-                  本单已于 {formatDateTime(detail.bill.reversed_at, "—")} 被 {detail.bill.reversed_by ?? "—"} 红冲，
+                  本单已于 {formatDateTime(detail.bill.reversed_at, "—")} 被 {subjectLabel(detail.bill.reversed_by)} 红冲，
                   红冲原因：{detail.bill.reversal_reason ?? "—"}。
                 </p>
                 <p className="mt-1">冲销本单的红字单：{detail.bill.reversal_bill_id ?? "—"}</p>

@@ -167,7 +167,7 @@ class DepositOffsetService(
                     HealthcareNotFoundException("encounter not found: $encounterId"),
                 )
             if (row.getOffsetDateTime("settled_at") != null) {
-                Future.failedFuture(ConflictException("encounter billing is already settled"))
+                Future.failedFuture(ConflictException("本次入住的账单已结算，不能重复结算"))
             } else {
                 Future.succeededFuture(row)
             }

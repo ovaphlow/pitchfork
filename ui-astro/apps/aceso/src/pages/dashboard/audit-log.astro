@@ -1,0 +1,8 @@
+---
+import DashboardLayout from "../../layouts/DashboardLayout.astro";
+import AuditLogPage from "../../components/AuditLogPage.tsx";
+---
+
+<DashboardLayout title="操作审计">
+  <AuditLogPage client:only="react" />
+</DashboardLayout>

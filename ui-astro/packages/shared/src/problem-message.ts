@@ -1,3 +1,19 @@
+/**
+ * 响应体是否该按 JSON 解析。
+ *
+ * 正常情况下由 `Content-Type: application/json`（或 `application/problem+json`）决定；
+ * 但上游可能只给了 JSON 体、漏了响应头：Aceso 权限闸门的 403/401/503 曾经就是这样，
+ * 结果前端把 `required_permission` 丢掉，翻成"该操作需要管理员权限"（045 修复）。
+ * 后端补了头之后，这里再容错一次：无头或非 JSON 头时，只要正文长得像 JSON 对象/数组就尝试解析；
+ * 解析失败仍回落为 `null`，不会把 HTML 错误页当 JSON 用。
+ */
+export function looksLikeJsonBody(contentType: string, responseText: string): boolean {
+  const type = contentType.toLowerCase();
+  if (type.includes("application/json") || type.includes("application/problem+json")) return true;
+  const trimmed = responseText.trimStart();
+  return trimmed.startsWith("{") || trimmed.startsWith("[");
+}
+
 /** 服务端错误体的公共形状（Problem Details 的超集，含权限闸门字段）。 */
 export interface ApiProblem {
   error?: string;

@@ -23,6 +23,12 @@ interface OperatorPickerProps {
   directoryError?: string;
   /** 下拉首项文案（空值 = 本人，服务端按会话落库） */
   selfOptionLabel?: string;
+  /**
+   * 046：是否允许代操作（下拉挑选他人）。默认 `true`（042 口径：仅平台管理员可代操作）。
+   * 临床署名（医嘱 `doctor`、诊断/病程 `physician`）传 `false` —— 署名即责任、**不开放代签**，
+   * 任何账号（含平台管理员）都只显示只读的「<姓名>（当前登录用户）」。
+   */
+  allowDelegation?: boolean;
 }
 
 /**
@@ -34,6 +40,8 @@ interface OperatorPickerProps {
  *   由服务端按认证会话落库（非管理员提交他人会被服务端 `400 operator cannot be delegated` 拒绝）；
  * - 目录加载失败时给出可见提示，不再静默吞错（此前表现为"下拉为空且无从判断原因"，
  *   表单又强制必填 → 业务账号做不了本职工作）。
+ *
+ * 046：新增 [allowDelegation] —— 传 `false` 时即使是平台管理员也只读（临床署名字段专用）。
  */
 export default function OperatorPicker({
   id,
@@ -44,8 +52,9 @@ export default function OperatorPicker({
   onChange,
   directoryError,
   selfOptionLabel = "本人（当前登录用户）",
+  allowDelegation = true,
 }: OperatorPickerProps) {
-  if (!currentUser?.platformAdmin) {
+  if (!allowDelegation || !currentUser?.platformAdmin) {
     return (
       <div className="flex flex-col gap-1.5">
         <span className="text-sm font-medium text-fg-muted">{label}</span>

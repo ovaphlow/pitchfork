@@ -981,8 +981,8 @@ export default function PharmacyPage() {
       header: "操作人",
       render: (row) => (
         <div className="text-sm text-fg-muted">
-          {row.reviewer ? `审方 ${row.reviewer}` : "—"}
-          {row.pharmacist ? <div>调配 {row.pharmacist}</div> : null}
+          {row.reviewer ? `审方 ${subjectLabel(row.reviewer)}` : "—"}
+          {row.pharmacist ? <div>调配 {subjectLabel(row.pharmacist)}</div> : null}
         </div>
       ),
     },
@@ -1023,7 +1023,7 @@ export default function PharmacyPage() {
     { key: "reason", header: "退药原因", render: (row) => <span className="text-fg-muted">{row.return_reason || "—"}</span> },
     { key: "quantity", header: "数量", render: (row) => <span className="text-fg-muted">{row.total_quantity ?? "—"}</span> },
     { key: "status", header: "状态", render: (row) => returnStatusBadge(row.status) },
-    { key: "operator", header: "操作人", render: (row) => <span className="text-fg-muted">{row.operator || "—"}</span> },
+    { key: "operator", header: "操作人", render: (row) => <span className="text-fg-muted">{row.operator ? subjectLabel(row.operator) : "—"}</span> },
     {
       key: "actions",
       header: "操作",
@@ -1434,7 +1434,7 @@ export default function PharmacyPage() {
 
       {activeTab === "requisitions" && <RequisitionsSection />}
 
-      {activeTab === "purchase" && <PurchaseOrdersSection />}
+      {activeTab === "purchase" && <PurchaseOrdersSection subjectLabel={subjectLabel} />}
 
       {activeTab === "returns" && (
         <Card
@@ -1778,8 +1778,8 @@ export default function PharmacyPage() {
               <div className="text-xs text-fg-dimmed">
                 创建 {formatDateTime(detail.created_at)}
                 {detail.dispensed_at ? ` · 发药 ${formatDateTime(detail.dispensed_at)}` : ""}
-                {detail.reviewer ? ` · 审方 ${detail.reviewer}` : ""}
-                {detail.pharmacist ? ` · 调配 ${detail.pharmacist}` : ""}
+                {detail.reviewer ? ` · 审方 ${subjectLabel(detail.reviewer)}` : ""}
+                {detail.pharmacist ? ` · 调配 ${subjectLabel(detail.pharmacist)}` : ""}
               </div>
             </div>
 

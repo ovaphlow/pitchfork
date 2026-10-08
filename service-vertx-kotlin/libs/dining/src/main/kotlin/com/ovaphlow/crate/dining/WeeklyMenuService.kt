@@ -2,6 +2,7 @@ package com.ovaphlow.crate.dining
 
 import com.ovaphlow.crate.common.Ulid
 import com.ovaphlow.crate.database.DatabaseConfig
+import com.ovaphlow.crate.database.isUniqueViolation
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
@@ -85,7 +86,7 @@ class WeeklyMenuService(
             get(id)
         }.recover { error ->
             // 命中部分唯一索引（该周已有启用菜谱）→ 409
-            if (error is io.vertx.pgclient.PgException && error.sqlState == "23505")
+            if (isUniqueViolation(error, setOf("uq_dining_weekly_menus_active_week")))
                 Future.failedFuture(DiningConflictException("该周已存在启用的菜谱，请先停用旧版"))
             else Future.failedFuture(error)
         }
@@ -198,7 +199,7 @@ class WeeklyMenuService(
                     return@compose Future.failedFuture(DiningNotFoundException("weekly menu not found: $id"))
                 get(id)
             }.recover { error ->
-                if (error is io.vertx.pgclient.PgException && error.sqlState == "23505")
+                if (isUniqueViolation(error, setOf("uq_dining_weekly_menus_active_week")))
                     Future.failedFuture(DiningConflictException("该周已存在启用的菜谱，请先停用旧版"))
                 else Future.failedFuture(error)
             }

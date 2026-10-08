@@ -13,7 +13,6 @@ import io.vertx.core.json.JsonObject
 import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.SqlClient
 import org.jooq.DSLContext
-import java.math.BigDecimal
 import java.time.LocalDate
 import java.time.OffsetDateTime
 
@@ -39,7 +38,8 @@ class ElderlyDischargeHandoverSnapshotService(
         private fun rowString(row: Row, name: String): String? = row.getValue(name)?.toString()
         private fun rowDate(row: Row, name: String): String? = (row.getValue(name) as? LocalDate)?.toString()
         private fun rowTime(row: Row, name: String): String? = (row.getValue(name) as? OffsetDateTime)?.toString()
-        private fun rowScore(row: Row, name: String): Double? = (row.getValue(name) as? BigDecimal)?.toDouble()
+        // NUMERIC 由 pg-client 解码为 Numeric（Number），而非 BigDecimal。
+        private fun rowScore(row: Row, name: String): Double? = (row.getValue(name) as? Number)?.toDouble()
         private fun rowDays(row: Row, name: String): Int? = (row.getValue(name) as? Number)?.toInt()
         private fun rowJson(row: Row, name: String): JsonObject? = row.getValue(name) as? JsonObject
 

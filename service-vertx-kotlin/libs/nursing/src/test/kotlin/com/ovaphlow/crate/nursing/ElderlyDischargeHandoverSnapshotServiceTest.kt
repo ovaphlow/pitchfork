@@ -12,9 +12,9 @@ import io.vertx.sqlclient.RowIterator
 import io.vertx.sqlclient.RowSet
 import io.vertx.sqlclient.SqlConnection
 import io.vertx.sqlclient.Tuple
+import io.vertx.sqlclient.data.Numeric
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Test
-import java.math.BigDecimal
 import java.time.LocalDate
 import java.time.OffsetDateTime
 
@@ -156,7 +156,7 @@ class ElderlyDischargeHandoverSnapshotServiceTest {
         val byTable = mapOf(
             "nursing_assessments" to rows(
                 mapOf("id" to "a1", "assess_type" to "ADMISSION", "assess_date" to LocalDate.of(2026, 7, 1),
-                    "assessor" to "王护士", "total_score" to BigDecimal("12.5"), "result_level" to "中",
+                    "assessor" to "王护士", "total_score" to Numeric.parse("12.5"), "result_level" to "中",
                     "detail" to JsonObject().put("note", "x"), "remark" to null,
                     "created_at" to OffsetDateTime.parse("2026-07-01T09:00:00+08:00")),
             ),
@@ -188,6 +188,7 @@ class ElderlyDischargeHandoverSnapshotServiceTest {
 
         assertEquals(1, snapshot.getJsonArray("assessments").size())
         assertEquals("ADMISSION", snapshot.getJsonArray("assessments").getJsonObject(0).getString("assess_type"))
+        assertEquals(12.5, snapshot.getJsonArray("assessments").getJsonObject(0).getDouble("total_score"))
         assertEquals(1, snapshot.getJsonArray("plans").size())
         assertEquals("i1", snapshot.getJsonArray("plans").getJsonObject(0).getJsonArray("items").getJsonObject(0).getString("id"))
         assertEquals(1, snapshot.getJsonArray("tasks").size())

@@ -1,5 +1,5 @@
 import { serviceBase } from "./aceso-service-config";
-import { problemMessage, type ApiProblem } from "./problem-message";
+import { looksLikeJsonBody, problemMessage, type ApiProblem } from "./problem-message";
 
 type ProblemDetails = ApiProblem;
 
@@ -507,7 +507,7 @@ function redirectToLogin(): void {
 async function readResponse<T>(response: Response, redirectOnUnauthorized: boolean): Promise<T> {
   const contentType = response.headers.get("content-type") ?? "";
   const responseText = await response.text();
-  const body: ProblemDetails | T | null = contentType.includes("application/json") || contentType.includes("application/problem+json")
+  const body: ProblemDetails | T | null = looksLikeJsonBody(contentType, responseText)
     ? (() => {
         try {
           return JSON.parse(responseText || "null") as ProblemDetails | T | null;
@@ -2233,7 +2233,11 @@ export interface ProgressNote {
 export interface ProgressNoteInput {
   note_type: string;
   content: string;
-  physician: string;
+  /**
+   * 046：医生署名由**服务端按会话派生、只读**，前端不再提交该字段（缺省即可）。
+   * 保留可选字段仅为兼容既有调用方与无认证挂载的嵌入式/集成测试。
+   */
+  physician?: string;
   /** 缺省时由服务端使用当前业务时间 */
   record_time?: string;
 }
@@ -2250,7 +2254,7 @@ export function createProgressNote(encounterId: string, input: ProgressNoteInput
     body: JSON.stringify({
       note_type: input.note_type,
       content: input.content.trim(),
-      physician: input.physician.trim(),
+      ...(input.physician?.trim() ? { physician: input.physician.trim() } : {}),
       ...(input.record_time?.trim() ? { record_time: input.record_time.trim() } : {}),
     }),
   });
@@ -2294,7 +2298,8 @@ export interface DiagnosisInput {
   diagnosis_type: "PRIMARY" | "SECONDARY";
   diagnosis_text: string;
   diagnosis_date: string;
-  physician: string;
+  /** 046：医生署名由服务端按会话派生、只读；缺省即可（保留可选字段兼容既有调用方/测试）。 */
+  physician?: string;
   icd_code?: string;
   /** 备注写入服务端受控 metadata */
   remark?: string;
@@ -2313,7 +2318,7 @@ export function createDiagnosis(encounterId: string, input: DiagnosisInput): Pro
       diagnosis_type: input.diagnosis_type,
       diagnosis_text: input.diagnosis_text.trim(),
       diagnosis_date: input.diagnosis_date,
-      physician: input.physician.trim(),
+      ...(input.physician?.trim() ? { physician: input.physician.trim() } : {}),
       ...(input.icd_code?.trim() ? { icd_code: input.icd_code.trim() } : {}),
       ...(input.remark?.trim() ? { remark: input.remark.trim() } : {}),
     }),
@@ -2430,7 +2435,8 @@ export interface MedicalOrderInput {
   /** 新建医嘱必填：LONG_TERM / TEMPORARY，服务端不接受空值 */
   order_class: string;
   order_content: string;
-  doctor: string;
+  /** 046：医生署名由服务端按会话派生、只读；前端不再提交该字段（缺省即可）。 */
+  doctor?: string;
   start_time: string;
   /** 临时医嘱可用的明确结束时间 */
   end_time?: string;
@@ -5189,4 +5195,2635 @@ export interface PaymentSummary {
 
 export function getPaymentSummary(): Promise<PaymentSummary> {
   return request<PaymentSummary>("/healthcare/v1/payments/summary");
+}
+
+// ============================================================================
+//  052 儿保（儿童健康）日常功能链：体检 / 成长 / 接种 / 异常通报 / 指导
+//  契约冻结见 docs/plans/052 §5；只增函数与类型，不改既有签名。
+// ============================================================================
+
+/** 儿保体检检查项（`items` 数组元素，结构随 UI 演化）。 */
+export interface ChildHealthCheckupItem {
+  item?: string;
+  result?: string;
+  conclusion?: string;
+}
+
+export interface ChildHealthCheckup {
+  id: string;
+  patient_id: string;
+  patient_name: string | null;
+  checkup_date: string;
+  checkup_type: string;
+  /** 体检时月龄，服务端按 birth_date 派生 */
+  age_months: number | null;
+  items: ChildHealthCheckupItem[] | null;
+  conclusion: string | null;
+  guidance: string | null;
+  next_checkup_date: string | null;
+  operator: string;
+  remark: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+  /** 053 B1：医生诊断（可空） */
+  diagnosis?: string | null;
+  /** 053 B1：诊断编码（可空） */
+  diagnosis_code?: string | null;
+  /** 053 B1：诊断状态 待诊断/已完成 */
+  status?: string;
+  /** 053 B1：诊断/审阅医生（服务端派生，客户端不得提交） */
+  reviewed_by?: string | null;
+  /** 053 B1：诊断时间（服务端派生） */
+  reviewed_at?: string | null;
+}
+
+export interface ChildHealthCheckupList {
+  records: ChildHealthCheckup[];
+  meta: { total: number };
+}
+
+export interface ChildHealthCheckupInput {
+  patient_id: string;
+  checkup_date: string;
+  checkup_type: string;
+  items?: ChildHealthCheckupItem[];
+  conclusion?: string | null;
+  guidance?: string | null;
+  next_checkup_date?: string | null;
+  remark?: string | null;
+}
+
+export interface ChildHealthCheckupPatch {
+  checkup_date?: string;
+  checkup_type?: string;
+  items?: ChildHealthCheckupItem[];
+  conclusion?: string | null;
+  guidance?: string | null;
+  next_checkup_date?: string | null;
+  remark?: string | null;
+}
+
+/** 体检类型白名单（与后端 `ChildHealthCheckupService.checkupTypes` 同源）。 */
+export const CHILD_CHECKUP_TYPES = ["满月", "3月", "6月", "9月", "12月", "18月", "24月", "3岁", "常规"] as const;
+
+/** 体检结论白名单（与后端 `conclusions` 同源）。 */
+export const CHILD_CHECKUP_CONCLUSIONS = ["正常", "异常", "需转诊"] as const;
+
+export function listChildHealthCheckups(
+  params: { patient_id: string; from?: string; to?: string; limit?: number; offset?: number },
+): Promise<ChildHealthCheckupList> {
+  const query = new URLSearchParams({ patient_id: params.patient_id });
+  if (params.from) query.set("from", params.from);
+  if (params.to) query.set("to", params.to);
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  return request<ChildHealthCheckupList>(`/healthcare/v1/child-health-checkups?${query.toString()}`);
+}
+
+export function getChildHealthCheckup(id: string): Promise<ChildHealthCheckup> {
+  return request<ChildHealthCheckup>(`/healthcare/v1/child-health-checkups/${encodeURIComponent(id)}`);
+}
+
+export function createChildHealthCheckup(input: ChildHealthCheckupInput): Promise<ChildHealthCheckup> {
+  return request<ChildHealthCheckup>("/healthcare/v1/child-health-checkups", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateChildHealthCheckup(id: string, input: ChildHealthCheckupPatch): Promise<ChildHealthCheckup> {
+  return request<ChildHealthCheckup>(`/healthcare/v1/child-health-checkups/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+/** 053 B1 体检诊断入参：署名 `reviewed_by` / 状态 `status` / 时间 `reviewed_at` 由服务端派生，客户端不得提交。 */
+export interface ChildCheckupDiagnosisInput {
+  diagnosis: string;
+  diagnosis_code?: string;
+}
+
+export function diagnoseChildHealthCheckup(
+  id: string,
+  input: ChildCheckupDiagnosisInput,
+): Promise<ChildHealthCheckup> {
+  return request<ChildHealthCheckup>(`/healthcare/v1/child-health-checkups/${encodeURIComponent(id)}/diagnosis`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+/** 落库时的评价快照（前端按 WHO LMS 计算后提交；服务端只校验形状并透传）。 */
+export interface ChildGrowthPercentile {
+  p?: number;
+  z?: number;
+}
+
+export interface ChildGrowthMeasurement {
+  id: string;
+  patient_id: string;
+  patient_name: string | null;
+  measured_at: string;
+  /** 测量时天龄，服务端按 birth_date 派生 */
+  age_days: number | null;
+  height_cm: number | null;
+  weight_kg: number | null;
+  head_circumference_cm: number | null;
+  percentile_snapshot: Record<string, ChildGrowthPercentile> | null;
+  operator: string;
+  note: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChildGrowthMeasurementList {
+  records: ChildGrowthMeasurement[];
+  meta: { total: number };
+}
+
+export interface ChildGrowthMeasurementInput {
+  patient_id: string;
+  measured_at?: string;
+  height_cm?: number;
+  weight_kg?: number;
+  head_circumference_cm?: number;
+  /** 体温：与成长测量同一次提交写入 vital_sign_records（052 裁定 7） */
+  temperature?: number;
+  percentile_snapshot?: Record<string, ChildGrowthPercentile>;
+  note?: string;
+}
+
+export interface ChildGrowthMeasurementPatch {
+  measured_at?: string;
+  height_cm?: number;
+  weight_kg?: number;
+  head_circumference_cm?: number;
+  percentile_snapshot?: Record<string, ChildGrowthPercentile>;
+  note?: string;
+}
+
+export interface ChildGrowthVitalSignEcho {
+  id: string;
+  type: string;
+  value: number;
+  unit: string;
+  abnormal: boolean;
+}
+
+export interface ChildGrowthCreateResult {
+  measurement: ChildGrowthMeasurement;
+  vital_sign: ChildGrowthVitalSignEcho | null;
+}
+
+/** 成长序列数据点（年龄轴，`age_days` 升序）。 */
+export interface ChildGrowthSeriesPoint {
+  id: string;
+  age_days: number;
+  value: number;
+  measured_at: string;
+  percentile?: ChildGrowthPercentile;
+}
+
+export type ChildGrowthMetric = "height" | "weight" | "head";
+
+export interface ChildGrowthSeries {
+  patient_id: string;
+  patient_name: string | null;
+  birth_date: string;
+  age_days: number;
+  series: Record<ChildGrowthMetric, ChildGrowthSeriesPoint[]>;
+}
+
+export function listChildGrowthMeasurements(
+  params: { patient_id: string; metric?: ChildGrowthMetric; from?: string; to?: string; limit?: number; offset?: number },
+): Promise<ChildGrowthMeasurementList> {
+  const query = new URLSearchParams({ patient_id: params.patient_id });
+  if (params.metric) query.set("metric", params.metric);
+  if (params.from) query.set("from", params.from);
+  if (params.to) query.set("to", params.to);
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  return request<ChildGrowthMeasurementList>(`/healthcare/v1/child-growth-measurements?${query.toString()}`);
+}
+
+export function getChildGrowthMeasurement(id: string): Promise<ChildGrowthMeasurement> {
+  return request<ChildGrowthMeasurement>(`/healthcare/v1/child-growth-measurements/${encodeURIComponent(id)}`);
+}
+
+export function createChildGrowthMeasurement(input: ChildGrowthMeasurementInput): Promise<ChildGrowthCreateResult> {
+  return request<ChildGrowthCreateResult>("/healthcare/v1/child-growth-measurements", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateChildGrowthMeasurement(
+  id: string,
+  input: ChildGrowthMeasurementPatch,
+): Promise<ChildGrowthMeasurement> {
+  return request<ChildGrowthMeasurement>(`/healthcare/v1/child-growth-measurements/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export function deleteChildGrowthMeasurement(id: string): Promise<{ id: string; deleted_at: string }> {
+  return request<{ id: string; deleted_at: string }>(
+    `/healthcare/v1/child-growth-measurements/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+}
+
+export function getChildGrowthSeries(patientId: string): Promise<ChildGrowthSeries> {
+  return request<ChildGrowthSeries>(`/healthcare/v1/child-growth-series/${encodeURIComponent(patientId)}`);
+}
+
+/** 读时接种状态（后端 `ChildVaccinationService.statusOf` 的结论）。 */
+export type ChildVaccinationStatus = "已接种" | "待接种" | "临期" | "逾期" | "暂缓" | "拒种";
+
+export interface ChildVaccinationRecord {
+  id: string;
+  patient_id: string;
+  patient_name: string | null;
+  vaccine_code: string;
+  vaccine_name: string;
+  dose_no: number;
+  administered_at: string | null;
+  facility: string | null;
+  batch_no: string | null;
+  status: string;
+  operator: string;
+  note: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChildVaccinationRecordList {
+  records: ChildVaccinationRecord[];
+  meta: { total: number };
+}
+
+export interface ChildVaccinationRecordInput {
+  patient_id: string;
+  vaccine_code: string;
+  dose_no?: number;
+  administered_at?: string | null;
+  facility?: string | null;
+  batch_no?: string | null;
+  status?: string;
+  note?: string | null;
+}
+
+/** 排程条目（后端 `VACCINATION_SCHEDULE` 的只读投影）。 */
+export interface ChildVaccinationScheduleRow {
+  vaccine_code: string;
+  vaccine_name: string;
+  dose_no: number;
+  recommended_month: number;
+  due_date: string;
+  status: ChildVaccinationStatus;
+  record_id: string | null;
+  administered_at: string | null;
+  facility: string | null;
+  batch_no: string | null;
+  note: string | null;
+}
+
+export interface ChildVaccinationStatusReport {
+  patient_id: string;
+  patient_name: string | null;
+  birth_date: string;
+  age_months: number;
+  records: ChildVaccinationScheduleRow[];
+  meta: {
+    total: number;
+    administered: number;
+    pending: number;
+    due_soon: number;
+    overdue: number;
+    deferred: number;
+    refused: number;
+  };
+}
+
+export interface ChildVaccinationRemindResult {
+  patient_id: string;
+  /** 逾期项生成的通报台账（含 message_id 与状态） */
+  notified: ChildHealthNotification[];
+  /** 临期项：只提示护士，不生成异常台账 */
+  due_soon: ChildVaccinationScheduleRow[];
+  meta: { notified: number; due_soon: number };
+}
+
+export function listChildVaccinationRecords(
+  params: { patient_id: string; limit?: number; offset?: number },
+): Promise<ChildVaccinationRecordList> {
+  const query = new URLSearchParams({ patient_id: params.patient_id });
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  return request<ChildVaccinationRecordList>(`/healthcare/v1/child-vaccination-records?${query.toString()}`);
+}
+
+export function createChildVaccination(input: ChildVaccinationRecordInput): Promise<ChildVaccinationRecord> {
+  return request<ChildVaccinationRecord>("/healthcare/v1/child-vaccinations", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function getChildVaccinationStatus(patientId: string): Promise<ChildVaccinationStatusReport> {
+  return request<ChildVaccinationStatusReport>(
+    `/healthcare/v1/child-vaccination-status/${encodeURIComponent(patientId)}`,
+  );
+}
+
+export function remindChildVaccinations(
+  patientId: string,
+  input: { channel?: string } = {},
+): Promise<ChildVaccinationRemindResult> {
+  return request<ChildVaccinationRemindResult>(
+    `/healthcare/v1/child-vaccination-status/${encodeURIComponent(patientId)}/remind`,
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+/** 异常类型白名单（与后端 `ChildAlertService.alertTypes` 同源）。 */
+export const CHILD_ALERT_TYPES = [
+  "体温异常",
+  "心率异常",
+  "呼吸异常",
+  "生长异常",
+  "接种逾期",
+  "体检异常",
+  "健康指导",
+] as const;
+
+/** 通报渠道白名单；MVP 只接入「站内」（Nexus message），其余记「待接入」。 */
+export const CHILD_NOTIFICATION_CHANNELS = ["站内", "短信", "微信"] as const;
+
+export interface ChildHealthAlert {
+  alert_type: string;
+  alert_ref: string | null;
+  severity: string;
+  title: string;
+  detail: string | null;
+  occurred_at: string;
+  metric: string;
+  value?: number;
+  /** 待通报 / 已通报（依据本域台账是否已有同 alert_type + alert_ref 的通报） */
+  status: string;
+  patient_id: string;
+  patient_name: string | null;
+  guardian_name: string | null;
+  guardian_phone: string | null;
+}
+
+export interface ChildHealthAlertList {
+  records: ChildHealthAlert[];
+  meta: { total: number };
+}
+
+export interface ChildHealthNotification {
+  id: string;
+  patient_id: string;
+  patient_name: string | null;
+  alert_type: string;
+  alert_ref: string | null;
+  guardian_name: string | null;
+  guardian_phone: string | null;
+  channel: string;
+  content: string;
+  message_id: string | null;
+  /** 已发送 / 待接入 / 发送失败 */
+  status: string;
+  operator: string;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface ChildHealthNotificationList {
+  records: ChildHealthNotification[];
+  meta: { total: number };
+}
+
+export interface ChildHealthNotificationInput {
+  patient_id: string;
+  alert_type: string;
+  alert_ref?: string | null;
+  guardian_name?: string | null;
+  guardian_phone?: string | null;
+  channel?: string;
+  content: string;
+}
+
+export function listChildHealthAlerts(
+  params: { patient_id: string; status?: string; limit?: number; offset?: number },
+): Promise<ChildHealthAlertList> {
+  const query = new URLSearchParams({ patient_id: params.patient_id });
+  if (params.status) query.set("status", params.status);
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  return request<ChildHealthAlertList>(`/healthcare/v1/child-health-alerts?${query.toString()}`);
+}
+
+export function listChildHealthNotifications(
+  params: { patient_id: string; limit?: number; offset?: number },
+): Promise<ChildHealthNotificationList> {
+  const query = new URLSearchParams({ patient_id: params.patient_id });
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  return request<ChildHealthNotificationList>(`/healthcare/v1/child-health-notifications?${query.toString()}`);
+}
+
+export function createChildHealthNotification(input: ChildHealthNotificationInput): Promise<ChildHealthNotification> {
+  return request<ChildHealthNotification>("/healthcare/v1/child-health-notifications", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+/** 指导模板（后端 `GUIDANCE_TEMPLATES` 常量）。 */
+export interface ChildGuidanceTemplate {
+  template_code: string;
+  age_band: string;
+  topic: string;
+  /** 053 B3：指导口径（日常 / 疾病防控）。 */
+  kind?: string;
+  title: string;
+  content: string;
+}
+
+export interface ChildGuidanceTemplateList {
+  records: ChildGuidanceTemplate[];
+  meta: { total: number; age_band: string | null };
+}
+
+export interface ChildGuidanceRecord {
+  id: string;
+  patient_id: string;
+  patient_name: string | null;
+  template_code: string;
+  age_band: string | null;
+  topic: string | null;
+  /** 053 B3：指导口径（日常 / 疾病防控）。 */
+  kind?: string;
+  content: string;
+  delivered_at: string;
+  channel: string;
+  operator: string;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface ChildGuidanceRecordList {
+  records: ChildGuidanceRecord[];
+  meta: { total: number };
+}
+
+export interface ChildGuidanceRecordInput {
+  patient_id: string;
+  template_code: string;
+  age_band?: string;
+  topic?: string;
+  /** 053 B3：指导口径（日常 / 疾病防控）；缺省由服务端按模板或「日常」推导。 */
+  kind?: string;
+  content?: string;
+  delivered_at?: string;
+  channel?: string;
+}
+
+export function listChildGuidanceTemplates(
+  ageMonths?: number,
+  kind?: string,
+): Promise<ChildGuidanceTemplateList> {
+  const query = new URLSearchParams();
+  if (ageMonths !== undefined) query.set("age_months", String(ageMonths));
+  if (kind !== undefined) query.set("kind", kind);
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<ChildGuidanceTemplateList>(`/healthcare/v1/child-guidance-templates${suffix}`);
+}
+
+export function createChildGuidanceRecord(input: ChildGuidanceRecordInput): Promise<ChildGuidanceRecord> {
+  return request<ChildGuidanceRecord>("/healthcare/v1/child-guidance-records", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function listChildGuidanceRecords(
+  params: { patient_id: string; limit?: number; offset?: number; kind?: string },
+): Promise<ChildGuidanceRecordList> {
+  const query = new URLSearchParams({ patient_id: params.patient_id });
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  if (params.kind !== undefined) query.set("kind", params.kind);
+  return request<ChildGuidanceRecordList>(`/healthcare/v1/child-guidance-records?${query.toString()}`);
+}
+
+// ============================================================================
+//  053 A2 发育筛查结果：POST/GET /child-developmental-screenings
+//  契约冻结见 docs/plans/053 §5；只增函数与类型，不改既有签名。
+//  判读/领域分等派生字段由服务端调 A1 评分引擎生成，客户端不得提交。
+// ============================================================================
+
+export interface ChildDevelopmentalScreening {
+  id: string;
+  patient_id: string;
+  patient_name: string | null;
+  scale_code: string;
+  scale_version: string;
+  /** 筛查时月龄，服务端按 birth_date 与 administered_at 派生 */
+  age_months: number;
+  administered_at: string;
+  /** 条目编码 → 分值（按适龄条目顺序） */
+  item_scores: Record<string, number>;
+  /** 领域编码 → 得分，服务端派生 */
+  domain_scores: Record<string, number>;
+  /** 领域编码 → 该月龄适龄满分，服务端回显 */
+  domain_max_scores: Record<string, number>;
+  total_score: number;
+  max_total_score: number;
+  /** 判读：正常 / 可疑 / 异常 */
+  classification: string;
+  triggered_items: string[];
+  conclusion: string | null;
+  /** 关联体检记录 id（053 A3，可空） */
+  checkup_id?: string | null;
+  operator: string;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChildDevelopmentalScreeningList {
+  records: ChildDevelopmentalScreening[];
+  meta: { total: number };
+}
+
+export interface ChildDevelopmentalScreeningInput {
+  patient_id: string;
+  scale_code: string;
+  administered_at?: string;
+  item_scores: Record<string, number>;
+  metadata?: Record<string, unknown>;
+}
+
+export function createChildDevelopmentalScreening(
+  input: ChildDevelopmentalScreeningInput,
+): Promise<ChildDevelopmentalScreening> {
+  return request<ChildDevelopmentalScreening>("/healthcare/v1/child-developmental-screenings", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function listChildDevelopmentalScreenings(
+  params: { patient_id: string; limit?: number; offset?: number },
+): Promise<ChildDevelopmentalScreeningList> {
+  const query = new URLSearchParams({ patient_id: params.patient_id });
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  return request<ChildDevelopmentalScreeningList>(
+    `/healthcare/v1/child-developmental-screenings?${query.toString()}`,
+  );
+}
+
+export function getChildDevelopmentalScreening(id: string): Promise<ChildDevelopmentalScreening> {
+  return request<ChildDevelopmentalScreening>(
+    `/healthcare/v1/child-developmental-screenings/${encodeURIComponent(id)}`,
+  );
+}
+
+/**
+ * 053 A3 筛查结论判读入参：`conclusion` 必填，`checkup_id` 可选（关联体检记录）。
+ * 判读后若 `classification` 为「可疑/异常」，可携带筛查 `id` 调
+ * `createChildReferral({ source_type: "筛查", source_id: id, ... })` 完成一键转诊。
+ */
+export interface ChildScreeningConclusionInput {
+  conclusion: string;
+  checkup_id?: string;
+}
+
+/** 053 A3：医生写筛查结论判读（`clinical:write`，覆盖式，返回更新后的筛查记录）。 */
+export function concludeChildDevelopmentalScreening(
+  id: string,
+  input: ChildScreeningConclusionInput,
+): Promise<ChildDevelopmentalScreening> {
+  return request<ChildDevelopmentalScreening>(
+    `/healthcare/v1/child-developmental-screenings/${encodeURIComponent(id)}/conclusion`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+// ============================================================================
+//  053 B2 健康问题转诊：POST/GET /child-referrals、PATCH /child-referrals/:id/status
+//  契约冻结见 docs/plans/053 §5；只增函数与类型，不改既有签名。
+//  状态机由服务端白名单管控（待转诊 → 已转诊 → 已完成，+已取消）；operator 服务端派生。
+// ============================================================================
+
+export interface ChildReferral {
+  id: string;
+  patient_id: string;
+  patient_name: string | null;
+  /** 来源：体检 / 筛查 / 异常 / 手动 */
+  source_type: string;
+  source_id: string | null;
+  problem_summary: string;
+  /** 转诊类型：院内转诊 / 转上级医院 / 专科转诊 */
+  referral_type: string;
+  target_org: string | null;
+  target_dept: string | null;
+  /** 紧急度：常规 / 急 */
+  urgency: string;
+  /** 状态：待转诊 / 已转诊 / 已完成 / 已取消 */
+  status: string;
+  referred_at: string | null;
+  outcome: string | null;
+  operator: string;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChildReferralList {
+  records: ChildReferral[];
+  meta: { total: number };
+}
+
+export interface ChildReferralInput {
+  patient_id: string;
+  source_type: string;
+  source_id?: string;
+  problem_summary: string;
+  referral_type: string;
+  target_org?: string;
+  target_dept?: string;
+  urgency?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ChildReferralStatusInput {
+  status: string;
+  outcome?: string;
+  referred_at?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export function createChildReferral(input: ChildReferralInput): Promise<ChildReferral> {
+  return request<ChildReferral>("/healthcare/v1/child-referrals", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function listChildReferrals(
+  params: { patient_id: string; status?: string; limit?: number; offset?: number },
+): Promise<ChildReferralList> {
+  const query = new URLSearchParams({ patient_id: params.patient_id });
+  if (params.status !== undefined) query.set("status", params.status);
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  return request<ChildReferralList>(`/healthcare/v1/child-referrals?${query.toString()}`);
+}
+
+export function updateChildReferralStatus(
+  id: string,
+  input: ChildReferralStatusInput,
+): Promise<ChildReferral> {
+  return request<ChildReferral>(
+    `/healthcare/v1/child-referrals/${encodeURIComponent(id)}/status`,
+    { method: "PATCH", body: JSON.stringify(input) },
+  );
+}
+
+// ============================================================================
+//  053 C1 儿童健康报告（只读聚合）：GET /child-health-reports/:patient_id
+//  契约冻结见 docs/plans/053 §5；只增函数与类型，不改既有签名。
+//  patient 段不含身份证号（053 §3 Dh）；过敏段读遗留 patients.allergies JSONB（D1 落地前）。
+// ============================================================================
+
+/** 报告患者段：最小 PHI（**不含身份证号**）。 */
+export interface ChildHealthReportPatient {
+  id: string;
+  name: string | null;
+  gender: string | null;
+  birth_date: string | null;
+  /** 由 birth_date 与业务今天派生；birth_date 为空或异常时为 null */
+  age_months: number | null;
+  /** 患者域：居民 / 长者 / 儿童 */
+  person_type: string;
+}
+
+/** 报告档案段（child_health_profiles 全列）。 */
+export interface ChildHealthReportProfile {
+  id: string;
+  patient_id: string;
+  guardian_name: string | null;
+  guardian_relationship: string | null;
+  guardian_phone: string | null;
+  birth_weight_g: number | null;
+  birth_height_mm: number | null;
+  delivery_mode: string | null;
+  feeding_method: string | null;
+  vaccination_summary: string | null;
+  vaccination_records: VaccinationRecord[] | null;
+  remark: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+/** 报告体检段（含 053 B1 诊断字段；患者段单独给出，故无 patient_name）。 */
+export type ChildHealthReportCheckup = Omit<ChildHealthCheckup, "patient_name">;
+
+/** 报告成长段（含 percentile_snapshot 与 deleted_at）。 */
+export type ChildHealthReportGrowth = Omit<ChildGrowthMeasurement, "patient_name"> & {
+  deleted_at: string | null;
+};
+
+/** 报告接种记录段。 */
+export type ChildHealthReportVaccinationRecord = Omit<ChildVaccinationRecord, "patient_name">;
+
+/** 报告接种排程条目（读时状态；不含 record_id 等记录回显）。 */
+export type ChildHealthReportScheduleRow = Omit<
+  ChildVaccinationScheduleRow,
+  "record_id" | "administered_at" | "facility" | "batch_no" | "note"
+>;
+
+/** 接种汇总（按读时状态计数，口径与 052 一致）。 */
+export interface ChildHealthReportVaccinationSummary {
+  total: number;
+  已接种: number;
+  待接种: number;
+  临期: number;
+  逾期: number;
+  暂缓: number;
+  拒种: number;
+}
+
+export interface ChildHealthReportVaccinations {
+  records: ChildHealthReportVaccinationRecord[];
+  schedule: ChildHealthReportScheduleRow[];
+  summary: ChildHealthReportVaccinationSummary;
+}
+
+/** 报告筛查段（含 053 A3 conclusion / checkup_id）。 */
+export type ChildHealthReportScreening = Omit<ChildDevelopmentalScreening, "patient_name">;
+
+/** 报告转诊段。 */
+export type ChildHealthReportReferral = Omit<ChildReferral, "patient_name">;
+
+/** 报告指导段（含 053 B3 kind）。 */
+export type ChildHealthReportGuidance = Omit<ChildGuidanceRecord, "patient_name">;
+
+/** 报告过敏段：遗留 patients.allergies JSONB（035 形状；D1 落地前不改读规范化表）。 */
+export interface ChildHealthReportAllergy {
+  allergen?: string;
+  reaction?: string;
+}
+
+export interface ChildHealthReportMeta {
+  generated_at: string;
+  counts: {
+    checkups: number;
+    growth: number;
+    screenings: number;
+    referrals: number;
+    guidance: number;
+    allergies: number;
+  };
+}
+
+export interface ChildHealthReport {
+  patient: ChildHealthReportPatient;
+  profile: ChildHealthReportProfile | null;
+  checkups: ChildHealthReportCheckup[];
+  growth: ChildHealthReportGrowth[];
+  vaccinations: ChildHealthReportVaccinations;
+  screenings: ChildHealthReportScreening[];
+  referrals: ChildHealthReportReferral[];
+  guidance: ChildHealthReportGuidance[];
+  allergies: ChildHealthReportAllergy[];
+  meta: ChildHealthReportMeta;
+}
+
+/** 053 C1：儿童健康报告（只读聚合；读开放）。 */
+export function getChildHealthReport(patientId: string): Promise<ChildHealthReport> {
+  return request<ChildHealthReport>(
+    `/healthcare/v1/child-health-reports/${encodeURIComponent(patientId)}`,
+  );
+}
+
+// ============================================================================
+//  053 D1 药物过敏史规范化：POST/GET /patient-allergies、PATCH/DELETE /patient-allergies/:id
+//  契约冻结见 docs/plans/053 §5；只增函数与类型，不改既有签名。
+//  枚举（药物/食物/其他、一般/严重、有效/已停用）由服务端白名单校验；operator 服务端派生；
+//  删除为软删（status → 已停用）。GET 读开放；POST/PATCH/DELETE 受 clinical:write。
+// ============================================================================
+
+export interface PatientAllergy {
+  id: string;
+  patient_id: string;
+  patient_name: string | null;
+  /** 过敏原类型：药物 / 食物 / 其他 */
+  allergen_type: string;
+  allergen_name: string;
+  allergen_code: string | null;
+  reaction: string | null;
+  /** 严重度：一般 / 严重 */
+  severity: string;
+  /** 状态：有效 / 已停用 */
+  status: string;
+  operator: string;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PatientAllergyList {
+  records: PatientAllergy[];
+  meta: { total: number };
+}
+
+export interface PatientAllergyInput {
+  patient_id: string;
+  /** 药物 / 食物 / 其他 */
+  allergen_type: string;
+  allergen_name: string;
+  allergen_code?: string;
+  reaction?: string;
+  /** 一般 / 严重，缺省「一般」 */
+  severity?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface PatientAllergyPatch {
+  allergen_type?: string;
+  allergen_name?: string;
+  allergen_code?: string;
+  reaction?: string;
+  severity?: string;
+  /** 有效 / 已停用 */
+  status?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export function listPatientAllergies(
+  params: { patient_id: string; status?: string; limit?: number; offset?: number },
+): Promise<PatientAllergyList> {
+  const query = new URLSearchParams({ patient_id: params.patient_id });
+  if (params.status !== undefined) query.set("status", params.status);
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  return request<PatientAllergyList>(`/healthcare/v1/patient-allergies?${query.toString()}`);
+}
+
+export function createPatientAllergy(input: PatientAllergyInput): Promise<PatientAllergy> {
+  return request<PatientAllergy>("/healthcare/v1/patient-allergies", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updatePatientAllergy(id: string, input: PatientAllergyPatch): Promise<PatientAllergy> {
+  return request<PatientAllergy>(`/healthcare/v1/patient-allergies/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+/** 软删除：置 status='已停用'，返回更新后的单条（含 {id, status}）。 */
+export function deletePatientAllergy(id: string): Promise<PatientAllergy> {
+  return request<PatientAllergy>(`/healthcare/v1/patient-allergies/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+// ============================================================================
+//  053 D3 开嘱前药物过敏检查：GET /drug-allergy-check?patient_id=&material_id=
+//  只读（读开放，046 D7）。目录校验与开嘱同口径（端口未接线 503 / 物资不存在 404 /
+//  非药品或非启用 409）；缺参 400。warnings 分级（一般/严重），severe 表示存在严重提醒。
+//  开嘱时严重项需在请求体顶层带 acknowledged_warnings（matched 字符串数组）二次确认。
+// ============================================================================
+
+export interface DrugAllergyWarning {
+  /** 严重度：一般 / 严重 */
+  severity: string;
+  reason: string;
+  /** 来源：过敏史 / 交叉反应 / 年龄禁忌 */
+  source: string;
+  /** 命中的过敏原或规则关键字（脱敏） */
+  matched: string;
+}
+
+export interface DrugAllergyCheck {
+  patient_id: string;
+  material_id: string;
+  drug_name: string | null;
+  drug_code: string | null;
+  warnings: DrugAllergyWarning[];
+  /** 是否存在严重提醒（true 时开嘱需 acknowledged_warnings 二次确认） */
+  severe: boolean;
+}
+
+export function checkDrugAllergy(patientId: string, materialId: string): Promise<DrugAllergyCheck> {
+  const query = new URLSearchParams({ patient_id: patientId, material_id: materialId });
+  return request<DrugAllergyCheck>(`/healthcare/v1/drug-allergy-check?${query.toString()}`);
+}
+
+// ============================================================================
+//  054 A 链（dining）— 营养师工作台
+//
+//  冻结契约：`docs/plans/054.aceso-child-health-role-workflows.md` §5.1；
+//  形状以 A1–A5 已交付实现为准（比 §5.7 的节选多出 `patient_name` / `band` /
+//  `unmatched` / `reference_version` 等服务端派生字段，UI 必须按实际响应取用）。
+//  本段只追加，不改既有签名；写路由受 `dining:manage`（A6 页面按此显隐），
+//  读路由（列表/分析/周报查看）不上门禁（046 D7）。
+// ============================================================================
+
+// ─── 054 A1：每餐膳食摄入记录（POST 同儿童同餐次幂等覆盖 / GET 列表）─────────
+
+export interface MealIntakeItem {
+  food_name: string;
+  amount_g: number;
+  note?: string;
+}
+
+export interface MealIntakeRecord {
+  id: string;
+  patient_id: string;
+  patient_name: string;
+  roster_item_id: string | null;
+  intake_date: string;
+  meal_time: string;
+  items: MealIntakeItem[];
+  /** 0–1 的摄入比例（缺省 1） */
+  intake_ratio: number;
+  /** 以下五项一律服务端按「食物项 × 菜品营养 × 摄入比例」汇总，客户端提交即忽略 */
+  energy_kcal: number;
+  protein_g: number;
+  fat_g: number;
+  carb_g: number;
+  sodium_mg: number;
+  operator: string;
+  remark: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MealIntakeRecordList {
+  records: MealIntakeRecord[];
+  meta: { total: number };
+}
+
+export interface MealIntakeInput {
+  patient_id: string;
+  intake_date: string;
+  /** 早餐 / 午餐 / 晚餐 / 加餐（服务端白名单） */
+  meal_time: string;
+  items: MealIntakeItem[];
+  intake_ratio?: number;
+  roster_item_id?: string | null;
+  remark?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+/** 登记摄入；同一儿童 + 同一日期 + 同一餐次重复提交为覆盖更新（幂等）。 */
+export function createMealIntakeRecord(input: MealIntakeInput): Promise<MealIntakeRecord> {
+  return request<MealIntakeRecord>("/dining/v1/meal-intake-records", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function listMealIntakeRecords(params: {
+  patient_id?: string;
+  date?: string;
+  meal_time?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<MealIntakeRecordList> {
+  const query = new URLSearchParams();
+  if (params.patient_id?.trim()) query.set("patient_id", params.patient_id.trim());
+  if (params.date?.trim()) query.set("date", params.date.trim());
+  if (params.meal_time?.trim()) query.set("meal_time", params.meal_time.trim());
+  if (params.from?.trim()) query.set("from", params.from.trim());
+  if (params.to?.trim()) query.set("to", params.to.trim());
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<MealIntakeRecordList>(`/dining/v1/meal-intake-records${suffix}`);
+}
+
+// ─── 054 A2/A3：营养分析（读时聚合；结论与缺口项由服务端派生）─────────────────
+
+export interface NutritionAnalysisBand {
+  code: string;
+  label: string;
+}
+
+/** 该月龄段的每日参考摄入量（内置常量口径，见 `reference_version`） */
+export interface NutritionAnalysisReference {
+  energy_kcal: number;
+  protein_g: number;
+  fat_g: number;
+  carb_g: number;
+  sodium_mg: number;
+}
+
+export interface NutritionAnalysisItem {
+  food_name: string;
+  amount_g: number;
+  energy_kcal: number;
+  /** 是否命中成分来源（菜品营养优先、内置常量回落） */
+  matched: boolean;
+}
+
+export interface NutritionAnalysis {
+  patient_id: string;
+  patient_name: string;
+  intake_date: string;
+  /** 缺省餐次时服务端返回「全部」 */
+  meal_time: string;
+  age_months: number;
+  band: NutritionAnalysisBand;
+  energy_kcal: number;
+  protein_g: number;
+  fat_g: number;
+  carb_g: number;
+  sodium_mg: number;
+  reference: NutritionAnalysisReference;
+  /** 服务端派生结论（客户端不得提交/覆盖） */
+  conclusion: string;
+  gaps: string[];
+  items: NutritionAnalysisItem[];
+  /** 未命中成分的食物名（计 0，不报错） */
+  unmatched: string[];
+  /** 参考值常量版本（口径标注，必须随结论一起展示） */
+  reference_version: string;
+}
+
+/** 读时聚合分析；当天无摄入记录返回零值结论，不 500。 */
+export function getNutritionAnalysis(params: {
+  patient_id: string;
+  date?: string;
+  meal_time?: string;
+}): Promise<NutritionAnalysis> {
+  const query = new URLSearchParams({ patient_id: params.patient_id });
+  if (params.date?.trim()) query.set("date", params.date.trim());
+  if (params.meal_time?.trim()) query.set("meal_time", params.meal_time.trim());
+  return request<NutritionAnalysis>(`/dining/v1/nutrition-analysis?${query.toString()}`);
+}
+
+// ─── 054 A4：过敏原标记（覆盖式写 dining_diet_profiles.allergies）+ 特殊膳食申请 ─
+
+/**
+ * 覆盖式写饮食档案的过敏原（复用既有 `allergies` 列，不新建过敏主数据表）。
+ * 请求体字段名是 `allergies`（与档案列同口径），不是 `allergens`。
+ */
+export function updateDietProfileAllergens(id: string, allergies: string[]): Promise<DietProfile> {
+  return request<DietProfile>(`/dining/v1/diet-profiles/${encodeURIComponent(id)}/allergens`, {
+    method: "PUT",
+    body: JSON.stringify({ allergies }),
+  });
+}
+
+/**
+ * 054 A4b：**按 patient 维度**覆盖式写过敏原
+ * （`PUT /dining/v1/diet-profiles/by-patient/:patient_id/allergens`）。
+ *
+ * - 儿童（`patients.person_type='儿童'`）：允许无入住 → 服务端 upsert 最小启用档案
+ *   （`encounter_id = NULL`、`meal_type` 缺省「普食」）并写 `allergies`；
+ * - 非儿童：只覆盖更新其既有启用档案，没有启用档案 → **400**（服务端文案，如
+ *   `非儿童必须先建立饮食档案（需在院入住）` / `encounter_id is required`），
+ *   调用方必须原样展示，不得吞错；
+ * - 请求体字段名是 `allergies`（与档案列同口径）；**覆盖式：整体替换，不是追加**，
+ *   传空数组即清空全部过敏原标记。
+ */
+export function upsertDietProfileAllergensByPatient(
+  patientId: string,
+  allergies: string[],
+  options: { meal_type?: string } = {},
+): Promise<DietProfile> {
+  const body: Record<string, unknown> = { allergies };
+  if (options.meal_type?.trim()) body.meal_type = options.meal_type.trim();
+  return request<DietProfile>(
+    `/dining/v1/diet-profiles/by-patient/${encodeURIComponent(patientId)}/allergens`,
+    {
+      method: "PUT",
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+export interface SpecialDietRequest {
+  id: string;
+  patient_id: string;
+  patient_name: string;
+  /** 过敏回避 / 治疗膳食 / 其他 */
+  request_type: string;
+  meal_type: string;
+  allergens: string[];
+  reason: string | null;
+  /** 待审批 / 已批准 / 已驳回 / 已终止 */
+  status: string;
+  requested_by: string;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  effective_from: string | null;
+  effective_to: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SpecialDietRequestList {
+  records: SpecialDietRequest[];
+  meta: { total: number };
+}
+
+export interface SpecialDietRequestInput {
+  patient_id: string;
+  request_type: string;
+  meal_type: string;
+  allergens?: string[];
+  reason?: string | null;
+  effective_from?: string | null;
+  effective_to?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+/** 创建特殊膳食申请；状态恒为「待审批」，申请人由服务端按会话派生。 */
+export function createSpecialDietRequest(input: SpecialDietRequestInput): Promise<SpecialDietRequest> {
+  return request<SpecialDietRequest>("/dining/v1/special-diet-requests", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function listSpecialDietRequests(params: {
+  patient_id?: string;
+  status?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<SpecialDietRequestList> {
+  const query = new URLSearchParams();
+  if (params.patient_id?.trim()) query.set("patient_id", params.patient_id.trim());
+  if (params.status?.trim()) query.set("status", params.status.trim());
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<SpecialDietRequestList>(`/dining/v1/special-diet-requests${suffix}`);
+}
+
+/** 状态流转；非法流转服务端 400（合法目标见 `lib/nutrition.ts` 的状态机）。 */
+export function updateSpecialDietRequestStatus(id: string, status: string): Promise<SpecialDietRequest> {
+  return request<SpecialDietRequest>(`/dining/v1/special-diet-requests/${encodeURIComponent(id)}/status`, {
+    method: "PATCH",
+    body: JSON.stringify({ status }),
+  });
+}
+
+// ─── 054 A5：营养周报（显式生成 + 快照；同儿童同周重复生成覆盖）──────────────
+
+export interface NutritionWeeklyReportDaily {
+  intake_date: string;
+  energy_kcal: number;
+  protein_g: number;
+  fat_g: number;
+  carb_g: number;
+  sodium_mg: number;
+  conclusion: string;
+}
+
+export interface NutritionWeeklyReport {
+  id: string;
+  patient_id: string;
+  patient_name: string;
+  /** 周一（`DiningConstants.weekStartOf` 口径） */
+  week_start: string;
+  /** 周日 */
+  week_end: string;
+  /** 当周有摄入记录的天数（均值为「按有记录天数」平均） */
+  intake_days: number;
+  energy_avg_kcal: number;
+  protein_avg_g: number;
+  fat_avg_g: number;
+  carb_avg_g: number;
+  sodium_avg_mg: number;
+  conclusion: string;
+  gaps: string[];
+  daily: NutritionWeeklyReportDaily[];
+  /** 参考值常量版本（快照落库，历史周报可追溯口径） */
+  reference_version: string | null;
+  generated_by: string;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface NutritionWeeklyReportList {
+  records: NutritionWeeklyReport[];
+  meta: { total: number };
+}
+
+/** 生成某儿童某周周报；`week_start` 缺省为当周，传非周一日期会被归一到该周周一。 */
+export function generateNutritionWeeklyReport(input: {
+  patient_id: string;
+  week_start?: string;
+}): Promise<NutritionWeeklyReport> {
+  return request<NutritionWeeklyReport>("/dining/v1/nutrition-weekly-reports/generate", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function listNutritionWeeklyReports(params: {
+  patient_id?: string;
+  week_start?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<NutritionWeeklyReportList> {
+  const query = new URLSearchParams();
+  if (params.patient_id?.trim()) query.set("patient_id", params.patient_id.trim());
+  if (params.week_start?.trim()) query.set("week_start", params.week_start.trim());
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<NutritionWeeklyReportList>(`/dining/v1/nutrition-weekly-reports${suffix}`);
+}
+
+// ============================================================================
+//  054 B 链（nursing）— 康复师工作台
+//
+//  冻结契约：`docs/plans/054.aceso-child-health-role-workflows.md` §5.2；
+//  形状以 B1–B4 已交付实现为准（`ChildRehabPeriodService` / `ChildRehabPlanService` /
+//  `ChildRehabSessionService` / `ChildRehabMilestoneService` / `ChildRehabHandoutService`）。
+//  写路由受 `rehab:execute`（B5 页面按此显隐），读路由不上门禁（046 D7）。
+//  本段只追加，不改既有签名。
+// ============================================================================
+
+// ─── 054 B1：儿童康复服务周期 ──────────────────────────────────────────────
+
+export interface ChildRehabPeriod {
+  id: string;
+  patient_id: string;
+  patient_name: string;
+  /** 恒为 `CHILD_REHAB`（服务端写入，客户端提交即忽略） */
+  service_type: string;
+  start_date: string;
+  end_date: string | null;
+  coordinator: string | null;
+  /** ACTIVE / SUSPENDED / COMPLETED / CANCELLED */
+  status: string;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChildRehabPeriodList {
+  records: ChildRehabPeriod[];
+  meta: { total: number };
+}
+
+export interface ChildRehabPeriodInput {
+  patient_id: string;
+  start_date: string;
+  end_date?: string | null;
+  coordinator?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+/** 创建康复周期；`encounter_id` 恒 NULL（儿童无入住），同儿童重复启用 → 409。 */
+export function createChildRehabPeriod(input: ChildRehabPeriodInput): Promise<ChildRehabPeriod> {
+  return request<ChildRehabPeriod>("/nursing/v1/child-rehab-periods", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function listChildRehabPeriods(params: {
+  patient_id?: string;
+  status?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<ChildRehabPeriodList> {
+  const query = new URLSearchParams();
+  if (params.patient_id?.trim()) query.set("patient_id", params.patient_id.trim());
+  if (params.status?.trim()) query.set("status", params.status.trim());
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<ChildRehabPeriodList>(`/nursing/v1/child-rehab-periods${suffix}`);
+}
+
+/** 周期状态流转；非法流转 400，重新启用命中部分唯一索引 → 409。 */
+export function updateChildRehabPeriodStatus(id: string, status: string): Promise<ChildRehabPeriod> {
+  return request<ChildRehabPeriod>(`/nursing/v1/child-rehab-periods/${encodeURIComponent(id)}/status`, {
+    method: "PATCH",
+    body: JSON.stringify({ status }),
+  });
+}
+
+// ─── 054 B1：训练计划与明细（复用 nursing_plans/plan_items）──────────────────
+
+export interface ChildRehabPlanItem {
+  id: string;
+  plan_id: string;
+  action: string;
+  frequency_code: string | null;
+  frequency_name: string | null;
+  duration_days: number | null;
+  remark: string | null;
+  status: string;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface ChildRehabPlan {
+  id: string;
+  period_id: string;
+  /** join 派生（`nursing_plans` 不加列） */
+  patient_id: string;
+  plan_name: string;
+  goals: string | null;
+  status: string;
+  created_by: string | null;
+  start_date: string | null;
+  end_date: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+  items: ChildRehabPlanItem[];
+}
+
+export interface ChildRehabPlanList {
+  records: ChildRehabPlan[];
+  meta: { total: number };
+}
+
+export interface ChildRehabPlanItemInput {
+  action: string;
+  frequency_code?: string | null;
+  frequency_name?: string | null;
+  duration_days?: number | null;
+  remark?: string | null;
+}
+
+export interface ChildRehabPlanInput {
+  period_id: string;
+  plan_name: string;
+  goals?: string | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  items?: ChildRehabPlanItemInput[];
+  metadata?: Record<string, unknown>;
+}
+
+export function createChildRehabPlan(input: ChildRehabPlanInput): Promise<ChildRehabPlan> {
+  return request<ChildRehabPlan>("/nursing/v1/child-rehab-plans", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function listChildRehabPlans(params: {
+  period_id?: string;
+  patient_id?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<ChildRehabPlanList> {
+  const query = new URLSearchParams();
+  if (params.period_id?.trim()) query.set("period_id", params.period_id.trim());
+  if (params.patient_id?.trim()) query.set("patient_id", params.patient_id.trim());
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<ChildRehabPlanList>(`/nursing/v1/child-rehab-plans${suffix}`);
+}
+
+// ─── 054 B2：训练执行打卡与进度（进度为读时派生，不落库）─────────────────────
+
+export interface ChildRehabSession {
+  id: string;
+  plan_id: string;
+  /** join 派生 */
+  patient_id: string;
+  session_date: string;
+  /** 0–1 的完成度 */
+  completion_ratio: number;
+  performance: string | null;
+  note: string | null;
+  operator: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+}
+
+/** 计划进度汇总；`progress_ratio = 完成天数 ÷ 计划天数`（**不封顶**）。 */
+export interface ChildRehabProgress {
+  plan_id: string;
+  session_count: number;
+  completed_days: number;
+  /** 计划起止含端点天数；任一端缺失为 null */
+  planned_days: number | null;
+  avg_completion_ratio: number;
+  progress_ratio: number;
+  last_session_date: string | null;
+}
+
+export interface ChildRehabSessionList {
+  records: ChildRehabSession[];
+  meta: { total: number };
+  /** 仅当请求带 `plan_id` 时返回 */
+  progress?: ChildRehabProgress;
+}
+
+export interface ChildRehabSessionInput {
+  plan_id: string;
+  session_date: string;
+  completion_ratio?: number;
+  performance?: string | null;
+  note?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export function createChildRehabSession(input: ChildRehabSessionInput): Promise<ChildRehabSession> {
+  return request<ChildRehabSession>("/nursing/v1/child-rehab-sessions", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function listChildRehabSessions(params: {
+  plan_id?: string;
+  patient_id?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<ChildRehabSessionList> {
+  const query = new URLSearchParams();
+  if (params.plan_id?.trim()) query.set("plan_id", params.plan_id.trim());
+  if (params.patient_id?.trim()) query.set("patient_id", params.patient_id.trim());
+  if (params.from?.trim()) query.set("from", params.from.trim());
+  if (params.to?.trim()) query.set("to", params.to.trim());
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<ChildRehabSessionList>(`/nursing/v1/child-rehab-sessions${suffix}`);
+}
+
+// ─── 054 B3：里程碑登记 + 读时四态派生（未达/临近/已达成/逾期）───────────────
+
+export interface ChildRehabMilestoneRecord {
+  id: string;
+  patient_id: string;
+  milestone_code: string;
+  milestone_name: string;
+  expected_age_months: number | null;
+  achieved_at: string | null;
+  /** 登记态：未达成 / 已达成 */
+  status: string;
+  operator: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChildRehabMilestoneList {
+  records: ChildRehabMilestoneRecord[];
+  meta: { total: number };
+}
+
+export interface ChildRehabMilestoneStatusItem {
+  milestone_code: string;
+  milestone_name: string;
+  expected_age_months: number | null;
+  achieved_at: string | null;
+  /** 读时派生四态：未达 / 临近 / 已达成 / 逾期 */
+  state: string;
+}
+
+export interface ChildRehabMilestoneStatus {
+  patient_id: string;
+  age_months: number;
+  as_of: string;
+  items: ChildRehabMilestoneStatusItem[];
+}
+
+/** 登记/更新里程碑达成（幂等 upsert）；`achieved_at` 缺省表示「未达成」。 */
+export function createChildRehabMilestone(input: {
+  patient_id: string;
+  milestone_code: string;
+  achieved_at?: string | null;
+  metadata?: Record<string, unknown>;
+}): Promise<ChildRehabMilestoneRecord> {
+  return request<ChildRehabMilestoneRecord>("/nursing/v1/child-rehab-milestones", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function listChildRehabMilestones(params: {
+  patient_id?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<ChildRehabMilestoneList> {
+  const query = new URLSearchParams();
+  if (params.patient_id?.trim()) query.set("patient_id", params.patient_id.trim());
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<ChildRehabMilestoneList>(`/nursing/v1/child-rehab-milestones${suffix}`);
+}
+
+/** 读时四态派生（常量表全量 + 已登记 code）；同一儿童跨月再查会变化。 */
+export function getChildRehabMilestoneStatus(patientId: string): Promise<ChildRehabMilestoneStatus> {
+  return request<ChildRehabMilestoneStatus>(
+    `/nursing/v1/child-rehab-milestone-status/${encodeURIComponent(patientId)}`,
+  );
+}
+
+// ─── 054 B4：家庭训练指导手册（模板常量 + 分发台账 + 签收单向）───────────────
+
+export interface ChildRehabHandoutTemplate {
+  template_code: string;
+  template_name: string;
+  content: string;
+}
+
+export interface ChildRehabHandoutTemplateList {
+  records: ChildRehabHandoutTemplate[];
+  meta: { total: number };
+}
+
+export interface ChildRehabHandout {
+  id: string;
+  patient_id: string;
+  template_code: string;
+  template_name: string;
+  content: string;
+  /** 自由文本，缺省「现场」（建议值：现场/微信/纸质） */
+  channel: string;
+  delivered_at: string | null;
+  /** 签收事实源：非空即已签收 */
+  acknowledged_at: string | null;
+  acknowledged_by: string | null;
+  /** 派生字段：未签收 / 已签收（事实源是 acknowledged_at） */
+  status: string;
+  operator: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChildRehabHandoutList {
+  records: ChildRehabHandout[];
+  meta: { total: number };
+}
+
+export function listChildRehabHandoutTemplates(): Promise<ChildRehabHandoutTemplateList> {
+  return request<ChildRehabHandoutTemplateList>("/nursing/v1/child-rehab-handout-templates");
+}
+
+export function createChildRehabHandout(input: {
+  patient_id: string;
+  template_code: string;
+  content?: string;
+  channel?: string;
+  delivered_at?: string;
+  metadata?: Record<string, unknown>;
+}): Promise<ChildRehabHandout> {
+  return request<ChildRehabHandout>("/nursing/v1/child-rehab-handouts", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function listChildRehabHandouts(params: {
+  patient_id?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<ChildRehabHandoutList> {
+  const query = new URLSearchParams();
+  if (params.patient_id?.trim()) query.set("patient_id", params.patient_id.trim());
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<ChildRehabHandoutList>(`/nursing/v1/child-rehab-handouts${suffix}`);
+}
+
+/** 签收（**单向**）：已签收再签 → 409；签收事实源是 `acknowledged_at`。 */
+export function acknowledgeChildRehabHandout(id: string): Promise<ChildRehabHandout> {
+  return request<ChildRehabHandout>(
+    `/nursing/v1/child-rehab-handouts/${encodeURIComponent(id)}/acknowledge`,
+    { method: "PATCH", body: JSON.stringify({}) },
+  );
+}
+
+// ============================================================================
+//  054 D 链（pharmacy）— 药师工作台：儿科用药规则库 + 用量计算辅助
+//
+//  冻结契约：`docs/plans/054.aceso-child-health-role-workflows.md` §5.4；
+//  形状以 D1/D2 已交付实现为准（`PediatricDoseRuleService` / `PediatricDoseCalculator`）。
+//  写路由（POST/PUT 规则）受 `pharmacy:dispense`；读路由（列表/计算）读开放（046 D7）。
+//  本段只追加，不改既有签名。
+//
+//  **安全边界（054 §12 R6）**：规则与计算结果只是「辅助计算 + 上限提示」，
+//  **不写医嘱、不替代药师判断**；`capped` 为真时药师必须人工复核上限。
+// ============================================================================
+
+// ─── 054 D2：儿科用药规则库 ────────────────────────────────────────────────
+
+export interface PediatricDoseRule {
+  id: string;
+  /** 药品目录 `public.materials.id`（跨 schema 弱关联，无 FK） */
+  material_id: string;
+  /** 写入时落库的名称快照 */
+  material_name: string | null;
+  age_min_months: number | null;
+  age_max_months: number | null;
+  weight_min_kg: number | null;
+  weight_max_kg: number | null;
+  /** 体重依赖剂量（与 fixed_dose 至少一项） */
+  dose_per_kg: number | null;
+  /** 固定剂量（与 dose_per_kg 至少一项；两者同时存在时优先 dose_per_kg） */
+  fixed_dose: number | null;
+  single_dose_max: number | null;
+  daily_dose_max: number | null;
+  doses_per_day: number | null;
+  unit: string;
+  /** 启用 / 停用 */
+  status: string;
+  note: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PediatricDoseRuleList {
+  records: PediatricDoseRule[];
+  meta: { total: number };
+}
+
+/**
+ * 规则写入体。服务端只接受白名单字段（提交 `id/material_name/created_by` 等未声明字段 → 400）；
+ * `PUT` 语义为「只覆盖请求体中出现的字段」，显式 `null` 清空可选字段。
+ */
+export interface PediatricDoseRuleInput {
+  material_id: string;
+  unit: string;
+  age_min_months?: number | null;
+  age_max_months?: number | null;
+  weight_min_kg?: number | null;
+  weight_max_kg?: number | null;
+  dose_per_kg?: number | null;
+  fixed_dose?: number | null;
+  single_dose_max?: number | null;
+  daily_dose_max?: number | null;
+  doses_per_day?: number | null;
+  status?: string;
+  note?: string | null;
+}
+
+export function listPediatricDoseRules(params: {
+  material_id?: string;
+  status?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<PediatricDoseRuleList> {
+  const query = new URLSearchParams();
+  if (params.material_id?.trim()) query.set("material_id", params.material_id.trim());
+  if (params.status?.trim()) query.set("status", params.status.trim());
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<PediatricDoseRuleList>(`/pharmacy/v1/pediatric-dose-rules${suffix}`);
+}
+
+/** 创建规则；`material_id` 必须存在于 `public.materials`，否则 404。 */
+export function createPediatricDoseRule(input: PediatricDoseRuleInput): Promise<PediatricDoseRule> {
+  return request<PediatricDoseRule>("/pharmacy/v1/pediatric-dose-rules", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+/** 修改规则（PUT：只覆盖请求体中出现的字段）。 */
+export function updatePediatricDoseRule(
+  id: string,
+  input: Partial<PediatricDoseRuleInput>,
+): Promise<PediatricDoseRule> {
+  return request<PediatricDoseRule>(`/pharmacy/v1/pediatric-dose-rules/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+// ─── 054 D1/D2：用量计算辅助（读开放）───────────────────────────────────────
+
+/** 规则来源诊断码（D1 内部词汇，非业务枚举、不由客户端提交）。 */
+export type PediatricDoseSource =
+  | "WEIGHT_AND_AGE_BAND"
+  | "WEIGHT_BAND"
+  | "AGE_BAND"
+  | "GENERIC"
+  | "GENERIC_FALLBACK";
+
+export interface PediatricDoseCalculation {
+  material_id: string;
+  material_name: string | null;
+  weight_kg: number | null;
+  age_months: number | null;
+  single_dose: number;
+  daily_dose: number;
+  unit: string;
+  /** 是否触发过任一上限封顶（单次或日总量）；true 时药师必须人工复核 */
+  capped: boolean;
+  rule_id: string | null;
+  /** 规则来源：命中区间 / 通用 / 区间缺失回落 */
+  source: PediatricDoseSource | string;
+}
+
+/**
+ * 用量计算辅助。无可用启用规则 → 404（**不返回 0 剂量**）；
+ * 体重/年龄非法（NaN/非正数/非整数）→ 400。
+ */
+export function getPediatricDoseCalculation(params: {
+  material_id: string;
+  weight_kg?: number | string;
+  age_months?: number | string;
+}): Promise<PediatricDoseCalculation> {
+  const query = new URLSearchParams({ material_id: params.material_id });
+  if (params.weight_kg !== undefined && String(params.weight_kg).trim() !== "") {
+    query.set("weight_kg", String(params.weight_kg).trim());
+  }
+  if (params.age_months !== undefined && String(params.age_months).trim() !== "") {
+    query.set("age_months", String(params.age_months).trim());
+  }
+  return request<PediatricDoseCalculation>(`/pharmacy/v1/pediatric-dose-calculations?${query.toString()}`);
+}
+
+// ============================================================================
+//  054 C 链（nursing）— 保育员工作台：活动日志 / 行为观测 / 班级日程 / 安全巡查
+//
+//  冻结契约：`docs/plans/054.aceso-child-health-role-workflows.md` §5.3；
+//  形状以 C1/C2 已交付实现为准（`ChildcareActivityLogService` /
+//  `ChildcareBehaviorObservationService` / `ChildcareClassScheduleService` /
+//  `ChildcareSafetyInspectionService`）。写路由受 `nursing:document`（C3 页面按此显隐），
+//  读路由不上门禁（046 D7）。本段只追加，不改既有签名。
+// ============================================================================
+
+// ─── 054 C1：日常活动日志（班级级；patient_id 可空）─────────────────────────
+
+export interface ChildcareActivityLog {
+  id: string;
+  /** 班级级日志为 null；儿童级日志为具体儿童 */
+  patient_id: string | null;
+  class_name: string;
+  activity_date: string;
+  activity_name: string;
+  participant_count: number;
+  note: string | null;
+  operator: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChildcareActivityLogList {
+  records: ChildcareActivityLog[];
+  meta: { total: number };
+}
+
+export interface ChildcareActivityLogInput {
+  class_name: string;
+  activity_name: string;
+  patient_id?: string | null;
+  /** 缺省为服务端业务当天 */
+  activity_date?: string;
+  /** 缺省 0 */
+  participant_count?: number;
+  note?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export function createChildcareActivityLog(
+  input: ChildcareActivityLogInput,
+): Promise<ChildcareActivityLog> {
+  return request<ChildcareActivityLog>("/nursing/v1/childcare-activity-logs", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function listChildcareActivityLogs(params: {
+  patient_id?: string;
+  class_name?: string;
+  date?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<ChildcareActivityLogList> {
+  const query = new URLSearchParams();
+  if (params.patient_id?.trim()) query.set("patient_id", params.patient_id.trim());
+  if (params.class_name?.trim()) query.set("class_name", params.class_name.trim());
+  if (params.date?.trim()) query.set("date", params.date.trim());
+  if (params.from?.trim()) query.set("from", params.from.trim());
+  if (params.to?.trim()) query.set("to", params.to.trim());
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<ChildcareActivityLogList>(`/nursing/v1/childcare-activity-logs${suffix}`);
+}
+
+// ─── 054 C1：行为观测（append-only，**无 updated_at**）────────────────────────
+
+export interface ChildcareBehaviorObservation {
+  id: string;
+  patient_id: string;
+  /** OffsetDateTime：观测时刻 */
+  observed_at: string;
+  category: string;
+  description: string;
+  /** 一般 / 关注 / 需干预（可空） */
+  level: string | null;
+  operator: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface ChildcareBehaviorObservationList {
+  records: ChildcareBehaviorObservation[];
+  meta: { total: number };
+}
+
+export interface ChildcareBehaviorObservationInput {
+  patient_id: string;
+  category: string;
+  description: string;
+  level?: string | null;
+  /** 缺省为服务端当前时刻；接受 ISO-8601 日期或日期时间 */
+  observed_at?: string;
+  metadata?: Record<string, unknown>;
+}
+
+/** 行为观测为 append-only（只新增、不可改），无更新端点。 */
+export function createChildcareBehaviorObservation(
+  input: ChildcareBehaviorObservationInput,
+): Promise<ChildcareBehaviorObservation> {
+  return request<ChildcareBehaviorObservation>("/nursing/v1/childcare-behavior-observations", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function listChildcareBehaviorObservations(params: {
+  patient_id?: string;
+  date?: string;
+  level?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<ChildcareBehaviorObservationList> {
+  const query = new URLSearchParams();
+  if (params.patient_id?.trim()) query.set("patient_id", params.patient_id.trim());
+  if (params.date?.trim()) query.set("date", params.date.trim());
+  if (params.level?.trim()) query.set("level", params.level.trim());
+  if (params.from?.trim()) query.set("from", params.from.trim());
+  if (params.to?.trim()) query.set("to", params.to.trim());
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<ChildcareBehaviorObservationList>(`/nursing/v1/childcare-behavior-observations${suffix}`);
+}
+
+// ─── 054 C2：班级日程（固定时段；同时段冲突 409）─────────────────────────────
+
+export interface ChildcareClassSchedule {
+  id: string;
+  class_name: string;
+  schedule_date: string;
+  /** 固定 8 个 `HH:mm-HH:mm` 时段之一（服务端白名单） */
+  time_slot: string;
+  activity_name: string;
+  /** 草稿 / 已发布 / 已取消 */
+  status: string;
+  operator: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChildcareClassScheduleList {
+  records: ChildcareClassSchedule[];
+  meta: { total: number };
+}
+
+export interface ChildcareClassScheduleInput {
+  class_name: string;
+  schedule_date: string;
+  time_slot: string;
+  activity_name: string;
+  metadata?: Record<string, unknown>;
+}
+
+/** 排课；初始状态恒为「草稿」（客户端提交的 status 被忽略）；同时段冲突 → 409。 */
+export function createChildcareClassSchedule(
+  input: ChildcareClassScheduleInput,
+): Promise<ChildcareClassSchedule> {
+  return request<ChildcareClassSchedule>("/nursing/v1/childcare-class-schedules", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function listChildcareClassSchedules(params: {
+  class_name?: string;
+  date?: string;
+  status?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<ChildcareClassScheduleList> {
+  const query = new URLSearchParams();
+  if (params.class_name?.trim()) query.set("class_name", params.class_name.trim());
+  if (params.date?.trim()) query.set("date", params.date.trim());
+  if (params.status?.trim()) query.set("status", params.status.trim());
+  if (params.from?.trim()) query.set("from", params.from.trim());
+  if (params.to?.trim()) query.set("to", params.to.trim());
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<ChildcareClassScheduleList>(`/nursing/v1/childcare-class-schedules${suffix}`);
+}
+
+/** 发布/取消；非法流转（如取消后再发布）→ 409，服务端文案原样透出。 */
+export function updateChildcareClassScheduleStatus(
+  id: string,
+  status: string,
+): Promise<ChildcareClassSchedule> {
+  return request<ChildcareClassSchedule>(
+    `/nursing/v1/childcare-class-schedules/${encodeURIComponent(id)}/status`,
+    { method: "PATCH", body: JSON.stringify({ status }) },
+  );
+}
+
+// ─── 054 C2：环境安全巡查（12 项检查项；隐患闭环 待整改→已整改→已关闭）───────
+
+export interface ChildcareSafetyInspectionItem {
+  /** 12 项检查项常量之一 */
+  item_code: string;
+  /** 合格 / 不合格 / 不适用 */
+  result: string;
+  hazard?: string | null;
+}
+
+export interface ChildcareSafetyInspection {
+  id: string;
+  area: string;
+  inspected_at: string;
+  items: ChildcareSafetyInspectionItem[];
+  /** 待整改 / 已整改 / 已关闭 */
+  status: string;
+  operator: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChildcareSafetyInspectionList {
+  records: ChildcareSafetyInspection[];
+  meta: { total: number };
+}
+
+export interface ChildcareSafetyInspectionInput {
+  area: string;
+  /** 缺省为服务端当前时刻；接受 ISO-8601 日期或日期时间 */
+  inspected_at?: string;
+  items?: ChildcareSafetyInspectionItem[];
+  metadata?: Record<string, unknown>;
+}
+
+/** 创建巡查记录（初始「待整改」）；`items` 可为空，随后用追加接口补录。 */
+export function createChildcareSafetyInspection(
+  input: ChildcareSafetyInspectionInput,
+): Promise<ChildcareSafetyInspection> {
+  return request<ChildcareSafetyInspection>("/nursing/v1/childcare-safety-inspections", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function listChildcareSafetyInspections(params: {
+  area?: string;
+  date?: string;
+  status?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<ChildcareSafetyInspectionList> {
+  const query = new URLSearchParams();
+  if (params.area?.trim()) query.set("area", params.area.trim());
+  if (params.date?.trim()) query.set("date", params.date.trim());
+  if (params.status?.trim()) query.set("status", params.status.trim());
+  if (params.from?.trim()) query.set("from", params.from.trim());
+  if (params.to?.trim()) query.set("to", params.to.trim());
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<ChildcareSafetyInspectionList>(`/nursing/v1/childcare-safety-inspections${suffix}`);
+}
+
+/**
+ * 追加检查/整改项（追加到 `items` 末尾）。
+ * 状态为「待整改」时顺带流转到「已整改」；「已关闭」→ 409。
+ */
+export function appendChildcareSafetyInspectionItem(
+  id: string,
+  item: ChildcareSafetyInspectionItem,
+): Promise<ChildcareSafetyInspection> {
+  return request<ChildcareSafetyInspection>(
+    `/nursing/v1/childcare-safety-inspections/${encodeURIComponent(id)}/items`,
+    { method: "POST", body: JSON.stringify(item) },
+  );
+}
+
+/** 关闭隐患：仅「已整改 → 已关闭」；「待整改」跳步 → 409（服务端文案原样透出）。 */
+export function closeChildcareSafetyInspection(id: string): Promise<ChildcareSafetyInspection> {
+  return request<ChildcareSafetyInspection>(
+    `/nursing/v1/childcare-safety-inspections/${encodeURIComponent(id)}/close`,
+    { method: "PATCH", body: JSON.stringify({}) },
+  );
+}
+
+// ============================================================================
+//  054 E 链（healthcare）— 收银工作台：套餐/订阅 / 结算/收款 / 发票
+//
+//  冻结契约：`docs/plans/054.aceso-child-health-role-workflows.md` §5.5；
+//  形状以 E1–E3 已交付实现为准（`ChildServicePackageService` /
+//  `ChildServiceSettlementService` / `InvoiceService`）。
+//  写路由受 `billing:write`（E4 页面按此显隐），读路由不上门禁（046 D7）。
+//  本段只追加，不改既有签名。
+//
+//  **金额纪律**：明细金额 = `unit_price × quantity`（HALF_UP 到分）、合计 = 明细之和、
+//  订阅 `amount` 为购买时套餐价快照、付费状态与结算状态一律**服务端读时派生**；
+//  客户端提交 `total_amount`/`paid_amount`/`used_amount`/`status` 等派生字段一律 400，
+//  前端只展示、不重算。
+// ============================================================================
+
+// ─── 054 E1：儿保服务套餐定义 ──────────────────────────────────────────────
+
+export interface ChildServicePackageItem {
+  item_code: string;
+  item_name: string;
+  quantity: number;
+}
+
+export interface ChildServicePackage {
+  id: string;
+  code: string;
+  name: string;
+  price: number;
+  items: ChildServicePackageItem[];
+  /** 启用 / 停用 */
+  status: string;
+  metadata: Record<string, unknown> | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChildServicePackageList {
+  records: ChildServicePackage[];
+  meta: { total: number };
+}
+
+/** 套餐写入体；`id`/`created_by`/时间戳由服务端管控（提交即 400）。 */
+export interface ChildServicePackageInput {
+  code: string;
+  name: string;
+  /** 非负、最多 2 位小数 */
+  price: number;
+  items: ChildServicePackageItem[];
+  status?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export function listChildServicePackages(params: {
+  status?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<ChildServicePackageList> {
+  const query = new URLSearchParams();
+  if (params.status?.trim()) query.set("status", params.status.trim());
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<ChildServicePackageList>(`/healthcare/v1/child-service-packages${suffix}`);
+}
+
+export function createChildServicePackage(
+  input: ChildServicePackageInput,
+): Promise<ChildServicePackage> {
+  return request<ChildServicePackage>("/healthcare/v1/child-service-packages", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+/** 修改套餐（PUT：只覆盖请求体中出现的字段；`code` 业务唯一）。 */
+export function updateChildServicePackage(
+  id: string,
+  input: Partial<ChildServicePackageInput>,
+): Promise<ChildServicePackage> {
+  return request<ChildServicePackage>(
+    `/healthcare/v1/child-service-packages/${encodeURIComponent(id)}`,
+    { method: "PUT", body: JSON.stringify(input) },
+  );
+}
+
+// ─── 054 E1：套餐订阅与付费状态（读时派生四态）──────────────────────────────
+
+export interface ChildPackageSubscription {
+  id: string;
+  patient_id: string;
+  package_id: string;
+  package_code: string | null;
+  package_name: string | null;
+  purchased_at: string | null;
+  /** 购买时套餐价快照（服务端写入） */
+  amount: number;
+  paid_amount: number;
+  used_amount: number;
+  /** 启用 / 停用 */
+  status: string;
+  /** 读时派生：未付 / 部分 / 已付 / 已用完 */
+  pay_state: string;
+  metadata: Record<string, unknown> | null;
+  operator: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChildPackageSubscriptionList {
+  records: ChildPackageSubscription[];
+  meta: { total: number };
+}
+
+/** 订阅写入体；`amount`/`paid_amount`/`used_amount`/`status` 由服务端派生（提交即 400）。 */
+export interface ChildPackageSubscriptionInput {
+  patient_id: string;
+  package_id: string;
+  /** ISO-8601 带偏移的日期时间；不得晚于当前时刻 */
+  purchased_at?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export function createChildPackageSubscription(
+  input: ChildPackageSubscriptionInput,
+): Promise<ChildPackageSubscription> {
+  return request<ChildPackageSubscription>("/healthcare/v1/child-package-subscriptions", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function listChildPackageSubscriptions(params: {
+  patient_id?: string;
+  status?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<ChildPackageSubscriptionList> {
+  const query = new URLSearchParams();
+  if (params.patient_id?.trim()) query.set("patient_id", params.patient_id.trim());
+  if (params.status?.trim()) query.set("status", params.status.trim());
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<ChildPackageSubscriptionList>(`/healthcare/v1/child-package-subscriptions${suffix}`);
+}
+
+/** 订阅状态流转：启用 ⇄ 停用（非法值 400）。 */
+export function updateChildPackageSubscriptionStatus(
+  id: string,
+  status: string,
+): Promise<ChildPackageSubscription> {
+  return request<ChildPackageSubscription>(
+    `/healthcare/v1/child-package-subscriptions/${encodeURIComponent(id)}/status`,
+    { method: "PATCH", body: JSON.stringify({ status }) },
+  );
+}
+
+// ─── 054 E2：儿保服务结算单与收款 ──────────────────────────────────────────
+
+/** 明细写入体：`amount` 由服务端按 `unit_price × quantity` 计算（提交即 400）。 */
+export interface ChildServiceSettlementItemInput {
+  item_code: string;
+  item_name: string;
+  /** 非负、最多 2 位小数 */
+  unit_price: number;
+  /** 正数、最多 3 位小数 */
+  quantity: number;
+}
+
+export interface ChildServiceSettlementItem extends ChildServiceSettlementItemInput {
+  /** 服务端计算：`unit_price × quantity` HALF_UP 到分 */
+  amount: number;
+}
+
+export interface ChildServiceSettlement {
+  id: string;
+  settlement_no: string;
+  patient_id: string;
+  subscription_id: string | null;
+  /** 服务端计算：明细金额之和 */
+  total_amount: number;
+  paid_amount: number;
+  /** 待收款 / 部分收款 / 已结清 / 已作废（读时派生） */
+  status: string;
+  operator: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+  items: ChildServiceSettlementItem[];
+}
+
+export interface ChildServiceSettlementList {
+  records: ChildServiceSettlement[];
+  meta: { total: number };
+}
+
+/** 结算单写入体；`settlement_no`/金额/状态由服务端派生（提交即 400）。 */
+export interface ChildServiceSettlementInput {
+  patient_id: string;
+  subscription_id?: string | null;
+  items: ChildServiceSettlementItemInput[];
+  metadata?: Record<string, unknown>;
+}
+
+export function createChildServiceSettlement(
+  input: ChildServiceSettlementInput,
+): Promise<ChildServiceSettlement> {
+  return request<ChildServiceSettlement>("/healthcare/v1/child-service-settlements", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function listChildServiceSettlements(params: {
+  patient_id?: string;
+  status?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<ChildServiceSettlementList> {
+  const query = new URLSearchParams();
+  if (params.patient_id?.trim()) query.set("patient_id", params.patient_id.trim());
+  if (params.status?.trim()) query.set("status", params.status.trim());
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<ChildServiceSettlementList>(`/healthcare/v1/child-service-settlements${suffix}`);
+}
+
+/** 收款写入体：金额 > 0、最多 2 位小数；单笔不得超未收金额（超额 400）。 */
+export interface ChildServicePaymentInput {
+  amount: number;
+  /** 现金 / 转账 / 银行卡 / 微信 / 支付宝 */
+  method: string;
+  remark?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+/** 登记收款（返回更新后的结算单）；超额收款 → 400，服务端文案原样透出。 */
+export function registerChildServiceSettlementPayment(
+  settlementId: string,
+  input: ChildServicePaymentInput,
+): Promise<ChildServiceSettlement> {
+  return request<ChildServiceSettlement>(
+    `/healthcare/v1/child-service-settlements/${encodeURIComponent(settlementId)}/payments`,
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+// ─── 054 E3：儿保发票台账 ──────────────────────────────────────────────────
+
+export interface ChildServiceInvoice {
+  id: string;
+  invoice_no: string;
+  patient_id: string;
+  title: string;
+  /** 关联结算单/订阅时由服务端取该单金额；否则取提交的 `amount` */
+  amount: number;
+  /** 已开具 / 已作废（单向：已开具 → 已作废） */
+  status: string;
+  settlement_id: string | null;
+  subscription_id: string | null;
+  issued_at: string | null;
+  operator: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChildServiceInvoiceList {
+  records: ChildServiceInvoice[];
+  meta: { total: number };
+}
+
+/**
+ * 发票开具写入体。
+ * `settlement_id` 与 `subscription_id` **互斥**；二者任一存在时**不得**再提交 `amount`
+ * （金额由服务端按该单派生，违反即 400）；两者都不给时必须给正数 `amount`。
+ * `invoice_no` 可省略（服务端生成 `INV-<ulid>`），最多 64 字符且唯一（重复 409）。
+ */
+export interface ChildServiceInvoiceInput {
+  patient_id: string;
+  title: string;
+  invoice_no?: string;
+  amount?: number;
+  settlement_id?: string | null;
+  subscription_id?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export function createChildServiceInvoice(
+  input: ChildServiceInvoiceInput,
+): Promise<ChildServiceInvoice> {
+  return request<ChildServiceInvoice>("/healthcare/v1/invoices", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function listChildServiceInvoices(params: {
+  patient_id?: string;
+  status?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<ChildServiceInvoiceList> {
+  const query = new URLSearchParams();
+  if (params.patient_id?.trim()) query.set("patient_id", params.patient_id.trim());
+  if (params.status?.trim()) query.set("status", params.status.trim());
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<ChildServiceInvoiceList>(`/healthcare/v1/invoices${suffix}`);
+}
+
+/** 发票状态流转：仅 `已开具 → 已作废`；非法流转服务端 400（文案原样透出）。 */
+export function updateChildServiceInvoiceStatus(
+  id: string,
+  status: string,
+): Promise<ChildServiceInvoice> {
+  return request<ChildServiceInvoice>(
+    `/healthcare/v1/invoices/${encodeURIComponent(id)}/status`,
+    { method: "PATCH", body: JSON.stringify({ status }) },
+  );
+}
+
+// ============================================================================
+//  054 F 链（healthcare）— 基础数据维护（F2）
+//
+//  冻结契约：`docs/plans/054.aceso-child-health-role-workflows.md` §5.6；
+//  形状以 F2 已交付实现为准（`BaseDataService`，迁移 V539）。
+//  写路由受 `base_data:manage`；读路由读开放（046 D7），且读取时会顺带刷新
+//  内容覆盖层（**读库优先、常量回落**：库为空/读失败 → 完全等价于既有常量基线）。
+//  本段只追加，不改既有签名。
+// ============================================================================
+
+// ─── 054 F2：疫苗类型内容 ──────────────────────────────────────────────────
+
+export interface BaseVaccinationType {
+  id: string;
+  code: string;
+  name: string;
+  /** 剂次数（≥ 1） */
+  dose_count: number;
+  /** 各剂次推荐月龄数组，长度必须等于 `dose_count` */
+  recommended_months: number[];
+  /** 启用 / 停用 */
+  status: string;
+  sort_order: number;
+  metadata: Record<string, unknown> | null;
+  created_by: string | null;
+  updated_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BaseVaccinationTypeList {
+  records: BaseVaccinationType[];
+  meta: { total: number };
+}
+
+/** 写入白名单字段（`id`/`created_by`/`updated_by`/时间戳由服务端管控，提交即 400）。 */
+export interface BaseVaccinationTypeInput {
+  code: string;
+  name: string;
+  dose_count: number;
+  recommended_months: number[];
+  status?: string;
+  sort_order?: number;
+  metadata?: Record<string, unknown>;
+}
+
+export function listBaseVaccinationTypes(params: {
+  status?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<BaseVaccinationTypeList> {
+  const query = new URLSearchParams();
+  if (params.status?.trim()) query.set("status", params.status.trim());
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<BaseVaccinationTypeList>(`/healthcare/v1/base-vaccination-types${suffix}`);
+}
+
+export function createBaseVaccinationType(
+  input: BaseVaccinationTypeInput,
+): Promise<BaseVaccinationType> {
+  return request<BaseVaccinationType>("/healthcare/v1/base-vaccination-types", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+/** 修改疫苗类型（PUT：只覆盖请求体中出现的字段；`code` 唯一，重复 409）。 */
+export function updateBaseVaccinationType(
+  id: string,
+  input: Partial<BaseVaccinationTypeInput>,
+): Promise<BaseVaccinationType> {
+  return request<BaseVaccinationType>(
+    `/healthcare/v1/base-vaccination-types/${encodeURIComponent(id)}`,
+    { method: "PUT", body: JSON.stringify(input) },
+  );
+}
+
+// ─── 054 F2：发育量表内容 ──────────────────────────────────────────────────
+
+/** 量表领域（`definition.domains` 元素）。 */
+export interface DevelopmentalScaleDomain {
+  code: string;
+  name?: string;
+}
+
+/** 量表条目选项（`definition.items[].options` 元素）。 */
+export interface DevelopmentalScaleOption {
+  value: number;
+  label: string;
+}
+
+/** 量表条目（`definition.items` 元素）。 */
+export interface DevelopmentalScaleItem {
+  code: string;
+  /** 必须命中 `definition.domains[].code` */
+  domain: string;
+  prompt: string;
+  min_months: number;
+  max_months: number;
+  options: DevelopmentalScaleOption[];
+}
+
+export interface DevelopmentalScaleDefinition {
+  domains: DevelopmentalScaleDomain[];
+  items: DevelopmentalScaleItem[];
+}
+
+export interface BaseDevelopmentalScale {
+  id: string;
+  scale_code: string;
+  scale_version: string;
+  name: string;
+  age_min_months: number;
+  age_max_months: number;
+  /** `{domains:[...], items:[...]}`（服务端校验形状，畸形行加载时跳过并回落常量） */
+  definition: DevelopmentalScaleDefinition;
+  status: string;
+  metadata: Record<string, unknown> | null;
+  created_by: string | null;
+  updated_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BaseDevelopmentalScaleList {
+  records: BaseDevelopmentalScale[];
+  meta: { total: number };
+}
+
+export interface BaseDevelopmentalScaleInput {
+  scale_code: string;
+  scale_version: string;
+  name: string;
+  age_min_months: number;
+  age_max_months: number;
+  definition: DevelopmentalScaleDefinition;
+  status?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export function listBaseDevelopmentalScales(params: {
+  status?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<BaseDevelopmentalScaleList> {
+  const query = new URLSearchParams();
+  if (params.status?.trim()) query.set("status", params.status.trim());
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<BaseDevelopmentalScaleList>(`/healthcare/v1/base-developmental-scales${suffix}`);
+}
+
+export function createBaseDevelopmentalScale(
+  input: BaseDevelopmentalScaleInput,
+): Promise<BaseDevelopmentalScale> {
+  return request<BaseDevelopmentalScale>("/healthcare/v1/base-developmental-scales", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+/** 修改量表（PUT：只覆盖请求体中出现的字段；`(scale_code, scale_version)` 唯一，重复 409）。 */
+export function updateBaseDevelopmentalScale(
+  id: string,
+  input: Partial<BaseDevelopmentalScaleInput>,
+): Promise<BaseDevelopmentalScale> {
+  return request<BaseDevelopmentalScale>(
+    `/healthcare/v1/base-developmental-scales/${encodeURIComponent(id)}`,
+    { method: "PUT", body: JSON.stringify(input) },
+  );
+}
+
+// ============================================================================
+//  054 F 链（healthcare）— 操作审计查询（F3）
+//
+//  冻结契约：`docs/plans/054.aceso-child-health-role-workflows.md` §5.6；
+//  形状以 F3 已交付实现为准（`AuditLogService` + `AuditMiddleware`，迁移 V540）。
+//
+//  **本接口是全系统唯一受门禁的读路由**（054 §11.2 Q8）：受 `access:manage`。
+//  审计写入由 apps/aceso 的旁路中间件负责（只记 POST/PUT/PATCH/DELETE，**不读请求体**，
+//  失败只 warn 不阻断，403 尝试也入账）；本客户端**只有查询**，没有任何写入口。
+//  本段只追加，不改既有签名。
+// ============================================================================
+
+export interface AuditLogEntry {
+  id: string;
+  /** 操作主体（认证主体） */
+  actor: string | null;
+  /** POST / PUT / PATCH / DELETE（中间件只审计这四类写方法） */
+  method: string;
+  path: string;
+  status_code: number | null;
+  /** 路径参数 `:id`（无该参数时为 null） */
+  resource_id: string | null;
+  occurred_at: string;
+  /** 仅元数据（如 `platform_admin`），**不含请求体** */
+  metadata: Record<string, unknown> | null;
+}
+
+export interface AuditLogList {
+  records: AuditLogEntry[];
+  meta: { total: number };
+}
+
+/**
+ * 审计查询（只读）。筛选：`actor` 精确、`method` 精确（服务端会转大写）、
+ * `path` **前缀**匹配、`from`/`to` 为 ISO-8601 带偏移的日期时间（`from` 不得晚于 `to`）。
+ */
+export function listAuditLogs(params: {
+  actor?: string;
+  method?: string;
+  path?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<AuditLogList> {
+  const query = new URLSearchParams();
+  if (params.actor?.trim()) query.set("actor", params.actor.trim());
+  if (params.method?.trim()) query.set("method", params.method.trim().toUpperCase());
+  if (params.path?.trim()) query.set("path", params.path.trim());
+  if (params.from?.trim()) query.set("from", params.from.trim());
+  if (params.to?.trim()) query.set("to", params.to.trim());
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<AuditLogList>(`/healthcare/v1/audit-logs${suffix}`);
 }

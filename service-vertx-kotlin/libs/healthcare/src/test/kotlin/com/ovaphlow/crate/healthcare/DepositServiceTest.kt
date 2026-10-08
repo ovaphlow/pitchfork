@@ -215,7 +215,7 @@ class DepositServiceTest {
         val insertsBefore = stub.tuples.count { it.first.contains("insert into healthcare.deposit_records") }
         val cause = causeOf(service.createRefund("enc-1", depositBody(mapOf("amount" to 0.01)), "cashier-1"))
         assertInstanceOf(IllegalArgumentException::class.java, cause)
-        assertTrue(cause.message?.contains("exceeds") == true, "got: ${cause.message}")
+        assertTrue(cause.message?.contains("退押金额超出押金余额") == true, "got: ${cause.message}")
         assertEquals(
             insertsBefore,
             stub.tuples.count { it.first.contains("insert into healthcare.deposit_records") },
@@ -268,7 +268,7 @@ class DepositServiceTest {
         )
         val cause = causeOf(DepositService(stub.pool).createRefund("enc-1", depositBody(mapOf("amount" to 1)), "cashier-1"))
         assertInstanceOf(IllegalArgumentException::class.java, cause)
-        assertTrue(cause.message?.contains("exceeds") == true, "got: ${cause.message}")
+        assertTrue(cause.message?.contains("退押金额超出押金余额") == true, "got: ${cause.message}")
     }
 
     // ——— 1.1 余额口径计入「核销」（结算收束的押金核销减项） ———
@@ -319,9 +319,12 @@ class DepositServiceTest {
         val insertsBefore = stub.tuples.count { it.first.contains("insert into healthcare.deposit_records") }
         val cause = causeOf(service.createRefund("enc-1", depositBody(mapOf("amount" to 500.01)), "cashier-1"))
         assertInstanceOf(IllegalArgumentException::class.java, cause)
-        assertTrue(cause.message?.contains("refund exceeds deposit balance") == true, "got: ${cause.message}")
-        assertTrue(cause.message?.contains("available 500.00") == true, "上限必须按 1000−200−300 收紧: ${cause.message}")
-        assertTrue(cause.message?.contains("requested 500.01") == true, "got: ${cause.message}")
+        // 051 D1：中文文案逐字冻结，金额统一两位小数（上限按 1000−200−300 收紧）
+        assertEquals(
+            "退押金额超出押金余额（可用 500.00，本次申请 500.01）",
+            cause.message,
+            "got: ${cause.message}",
+        )
         assertEquals(
             insertsBefore,
             stub.tuples.count { it.first.contains("insert into healthcare.deposit_records") },
@@ -646,7 +649,7 @@ class DepositServiceTest {
             ).map { (status, body) ->
                 ctx.verify {
                     assertEquals(400, status, "累计退押超余额必须 400")
-                    assertTrue(body.getString("error")?.contains("exceeds") == true, "got: ${body.getString("error")}")
+                    assertTrue(body.getString("error")?.contains("退押金额超出押金余额") == true, "got: ${body.getString("error")}")
                 }
             }
         }.onComplete { ar ->

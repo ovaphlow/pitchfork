@@ -1,0 +1,8 @@
+---
+import DashboardLayout from "../../layouts/DashboardLayout.astro";
+import ChildGuidancePage from "../../components/ChildGuidancePage.tsx";
+---
+
+<DashboardLayout title="健康指导">
+  <ChildGuidancePage client:only="react" />
+</DashboardLayout>

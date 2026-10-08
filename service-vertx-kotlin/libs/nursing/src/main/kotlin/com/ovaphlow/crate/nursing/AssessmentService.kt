@@ -48,7 +48,9 @@ class AssessmentService(
                 .put("assess_type", row.getValue("assess_type")?.toString())
                 .put("assess_date", row.getValue("assess_date")?.toString())
                 .put("assessor", row.getValue("assessor")?.toString())
-                .put("total_score", (row.getValue("total_score") as? BigDecimal)?.toDouble())
+                // Vert.x pg-client 把 NUMERIC 解码为 io.vertx.sqlclient.data.Numeric（Number），
+                // 直接 `as? BigDecimal` 会恒为 null；按 Number 取值才能保住分数。
+                .put("total_score", (row.getValue("total_score") as? Number)?.toDouble())
                 .put("result_level", row.getValue("result_level")?.toString())
                 .put("detail", row.getValue("detail") as? JsonObject)
                 .put("remark", row.getValue("remark")?.toString())

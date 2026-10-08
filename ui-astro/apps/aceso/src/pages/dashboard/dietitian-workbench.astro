@@ -1,0 +1,8 @@
+---
+import DashboardLayout from "../../layouts/DashboardLayout.astro";
+import DietitianWorkbenchPage from "../../components/DietitianWorkbenchPage.tsx";
+---
+
+<DashboardLayout title="营养师工作台">
+  <DietitianWorkbenchPage client:only="react" />
+</DashboardLayout>

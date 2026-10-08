@@ -11,6 +11,7 @@ import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.SqlClient
 import io.vertx.sqlclient.SqlConnection
+import io.vertx.sqlclient.Tuple
 import org.jooq.DSLContext
 import org.jooq.JSONB
 import org.jooq.impl.DSL.count
@@ -18,12 +19,59 @@ import java.math.BigDecimal
 import java.time.OffsetDateTime
 
 /**
+ * 054 D3：一条药物过敏/禁忌提醒（Pharmacy 侧投影）。
+ *
+ * 字段与 healthcare 侧 `DrugAllergyWarning` **同名同义**（severity/reason/source/matched）；
+ * Pharmacy 不依赖 healthcare 库，故在本库内镜像该投影，由适配器负责转换。
+ */
+data class AllergyWarning(
+    /** 严重度：一般 / 严重（053 §11 裁定 4：分级提醒，默认非阻塞）。 */
+    val severity: String,
+    val reason: String,
+    val source: String,
+    val matched: String,
+)
+
+/**
+ * 054 D3：一次药物过敏交叉检查的结果（Pharmacy 侧投影）。
+ */
+data class DrugAllergyCheckResult(
+    val drugName: String? = null,
+    val drugCode: String? = null,
+    val warnings: List<AllergyWarning> = emptyList(),
+)
+
+/**
+ * 054 D3：发药前药物过敏交叉检查端口（Pharmacy 侧）。
+ *
+ * 规则**不在本库实现**：由 Aceso `Main.kt` 注入 healthcare 适配器
+ * （`MedicalOrderService.checkDrugAllergy`，即 053 的 `DrugAllergyChecker` 引擎）。
+ *
+ * 返回 `null` 表示**无法判定**（药品不在目录 / 非药品 / 已停用 / 患者无档案等域判定），
+ * 由调用方按「无可提示」处理，**不阻断发药**——否则存量非药品物资的发药单会因新检查被拒，
+ * 违反 054 L16（N18 向后兼容）。只有**基础设施故障**（如连接不可用）才允许失败。
+ */
+interface DrugAllergyCheckPort {
+    fun check(patientId: String, materialId: String): Future<DrugAllergyCheckResult?>
+}
+
+/**
+ * 054 D3：存在**严重**提醒且调用方未二次确认 → 409（提醒内容随错误体一并返回，便于前端直接渲染）。
+ */
+class AllergyAcknowledgementRequiredException(
+    val warnings: JsonArray,
+    message: String = "severe allergy warning requires acknowledgement",
+) : Exception(message)
+
+/**
  * 011 发药服务：待接方用药医嘱、从医嘱接方、审方/调配/发药确认/取消。
  *
  * - 患者、入住、药名、医生和医嘱内容全部从锁定医嘱读取，不接受请求体覆盖；
  * - 创建、状态动作和发药确认全部在单一数据库事务内完成；
  * - 发药确认通过 [InventoryOutboundPort] 同连接出库并回写 `stock_operation_detail_id`；
- * - 旧通用创建入口禁止 `ELDERLY_ROUTINE`，该类型只能走 `from-medical-order`。
+ * - 旧通用创建入口禁止 `ELDERLY_ROUTINE`，该类型只能走 `from-medical-order`；
+ * - **054 D3**：发药确认前（出库前，即「发药前」最小侵入点）经 [DrugAllergyCheckPort]
+ *   调用 053 既有过敏检查，产出分级提醒；严重项需 `acknowledged_warnings` 二次确认。
  */
 class DispenseService(
     private val pool: Pool,
@@ -34,6 +82,11 @@ class DispenseService(
      * 为 null 时补绑路径 fail-closed（503），不静默跳过目录校验与补绑。
      */
     private val drugCatalogPort: DrugCatalogPort? = null,
+    /**
+     * 054 D3 过敏检查端口：由 Aceso `Main.kt` 注入 healthcare 适配器。
+     * 为 null 时**完全不做检查**，发药确认行为与接线前逐字一致（响应也不追加新字段）。
+     */
+    private val drugAllergyCheckPort: DrugAllergyCheckPort? = null,
     private val ctx: DSLContext = DatabaseConfig.createDSL(),
 ) {
     companion object {
@@ -54,6 +107,22 @@ class DispenseService(
         /** 025 目录药品判定：药品 = 启用状态的 `category = '药品'` 物资 */
         private const val DRUG_CATEGORY = "药品"
         private const val ACTIVE_STATUS = "ACTIVE"
+
+        /** 054 D3：二次确认字段（请求体）与严重度取值（与 healthcare 侧同名）。 */
+        const val ACKNOWLEDGED_WARNINGS_FIELD = "acknowledged_warnings"
+        const val SEVERITY_SEVERE = "严重"
+
+        /**
+         * 054 D3：发药前检查输入（患者 + 待发药品）。
+         *
+         * 原生参数化 SQL（新持久化一律原生，不用 jOOQ）；`material_id` 为空的行不参与检查。
+         * 无行（发药单不存在 / 无明细）→ 空列表 → 跳过检查，由后续事务路径给出规范 404。
+         */
+        private const val ALLERGY_INPUTS_SQL =
+            "SELECT d.patient_id AS patient_id, i.material_id AS material_id " +
+                "FROM pharmacy.pharmacy_dispenses d " +
+                "JOIN pharmacy.pharmacy_dispense_items i ON i.dispense_id = d.id " +
+                "WHERE d.id = \$1 AND i.material_id IS NOT NULL"
 
         fun toJson(row: Row): JsonObject {
             return JsonObject()
@@ -433,8 +502,29 @@ class DispenseService(
      * 发药确认：锁定药房单、明细和医嘱，调用同连接库存出库，回写
      * `stock_operation_detail_id`，最后置为 DISPENSED —— 全部在同一事务内提交或回滚。
      * 已是 DISPENSED 的重试直接返回已有结果，不重复扣库存。
+     *
+     * **054 D3**：出库前（「发药前」）先经 [DrugAllergyCheckPort] 调用 053 既有过敏检查：
+     *   - 一般提醒 → 随响应返回 `allergy_warnings`，**不阻断**；
+     *   - 严重提醒且请求体未给出 `acknowledged_warnings` → [AllergyAcknowledgementRequiredException]（409），
+     *     **在开启事务之前**失败，不产生任何库存/单据副作用；
+     *   - 严重提醒且已二次确认 → 放行，响应 `requires_acknowledgement=false`；
+     *   - 端口未接线 → 完全跳过检查，行为与接线前一致（响应不追加新字段）。
      */
     fun confirm(id: String, body: JsonObject): Future<JsonObject> {
+        val port = drugAllergyCheckPort
+            ?: return confirmTransaction(id)
+
+        return allergyWarningsBeforeDispense(port, id, body).compose { warnings ->
+            confirmTransaction(id).map { result ->
+                result
+                    .put("allergy_warnings", warnings)
+                    .put("requires_acknowledgement", false)
+            }
+        }
+    }
+
+    /** 发药确认事务本体（054 D3 之前既有实现，逐字保留）。 */
+    private fun confirmTransaction(id: String): Future<JsonObject> {
         return pool.withTransaction<JsonObject> { connection ->
             lockDispense(connection, id).compose { current ->
                 if (current.getString("status") == "DISPENSED") {
@@ -487,6 +577,81 @@ class DispenseService(
                 }
             }
         }
+    }
+
+    // ========================================================================
+    //  054 D3：发药前过敏交叉检查
+    // ========================================================================
+
+    /**
+     * 计算本次发药的过敏提醒；严重且未二次确认时直接失败（**事务未开启**）。
+     * 端口未接线时不走本方法（见 [confirm]）。
+     */
+    private fun allergyWarningsBeforeDispense(
+        port: DrugAllergyCheckPort,
+        id: String,
+        body: JsonObject,
+    ): Future<JsonArray> {
+        return loadAllergyCheckInputs(id).compose { inputs ->
+            if (inputs.isEmpty()) return@compose Future.succeededFuture(JsonArray())
+
+            val patientId = inputs.first().first
+            val materialIds = inputs.map { it.second }.distinct()
+            val checks = materialIds.map { materialId ->
+                port.check(patientId, materialId).map { result -> warningsJson(materialId, result) }
+            }
+
+            Future.all(checks).compose { composite ->
+                val warnings = JsonArray()
+                for (index in 0 until composite.size()) {
+                    composite.resultAt<JsonArray>(index)?.let { warnings.addAll(it) }
+                }
+                if (requiresAcknowledgement(warnings) && !isAcknowledged(body.getValue(ACKNOWLEDGED_WARNINGS_FIELD)))
+                    Future.failedFuture(AllergyAcknowledgementRequiredException(warnings))
+                else Future.succeededFuture(warnings)
+            }
+        }
+    }
+
+    /** 读取本次发药的患者与待发药品（原生参数化 SQL）；无行返回空列表。 */
+    private fun loadAllergyCheckInputs(id: String): Future<List<Pair<String, String>>> =
+        pool.preparedQuery(ALLERGY_INPUTS_SQL).execute(Tuple.of(id)).map { rows ->
+            rows.iterator().asSequence().mapNotNull { row ->
+                val patientId = row.getString("patient_id")?.trim()
+                val materialId = row.getString("material_id")?.trim()
+                if (patientId.isNullOrEmpty() || materialId.isNullOrEmpty()) null else patientId to materialId
+            }.toList()
+        }
+
+    /** 一次检查结果 → 提醒数组（附加 `material_id`/`drug_name` 便于前端定位到具体药品）。 */
+    private fun warningsJson(materialId: String, result: DrugAllergyCheckResult?): JsonArray {
+        val warnings = JsonArray()
+        result?.warnings?.forEach { warning ->
+            warnings.add(
+                JsonObject()
+                    .put("material_id", materialId)
+                    .put("drug_name", result.drugName)
+                    .put("drug_code", result.drugCode)
+                    .put("severity", warning.severity)
+                    .put("reason", warning.reason)
+                    .put("source", warning.source)
+                    .put("matched", warning.matched),
+            )
+        }
+        return warnings
+    }
+
+    /** 是否存在严重提醒（053 §11 裁定 4：严重项需二次确认，一般项仅提示）。 */
+    private fun requiresAcknowledgement(warnings: JsonArray): Boolean =
+        warnings.any { (it as? JsonObject)?.getString("severity") == SEVERITY_SEVERE }
+
+    /** `acknowledged_warnings` 接受 `true` 或非空数组（列出已确认的提醒）；其余视为未确认。 */
+    private fun isAcknowledged(value: Any?): Boolean = when (value) {
+        null -> false
+        is Boolean -> value
+        is JsonArray -> value.size() > 0
+        is String -> value.trim().equals("true", ignoreCase = true)
+        else -> false
     }
 
     private fun writeConfirmResult(
