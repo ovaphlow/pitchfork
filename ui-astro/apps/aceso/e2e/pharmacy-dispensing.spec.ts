@@ -22,7 +22,7 @@ const API_BASE_URL = process.env.PLAYWRIGHT_API_BASE_URL;
 const LOGIN_IDENTIFIER = process.env.PLAYWRIGHT_USERNAME;
 const LOGIN_PASSWORD = process.env.PLAYWRIGHT_PASSWORD;
 const NEXUS_API_BASE =
-  process.env.PLAYWRIGHT_NEXUS_API_BASE_URL ?? "http://192.168.0.109:8421/crate-api/shared/v1";
+  process.env.PLAYWRIGHT_NEXUS_API_BASE_URL ?? "http://192.168.0.109:8421/crate-api/v1";
 
 interface Encounter {
   id: string;

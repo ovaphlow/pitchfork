@@ -84,7 +84,7 @@ export async function meritRequest<T>(
     headers.set("Content-Type", "application/json");
   }
   if (csrf) {
-    const token = cookieValue("identityd_csrf");
+    const token = cookieValue("platformd_csrf");
     if (!token) throw new Error("会话校验已失效，请重新登录");
     headers.set("X-CSRF-Token", token);
   }

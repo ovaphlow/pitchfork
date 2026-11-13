@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { getCurrentSession } from "@pitchfork/shared/aceso";
 import { LoadingSpinner } from "@pitchfork/ui";
 
-// IdP 空闲窗口已按 031 决策放宽到 2h（service-idp-go/.env）。
+// IdP 空闲窗口已按 031 决策放宽到 2h（platform/.env）。
 // 心跳间隔取 10min，远小于 2h，保证前台标签页持续续期；后台标签页不续期。
 const HEARTBEAT_INTERVAL_MS = 10 * 60 * 1000; // 10min 前台心跳
 

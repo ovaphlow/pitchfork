@@ -16,7 +16,7 @@ import { expect, test } from "@playwright/test";
  *  - Aceso API :8422 连接独立测试库 aceso_test（127.0.0.1:55432，Flyway 全量迁移）
  *  - Aceso UI :4324、身份服务 :8420、Nexus :8421
  *  - PLAYWRIGHT_BASE_URL 必须指向 http://192.168.0.109:4324（与 API/IDP 同站点，
- *    否则 SameSite=Lax 的 identityd_session cookie 不会随跨站 fetch 发送）
+ *    否则 SameSite=Lax 的 platformd_session cookie 不会随跨站 fetch 发送）
  *
  * fixture 通过数据库直接插入（前缀 ov-），计划时间相对服务端 now 偏移，得到
  * 2 条逾期 + 2 条非逾期；不经过浏览器 API 调用，避免受登录 token 存储形态影响。

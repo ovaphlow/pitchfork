@@ -1,0 +1,34 @@
+# Podman / Docker Compose — PostgreSQL for agora-api
+#
+# Usage:
+#   podman compose up -d        # or: docker compose up -d
+#   podman compose down         # keeps ./.data/pg
+#
+# Credentials match .env.example:
+#   postgres://agora:agora@localhost:5432/agora?sslmode=disable
+#
+# Override the host port or password when 5432 is already taken:
+#   AGORA_DB_PORT=5433 podman compose up -d
+#   AGORA_DB_PASSWORD=... podman compose up -d   # then update DATABASE_URL
+
+name: pitchfork-agora
+
+services:
+  agora-db:
+    image: postgres:17
+    container_name: pitchfork-agora-db
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${AGORA_DB_PORT:-5432}:5432"
+    environment:
+      POSTGRES_DB: agora
+      POSTGRES_USER: agora
+      POSTGRES_PASSWORD: "${AGORA_DB_PASSWORD:-agora}"
+    volumes:
+      - ./.data/pg:/var/lib/postgresql/data:Z
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agora -d agora"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s

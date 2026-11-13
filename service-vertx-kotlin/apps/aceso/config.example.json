@@ -8,7 +8,7 @@
   },
   "console-level": "INFO",
   "nexus": {
-    "base-url": "http://127.0.0.1:8421"
+    "base-url": "http://127.0.0.1:8420"
   },
   "identity": {
     "base-url": "http://127.0.0.1:8420",

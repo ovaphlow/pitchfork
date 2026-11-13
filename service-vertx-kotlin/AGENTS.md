@@ -9,8 +9,9 @@ database-test safety rules. Product composition and configuration are in
 - `apps:trainova` serves Trainova on `8421`; `apps:aceso` serves Aceso on `8422`.
 - A product mounts only its own domain libraries. Do not add a cross-product lib
   dependency to reuse a table or endpoint.
-- `settings`, `messages` and `files` are Nexus capabilities. Consume their HTTP
-  API at `/crate-api/shared/v1/*`; do not recreate the removed Kotlin libraries.
+- Shared capabilities (`settings`, `messages`, `files`, `interactions`, role and
+  department directories) are served by `platformd` at `/crate-api/v1/*`;
+  consume that HTTP API and do not recreate the removed Kotlin libraries.
 - `healthcare` is incubating and may not be depended on by an app until it has a
   complete product API contract.
 

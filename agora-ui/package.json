@@ -1,0 +1,25 @@
+{
+  "name": "agora-ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.4.4",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro check && astro build",
+    "preview": "astro preview",
+    "check": "astro check && svelte-check --tsconfig ./tsconfig.json"
+  },
+  "dependencies": {
+    "@astrojs/svelte": "^9.1.1",
+    "astro": "^7.4.2",
+    "svelte": "^5.57.3"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.12",
+    "@tailwindcss/vite": "^4.3.3",
+    "svelte-check": "^4.7.7",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^6.0.3"
+  }
+}

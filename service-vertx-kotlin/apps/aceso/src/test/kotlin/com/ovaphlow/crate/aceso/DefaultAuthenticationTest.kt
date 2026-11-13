@@ -59,7 +59,7 @@ class DefaultAuthenticationTest {
         sessionAuthPaths += ctx.normalizedPath()
         sessionAuthMountPoints += ctx.mountPoint()
         val cookie = ctx.request().getHeader("Cookie")
-        if (cookie != null && cookie.contains("identityd_session=")) {
+        if (cookie != null && cookie.contains("platformd_session=")) {
             ctx.put("userId", "test-user")
             ctx.next()
         } else {
@@ -70,7 +70,7 @@ class DefaultAuthenticationTest {
         }
     }
 
-    private val authenticatedCookie = "identityd_session=opaque-test-token"
+    private val authenticatedCookie = "platformd_session=opaque-test-token"
 
     /** 每个已挂载模块一条读 + 一条写（路径取自各 lib 的真实路由注册）。 */
     private val protectedRoutes: List<Pair<HttpMethod, String>> =
@@ -152,7 +152,7 @@ class DefaultAuthenticationTest {
         // 显式模块枚举：只有 /<module>/v1/health 放行。
         publicHealthPaths.forEach { path -> assertTrue(isPublicApiPath(path), "$path 应放行") }
         // 未挂载的模块、以及"以 health 结尾"的业务路径都不得被放行。
-        assertFalse(isPublicApiPath("/crate-api/shared/v1/health"))
+        assertFalse(isPublicApiPath("/crate-api/v1/health"))
         assertFalse(isPublicApiPath("/crate-api/analytics/v1/health"))
         assertFalse(isPublicApiPath("/crate-api/healthcare/v1/patients/health"))
         assertFalse(isPublicApiPath("/crate-api/healthcare/v1/health-checkups/health"))
@@ -163,8 +163,8 @@ class DefaultAuthenticationTest {
         assertTrue(isPublicApiPath("/crate-api/identity/v1/login"))
         assertTrue(isPublicApiPath("/crate-api/identity/v1/health"))
         assertFalse(isPublicApiPath("/crate-api/identity/v1"))
-        // /shared/v1/*（Nexus 代理）默认不放行。
-        assertFalse(isPublicApiPath("/crate-api/shared/v1/settings"))
+        // /v1/*（Nexus 代理）默认不放行。
+        assertFalse(isPublicApiPath("/crate-api/v1/settings"))
     }
 
     // ------------------------------------------------------------------
@@ -292,7 +292,7 @@ class DefaultAuthenticationTest {
     }
 
     // ------------------------------------------------------------------
-    // 6. Identity 代理子树放行（否则无法登录），/shared/v1/* 默认纳入认证
+    // 6. Identity 代理子树放行（否则无法登录），/v1/* 默认纳入认证
     // ------------------------------------------------------------------
 
     @Test
@@ -317,13 +317,13 @@ class DefaultAuthenticationTest {
         sessionAuthPaths.clear()
         businessCalls.clear()
 
-        val probe = send(port, HttpMethod.GET, "/crate-api/shared/v1/settings")
+        val probe = send(port, HttpMethod.GET, "/crate-api/v1/settings")
 
-        // 计划决策 3：/shared/v1/* 默认 fail closed。若实测发现匿名依赖，
+        // 计划决策 3：/v1/* 默认 fail closed。若实测发现匿名依赖，
         // 必须由调度者决定以显式例外的形式加入白名单，而不是在这里默默放行。
         assertEquals(401, probe.status)
         assertTrue(businessCalls.isEmpty(), "未认证不得访问 Nexus 代理")
-        assertEquals(listOf("/crate-api/shared/v1/settings"), sessionAuthPaths)
+        assertEquals(listOf("/crate-api/v1/settings"), sessionAuthPaths)
     }
 
     // ------------------------------------------------------------------
@@ -363,7 +363,7 @@ class DefaultAuthenticationTest {
         }
 
         apiRouter.route("/identity/v1/*").subRouter(identityRouter(vertx))
-        apiRouter.route("/shared/v1/*").subRouter(sharedRouter(vertx))
+        apiRouter.route("/v1/*").subRouter(sharedRouter(vertx))
         apiRouter.route("/inventories/v1/*").subRouter(inventoriesRouter(vertx))
         apiRouter.route("/healthcare/v1/*").subRouter(healthcareRouter(vertx))
         apiRouter.route("/nursing/v1/*").subRouter(nursingRouter(vertx))

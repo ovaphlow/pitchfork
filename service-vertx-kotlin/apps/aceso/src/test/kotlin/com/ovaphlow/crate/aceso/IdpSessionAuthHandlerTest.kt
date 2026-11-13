@@ -83,7 +83,7 @@ class IdpSessionAuthHandlerTest {
         HANG,
     }
 
-    private val authenticatedCookie = "identityd_session=opaque-test-token"
+    private val authenticatedCookie = "platformd_session=opaque-test-token"
 
     @BeforeEach
     fun setUp(vertx: Vertx) {

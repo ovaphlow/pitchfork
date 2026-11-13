@@ -16,7 +16,7 @@ import { expect, test, type Page } from "@playwright/test";
  * 运行前提（已有服务，仅校验不启动）：
  *  - Aceso API :8422 连接隔离测试库 aceso_test（127.0.0.1:55432）
  *  - Aceso UI :4324、身份服务 :8420、Nexus :8421
- *  - PLAYWRIGHT_BASE_URL 使用与 API/IDP 同站点地址，保证 identityd_session cookie 正常
+ *  - PLAYWRIGHT_BASE_URL 使用与 API/IDP 同站点地址，保证 platformd_session cookie 正常
  *
  * fixture 使用固定前缀 st4-，通过数据库直接插入 PRN 任务执行记录；
  * PRN 频次不会触发 todayExecutions 懒生成，保证统计与今日列表数据可控。

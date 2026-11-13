@@ -1,7 +1,7 @@
 # service-prototype
 
 `service-prototype` is the minimal Go service skeleton of the pitchfork
-monorepo. It follows the engineering conventions of `service-idp-go`
+monorepo. It follows the engineering conventions of `platform`
 (`cmd/prototyped` composition root, `internal/config`, `internal/database`,
 `internal/httpapi` layering) and provides a health endpoint that does not
 depend on a database.

@@ -28,7 +28,7 @@
 
 ## 共享 API 与数据约定
 
-- 路由格式：`/crate-api/<module>/v1/<resource>`。
+- 路由格式：`/crate-api/<module>/v1/<resource>`。例外：共享能力（原 Nexus，现由 `platform/` 提供）挂在 `/crate-api/v1/<resource>`。
 - 列表响应：`{ "records": [...], "meta": { "total": N } }`；空列表仍返回 `records: []` 与 `total: 0`。单条响应直接返回对象，错误响应为 `{ "error": "<message>" }`。
 - 分页参数使用 `limit`、`offset`；ID 使用 26 位 Crockford Base32 ULID。
 - 时间字段为 `created_at`、`updated_at`，类型为 `OffsetDateTime`；扩展 JSONB 字段命名为 `metadata`。
@@ -51,7 +51,7 @@
 
 ### 服务与资源生命周期（2026-09-29 用户变更策略）
 
-- **开发服务只由用户启停。** AI agent **不得**启动或停止任何开发服务（Aceso API `8422`、Aceso UI `4324`、Identity `8420`、Nexus `8421`、开发库 `5432` 等）：不得杀进程、不得重绑端口、不得另起替代实例占用同一端口。此前对 Aceso UI 的启停授权**已撤销**。
+- **开发服务只由用户启停。** AI agent **不得**启动或停止任何开发服务（Aceso API `8422`、Aceso UI `4324`、Platformd `8420`（含原 Nexus 共享能力）、Nexus `8421`（已并入 platformd，待停用）、开发库 `5432` 等）：不得杀进程、不得重绑端口、不得另起替代实例占用同一端口。此前对 Aceso UI 的启停授权**已撤销**。
 - **agent 允许的操作范围**：构建（build）、编译（compile）、运行单元/嵌入式路由测试，以及运行仓库内的测试脚本。仅此三类。
 - **测试数据库与测试程序由 agent 自行管理，但用完必须收干净。** agent 可以自行启动/销毁隔离测试数据库容器（如 `pitchfork-aceso-test-db`、端口 `55432`）与测试进程，但每次使用结束必须做到：`down` 掉自己启动的容器、终止遗留的测试进程、确认没有孤儿容器或进程占用端口，并在交接中给出「已收摊」的证据（`podman ps` 与进程列表）。**不得把自己启动的测试资源留在后台跨会话存活。**
 

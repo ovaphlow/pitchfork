@@ -1,0 +1,7 @@
+.data/
+bin/
+.env
+node_modules/
+logs/
+/platformd
+/platformd.exe

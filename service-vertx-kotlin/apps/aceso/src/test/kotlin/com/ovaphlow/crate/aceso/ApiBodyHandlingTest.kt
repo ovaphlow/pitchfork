@@ -61,7 +61,7 @@ class ApiBodyHandlingTest {
     private lateinit var client: HttpClient
     private val servers = mutableListOf<io.vertx.core.http.HttpServer>()
 
-    private val authenticatedCookie = "identityd_session=guard-token"
+    private val authenticatedCookie = "platformd_session=guard-token"
 
     @BeforeEach
     fun setUp(vertx: Vertx) {

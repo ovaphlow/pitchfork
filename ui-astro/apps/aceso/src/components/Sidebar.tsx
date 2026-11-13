@@ -152,7 +152,7 @@ export const menuItems: Item[] = [
 export default function Sidebar({ currentPath }: SidebarProps) {
   // 域订阅口径统一走 useDomain（与页面内容、浏览器标题同源）
   const domain = useDomain();
-  // 054 F1：本人权限码 + 平台管理员标记（Nexus `/shared/v1/subject-permissions`）；
+  // 054 F1：本人权限码 + 平台管理员标记（platformd `/crate-api/v1/subject-permissions`）；
   // 仅用于入口显隐。平台管理员后端短路放行，菜单同口径全量可见。
   const { codes: permissionCodes, platformAdmin } = useSubjectPermissions();
 

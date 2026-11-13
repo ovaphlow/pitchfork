@@ -1,0 +1,20 @@
+# build output
+/bin/
+agora-api
+
+# environment files
+.env
+.env.*
+!.env.example
+
+# runtime logs
+logs/*
+!logs/.gitkeep
+
+# local database data
+.data/
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store

@@ -159,7 +159,7 @@ class DeclaredPermissionsTest {
             DECLARED_PERMISSIONS.count { it.permissionCode == BASE_DATA_MANAGE_PERMISSION },
             "054 F2：Aceso 侧基础数据写路由 4 条（疫苗类型 POST/PUT + 发育量表 POST/PUT）",
         )
-        // 054 F3：`access:manage` 此前只由 Nexus 承载（`/shared/v1/departments` 3 条）；
+        // 054 F3：`access:manage` 此前只由 Nexus 承载（`/v1/departments` 3 条）；
         // 054 新增 `GET /healthcare/v1/audit-logs` 后，Aceso 侧出现**第一条**受该码门禁的路由。
         assertEquals(
             1,
@@ -224,8 +224,8 @@ class DeclaredPermissionsTest {
             "目录里标 enforced_by=nexus 的条目必须真的在 Nexus 侧接线，否则角色页会展示一个假的已接线码",
         )
         assertTrue(
-            NEXUS_ENFORCED_PERMISSIONS.all { it.path.startsWith("/shared/v1/") },
-            "Nexus 门禁路由都在 /shared/v1/ 下：${NEXUS_ENFORCED_PERMISSIONS.map { it.path }}",
+            NEXUS_ENFORCED_PERMISSIONS.all { it.path.startsWith("/v1/") },
+            "Nexus 门禁路由都在 /v1/ 下：${NEXUS_ENFORCED_PERMISSIONS.map { it.path }}",
         )
     }
 

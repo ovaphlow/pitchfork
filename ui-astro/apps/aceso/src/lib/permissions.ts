@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
  * 定位与边界（计划 §7 F1、§8.6）：
  * - 只做**前端显隐**：让没有对应权限码的账号看不到入口。**后端仍是唯一强制点**，
  *   绕过前端直接请求写路由依然 403；前端隐藏不替代 403，也不承担鉴权职责。
- * - 权限码取**本人**：`GET /crate-api/shared/v1/subject-permissions?subject_id=<本人>`
+ * - 权限码取**本人**：`GET /crate-api/v1/subject-permissions?subject_id=<本人>`
  *   （Nexus）。Nexus 只允许查自己（043 D5：查他人需 `access:manage`），所以先取会话
  *   `subject_id`，再用共享客户端既有导出 `getSubjectPermissions` 查本人。
  * - **平台管理员短路**：后端 `SubjectPermissionGate` 对 `platform_admin` 直接放行，

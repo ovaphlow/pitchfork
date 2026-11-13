@@ -138,7 +138,7 @@ class AuditLogIntegrationTest {
             pool = DatabaseConfig.createPool(vertx, dbConfig)
             client = vertx.createHttpClient()
 
-            // 桩 Nexus：GET /crate-api/shared/v1/subject-permissions → {"permission_codes":[...]}
+            // 桩 Nexus：GET /crate-api/v1/subject-permissions → {"permission_codes":[...]}
             val nexusRouter = Router.router(vertx)
             nexusRouter.route().handler { rctx ->
                 rctx.response().putHeader("Content-Type", "application/json")

@@ -9,7 +9,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
  *   PLAYWRIGHT_API_BASE_URL    Aceso API 地址（/crate-api 根）
  *   PLAYWRIGHT_DB_*            隔离 PostgreSQL 连接
  *   PLAYWRIGHT_USERNAME/PASSWORD 测试账号
- *   PLAYWRIGHT_NEXUS_API_BASE_URL 共享 Nexus 地址；缺省 http://127.0.0.1:8423/crate-api/shared/v1
+ *   PLAYWRIGHT_NEXUS_API_BASE_URL 共享 Nexus 地址；缺省 http://127.0.0.1:8423/crate-api/v1
  *                                 （nexus-shared e2e 实例；与 Trainova 业务系统无关）
  *
  * 主线（对照 docs/plans/013.aceso-pharmacy-requisition-and-ward-stock-transfer.md）：
@@ -23,7 +23,7 @@ const API_BASE_URL = process.env.PLAYWRIGHT_API_BASE_URL;
 const LOGIN_IDENTIFIER = process.env.PLAYWRIGHT_USERNAME;
 const LOGIN_PASSWORD = process.env.PLAYWRIGHT_PASSWORD;
 const NEXUS_API_BASE =
-  process.env.PLAYWRIGHT_NEXUS_API_BASE_URL ?? "http://127.0.0.1:8423/crate-api/shared/v1";
+  process.env.PLAYWRIGHT_NEXUS_API_BASE_URL ?? "http://127.0.0.1:8423/crate-api/v1";
 
 interface Warehouse {
   id: string;

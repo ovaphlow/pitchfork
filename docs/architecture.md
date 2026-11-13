@@ -23,7 +23,9 @@ cross product boundaries.
 An app owns route mounting, runtime configuration and its declared libraries.
 Promote a capability to the platform layer only after ownership, data and API
 contracts are product-neutral. `healthcare` cannot be mounted until it has a
-complete product contract. Nexus owns shared `settings`, `messages` and `files`.
+complete product contract. The former `service-nexus-shared` capabilities
+(`settings`, `messages`, `files`, `interactions`, role/department directories)
+now live in platformd behind `/crate-api/v1/*` (plan 055).
 
 ## Configuration And Data
 

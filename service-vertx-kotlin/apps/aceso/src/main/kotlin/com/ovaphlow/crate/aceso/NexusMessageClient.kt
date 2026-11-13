@@ -16,7 +16,7 @@ import java.util.concurrent.TimeUnit
 /**
  * 052 P4：家长通报的 Nexus `messages` 支撑实现。
  *
- * 只做一件事：带用户会话 cookie `POST /crate-api/shared/v1/messages`，返回 `message_id`。
+ * 只做一件事：带用户会话 cookie `POST /crate-api/v1/messages`，返回 `message_id`。
  *
  * 口径：
  *  - Nexus 写路由要求**有效会话**（`Extension<Identity>`），因此转发调用方的 Cookie，
@@ -56,7 +56,7 @@ internal class NexusMessageClient(
             .put("receiver_type", receiverType)
             .put("payload", payload)
             .encode()
-        val target = "$basePath/crate-api/shared/v1/messages"
+        val target = "$basePath/crate-api/v1/messages"
         return httpClient.request(HttpMethod.POST, port, host, target)
             .compose { request: HttpClientRequest ->
                 request.putHeader("Cookie", cookie)

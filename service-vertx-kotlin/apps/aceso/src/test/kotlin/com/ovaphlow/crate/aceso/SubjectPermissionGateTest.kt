@@ -256,7 +256,7 @@ class SubjectPermissionGateTest {
 
     private fun startFakeNexus(): Int {
         val router = Router.router(vertx)
-        router.get("/crate-api/shared/v1/subject-permissions").handler { ctx ->
+        router.get("/crate-api/v1/subject-permissions").handler { ctx ->
             upstreamSubjectIds.add(ctx.queryParams().get("subject_id") ?: "")
             ctx.response()
                 .setStatusCode(upstreamStatus)
@@ -299,7 +299,7 @@ class SubjectPermissionGateTest {
     }
 
     private companion object {
-        const val COOKIE = "identityd_session=opaque-test-token"
+        const val COOKIE = "platformd_session=opaque-test-token"
         const val REHAB_PERMISSION = "rehab:execute"
         const val GRANTED_BODY =
             """{"subject_id":"subject-1","role_codes":["nursing.staff"],"permission_codes":["nursing:execute"],"source":"nexus"}"""

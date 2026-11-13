@@ -18,7 +18,7 @@ internal const val DEPARTMENT_CACHE_TTL_MS = 60_000L
 /**
  * 组织部门目录的 Nexus 支撑实现（040）。
  *
- * 只做一件事：带用户会话 cookie 拉一次 `/crate-api/shared/v1/departments` 的 code 集合，
+ * 只做一件事：带用户会话 cookie 拉一次 `/crate-api/v1/departments` 的 code 集合，
  * 按 TTL 缓存后回答「这个 code 存在吗」。上游异常交给 Future 失败，
  * 调用方按 503 fail-closed——宁可不建单，也不落一个没有出处的科室。
  */
@@ -53,7 +53,7 @@ internal class DepartmentDirectoryClient(
             return Future.succeededFuture(cached.contains(code))
         }
 
-        val target = "$basePath/crate-api/shared/v1/departments?page=1&page_size=100"
+        val target = "$basePath/crate-api/v1/departments?page=1&page_size=100"
         return httpClient.request(HttpMethod.GET, port, host, target)
             .compose { request: HttpClientRequest ->
                 request.putHeader("Cookie", cookie)

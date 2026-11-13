@@ -12,3 +12,6 @@ __pycache__/
 .hermes/loop/
 .hermes/kanban-loop.lock
 kanban_history.txt
+
+.pi/
+.pnpm-store/

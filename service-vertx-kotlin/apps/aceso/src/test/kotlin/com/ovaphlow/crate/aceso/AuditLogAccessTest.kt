@@ -48,7 +48,7 @@ class AuditLogAccessTest {
     private lateinit var client: HttpClient
     private val servers = mutableListOf<io.vertx.core.http.HttpServer>()
 
-    private val cookie = "identityd_session=audit-token"
+    private val cookie = "platformd_session=audit-token"
 
     @BeforeEach
     fun setUp(vertx: Vertx) {

@@ -54,6 +54,9 @@ standard OIDC contract. This document does not modify the Kotlin plan.
 
 - Public internet sign-up, email verification, password recovery, or social
   login.
+  - 2026-10-31 变更：Agora 的互联网注册/登录已新增
+    `POST /crate-api/identity/v1/registrations`（普通主体、自动会话、审计）。
+    邮箱验证、找回密码与注册频率限制仍不在本轮范围。
 - Third-party client registration, consent screens for arbitrary applications,
   and a public developer platform.
 - SAML, LDAP federation, SCIM, device flow, client credentials, and MFA.

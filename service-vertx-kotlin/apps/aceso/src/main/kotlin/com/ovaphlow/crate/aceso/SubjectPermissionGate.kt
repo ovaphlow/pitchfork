@@ -78,7 +78,7 @@ internal class SubjectPermissionClient(
             return Future.succeededFuture(PermissionLookup.Granted(cached.permissionCodes))
         }
         val encoded = URLEncoder.encode(subjectId, StandardCharsets.UTF_8)
-        val target = "$basePath/crate-api/shared/v1/subject-permissions?subject_id=$encoded"
+        val target = "$basePath/crate-api/v1/subject-permissions?subject_id=$encoded"
         return httpClient.request(HttpMethod.GET, port, host, target)
             .compose { request: HttpClientRequest ->
                 request.putHeader("Cookie", cookie)

@@ -50,8 +50,8 @@ export const acesoServices: Record<ServiceName, ServiceEndpoint> = {
   },
   nexus: {
     host: serviceHost("PUBLIC_NEXUS_API_HOST", defaultHost),
-    port: servicePort("PUBLIC_NEXUS_API_PORT", 8421),
-    basePath: "/crate-api/shared/v1",
+    port: servicePort("PUBLIC_NEXUS_API_PORT", 8420),
+    basePath: "/crate-api/v1",
   },
 };
 

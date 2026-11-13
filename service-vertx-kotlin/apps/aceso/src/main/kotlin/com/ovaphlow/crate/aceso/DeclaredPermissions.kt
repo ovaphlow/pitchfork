@@ -307,7 +307,7 @@ internal val DECLARED_PERMISSIONS: List<DeclaredPermission> = listOf(
     DeclaredPermission("POST", "/pharmacy/v1/pediatric-dose-rules", PHARMACY_DISPENSE_PERMISSION),
     DeclaredPermission("PUT", "/pharmacy/v1/pediatric-dose-rules/:id", PHARMACY_DISPENSE_PERMISSION),
     // 054 F2：基础数据维护（疫苗类型 / 发育量表内容表建查改；写码 base_data:manage，不新增码）
-    // 说明：base_data:manage 同时仍由 Nexus 承载 /shared/v1/departments 等写路由（NEXUS_ENFORCED_PERMISSIONS 不变）。
+    // 说明：base_data:manage 同时仍由 Nexus 承载 /v1/departments 等写路由（NEXUS_ENFORCED_PERMISSIONS 不变）。
     DeclaredPermission("POST", "/healthcare/v1/base-vaccination-types", BASE_DATA_MANAGE_PERMISSION),
     DeclaredPermission("PUT", "/healthcare/v1/base-vaccination-types/:id", BASE_DATA_MANAGE_PERMISSION),
     DeclaredPermission("POST", "/healthcare/v1/base-developmental-scales", BASE_DATA_MANAGE_PERMISSION),
@@ -379,18 +379,18 @@ internal const val BASE_DATA_MANAGE_PERMISSION = "base_data:manage"
  * Nexus 侧已接线的写路由（043 §4.1 冻结矩阵）。
  *
  * 与 `service-nexus-shared/src/{roles,departments,subject_roles,subject_departments}/mod.rs`
- * 的 `write_router()` 一一对应；`GET /shared/v1/subject-permissions` 的"仅本人"收紧
+ * 的 `write_router()` 一一对应；`GET /v1/subject-permissions` 的"仅本人"收紧
  * 也由 `access:manage` 控制（查自己不需要该码，因此不计入本清单）。
  */
 internal val NEXUS_ENFORCED_PERMISSIONS: List<NexusEnforcedPermission> = listOf(
-    NexusEnforcedPermission(ACCESS_MANAGE_PERMISSION, "POST", "/shared/v1/roles"),
-    NexusEnforcedPermission(ACCESS_MANAGE_PERMISSION, "PUT", "/shared/v1/roles/:id"),
-    NexusEnforcedPermission(ACCESS_MANAGE_PERMISSION, "DELETE", "/shared/v1/roles/:id"),
-    NexusEnforcedPermission(ACCESS_MANAGE_PERMISSION, "PUT", "/shared/v1/subject-roles/subjects/:id"),
-    NexusEnforcedPermission(ACCESS_MANAGE_PERMISSION, "PUT", "/shared/v1/subject-departments/subjects/:id"),
-    NexusEnforcedPermission(BASE_DATA_MANAGE_PERMISSION, "POST", "/shared/v1/departments"),
-    NexusEnforcedPermission(BASE_DATA_MANAGE_PERMISSION, "PUT", "/shared/v1/departments/:id"),
-    NexusEnforcedPermission(BASE_DATA_MANAGE_PERMISSION, "DELETE", "/shared/v1/departments/:id"),
+    NexusEnforcedPermission(ACCESS_MANAGE_PERMISSION, "POST", "/v1/roles"),
+    NexusEnforcedPermission(ACCESS_MANAGE_PERMISSION, "PUT", "/v1/roles/:id"),
+    NexusEnforcedPermission(ACCESS_MANAGE_PERMISSION, "DELETE", "/v1/roles/:id"),
+    NexusEnforcedPermission(ACCESS_MANAGE_PERMISSION, "PUT", "/v1/subject-roles/subjects/:id"),
+    NexusEnforcedPermission(ACCESS_MANAGE_PERMISSION, "PUT", "/v1/subject-departments/subjects/:id"),
+    NexusEnforcedPermission(BASE_DATA_MANAGE_PERMISSION, "POST", "/v1/departments"),
+    NexusEnforcedPermission(BASE_DATA_MANAGE_PERMISSION, "PUT", "/v1/departments/:id"),
+    NexusEnforcedPermission(BASE_DATA_MANAGE_PERMISSION, "DELETE", "/v1/departments/:id"),
 )
 
 /**
@@ -431,7 +431,7 @@ internal val PERMISSION_CATALOG: List<PermissionCatalogEntry> = listOf(
         "nexus",
     ),
     // 054 F2（rev10 M6）：该码自 054 起为 **Nexus + Aceso 双承载**——Nexus 侧仍强制组织主数据
-    // （`/shared/v1/departments`），Aceso 侧新增强制临床内容主数据（`/healthcare/v1/base-*` 4 条写路由）。
+    // （`/v1/departments`），Aceso 侧新增强制临床内容主数据（`/healthcare/v1/base-*` 4 条写路由）。
     // `enforced_by` 保持单值 `"nexus"`（语义仍为真、只是不完整）；多值升级见计划 R19（不在本轮）。
     PermissionCatalogEntry(
         BASE_DATA_MANAGE_PERMISSION,

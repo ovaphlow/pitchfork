@@ -255,12 +255,12 @@ internal fun buildApiRouter(
             "/crate-api/identity/v1/problems/identity-unavailable",
         ),
     )
-    apiRouter.route("/shared/v1/*").subRouter(
+    apiRouter.route("/v1/*").subRouter(
         ServiceProxyRoutes.create(
             vertx,
             nexusBaseUrl,
             "nexus",
-            "/crate-api/shared/v1/problems/nexus-unavailable",
+            "/crate-api/v1/problems/nexus-unavailable",
         ),
     )
     apiRouter.route("/inventories/v1/*").subRouter(InventoriesRoutes.create(vertx, pool))
@@ -682,7 +682,7 @@ private fun inventoryPurchaseReceiptPort(stockService: StockService): InventoryP
 
 // ========================================================================
 //  013 认证挂载：IDP opaque session 验证
-//  IDP 使用 HttpOnly cookie `identityd_session`，不签发 JWT。写路由要求有效
+//  IDP 使用 HttpOnly cookie `platformd_session`，不签发 JWT。写路由要求有效
 //  会话：转发请求 Cookie 到 IDP `GET /crate-api/identity/v1/session` 换取
 //  `subject_id` 作为操作人（userId），与 Aceso 前端既有 cookie 工作流一致。
 //
@@ -691,7 +691,7 @@ private fun inventoryPurchaseReceiptPort(stockService: StockService): InventoryP
 //  类型不符或非 true 一律按 false 处理（fail-closed：判定不出管理员就不得代操作）。
 // ========================================================================
 
-private const val IDP_SESSION_COOKIE = "identityd_session"
+private const val IDP_SESSION_COOKIE = "platformd_session"
 
 /**
  * IdP 会话校验的上游超时（连接 + 整体，含读响应体）默认值，单位毫秒。
