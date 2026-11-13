@@ -28,7 +28,7 @@ import { useDomain } from "../lib/useDomain";
  *
  * 排程与状态判定由后端读时计算（`GET /child-vaccination-status/:patient_id`）；
  * 前端只做徽标、排序与「生成提醒」动作。提醒只对**逾期**项写通报台账并调用
- * Nexus message，临期项只在结果里提示护士（临期不是异常，不制造虚假告警）。
+ * platformd 共享 message，临期项只在结果里提示护士（临期不是异常，不制造虚假告警）。
  */
 
 interface RecordForm {

@@ -105,8 +105,8 @@ func (deps Deps) logout(responseWriter http.ResponseWriter, request *http.Reques
 	responseWriter.WriteHeader(http.StatusNoContent)
 }
 
-// buildSession joins the identity view with Nexus-owned roles and permissions.
-// Base data is best-effort: a Nexus outage must not block a valid login.
+// buildSession joins the identity view with platformd's shared roles and permissions.
+// Base data is best-effort: a shared API outage must not block a valid login.
 func (deps Deps) buildSession(ctx context.Context, identity identityclient.Identity, cookieHeader string) authSessionResponse {
 	response := authSessionResponse{
 		SubjectID:     identity.SubjectID,

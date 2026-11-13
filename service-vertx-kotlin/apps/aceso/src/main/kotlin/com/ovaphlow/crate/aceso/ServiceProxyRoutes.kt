@@ -14,7 +14,7 @@ import java.net.URI
  * Transparently forwards requests to a shared upstream service.
  *
  * The browser's IDP Cookie is deliberately copied as an opaque header. Aceso
- * does not inspect authentication state; IDP and Nexus remain its authorities.
+ * does not inspect authentication state; platformd remains the authority.
  */
 object ServiceProxyRoutes {
     private val log = LoggerFactory.getLogger(ServiceProxyRoutes::class.java)

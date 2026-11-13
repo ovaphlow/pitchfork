@@ -76,7 +76,7 @@ export interface IdentitySubjectList {
 }
 
 /**
- * 组织部门（Nexus `/departments`）。
+ * 组织部门（platformd 共享 `/departments`）。
  *
  * 与床位/入住里的 `department`（照护单元/病区，自由文本）不是同一概念，互不联动。
  */
@@ -669,7 +669,7 @@ export function setIdentityTemporaryPassword(id: string, temporaryPassword: stri
 }
 
 // ========================================================================
-//  Nexus API — Departments (组织部门目录)
+//  Shared API（platformd）— Departments (组织部门目录)
 // ========================================================================
 
 function departmentPayload(input: DepartmentInput): Record<string, unknown> {
@@ -744,7 +744,7 @@ export async function deleteWarehouse(id: string): Promise<void> {
 }
 
 // ========================================================================
-//  Nexus API — Role Directory (角色目录)
+//  Shared API（platformd）— Role Directory (角色目录)
 // ========================================================================
 
 export interface NexusRole {
@@ -792,7 +792,7 @@ export async function deleteRole(id: string): Promise<void> {
 }
 
 // ========================================================================
-//  Nexus API — Subject Role Assignments (用户 ↔ 角色分配)
+//  Shared API（platformd）— Subject Role Assignments (用户 ↔ 角色分配)
 // ========================================================================
 
 export interface SubjectRoleAssignment {
@@ -825,7 +825,7 @@ export function replaceSubjectRoles(subjectId: string, roleCodes: string[]): Pro
 }
 
 // ========================================================================
-//  Nexus API — Subject Department (用户 ↔ 部门，一人一主部门)
+//  Shared API（platformd）— Subject Department (用户 ↔ 部门，一人一主部门)
 // ========================================================================
 
 export interface SubjectDepartmentAssignment {
@@ -5562,7 +5562,7 @@ export const CHILD_ALERT_TYPES = [
   "健康指导",
 ] as const;
 
-/** 通报渠道白名单；MVP 只接入「站内」（Nexus message），其余记「待接入」。 */
+/** 通报渠道白名单；MVP 只接入「站内」（platformd 共享 message），其余记「待接入」。 */
 export const CHILD_NOTIFICATION_CHANNELS = ["站内", "短信", "微信"] as const;
 
 export interface ChildHealthAlert {

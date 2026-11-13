@@ -34,8 +34,8 @@ var tables = []string{
 }
 
 func main() {
-	sourceDatabase := flag.String("source-db", "../service-nexus-shared/.data/nexus.sqlite", "Nexus SQLite 路径（只读）")
-	sourceFiles := flag.String("source-files", "../service-nexus-shared/.data/files", "Nexus 文件实体目录")
+	sourceDatabase := flag.String("source-db", "../service-nexus-shared/.data/nexus.sqlite", "旧 Nexus SQLite 路径（只读；模块删除后指向归档副本）")
+	sourceFiles := flag.String("source-files", "../service-nexus-shared/.data/files", "旧 Nexus 文件实体目录（模块删除后指向归档副本）")
 	targetDatabase := flag.String("target-db", ".data/platformd.sqlite", "platformd SQLite 路径")
 	targetFiles := flag.String("target-files", ".data/files", "platformd 文件实体目录（PLATFORMD_FILES_DIR）")
 	dryRun := flag.Bool("dry-run", false, "只报告将迁移的行数与文件数，不写入")

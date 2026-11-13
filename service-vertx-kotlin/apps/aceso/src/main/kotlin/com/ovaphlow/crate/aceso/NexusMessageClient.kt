@@ -14,14 +14,14 @@ import java.net.URI
 import java.util.concurrent.TimeUnit
 
 /**
- * 052 P4：家长通报的 Nexus `messages` 支撑实现。
+ * 052 P4：家长通报的 platformd 共享 `messages` 支撑实现。
  *
  * 只做一件事：带用户会话 cookie `POST /crate-api/v1/messages`，返回 `message_id`。
  *
  * 口径：
- *  - Nexus 写路由要求**有效会话**（`Extension<Identity>`），因此转发调用方的 Cookie，
+ *  - 共享写路由要求**有效会话**，因此转发调用方的 Cookie，
  *    不自行铸造身份（与 `SubjectPermissionClient` / `DepartmentDirectoryClient` 同范式）；
- *  - `sender_id` 由 Nexus 从会话派生（Aceso 不提交、也提交不了）；
+ *  - `sender_id` 由 platformd 从会话派生（Aceso 不提交、也提交不了）；
  *  - 失败只记错误信息，绝不记 cookie / 会话值；上游异常交给 Future 失败，
  *    由 `ChildAlertService` 记「发送失败」台账，不谎报送达（052 D6）。
  */

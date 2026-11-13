@@ -4,12 +4,12 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 /**
  * 014 Aceso 药房采购与供应商收货入库闭环 — 浏览器验收。
  *
- * 依赖用户已启动的 Aceso UI、Aceso API、共享 Nexus（nexus-shared）与隔离测试数据库：
+ * 依赖用户已启动的 Aceso UI、Aceso API、platformd 共享 API 与隔离测试数据库：
  *   PLAYWRIGHT_BASE_URL        Aceso UI 地址
  *   PLAYWRIGHT_API_BASE_URL    Aceso API 地址（/crate-api 根）
  *   PLAYWRIGHT_DB_*            隔离 PostgreSQL 连接
  *   PLAYWRIGHT_USERNAME/PASSWORD 测试账号
- *   PLAYWRIGHT_NEXUS_API_BASE_URL 共享 Nexus 地址；缺省 http://127.0.0.1:8423/crate-api/v1
+ *   PLAYWRIGHT_NEXUS_API_BASE_URL 测试用 platformd 共享 API 地址；缺省 http://127.0.0.1:8423/crate-api/v1（隔离测试实例）
  *
  * 主线（对照 docs/plans/014.aceso-pharmacy-procurement-and-receiving.md §9.2）：
  *   药房建采购订单（DRAFT）→ 审核（APPROVED，业务字段冻结）→ 同订单项多批次分批到货
@@ -200,7 +200,7 @@ async function ensureAuthenticated(page: Page) {
   ]);
 }
 
-// ─── Nexus 仓库 ────────────────────────────────────────────────────────────
+// ─── 共享仓库 ──────────────────────────────────────────────────────────────
 
 async function nexusListWarehouses(page: Page): Promise<Warehouse[]> {
   return page.evaluate(async ({ nexusBase }) => {

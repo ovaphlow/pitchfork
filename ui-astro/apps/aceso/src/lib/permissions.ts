@@ -7,7 +7,7 @@ import { useEffect, useState } from "react";
  * - 只做**前端显隐**：让没有对应权限码的账号看不到入口。**后端仍是唯一强制点**，
  *   绕过前端直接请求写路由依然 403；前端隐藏不替代 403，也不承担鉴权职责。
  * - 权限码取**本人**：`GET /crate-api/v1/subject-permissions?subject_id=<本人>`
- *   （Nexus）。Nexus 只允许查自己（043 D5：查他人需 `access:manage`），所以先取会话
+ *   （platformd 共享 API）。platformd 只允许查自己（043 D5：查他人需 `access:manage`），所以先取会话
  *   `subject_id`，再用共享客户端既有导出 `getSubjectPermissions` 查本人。
  * - **平台管理员短路**：后端 `SubjectPermissionGate` 对 `platform_admin` 直接放行，
  *   而平台管理员通常**不持有任何权限码**。前端必须同口径——`platformAdmin === true`
@@ -50,7 +50,7 @@ export function normalizePermissionCodes(codes: readonly string[] | null | undef
  * - `required` 缺省或为空数组 = 该入口不设前端门槛（既有菜单项保持原行为）；
  * - 语义为**任一命中**（OR）：声明多个码时，拥有其中任意一个即可见；
  * - `codes === null` 表示权限**未知**（读取中或读取失败）→ 不显示受限入口。
- *   与后端 `SubjectPermissionGate` 的 fail-closed 口径一致：Nexus 不可用时后端也拒绝
+ *   与后端 `SubjectPermissionGate` 的 fail-closed 口径一致：platformd 不可用时后端也拒绝
  *   受保护写操作，前端此时不应给出必然 403 的入口。空数组（已确认无任何权限码）同样不可见。
  */
 export function hasRequiredPermissions(
@@ -121,7 +121,7 @@ const INITIAL_STATE: SubjectPermissionsState = {
 };
 
 /**
- * 读取**本人**权限码与平台管理员标记（会话 → 本人 `subject_id` → Nexus `/subject-permissions`）。
+ * 读取**本人**权限码与平台管理员标记（会话 → 本人 `subject_id` → platformd 共享 `/subject-permissions`）。
  *
  * 两个函数都是 `@pitchfork/shared/aceso` 的既有导出（`getCurrentSession`、
  * `getSubjectPermissions`），本任务不新增、不改动共享客户端。

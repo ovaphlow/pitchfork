@@ -4,13 +4,13 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 /**
  * 013 Aceso 药房申领与护理站补货调拨闭环 — 浏览器验收。
  *
- * 依赖用户已启动的 Aceso UI、Aceso API、共享 Nexus（nexus-shared）与隔离测试数据库：
+ * 依赖用户已启动的 Aceso UI、Aceso API、platformd 共享 API 与隔离测试数据库：
  *   PLAYWRIGHT_BASE_URL        Aceso UI 地址
  *   PLAYWRIGHT_API_BASE_URL    Aceso API 地址（/crate-api 根）
  *   PLAYWRIGHT_DB_*            隔离 PostgreSQL 连接
  *   PLAYWRIGHT_USERNAME/PASSWORD 测试账号
- *   PLAYWRIGHT_NEXUS_API_BASE_URL 共享 Nexus 地址；缺省 http://127.0.0.1:8423/crate-api/v1
- *                                 （nexus-shared e2e 实例；与 Trainova 业务系统无关）
+ *   PLAYWRIGHT_NEXUS_API_BASE_URL 测试用 platformd 共享 API 地址；缺省 http://127.0.0.1:8423/crate-api/v1
+ *                                 （隔离测试实例；勿指向开发库）
  *
  * 主线（对照 docs/plans/013.aceso-pharmacy-requisition-and-ward-stock-transfer.md）：
  *   护理站建单（DRAFT）→ 药房审批并预留批次库存（APPROVED）→
@@ -272,7 +272,7 @@ async function ensureAuthenticated(page: Page) {
   ]);
 }
 
-/** Nexus 仓库列表：测试前置数据必须使用真实仓库编码。 */
+/** 共享仓库列表：测试前置数据必须使用真实仓库编码。 */
 async function nexusListWarehouses(page: Page): Promise<Warehouse[]> {
   return page.evaluate(async ({ nexusBase }) => {
     const response = await fetch(`${nexusBase}/settings?category=warehouse&page=1&page_size=100`, {
@@ -283,7 +283,7 @@ async function nexusListWarehouses(page: Page): Promise<Warehouse[]> {
   }, { nexusBase: NEXUS_API_BASE });
 }
 
-/** Nexus 创建仓库（仅在 e2e Nexus 缺少两个仓库时补种）。 */
+/** 创建仓库（仅在测试实例缺少两个仓库时补种）。 */
 async function nexusCreateWarehouse(page: Page, input: { code: string; name: string; description?: string }): Promise<Warehouse> {
   return page.evaluate(
     async ({ nexusBase, code, name, description }) => {

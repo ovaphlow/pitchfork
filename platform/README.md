@@ -165,23 +165,31 @@ Two environment variables configure the shared slice:
 
 Migrations `000013`–`000020` create the shared tables in `platformd.sqlite`.
 
-### Migrating data from service-nexus-shared
+### Migrating data from the retired service-nexus-shared database
 
-Stop `platformd` (or at least its write traffic), then run:
+The Rust service was merged into platformd (data migrated first, with a
+`platformd.sqlite` backup kept from that run) and then removed from the tree.
+If you still have an archived copy of its SQLite database and file directory,
+stop `platformd` (or at least its write traffic) and import it:
 
 ```bash
 cd platform
 set -a
 . ./.env
 set +a
-go run ./cmd/nexus-import -dry-run   # preview row and file counts
-go run ./cmd/nexus-import            # backup target, copy tables, copy files
+go run ./cmd/nexus-import -dry-run \
+  -source-db ~/nexus-archive/nexus.sqlite \
+  -source-files ~/nexus-archive/files
+go run ./cmd/nexus-import \
+  -source-db ~/nexus-archive/nexus.sqlite \
+  -source-files ~/nexus-archive/files
 ```
 
 The importer applies pending migrations, copies the eight shared tables with
 `INSERT OR IGNORE` (idempotent), backs up `platformd.sqlite` with `VACUUM INTO`
 before writing, and copies file entities (`stored_name`) into
-`PLATFORMD_FILES_DIR`. It never deletes Nexus data, so the old service can stay
-read-only until removal is decided.
+`PLATFORMD_FILES_DIR`. Its defaults still point at
+`../service-nexus-shared/.data/...` for the migration window; pass explicit
+flags once the old tree is gone.
 
 See `../docs/plans/055.nexus-shared-merge-into-platform.md`.

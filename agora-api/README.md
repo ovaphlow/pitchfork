@@ -55,10 +55,10 @@ podman compose down      # 停止，数据保留在 ./.data/pg
 | `POST` | `/crate-api/agora/v1/auth/email-link` | 申请一次性登录邮件；入参 `{email, display_name?}`；未知邮箱/限流/投递失败同样返回 `202 {"status":"accepted"}` |
 | `POST` | `/crate-api/agora/v1/auth/email-link/exchange` | 兑换邮件中的一次性 token（`{token}`），转发 platformd 会话 Cookie 并返回会话 JSON；token 一次性、10 分钟有效 |
 | `POST` | `/crate-api/agora/v1/auth/login` | 密码登录（存量账号兜底）：校验 IDP 凭据并建立会话 |
-| `GET` | `/crate-api/agora/v1/auth/session` | 当前会话 + Nexus 角色/权限 |
+| `GET` | `/crate-api/agora/v1/auth/session` | 当前会话 + 共享角色/权限 |
 | `DELETE` | `/crate-api/agora/v1/auth/session` | 登出并清除会话 Cookie |
-| `POST` | `/crate-api/agora/v1/files` | 上传审核材料（营业执照）；multipart 字段名 `file`，仅收 JPG/PNG/WebP/PDF，≤ 8 MB；转发给 Nexus files 并返回 `{id, content_url}` |
-| `GET` | `/crate-api/agora/v1/files/{id}/content` | 读取已上传文件；需要有效会话，转发 Nexus files 内容 |
+| `POST` | `/crate-api/agora/v1/files` | 上传审核材料（营业执照）；multipart 字段名 `file`，仅收 JPG/PNG/WebP/PDF，≤ 8 MB；转发给 platformd 共享 files 并返回 `{id, content_url}` |
+| `GET` | `/crate-api/agora/v1/files/{id}/content` | 读取已上传文件；需要有效会话，转发 platformd 共享 files 内容 |
 | `GET` | `/crate-api/agora/v1/organizations` | 机构列表；仅返回已认证机构，支持 `city`、`org_type`、`q`、`limit`、`offset` |
 | `POST` | `/crate-api/agora/v1/organizations` | 创建机构；当前主体成为所有者，状态 `待审核`；`metadata.credit_code` 与 `metadata.license_file_id` 作为审核材料 |
 | `GET` | `/crate-api/agora/v1/organizations/mine` | 我所属的机构及其中的角色 |
@@ -80,7 +80,7 @@ podman compose down      # 停止，数据保留在 ./.data/pg
 
 - 机构审核状态：`待审核 → 已认证 / 已驳回 / 已停用`，只有 `已认证` 机构能发布岗位。
 - 一个主体可以创建并管理多家机构（例如集团、连锁），每家机构独立审核；约束只有 `name + city` 唯一，不限制每个主体的机构数量。机构成员角色按机构隔离。
-- 机构审核材料：`metadata.credit_code`（统一社会信用代码）与 `metadata.license_file_id`（营业执照，指向 Nexus files.id）。文件经 `POST /crate-api/agora/v1/files` 上传，营业执照只接受图片与 PDF，单文件不超过 8 MB。
+- 机构审核材料：`metadata.credit_code`（统一社会信用代码）与 `metadata.license_file_id`（营业执照，指向 platformd 共享 files.id）。文件经 `POST /crate-api/agora/v1/files` 上传，营业执照只接受图片与 PDF，单文件不超过 8 MB。
 - 机构成员角色：`所有者`（每机构唯一）> `管理员` > `招聘专员`。所有者与管理员可改档案、管成员；三者都可维护岗位。
 - 岗位状态 `已关闭` 是终态；「已过期」由 `expires_at` 推导，不落状态、不需要后台任务。
 - 公开接口只暴露已认证机构与 `招聘中` 岗位；其余记录对非成员返回 404 而不是 403。
@@ -92,14 +92,14 @@ agora-api 是浏览器与两个内部服务之间的 BFF，浏览器只看到 ag
 ```text
 browser ──cookie──▶ agora-api ──Cookie──▶ platformd  GET /session
                         │
-                        └────────Cookie──▶ nexus      GET /subject-permissions
+                        └────────Cookie──▶ platformd  GET /crate-api/v1/subject-permissions
 ```
 
 - 注册/登录请求转发到 `platformd`，`Set-Cookie` 原样回传；agora-api 不解析、
   不保存会话 token。
-- 登录成功后读取 `service-nexus-shared` 的 `GET /subject-permissions?subject_id=`
-  （只查当前主体），把角色和权限码附在会话响应里。Nexus 不可用时登录仍成功，
-  `nexus_ready=false`。
+- 登录成功后读取 `platformd` 共享 API 的 `GET /crate-api/v1/subject-permissions?subject_id=`
+  （只查当前主体），把角色和权限码附在会话响应里。共享 API 不可用时登录仍成功，
+  `nexus_ready=false`（字段名沿用）。
 - 登出会把 IDP 的 CSRF Cookie 值作为 `X-CSRF-Token` 转发，确保服务端会话被真正
   撤销，而不是只清浏览器 Cookie。
 - 浏览器 Cookie 使用 `SameSite=Lax`；面向互联网部署必须使用 HTTPS，并让 UI 与
@@ -132,9 +132,9 @@ curl -s http://localhost:8080/crate-api/agora/v1/status
 | `AUTO_MIGRATE` | `true` | 启动时执行 `migrations/` 下未应用的 SQL；设为 `false` 则由部署流程单独执行 |
 | `ALLOWED_ORIGINS` | `http://localhost:4321,http://127.0.0.1:4321` | 逗号分隔的 CORS 来源；精确匹配 |
 | `IDENTITY_BASE_URL` | `http://127.0.0.1:8420` | `platformd` 地址 |
-| `NEXUS_BASE_URL` | `http://127.0.0.1:8421` | `service-nexus-shared` 地址 |
-| `AUTH_HTTP_TIMEOUT` | `3s` | 调用上述两个服务的超时 |
-| `FILES_HTTP_TIMEOUT` | `30s` | 访问 Nexus files 的超时；上传需要读取与哈希请求体，故独立配置 |
+| `NEXUS_BASE_URL` | `http://127.0.0.1:8420` | `platformd` 共享 API 地址（`/crate-api/v1`） |
+| `AUTH_HTTP_TIMEOUT` | `3s` | 调用 platformd 身份端点与共享 API 的超时 |
+| `FILES_HTTP_TIMEOUT` | `30s` | 访问 platformd 共享 files 的超时；上传需要读取与哈希请求体，故独立配置 |
 | `TRUSTED_PROXY_CIDRS` | `127.0.0.1/32,::1/128` | 允许提供 `X-Forwarded-For` 的反向代理 |
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 | `LOG_FILE` | `logs/app.jsonl` | JSONL 文件；设为 `-` 时只写 stdout |
@@ -163,7 +163,7 @@ internal/httpapi/        # 原生 ServeMux、中间件、响应、认证 BFF、�
 internal/id/             # 26 位 Crockford Base32 ULID
 internal/identityclient/ # platformd 会话与注册调用
 internal/migrate/        # 进程内迁移 runner（advisory lock + schema_migrations）
-internal/nexusclient/    # service-nexus-shared 基础数据读取与 files 上传/下载代理
+internal/nexusclient/    # platformd 共享 API（/crate-api/v1）基础数据读取与 files 上传/下载代理
 internal/organizations/  # 机构、成员、审核状态机
 internal/positions/      # 招聘岗位与发布状态机
 internal/logging/        # JSONL slog

@@ -19,7 +19,7 @@ import { useDomain } from "../lib/useDomain";
  * 儿保异常提醒与家长通报页（052 P4）。
  *
  * 异常由后端按儿童口径聚合（体温/心率/呼吸按年龄档、生长按 P3/P97、接种逾期、体检异常）；
- * 本页负责展示、筛选与「通报家长」动作。通报会写本域台账并调用 Nexus message；
+ * 本页负责展示、筛选与「通报家长」动作。通报会写本域台账并调用 platformd 共享 message；
  * 渠道未接入或发送失败都会如实标注，**不显示为已送达**（052 D6 / 裁定 4）。
  */
 
@@ -296,7 +296,7 @@ export default function ChildHealthAlertsPage() {
           <Table columns={notificationColumns} data={notifications} />
         )}
         <p className="mt-3 text-xs text-fg-dimmed">
-          「待接入」表示该渠道尚未接入外发能力，「发送失败」表示 Nexus message 未创建成功——两者都不代表已送达。
+          「待接入」表示该渠道尚未接入外发能力，「发送失败」表示 platformd 共享 message 未创建成功——两者都不代表已送达。
         </p>
       </Card>
 

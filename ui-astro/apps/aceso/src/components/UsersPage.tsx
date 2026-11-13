@@ -159,7 +159,7 @@ export default function UsersPage() {
     setAssignments(grouped);
   }, []);
 
-  // 部门归属单独取：Nexus 尚未重启（没有 /subject-departments）时，
+  // 部门归属单独取：platformd 尚未重启（没有 /subject-departments）时，
   // 只影响部门列，不把角色列一起打成错误。
   const loadDepartmentAssignments = useCallback(async (subjectIds: string[]) => {
     if (subjectIds.length === 0) {

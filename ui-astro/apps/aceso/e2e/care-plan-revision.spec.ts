@@ -13,7 +13,7 @@ import { expect, test, type Page } from "@playwright/test";
  *
  * 运行前提（已有服务，仅校验不启动）：
  *  - Aceso API :8422 连接隔离测试库 aceso_test（127.0.0.1:55432）
- *  - Aceso UI :4324、身份服务 :8420、Nexus :8421
+ *  - Aceso UI :4324、platformd :8420（身份 + 共享 API）
  *  - PLAYWRIGHT_BASE_URL 使用与 API/IDP 同站点地址
  *
  * 基线数据通过页面内登录态调用真实 API 创建（fixture 前缀 r9-），

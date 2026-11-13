@@ -6,7 +6,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
  * `materials.base_unit/quantity_scale/package_unit/package_size`，库存账本默认基础单位，
  * 包装仅作展示/盘点辅助；对应计划 §6.3 1/2/5 与 015 §9.3 继承口径）。
  *
- * 依赖用户已启动的 Aceso UI、Aceso API、共享 Nexus 与隔离测试数据库：
+ * 依赖用户已启动的 Aceso UI、Aceso API、platformd 共享 API 与隔离测试数据库：
  *   PLAYWRIGHT_BASE_URL / PLAYWRIGHT_API_BASE_URL / PLAYWRIGHT_DB_* / PLAYWRIGHT_USERNAME/PASSWORD
  *
  * 主线：新建片剂物资（片、0 位小数、盒=24）→ UI 录入 2 盒入库 → 结存/可用/成本 48 片 +

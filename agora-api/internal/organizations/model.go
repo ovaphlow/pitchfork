@@ -230,7 +230,7 @@ func (m Metadata) Validate() (Metadata, error) {
 	if normalised.CreditCode, err = text("统一社会信用代码", m.CreditCode, 0, maxCreditCode); err != nil {
 		return m, err
 	}
-	// license_file_id 指向 Nexus files.id，由平台审核时查看营业执照原件。
+	// license_file_id 指向 platformd 共享 files.id，由平台审核时查看营业执照原件。
 	if normalised.LicenseFileID, err = text("营业执照", m.LicenseFileID, 0, maxLogoFileID); err != nil {
 		return m, err
 	}

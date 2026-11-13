@@ -9,7 +9,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
  *   PLAYWRIGHT_API_BASE_URL    Aceso API 地址（/crate-api 根）
  *   PLAYWRIGHT_DB_*            隔离 PostgreSQL 连接
  *   PLAYWRIGHT_USERNAME/PASSWORD 测试账号
- *   PLAYWRIGHT_NEXUS_API_BASE_URL 可选；缺省按仓库配置所在 Nexus 地址
+ *   PLAYWRIGHT_NEXUS_API_BASE_URL 可选；缺省为隔离测试实例
  *
  * 主线（对照 docs/plans/012.aceso-pharmacy-medication-return.md）：
  *   已发药(DISPENSED)明细 → 详情弹窗「创建退药」→ 待确认(PENDING)退药单 →
@@ -22,7 +22,7 @@ const API_BASE_URL = process.env.PLAYWRIGHT_API_BASE_URL;
 const LOGIN_IDENTIFIER = process.env.PLAYWRIGHT_USERNAME;
 const LOGIN_PASSWORD = process.env.PLAYWRIGHT_PASSWORD;
 const NEXUS_API_BASE =
-  process.env.PLAYWRIGHT_NEXUS_API_BASE_URL ?? "http://192.168.0.109:8421/crate-api/v1";
+  process.env.PLAYWRIGHT_NEXUS_API_BASE_URL ?? "http://127.0.0.1:8423/crate-api/v1";
 
 interface Encounter {
   id: string;
@@ -435,7 +435,7 @@ async function createActiveAdmission(page: Page, suffix: string): Promise<Admiss
   });
 }
 
-/** 读取 Nexus 仓库下拉配置；测试前置数据必须使用真实仓库编码。 */
+/** 读取共享仓库下拉配置；测试前置数据必须使用真实仓库编码。 */
 async function getWarehouseCode(page: Page): Promise<string> {
   const warehouses = await page.evaluate(async ({ nexusBase }) => {
     const response = await fetch(`${nexusBase}/settings?category=warehouse&page=1&page_size=100`, {

@@ -1,6 +1,7 @@
-// Package nexusclient reads identity-backed base data from service-nexus-shared.
-// Nexus authorizes requests by forwarding the same opaque IDP cookie, so the
-// caller passes the browser Cookie header through unchanged.
+// Package nexusclient reads identity-backed base data from platformd's shared
+// API (/crate-api/v1). platformd authorizes requests with the same opaque
+// session cookie, so the caller passes the browser Cookie header through
+// unchanged.
 package nexusclient
 
 import (

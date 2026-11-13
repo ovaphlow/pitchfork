@@ -1,11 +1,11 @@
 import { expect, test, type Page } from "@playwright/test";
 
 /**
- * 018 计划 — Nexus Shared 角色目录（roles）浏览器验收。
+ * 018 计划 — 共享角色目录（roles，platformd 提供）浏览器验收。
  *
  * 前置环境（隔离实例，均由测试启动并在结束后销毁）：
  *   - IDP 测试实例：127.0.0.1:8430（独立 SQLite，bootstrap admin 账号登录）
- *   - Nexus 测试实例：127.0.0.1:8423（独立 SQLite 测试库）
+ *   - platformd 测试实例：127.0.0.1:8423（独立 SQLite 测试库）
  *   - Aceso UI dev：127.0.0.1:4324（PUBLIC_IDENTITY_API_PORT=8430、
  *     PUBLIC_NEXUS_API_HOST=127.0.0.1、PUBLIC_NEXUS_API_PORT=8423）
  * 环境变量：PLAYWRIGHT_BASE_URL、PLAYWRIGHT_USERNAME、PLAYWRIGHT_PASSWORD、

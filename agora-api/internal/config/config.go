@@ -68,7 +68,7 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
-	nexusBaseURL, err := envURL("NEXUS_BASE_URL", "http://127.0.0.1:8421")
+	nexusBaseURL, err := envURL("NEXUS_BASE_URL", "http://127.0.0.1:8420")
 	if err != nil {
 		return Config{}, err
 	}

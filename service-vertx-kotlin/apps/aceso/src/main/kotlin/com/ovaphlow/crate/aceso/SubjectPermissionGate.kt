@@ -19,7 +19,7 @@ import java.util.concurrent.TimeUnit
 
 // 036/037 角色消费试点：把「主体 → 角色 → 权限码」接到真实请求上。
 //
-// 权限码的权威是 Nexus 共享角色目录（roles.permission_codes），产品后端不自己定义角色语义，
+// 权限码的权威是 platformd 共享角色目录（roles.permission_codes），产品后端不自己定义角色语义，
 // 只声明「这个路由需要哪个权限码」。本轮只接护理执行的两条写路由（记录给药、打卡状态更新），
 // 读路由与其它模块行为完全不变。
 //
@@ -48,10 +48,10 @@ internal sealed interface PermissionLookup {
 }
 
 /**
- * 从 Nexus 取「该主体当前拥有的权限码集合」。
+ * 从 platformd 共享 API 取「该主体当前拥有的权限码集合」。
  *
  * 只做一件事：发一次带用户会话 cookie 的 GET，按状态码分类，并把成功结果按 TTL 缓存。
- * 缓存无主动失效（Nexus 侧变更靠 TTL 收敛），键是 subjectId，规模等于登录用户数。
+ * 缓存无主动失效（platformd 侧变更靠 TTL 收敛），键是 subjectId，规模等于登录用户数。
  */
 internal class SubjectPermissionClient(
     vertx: Vertx,

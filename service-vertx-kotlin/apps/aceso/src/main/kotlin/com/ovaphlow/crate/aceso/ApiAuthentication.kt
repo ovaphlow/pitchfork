@@ -60,7 +60,7 @@ private const val PUBLIC_IDENTITY_PREFIX = "/identity/v1/"
 /**
  * `/crate-api` 下的公共路径白名单：只有这些路径允许匿名访问。
  *
- * 注意 `shared/v1`（Nexus 代理）**不在**白名单内——计划决策 3 明确 fail closed。
+ * 注意 `/v1`（platformd 共享 API 代理）**不在**白名单内——计划决策 3 明确 fail closed。
  */
 internal fun isPublicApiPath(path: String): Boolean {
     val relative =

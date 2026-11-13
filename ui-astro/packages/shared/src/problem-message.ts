@@ -27,7 +27,7 @@ export interface ApiProblem {
  * 把服务端错误翻成用户能照做的提示。
  *
  * 权限闸门在无权限时回 403 + `required_permission`，上游故障回 503，
- * 删除仍被引用的部门/角色时 Nexus 回 409 + 英文 detail；
+ * 删除仍被引用的部门/角色时 platformd 共享 API 回 409 + 英文 detail；
  * 这几种若原样透出英文，用户只会看到 `forbidden` 或英文句子，不知道该找谁要哪权限、
  * 还是该先调整归属。
  *
@@ -35,8 +35,8 @@ export interface ApiProblem {
  */
 
 /**
- * 删除冲突（409）的中文映射：句式逐字对齐 Nexus 的英文错误约定
- * （`service-nexus-shared/src/departments/mod.rs` / `src/roles/mod.rs`）。
+ * 删除冲突（409）的中文映射：句式逐字对齐 platformd 共享模块的英文错误约定
+ * （`platform/internal/shared/departments.go` / `roles.go`）。
  * 只在这两条句式上动手：其余 409（如重复编码）继续走通用兜底，原样透出 detail。
  */
 const DEPARTMENT_DELETE_CONFLICT = /^department is assigned to (\d+) subject\(s\); unassign before deleting$/;
@@ -52,7 +52,7 @@ export function problemMessage(
     if (requiredPermission) {
       return `权限不足：需要「${requiredPermission}」权限。请联系管理员在「角色管理」中把带有该权限码的角色分配给你。`;
     }
-    // 043：没有权限码的 403（IDP 的管理员接口、Nexus 的平台管理员门禁）此前会原样透出英文
+    // 043：没有权限码的 403（IDP 的管理员接口、platformd 的平台管理员门禁）此前会原样透出英文
     // `not authorized`，业务账号只看到一句英文、不知道是权限问题还是数据为空。
     return "权限不足：该操作需要管理员权限，请联系平台管理员。";
   }

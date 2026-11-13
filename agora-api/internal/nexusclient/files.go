@@ -12,11 +12,11 @@ import (
 	"strings"
 )
 
-// filesPath is the Nexus files collection. Uploads and downloads both require a
+// filesPath is the platformd shared files collection. Uploads and downloads require a
 // valid IDP session, so the caller forwards the browser Cookie header untouched.
 const filesPath = "/crate-api/v1/files"
 
-// File is the metadata Nexus returns after a successful upload.
+// File is the metadata platformd returns after a successful upload.
 type File struct {
 	ID           string `json:"id"`
 	OriginalName string `json:"original_name"`
@@ -24,7 +24,7 @@ type File struct {
 	SizeBytes    int64  `json:"size_bytes"`
 }
 
-// UploadFile sends one image/PDF to Nexus and returns its metadata.
+// UploadFile sends one image/PDF to the platformd shared files API and returns its metadata.
 func (c *Client) UploadFile(
 	ctx context.Context,
 	cookieHeader, filename, contentType string,

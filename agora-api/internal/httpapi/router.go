@@ -24,8 +24,8 @@ type Deps struct {
 	ReadinessTimeout time.Duration
 	Identity         *identityclient.Client
 	Nexus            *nexusclient.Client
-	// Files is a second Nexus client with a longer timeout: uploads read the
-	// request body and hash it on disk, which outlasts the permissions call.
+	// Files is a second shared-API client with a longer timeout: uploads read
+	// the request body and hash it on disk, which outlasts the permissions call.
 	Files          *nexusclient.Client
 	TrustedProxies []netip.Prefix
 	Organizations  OrganizationStore

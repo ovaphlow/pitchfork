@@ -6,7 +6,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
  * 执行耗材详情（数量/单位/成本）与库存流水完全一致；只录入基础数量，
  * 不暴露规格/换算/基础数量等旧字段。
  *
- * 依赖用户已启动的 Aceso UI、API、共享 Nexus 与隔离测试数据库：
+ * 依赖用户已启动的 Aceso UI、API、platformd 共享 API 与隔离测试数据库：
  *   PLAYWRIGHT_BASE_URL / PLAYWRIGHT_API_BASE_URL / PLAYWRIGHT_DB_* / PLAYWRIGHT_USERNAME/PASSWORD
  *
  * 链路：SQL 种 patient/service_period/task/execution(PENDING 今日) +

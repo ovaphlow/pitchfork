@@ -2,7 +2,7 @@
 
 PostgreSQL 17。文件按名称字典序执行，一个文件一个事务；执行记录写入 `schema_migrations`。
 迁移只由 `agora-api` 进程在启动时执行（`internal/migrate`，`AUTO_MIGRATE=false` 可关闭），
-不连接 Nexus/IDP 的数据库。
+不连接 platformd 的数据库。
 
 runner 的行为：
 
@@ -44,7 +44,7 @@ runner 的行为：
   "website": "https://example.com",
   "address": "××路 1 号",
   "credit_code": "91310000XXXXXXXXXX",
-  "license_file_id": "<Nexus files.id>",
+  "license_file_id": "<platformd 共享 files.id>",
   "founded_year": 2015,
   "tags": ["双休", "五险一金"],
   "contact": { "name": "", "phone": "", "email": "" }

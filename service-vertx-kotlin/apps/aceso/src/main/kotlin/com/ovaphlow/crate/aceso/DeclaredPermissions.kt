@@ -378,8 +378,8 @@ internal const val BASE_DATA_MANAGE_PERMISSION = "base_data:manage"
 /**
  * Nexus 侧已接线的写路由（043 §4.1 冻结矩阵）。
  *
- * 与 `service-nexus-shared/src/{roles,departments,subject_roles,subject_departments}/mod.rs`
- * 的 `write_router()` 一一对应；`GET /v1/subject-permissions` 的"仅本人"收紧
+ * 与 `platform/internal/shared/{roles,departments,subject_roles,subject_departments}.go`
+ * 的写路由一一对应；`GET /v1/subject-permissions` 的"仅本人"收紧
  * 也由 `access:manage` 控制（查自己不需要该码，因此不计入本清单）。
  */
 internal val NEXUS_ENFORCED_PERMISSIONS: List<NexusEnforcedPermission> = listOf(
