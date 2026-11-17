@@ -5,8 +5,6 @@ __pycache__/
 .data/
 .pi-subagents/
 .superpowers/
-.pi-lens/
-.pi-lens.json
 
 .codebase-memory/
 .hermes/loop/

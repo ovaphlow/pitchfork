@@ -23,7 +23,13 @@ func TestStatusTransitions(t *testing.T) {
 		{StatusOpen, StatusDraft, false},
 		{StatusPaused, StatusOpen, true},
 		{StatusPaused, StatusClosed, true},
-		{StatusClosed, StatusOpen, false},
+		{StatusOpen, StatusStopped, false},
+		{StatusStopped, StatusOpen, true},
+		{StatusStopped, StatusClosed, true},
+		{StatusStopped, StatusPaused, false},
+		{StatusClosed, StatusOpen, true},
+		{StatusClosed, StatusPaused, false},
+		{StatusClosed, StatusStopped, false},
 		{StatusClosed, StatusDraft, false},
 	}
 	for _, test := range tests {
@@ -38,8 +44,17 @@ func TestStatusInputValidate(t *testing.T) {
 	if err != nil || next != StatusOpen {
 		t.Fatalf("Validate = %q, %v", next, err)
 	}
-	if _, err := (StatusInput{Status: StatusOpen}).Validate(StatusClosed); err == nil {
-		t.Fatal("a closed posting cannot reopen")
+	if next, err := (StatusInput{Status: StatusOpen}).Validate(StatusClosed); err != nil || next != StatusOpen {
+		t.Fatalf("reopening a closed posting = %q, %v; want 招聘中", next, err)
+	}
+	if next, err := (StatusInput{Status: StatusOpen}).Validate(StatusStopped); err != nil || next != StatusOpen {
+		t.Fatalf("restoring a stopped posting = %q, %v; want 招聘中", next, err)
+	}
+	if _, err := (StatusInput{Status: StatusPaused}).Validate(StatusClosed); err == nil {
+		t.Fatal("a closed posting must reopen through 招聘中 only")
+	}
+	if _, err := (StatusInput{Status: StatusStopped}).Validate(StatusOpen); err == nil {
+		t.Fatal("auto-stop must not be requested through the status API")
 	}
 	if _, err := (StatusInput{Status: "已过期"}).Validate(StatusOpen); err == nil {
 		t.Fatal("unknown states must be rejected")
@@ -181,17 +196,21 @@ func TestPositionPublicHonoursExpiry(t *testing.T) {
 		name      string
 		status    Status
 		expiresAt *time.Time
+		openUntil *time.Time
 		want      bool
 	}{
-		{"open without expiry", StatusOpen, nil, true},
-		{"open with future expiry", StatusOpen, &future, true},
-		{"open with past expiry", StatusOpen, &past, false},
-		{"draft", StatusDraft, nil, false},
-		{"paused", StatusPaused, nil, false},
-		{"closed", StatusClosed, nil, false},
+		{"open without expiry", StatusOpen, nil, nil, true},
+		{"open with future expiry", StatusOpen, &future, nil, true},
+		{"open with past expiry", StatusOpen, &past, nil, false},
+		{"open with future window", StatusOpen, nil, &future, true},
+		{"open with elapsed window", StatusOpen, nil, &past, false},
+		{"stopped", StatusStopped, nil, &past, false},
+		{"draft", StatusDraft, nil, nil, false},
+		{"paused", StatusPaused, nil, nil, false},
+		{"closed", StatusClosed, nil, nil, false},
 	}
 	for _, test := range tests {
-		position := Position{Status: test.status, ExpiresAt: test.expiresAt}
+		position := Position{Status: test.status, ExpiresAt: test.expiresAt, OpenUntil: test.openUntil}
 		if got := position.Public(now); got != test.want {
 			t.Errorf("%s: Public = %v, want %v", test.name, got, test.want)
 		}

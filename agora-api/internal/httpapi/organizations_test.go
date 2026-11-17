@@ -183,6 +183,74 @@ func TestReviewOrganizationRequiresPlatformAdmin(t *testing.T) {
 	}
 }
 
+func TestListOrganizationsStatusFilterRequiresPlatformAdmin(t *testing.T) {
+	const pendingID = "01ARZ3NDEKTSV4RRFFQ69G5FAY"
+	orgs := newFakeOrganizations()
+	orgs.byID[testOrganizationID] = organizations.Organization{ID: testOrganizationID, Name: "甲医院", Status: organizations.StatusVerified}
+	orgs.byID[pendingID] = organizations.Organization{ID: pendingID, Name: "乙医院", Status: organizations.StatusPending}
+
+	member := newSessionProvider(t, "SUB1", false)
+	defer member.Close()
+	handler := newDirectoryHandler(member.URL, orgs, newFakePositions())
+
+	response := doRequest(handler, http.MethodGet, "/crate-api/agora/v1/organizations?status=待审核", "", withSession(nil))
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("member status = %d, want 403", response.Code)
+	}
+	if orgs.lastFilter.Status != "" {
+		t.Fatalf("a forbidden filter reached the store: %+v", orgs.lastFilter)
+	}
+
+	// Without a session the public listing stays verified-only.
+	response = doRequest(handler, http.MethodGet, "/crate-api/agora/v1/organizations", "", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("public status = %d, want 200: %s", response.Code, response.Body.String())
+	}
+	if orgs.lastFilter.Status != "" {
+		t.Fatalf("public filter = %+v", orgs.lastFilter)
+	}
+
+	admin := newSessionProvider(t, "ADMIN1", true)
+	defer admin.Close()
+	handler = newDirectoryHandler(admin.URL, orgs, newFakePositions())
+
+	response = doRequest(handler, http.MethodGet, "/crate-api/agora/v1/organizations?status=待审核", "", withSession(nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("admin status = %d, want 200: %s", response.Code, response.Body.String())
+	}
+	if orgs.lastFilter.Status != organizations.StatusPending {
+		t.Fatalf("filter = %+v", orgs.lastFilter)
+	}
+	var body struct {
+		Records []organizations.Organization `json:"records"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Records) != 1 || body.Records[0].ID != pendingID {
+		t.Fatalf("records = %+v", body.Records)
+	}
+
+	response = doRequest(handler, http.MethodGet, "/crate-api/agora/v1/organizations?status=未知", "", withSession(nil))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("invalid status = %d, want 400: %s", response.Code, response.Body.String())
+	}
+
+	response = doRequest(handler, http.MethodGet, "/crate-api/agora/v1/organizations?status=全部", "", withSession(nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("all status = %d, want 200: %s", response.Code, response.Body.String())
+	}
+	if !orgs.lastFilter.AllStatuses {
+		t.Fatalf("all-status filter = %+v", orgs.lastFilter)
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode all-status list: %v", err)
+	}
+	if len(body.Records) != 2 {
+		t.Fatalf("all-status records = %d, want 2", len(body.Records))
+	}
+}
+
 func TestOrganizationMemberEndpoints(t *testing.T) {
 	identity := newSessionProvider(t, "SUB1", false)
 	defer identity.Close()

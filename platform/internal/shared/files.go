@@ -32,13 +32,14 @@ import (
 // 仅在 Store.MaxUploadBytes 未配置时兜底（生产配置一定为正数）。
 const defaultMaxUploadBytes int64 = 20 * 1024 * 1024
 
-const fileColumns = "id, original_name, stored_name, mime_type, size_bytes, storage_path, hash_sha256, uploaded_by, created_at"
+const fileColumns = "id, app_code, original_name, stored_name, mime_type, size_bytes, storage_path, hash_sha256, uploaded_by, created_at"
 
-const insertFileSQL = "INSERT INTO files (id, original_name, stored_name, mime_type, size_bytes, storage_path, hash_sha256, uploaded_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+const insertFileSQL = "INSERT INTO files (id, app_code, original_name, stored_name, mime_type, size_bytes, storage_path, hash_sha256, uploaded_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
 
 // fileMetadata 的字段顺序与 Rust FileMetadata 完全一致。
 type fileMetadata struct {
 	ID           string `json:"id"`
+	AppCode      string `json:"app_code"`
 	OriginalName string `json:"original_name"`
 	StoredName   string `json:"stored_name"`
 	MimeType     string `json:"mime_type"`
@@ -68,6 +69,11 @@ func (handler *Handler) listFiles(responseWriter http.ResponseWriter, request *h
 	if _, ok := handler.requireSession(responseWriter, request); !ok {
 		return
 	}
+	appCode, appFailure := handler.requireAppCode(request)
+	if appFailure != (apiError{}) {
+		handler.fail(responseWriter, appFailure)
+		return
+	}
 	limit, offset, queryError := pageQuery(request)
 	if queryError.status != 0 {
 		handler.fail(responseWriter, queryError)
@@ -76,10 +82,10 @@ func (handler *Handler) listFiles(responseWriter http.ResponseWriter, request *h
 
 	// Nexus 只把非空 uploaded_by 当作过滤条件（不做 trim）。
 	uploadedBy := request.URL.Query().Get("uploaded_by")
-	query := "SELECT " + fileColumns + " FROM files"
-	arguments := make([]any, 0, 3)
+	query := "SELECT " + fileColumns + " FROM files WHERE app_code = ?"
+	arguments := []any{appCode}
 	if uploadedBy != "" {
-		query += " WHERE uploaded_by = ?"
+		query += " AND uploaded_by = ?"
 		arguments = append(arguments, uploadedBy)
 	}
 	query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
@@ -112,6 +118,11 @@ func (handler *Handler) listFiles(responseWriter http.ResponseWriter, request *h
 func (handler *Handler) uploadFile(responseWriter http.ResponseWriter, request *http.Request) {
 	session, ok := handler.requireSession(responseWriter, request)
 	if !ok {
+		return
+	}
+	appCode, appFailure := handler.requireAppCode(request)
+	if appFailure != (apiError{}) {
+		handler.fail(responseWriter, appFailure)
 		return
 	}
 
@@ -202,7 +213,7 @@ func (handler *Handler) uploadFile(responseWriter http.ResponseWriter, request *
 	}
 
 	_, err = handler.store.DB.ExecContext(request.Context(), insertFileSQL,
-		id, originalName, storedName, mimeType, int64(len(contents)), storagePath, hashSHA256, session.SubjectID)
+		id, appCode, originalName, storedName, mimeType, int64(len(contents)), storagePath, hashSHA256, session.SubjectID)
 	if err != nil {
 		if removeErr := os.Remove(diskPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 			handler.logger().LogAttrs(request.Context(), slog.LevelError, "remove untracked uploaded file",
@@ -212,7 +223,7 @@ func (handler *Handler) uploadFile(responseWriter http.ResponseWriter, request *
 		return
 	}
 
-	file, err := handler.loadFile(request, id)
+	file, err := handler.loadFile(request, id, appCode)
 	if err != nil {
 		handler.fail(responseWriter, notFound("file not found"))
 		return
@@ -225,7 +236,12 @@ func (handler *Handler) getFile(responseWriter http.ResponseWriter, request *htt
 	if _, ok := handler.requireSession(responseWriter, request); !ok {
 		return
 	}
-	file, err := handler.loadFile(request, request.PathValue("id"))
+	appCode, appFailure := handler.requireAppCode(request)
+	if appFailure != (apiError{}) {
+		handler.fail(responseWriter, appFailure)
+		return
+	}
+	file, err := handler.loadFile(request, request.PathValue("id"), appCode)
 	if err != nil {
 		handler.fail(responseWriter, notFound("file not found"))
 		return
@@ -238,7 +254,12 @@ func (handler *Handler) downloadFile(responseWriter http.ResponseWriter, request
 	if _, ok := handler.requireSession(responseWriter, request); !ok {
 		return
 	}
-	file, err := handler.loadFile(request, request.PathValue("id"))
+	appCode, appFailure := handler.requireAppCode(request)
+	if appFailure != (apiError{}) {
+		handler.fail(responseWriter, appFailure)
+		return
+	}
+	file, err := handler.loadFile(request, request.PathValue("id"), appCode)
 	if err != nil {
 		handler.fail(responseWriter, notFound("file not found"))
 		return
@@ -273,8 +294,13 @@ func (handler *Handler) deleteFile(responseWriter http.ResponseWriter, request *
 	if _, ok := handler.requireSession(responseWriter, request); !ok {
 		return
 	}
+	appCode, appFailure := handler.requireAppCode(request)
+	if appFailure != (apiError{}) {
+		handler.fail(responseWriter, appFailure)
+		return
+	}
 	id := request.PathValue("id")
-	file, err := handler.loadFile(request, id)
+	file, err := handler.loadFile(request, id, appCode)
 	if err != nil {
 		handler.fail(responseWriter, notFound("file not found"))
 		return
@@ -288,7 +314,8 @@ func (handler *Handler) deleteFile(responseWriter http.ResponseWriter, request *
 		handler.failFiles(responseWriter, request, "delete stored file", err)
 		return
 	}
-	if _, err := handler.store.DB.ExecContext(request.Context(), "DELETE FROM files WHERE id = ?", id); err != nil {
+	if _, err := handler.store.DB.ExecContext(request.Context(),
+		"DELETE FROM files WHERE id = ? AND app_code = ?", id, appCode); err != nil {
 		handler.failFiles(responseWriter, request, "delete file metadata", err)
 		return
 	}
@@ -296,15 +323,15 @@ func (handler *Handler) deleteFile(responseWriter http.ResponseWriter, request *
 }
 
 // loadFile 按 id 取元数据；无行时返回 sql.ErrNoRows（调用方统一映射 404）。
-func (handler *Handler) loadFile(request *http.Request, id string) (fileMetadata, error) {
+func (handler *Handler) loadFile(request *http.Request, id, appCode string) (fileMetadata, error) {
 	row := handler.store.DB.QueryRowContext(request.Context(),
-		"SELECT "+fileColumns+" FROM files WHERE id = ?", id)
+		"SELECT "+fileColumns+" FROM files WHERE id = ? AND app_code = ?", id, appCode)
 	return scanFileMetadata(row.Scan)
 }
 
 func scanFileMetadata(scan func(...any) error) (fileMetadata, error) {
 	var file fileMetadata
-	err := scan(&file.ID, &file.OriginalName, &file.StoredName, &file.MimeType, &file.SizeBytes,
+	err := scan(&file.ID, &file.AppCode, &file.OriginalName, &file.StoredName, &file.MimeType, &file.SizeBytes,
 		&file.StoragePath, &file.HashSHA256, &file.UploadedBy, &file.CreatedAt)
 	return file, err
 }

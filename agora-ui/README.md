@@ -19,7 +19,10 @@ bun install
 bun run dev
 ```
 
-开发地址：<http://localhost:4321>。依赖锁定在 `bun.lock`。
+开发地址：<http://localhost:4321>。`astro.config.mjs` 设置 `server.host: true`，
+开发服务器监听所有网卡，局域网设备可用 `http://<本机 LAN IP>:4321` 访问；
+`PUBLIC_API_URL` 与后端 `ALLOWED_ORIGINS` 也必须使用同一 LAN 地址（见下文）。
+依赖锁定在 `bun.lock`。
 
 ```bash
 bun run check   # astro check + svelte-check
@@ -45,9 +48,15 @@ bun run preview # 预览构建产物
 src/
   components/App.svelte          # 会话门禁、顶部认证栏、页签路由、身份工作台
   components/AuthPanel.svelte    # 登录/注册表单
+  components/AdminApp.svelte     # 独立管理台外壳（/admin）：会话门禁、顶栏、登录、页签
+  components/AdminNav.svelte     # 管理台底部导航（主页/招聘方/求职方/平台功能）
+  components/AdminHome.svelte    # 管理主页：待处理事项与统计
+  components/AdminOrganizations.svelte # 招聘方：机构查询、认证/驳回/停用
+  components/AdminSeekers.svelte # 求职方：平台账号查询、启用/禁用
+  components/AdminPlatform.svelte # 平台功能：服务状态与管理员权限
   components/BottomNav.svelte    # 登录后底部导航（首页/搜索/消息/我的）
   components/IntentSwitch.svelte # 求职者/招聘方身份切换
-  components/OrganizationCard.svelte     # 机构卡片 + 岗位管理折叠入口
+  components/OrganizationCard.svelte     # 机构卡片 + 内嵌岗位列表
   components/OrganizationPositions.svelte # 机构岗位列表、发布草稿、状态流转
   components/PositionCard.svelte # 岗位卡片（首页与搜索共用）
   components/ProfilePanel.svelte # 「我的」：账号、权限、接口状态与探测
@@ -57,13 +66,14 @@ src/
   lib/intent.ts                  # 登录身份状态与 localStorage 持久化
   lib/nav.ts                     # 底部导航页签类型
   pages/index.astro              # 静态页面壳，挂载 client:only
+  pages/admin/index.astro        # 管理台页面壳（/admin），与主应用相互独立
   styles/global.css              # Tailwind 入口与主题 token
 ```
 
 ## 底部导航
 
 登录后固定四个页签，求职者与招聘方共用，图标 + 文案，`aria-current="page"` 标记当前页；
-登录页不显示导航。
+登录页不显示导航。平台管理员不在这里：登录后会被直接送到独立的 `/admin`。
 
 | 页签 | 内容 |
 |---|---|
@@ -81,7 +91,10 @@ src/
 工作台，不进入请求体、不改变认证接口，也不参与权限判定：
 
 - 求职者：登录后读取 `GET /crate-api/agora/v1/positions`，列岀在招岗位（后端只返回
-  状态为「招聘中」且未过期的记录），分页 20 条一页，可「加载更多」。
+  状态为「招聘中」且未过期的记录），分页 20 条一页，可「加载更多」。岗位卡片按
+  `open_until` 显示招聘窗口「剩余 N 天」，≤3 天用琥珀色强调；首页与搜索结果共用该卡片。
+- 登录/邮件链接兑换成功后，前端调用 `PUT /crate-api/agora/v1/me/intent` 把本次选择写入
+  `subject_intents`；失败不影响登录。该记录只用于管理台展示与筛选，不参与权限判定。
 - 招聘方：登录后读取 `GET /crate-api/agora/v1/organizations/mine`，列出所属
   机构与其成员角色；没有机构时提示先创建机构并通过平台认证，而不是拒绝登录。
   工作台内提供「创建机构」表单（名称、类型、简称、统一社会信用代码、营业执照）：
@@ -94,14 +107,19 @@ src/
 
 ### 岗位发布与管理
 
-招聘方首页的机构卡片下方有「岗位」折叠区，展开后读取
-`GET /crate-api/agora/v1/organizations/{id}/positions`（含草稿）。
+招聘方首页的机构卡片直接内嵌岗位列表，加载时即读取
+`GET /crate-api/agora/v1/organizations/{id}/positions`（含草稿），不再提供折叠入口。
 「发布岗位」表单提交 `POST /crate-api/agora/v1/positions`，新建岗位状态为 `草稿`：
 
 - 表单字段：岗位名称（必填）、用工类型、工作方式、招聘人数、薪资（面议或下限/上限 + 单位）、
   学历要求、经验要求、城市、岗位职责、任职要求。枚举值与后端 `positions` 包保持一致。
 - 状态流转通过 `POST /crate-api/agora/v1/positions/{id}/status`：
-  `草稿 → 发布（招聘中）`；`招聘中 → 暂停 / 关闭`；`已暂停 → 恢复发布 / 关闭`。
+  `草稿 → 发布（招聘中）`；`招聘中 → 暂停 / 关闭`；`已暂停 → 恢复发布 / 关闭`；
+  `已停招 → 恢复招聘（7 天）/ 关闭`；`已关闭 → 恢复招聘（7 天）`。
+- 招聘窗口：首次发布后 14 天（2 周）自动停招，后端把岗位落为 `已停招` 并停止公开展示。
+  岗位列表顶部固定提示该规则；`招聘中` 岗位显示「招聘剩余 N 天」，`已停招` 岗位显示
+  停招说明与「恢复招聘（7 天）」按钮。恢复后窗口为 7 天，再次到期仍可恢复。
+  页面同时按 `open_until` 推导停招状态，避免长时间停留的页面展示过期按钮。
 - 机构状态非 `已认证` 时，「发布」按钮禁用并提示先完成认证（后端同样拒绝）；
   `已驳回` / `已停用` 机构连草稿也会被后端拒绝。
 - 发布后的岗位会出现在求职者首页与搜索页（后端只返回「招聘中」且未过期的岗位）。
@@ -111,6 +129,32 @@ src/
 
 招聘方能否真正发布岗位仍由后端机构成员角色（`所有者` / `管理员` / `招聘专员`）
 决定。
+
+## 管理（平台管理员）
+
+管理台是独立页面 `GET /admin`，与求职者 / 招聘方工作区分开，**主应用没有任何链接指向它**：
+
+- 在登录页以平台管理员身份登录后，主应用检测到 `platform_admin=true` 直接 `location.replace("/admin")`；
+  直接在 `/admin` 打开时由该页自己的登录面板完成登录。
+- 管理台有独立顶栏（品牌、语言、退出）和自己的底部导航；退出或非管理员会话都会回到 `/`。
+- 普通账号访问 `/admin` 会被前端送回 `/`，接口层面同样按 `platform_admin` 拒绝。
+
+管理台底部导航：
+
+| 页签 | 内容 |
+|---|---|
+| 主页 | 待审核/已认证/已驳回/已停用机构数、平台账号数、在招岗位数，以及最近 5 个待审核机构 |
+| 招聘方 | 按名称与审核状态查询机构；通过认证、驳回（必填原因）、停用（可选原因）、重新认证 |
+| 求职方 | 平台账号目录（当前以平台账号作为求职用户），按姓名/账号、账号状态与 `user_type`（求职者/招聘者/未选择）筛选，启用/禁用账号 |
+| 平台功能 | agora-api 与数据库就绪状态、探测延迟、当前管理员的角色与权限码 |
+
+- 列表读取 `GET /crate-api/agora/v1/organizations?status=待审核&limit=50`，`status` 只对平台管理员开放；
+  公开机构列表仍固定只返回 `已认证`。
+- 每张卡片显示机构名称、类型 / 城市 / 区县、提交日期、统一社会信用代码；有 `metadata.license_file_id`
+  时提供「查看营业执照」新标签链接（`GET /files/{id}/content`，走登录 Cookie）。
+- 「通过认证」提交 `POST /organizations/{id}/review` `{status:"已认证"}`；「驳回」展开原因输入框，
+  原因必填后提交 `{status:"已驳回", reason}`。审核完成即从待审核列表移除并给出提示。
+- 页面只处理 `待审核`；被驳回机构再次提交审核前不会回到该列表。
 
 ## 多语言
 
@@ -123,11 +167,14 @@ src/
   格式化。
 - 语言按钮位于顶栏，显示的是“切换到”的目标语言（`EN` / `中`）。
 
-## 移动端布局
+## 移动优先布局
 
-界面只面向移动端：
+界面面向手机与小平板，始终保持单列：
 
-- 单列布局，内容列 `max-w-[27rem]`（432px）居中；不提供桌面布局，也不使用 `sm:` / `md:` / `lg:` 断点。
+- 内容列居中：手机 `max-w-[27rem]`（432px）；≥640px 的小平板放宽到 `max-w-[40rem]`（640px），
+  列表、表单、底部导航仍为单列，不切卡片多列，也不提供桌面布局。
+- 只使用 Tailwind 的 `sm:`（40rem）一个断点，`App.svelte` 与 `pages/index.astro` 的 noscript
+  兜底保持同一宽度。
 - `Layout.astro` 使用 `viewport-fit=cover`，顶栏与底部操作栏通过 `env(safe-area-inset-*)` 避让刘海与手势区。
 - 高度使用 `dvh`；所有可点击目标至少 44px，主操作常驻底部拇指区。
 - 交互只用 `active:` 触控反馈，不依赖 hover。

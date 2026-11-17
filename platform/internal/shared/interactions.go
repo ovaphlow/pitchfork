@@ -24,6 +24,7 @@ func (handler *Handler) registerInteractions(mux *http.ServeMux) {
 // interaction 是 interactions 模块的 HTTP 输出形状（与 Nexus Interaction 同形）。
 type interaction struct {
 	ID              string          `json:"id"`
+	AppCode         string          `json:"app_code"`
 	ActorID         string          `json:"actor_id"`
 	TargetType      string          `json:"target_type"`
 	TargetID        string          `json:"target_id"`
@@ -52,6 +53,7 @@ type interactionUpdateInput struct {
 // interactionRecord 是 interactions 表的一行。
 type interactionRecord struct {
 	ID              string
+	AppCode         string
 	ActorID         string
 	TargetType      string
 	TargetID        string
@@ -66,6 +68,7 @@ func readInteractionRecord(scanner sharedModuleRowScanner) (interactionRecord, e
 	var record interactionRecord
 	err := scanner.Scan(
 		&record.ID,
+		&record.AppCode,
 		&record.ActorID,
 		&record.TargetType,
 		&record.TargetID,
@@ -85,6 +88,7 @@ func (record interactionRecord) interaction() (interaction, apiError) {
 	}
 	return interaction{
 		ID:              record.ID,
+		AppCode:         record.AppCode,
 		ActorID:         record.ActorID,
 		TargetType:      record.TargetType,
 		TargetID:        record.TargetID,
@@ -100,14 +104,19 @@ func (handler *Handler) interactionsList(responseWriter http.ResponseWriter, req
 	if _, ok := handler.requireSession(responseWriter, request); !ok {
 		return
 	}
+	appCode, failure := handler.requireAppCode(request)
+	if failure != (apiError{}) {
+		handler.fail(responseWriter, failure)
+		return
+	}
 	limit, offset, failure := pageQuery(request)
 	if failure != (apiError{}) {
 		handler.fail(responseWriter, failure)
 		return
 	}
 
-	statement := "SELECT id, actor_id, target_type, target_id, interaction_type, value, payload, created_at, updated_at FROM interactions WHERE 1 = 1"
-	arguments := make([]any, 0, 6)
+	statement := "SELECT id, app_code, actor_id, target_type, target_id, interaction_type, value, payload, created_at, updated_at FROM interactions WHERE app_code = ?"
+	arguments := []any{appCode}
 	for _, filter := range []struct {
 		name   string
 		column string
@@ -158,6 +167,11 @@ func (handler *Handler) interactionsCreate(responseWriter http.ResponseWriter, r
 	if !ok {
 		return
 	}
+	appCode, failure := handler.requireAppCode(request)
+	if failure != (apiError{}) {
+		handler.fail(responseWriter, failure)
+		return
+	}
 	var input interactionCreateInput
 	if failure := decodeJSON(request, &input); failure != (apiError{}) {
 		handler.fail(responseWriter, failure)
@@ -184,9 +198,9 @@ func (handler *Handler) interactionsCreate(responseWriter http.ResponseWriter, r
 		value = *input.Value
 	}
 	_, err = handler.store.DB.ExecContext(request.Context(), `
-		INSERT INTO interactions (id, actor_id, target_type, target_id, interaction_type, value, payload)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		id, session.SubjectID, input.TargetType, input.TargetID, input.InteractionType, value, string(payload),
+		INSERT INTO interactions (id, app_code, actor_id, target_type, target_id, interaction_type, value, payload)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, appCode, session.SubjectID, input.TargetType, input.TargetID, input.InteractionType, value, string(payload),
 	)
 	if err != nil {
 		if sharedModuleIsUniqueViolation(err) {
@@ -196,7 +210,7 @@ func (handler *Handler) interactionsCreate(responseWriter http.ResponseWriter, r
 		handler.fail(responseWriter, internalError())
 		return
 	}
-	item, failure := handler.fetchInteraction(request.Context(), id)
+	item, failure := handler.fetchInteraction(request.Context(), id, appCode)
 	if failure != (apiError{}) {
 		handler.fail(responseWriter, failure)
 		return
@@ -208,7 +222,12 @@ func (handler *Handler) interactionsGet(responseWriter http.ResponseWriter, requ
 	if _, ok := handler.requireSession(responseWriter, request); !ok {
 		return
 	}
-	item, failure := handler.fetchInteraction(request.Context(), request.PathValue("id"))
+	appCode, failure := handler.requireAppCode(request)
+	if failure != (apiError{}) {
+		handler.fail(responseWriter, failure)
+		return
+	}
+	item, failure := handler.fetchInteraction(request.Context(), request.PathValue("id"), appCode)
 	if failure != (apiError{}) {
 		handler.fail(responseWriter, failure)
 		return
@@ -219,6 +238,11 @@ func (handler *Handler) interactionsGet(responseWriter http.ResponseWriter, requ
 func (handler *Handler) interactionsUpdate(responseWriter http.ResponseWriter, request *http.Request) {
 	session, ok := handler.requireSession(responseWriter, request)
 	if !ok {
+		return
+	}
+	appCode, failure := handler.requireAppCode(request)
+	if failure != (apiError{}) {
+		handler.fail(responseWriter, failure)
 		return
 	}
 	var input interactionUpdateInput
@@ -236,7 +260,7 @@ func (handler *Handler) interactionsUpdate(responseWriter http.ResponseWriter, r
 		return
 	}
 	id := request.PathValue("id")
-	existing, failure := handler.fetchOwnedInteraction(request.Context(), id, session.SubjectID)
+	existing, failure := handler.fetchOwnedInteraction(request.Context(), id, session.SubjectID, appCode)
 	if failure != (apiError{}) {
 		handler.fail(responseWriter, failure)
 		return
@@ -251,14 +275,14 @@ func (handler *Handler) interactionsUpdate(responseWriter http.ResponseWriter, r
 	_, err := handler.store.DB.ExecContext(request.Context(), `
 		UPDATE interactions
 		SET value = ?, payload = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-		WHERE id = ? AND actor_id = ?`,
-		value, string(payload), id, session.SubjectID,
+		WHERE id = ? AND actor_id = ? AND app_code = ?`,
+		value, string(payload), id, session.SubjectID, appCode,
 	)
 	if err != nil {
 		handler.fail(responseWriter, internalError())
 		return
 	}
-	item, failure := handler.fetchInteraction(request.Context(), id)
+	item, failure := handler.fetchInteraction(request.Context(), id, appCode)
 	if failure != (apiError{}) {
 		handler.fail(responseWriter, failure)
 		return
@@ -271,8 +295,14 @@ func (handler *Handler) interactionsDelete(responseWriter http.ResponseWriter, r
 	if !ok {
 		return
 	}
+	appCode, failure := handler.requireAppCode(request)
+	if failure != (apiError{}) {
+		handler.fail(responseWriter, failure)
+		return
+	}
 	result, err := handler.store.DB.ExecContext(request.Context(),
-		"DELETE FROM interactions WHERE id = ? AND actor_id = ?", request.PathValue("id"), session.SubjectID)
+		"DELETE FROM interactions WHERE id = ? AND actor_id = ? AND app_code = ?",
+		request.PathValue("id"), session.SubjectID, appCode)
 	if err != nil {
 		handler.fail(responseWriter, internalError())
 		return
@@ -289,10 +319,10 @@ func (handler *Handler) interactionsDelete(responseWriter http.ResponseWriter, r
 	writeNoContent(responseWriter)
 }
 
-func (handler *Handler) fetchInteraction(ctx context.Context, id string) (interaction, apiError) {
+func (handler *Handler) fetchInteraction(ctx context.Context, id, appCode string) (interaction, apiError) {
 	record, err := readInteractionRecord(handler.store.DB.QueryRowContext(ctx, `
-		SELECT id, actor_id, target_type, target_id, interaction_type, value, payload, created_at, updated_at
-		FROM interactions WHERE id = ?`, id))
+		SELECT id, app_code, actor_id, target_type, target_id, interaction_type, value, payload, created_at, updated_at
+		FROM interactions WHERE id = ? AND app_code = ?`, id, appCode))
 	if isNoRows(err) {
 		return interaction{}, notFound("interaction not found")
 	}
@@ -302,10 +332,10 @@ func (handler *Handler) fetchInteraction(ctx context.Context, id string) (intera
 	return record.interaction()
 }
 
-func (handler *Handler) fetchOwnedInteraction(ctx context.Context, id string, actorID string) (interaction, apiError) {
+func (handler *Handler) fetchOwnedInteraction(ctx context.Context, id string, actorID, appCode string) (interaction, apiError) {
 	record, err := readInteractionRecord(handler.store.DB.QueryRowContext(ctx, `
-		SELECT id, actor_id, target_type, target_id, interaction_type, value, payload, created_at, updated_at
-		FROM interactions WHERE id = ? AND actor_id = ?`, id, actorID))
+		SELECT id, app_code, actor_id, target_type, target_id, interaction_type, value, payload, created_at, updated_at
+		FROM interactions WHERE id = ? AND actor_id = ? AND app_code = ?`, id, actorID, appCode))
 	if isNoRows(err) {
 		return interaction{}, notFound("interaction not found")
 	}

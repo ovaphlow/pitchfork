@@ -31,7 +31,8 @@ import (
 const (
 	filesTestSubjectID      = "01M3ZR3CDAQ6ZKHCYD065RSYMT"
 	filesTestOtherSubjectID = "01KYE3F6CPNJS16RHT01M64D8B"
-	filesTestInsertSQL      = "INSERT INTO files (id, original_name, stored_name, mime_type, size_bytes, storage_path, hash_sha256, uploaded_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+	filesTestInsertSQL      = "INSERT INTO files (id, app_code, original_name, stored_name, mime_type, size_bytes, storage_path, hash_sha256, uploaded_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+	filesTestAppCode        = "aceso"
 	filesTestProblemType    = "application/problem+json"
 )
 
@@ -54,13 +55,16 @@ func (harness *filesTestHarness) serve(request *http.Request) *httptest.Response
 
 func (harness *filesTestHarness) request(method, path string) *httptest.ResponseRecorder {
 	harness.t.Helper()
-	return harness.serve(httptest.NewRequest(method, path, nil))
+	request := httptest.NewRequest(method, path, nil)
+	request.Header.Set(AppCodeHeader, filesTestAppCode)
+	return harness.serve(request)
 }
 
 func (harness *filesTestHarness) upload(parts ...filesTestPart) *httptest.ResponseRecorder {
 	harness.t.Helper()
 	body, contentType := filesTestMultipartBody(harness.t, parts...)
 	request := httptest.NewRequest(http.MethodPost, Prefix+"/files/upload", bytes.NewReader(body))
+	request.Header.Set(AppCodeHeader, filesTestAppCode)
 	request.Header.Set("Content-Type", contentType)
 	return harness.serve(request)
 }
@@ -73,7 +77,7 @@ func (harness *filesTestHarness) uploadOne(fieldName, fileName, contentType stri
 func (harness *filesTestHarness) insertFileMetadata(id, uploadedBy, createdAt, storedName, mimeType string) {
 	harness.t.Helper()
 	_, err := harness.db.ExecContext(harness.t.Context(), filesTestInsertSQL,
-		id, "original-"+id, storedName, mimeType, int64(4), storedName, "hash-"+id, uploadedBy, createdAt)
+		id, filesTestAppCode, "original-"+id, storedName, mimeType, int64(4), storedName, "hash-"+id, uploadedBy, createdAt)
 	if err != nil {
 		harness.t.Fatalf("insert file metadata %q: %v", id, err)
 	}
@@ -567,6 +571,7 @@ func TestFilesUploadValidation(t *testing.T) {
 	})
 	t.Run("not multipart", func(t *testing.T) {
 		request := httptest.NewRequest(http.MethodPost, Prefix+"/files/upload", strings.NewReader("{}"))
+		request.Header.Set(AppCodeHeader, filesTestAppCode)
 		request.Header.Set("Content-Type", "application/json")
 		filesTestRequireProblem(t, harness.serve(request), http.StatusBadRequest,
 			"invalid-request", "invalid multipart form data")

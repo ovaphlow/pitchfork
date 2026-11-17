@@ -14,6 +14,7 @@ import (
 	"github.com/ovaphlow/pitchfork/agora-api/internal/database"
 	"github.com/ovaphlow/pitchfork/agora-api/internal/httpapi"
 	"github.com/ovaphlow/pitchfork/agora-api/internal/identityclient"
+	"github.com/ovaphlow/pitchfork/agora-api/internal/intents"
 	"github.com/ovaphlow/pitchfork/agora-api/internal/logging"
 	"github.com/ovaphlow/pitchfork/agora-api/internal/migrate"
 	"github.com/ovaphlow/pitchfork/agora-api/internal/nexusclient"
@@ -82,6 +83,7 @@ func run() error {
 		TrustedProxies:   cfg.TrustedProxies,
 		Organizations:    organizationStore,
 		Positions:        positions.NewStore(pool),
+		Intents:          intents.NewStore(pool),
 
 		EmailLinkRedirectURI: cfg.EmailLinkRedirectURI,
 	})

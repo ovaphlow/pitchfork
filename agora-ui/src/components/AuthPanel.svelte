@@ -7,9 +7,11 @@
   interface Props {
     onAuthenticated: (session: AuthSession) => void;
     initialError?: string;
+    /** 管理台登录不涉及求职者/招聘方身份，隐藏切换器。 */
+    showIntent?: boolean;
   }
 
-  let { onAuthenticated, initialError = "" }: Props = $props();
+  let { onAuthenticated, initialError = "", showIntent = true }: Props = $props();
 
   type Mode = "login" | "register";
   // 登录面板默认邮箱链接；密码登录只作为存量非邮箱账号的兜底入口。
@@ -142,13 +144,17 @@
   >
     {mode === "register" ? $t.auth.registerHeading : $t.auth.loginHeading}
   </h1>
-  <div class="mt-6">
-    <IntentSwitch label={$t.identity.label} />
-  </div>
+  {#if showIntent}
+    <div class="mt-6">
+      <IntentSwitch label={$t.identity.label} />
+    </div>
+  {/if}
 
-  <p class="mt-4 text-[15px] leading-6 text-muted">
-    {subcopy}
-  </p>
+  {#if showIntent}
+    <p class="mt-4 text-[15px] leading-6 text-muted">
+      {subcopy}
+    </p>
+  {/if}
 
   <form class="mt-7 space-y-4" onsubmit={submit} aria-busy={pending}>
     {#if mode === "register"}

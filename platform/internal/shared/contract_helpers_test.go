@@ -157,6 +157,10 @@ func (harness *contractHarness) request(method, path, session string, body any) 
 }
 
 func (harness *contractHarness) requestRaw(method, path, session string, body []byte, contentType string) *contractResponse {
+	return harness.requestRawWithApp(method, path, session, "aceso", body, contentType)
+}
+
+func (harness *contractHarness) requestRawWithApp(method, path, session, appCode string, body []byte, contentType string) *contractResponse {
 	harness.t.Helper()
 
 	url := harness.server.URL + path
@@ -172,6 +176,9 @@ func (harness *contractHarness) requestRaw(method, path, session string, body []
 		request.Header.Set("Content-Type", contentType)
 	}
 	request.Header.Set("Accept", "application/json")
+	if appCode != "" {
+		request.Header.Set(shared.AppCodeHeader, appCode)
+	}
 	if session != "" {
 		request.Header.Set(contractSessionHeader, session)
 	}
@@ -412,7 +419,7 @@ func (harness *contractHarness) seedRole(t *testing.T, roleCode, displayName str
 	}
 	roleID := contractNewID()
 	if _, err := harness.db.Exec(
-		"INSERT INTO roles (id, role_code, display_name, description, permission_codes) VALUES (?, ?, ?, '', ?)",
+		"INSERT INTO roles (id, app_code, role_code, display_name, description, permission_codes) VALUES (?, 'aceso', ?, ?, '', ?)",
 		roleID, roleCode, displayName, string(encoded),
 	); err != nil {
 		t.Fatalf("seed role %q: %v", roleCode, err)
@@ -453,6 +460,10 @@ func (harness *contractHarness) rowCount(t *testing.T, query string, args ...any
 
 // uploadFile 构造 multipart/form-data 上传（等价的 Rust helper request_file）。
 func (harness *contractHarness) uploadFile(session, fieldName, filename, contentType string, content []byte) *contractResponse {
+	return harness.uploadFileAsApp(session, "aceso", fieldName, filename, contentType, content)
+}
+
+func (harness *contractHarness) uploadFileAsApp(session, appCode, fieldName, filename, contentType string, content []byte) *contractResponse {
 	harness.t.Helper()
 
 	var buffer bytes.Buffer
@@ -470,7 +481,7 @@ func (harness *contractHarness) uploadFile(session, fieldName, filename, content
 	if err := writer.Close(); err != nil {
 		harness.t.Fatalf("close multipart writer: %v", err)
 	}
-	return harness.requestRaw(http.MethodPost, sharedPath("/files/upload"), session, buffer.Bytes(), writer.FormDataContentType())
+	return harness.requestRawWithApp(http.MethodPost, sharedPath("/files/upload"), session, appCode, buffer.Bytes(), writer.FormDataContentType())
 }
 
 // readStoredFile 读取 FilesDir 下的物理文件。

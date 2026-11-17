@@ -17,6 +17,7 @@
     listMyOrganizations,
     listPositions,
     logout,
+    saveIntent,
     uploadFile,
     type AuthSession,
     type Membership,
@@ -76,10 +77,19 @@
       ?.setAttribute("content", $t.meta.description);
   });
 
+  // 平台管理员使用独立管理台：主应用不提供入口，登录后直接跳转。
+  $effect(() => {
+    if (session?.platform_admin) {
+      window.location.replace("/admin");
+    }
+  });
+
   function handleAuthenticated(next: AuthSession) {
     session = next;
     sessionError = "";
     tab = "home";
+    // Best effort: the preference must never block sign-in.
+    void saveIntent($intent).catch(() => {});
   }
 
   // 一次性 token 不该留在地址栏（历史记录、截图、分享）。
@@ -317,7 +327,7 @@
 </svelte:head>
 
 <main class="relative flex min-h-dvh justify-center overflow-x-clip bg-ink text-bone">
-  <div class="relative flex min-h-dvh w-full max-w-[27rem] flex-col">
+  <div class="relative flex min-h-dvh w-full max-w-[27rem] flex-col sm:max-w-[40rem]">
     <div class="grid-field pointer-events-none absolute inset-0" aria-hidden="true"></div>
     <div
       class="pointer-events-none absolute -left-24 top-0 h-72 w-72 rounded-full bg-acid/[0.08] blur-[100px]"

@@ -27,6 +27,7 @@ func (handler *Handler) registerSettings(mux *http.ServeMux) {
 // setting 是 settings 模块的 HTTP 输出形状（与 Nexus Setting 同形）。
 type setting struct {
 	ID         string          `json:"id"`
+	AppCode    string          `json:"app_code"`
 	Category   string          `json:"category"`
 	Code       string          `json:"code"`
 	RootCode   string          `json:"root_code"`
@@ -48,6 +49,7 @@ type settingInput struct {
 // settingRecord 是 settings 表的一行。
 type settingRecord struct {
 	ID         string
+	AppCode    string
 	Category   string
 	Code       string
 	RootCode   string
@@ -61,6 +63,7 @@ func readSettingRecord(scanner sharedModuleRowScanner) (settingRecord, error) {
 	var record settingRecord
 	err := scanner.Scan(
 		&record.ID,
+		&record.AppCode,
 		&record.Category,
 		&record.Code,
 		&record.RootCode,
@@ -80,6 +83,7 @@ func (record settingRecord) setting() (setting, apiError) {
 	}
 	return setting{
 		ID:         record.ID,
+		AppCode:    record.AppCode,
 		Category:   record.Category,
 		Code:       record.Code,
 		RootCode:   record.RootCode,
@@ -94,16 +98,21 @@ func (handler *Handler) settingsList(responseWriter http.ResponseWriter, request
 	if _, ok := handler.requireSession(responseWriter, request); !ok {
 		return
 	}
+	appCode, failure := handler.requireAppCode(request)
+	if failure != (apiError{}) {
+		handler.fail(responseWriter, failure)
+		return
+	}
 	limit, offset, failure := pageQuery(request)
 	if failure != (apiError{}) {
 		handler.fail(responseWriter, failure)
 		return
 	}
 
-	statement := "SELECT id, category, code, root_code, parent_code, payload, created_at, updated_at FROM settings"
-	arguments := make([]any, 0, 3)
+	statement := "SELECT id, app_code, category, code, root_code, parent_code, payload, created_at, updated_at FROM settings WHERE app_code = ?"
+	arguments := []any{appCode}
 	if category := request.URL.Query().Get("category"); category != "" {
-		statement += " WHERE category = ?"
+		statement += " AND category = ?"
 		arguments = append(arguments, category)
 	}
 	statement += " ORDER BY category, code LIMIT ? OFFSET ?"
@@ -141,6 +150,11 @@ func (handler *Handler) settingsCreate(responseWriter http.ResponseWriter, reque
 	if _, ok := handler.requireSession(responseWriter, request); !ok {
 		return
 	}
+	appCode, failure := handler.requireAppCode(request)
+	if failure != (apiError{}) {
+		handler.fail(responseWriter, failure)
+		return
+	}
 	var input settingInput
 	if failure := decodeJSON(request, &input); failure != (apiError{}) {
 		handler.fail(responseWriter, failure)
@@ -157,9 +171,9 @@ func (handler *Handler) settingsCreate(responseWriter http.ResponseWriter, reque
 		return
 	}
 	_, err = handler.store.DB.ExecContext(request.Context(), `
-		INSERT INTO settings (id, category, code, root_code, parent_code, payload)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		id, input.Category, input.Code, input.RootCode, input.ParentCode, string(payload),
+		INSERT INTO settings (id, app_code, category, code, root_code, parent_code, payload)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		id, appCode, input.Category, input.Code, input.RootCode, input.ParentCode, string(payload),
 	)
 	if err != nil {
 		if sharedModuleIsUniqueViolation(err) {
@@ -169,7 +183,7 @@ func (handler *Handler) settingsCreate(responseWriter http.ResponseWriter, reque
 		handler.fail(responseWriter, internalError())
 		return
 	}
-	item, failure := handler.fetchSetting(request.Context(), id)
+	item, failure := handler.fetchSetting(request.Context(), id, appCode)
 	if failure != (apiError{}) {
 		handler.fail(responseWriter, failure)
 		return
@@ -181,7 +195,12 @@ func (handler *Handler) settingsGet(responseWriter http.ResponseWriter, request 
 	if _, ok := handler.requireSession(responseWriter, request); !ok {
 		return
 	}
-	item, failure := handler.fetchSetting(request.Context(), request.PathValue("id"))
+	appCode, failure := handler.requireAppCode(request)
+	if failure != (apiError{}) {
+		handler.fail(responseWriter, failure)
+		return
+	}
+	item, failure := handler.fetchSetting(request.Context(), request.PathValue("id"), appCode)
 	if failure != (apiError{}) {
 		handler.fail(responseWriter, failure)
 		return
@@ -191,6 +210,11 @@ func (handler *Handler) settingsGet(responseWriter http.ResponseWriter, request 
 
 func (handler *Handler) settingsReplace(responseWriter http.ResponseWriter, request *http.Request) {
 	if _, ok := handler.requireSession(responseWriter, request); !ok {
+		return
+	}
+	appCode, failure := handler.requireAppCode(request)
+	if failure != (apiError{}) {
+		handler.fail(responseWriter, failure)
 		return
 	}
 	var input settingInput
@@ -208,8 +232,8 @@ func (handler *Handler) settingsReplace(responseWriter http.ResponseWriter, requ
 		UPDATE settings
 		SET category = ?, code = ?, root_code = ?, parent_code = ?, payload = ?,
 			updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-		WHERE id = ?`,
-		input.Category, input.Code, input.RootCode, input.ParentCode, string(payload), id,
+		WHERE id = ? AND app_code = ?`,
+		input.Category, input.Code, input.RootCode, input.ParentCode, string(payload), id, appCode,
 	)
 	if err != nil {
 		if sharedModuleIsUniqueViolation(err) {
@@ -228,7 +252,7 @@ func (handler *Handler) settingsReplace(responseWriter http.ResponseWriter, requ
 		handler.fail(responseWriter, notFound("setting not found"))
 		return
 	}
-	item, failure := handler.fetchSetting(request.Context(), id)
+	item, failure := handler.fetchSetting(request.Context(), id, appCode)
 	if failure != (apiError{}) {
 		handler.fail(responseWriter, failure)
 		return
@@ -240,7 +264,13 @@ func (handler *Handler) settingsDelete(responseWriter http.ResponseWriter, reque
 	if _, ok := handler.requireSession(responseWriter, request); !ok {
 		return
 	}
-	result, err := handler.store.DB.ExecContext(request.Context(), "DELETE FROM settings WHERE id = ?", request.PathValue("id"))
+	appCode, failure := handler.requireAppCode(request)
+	if failure != (apiError{}) {
+		handler.fail(responseWriter, failure)
+		return
+	}
+	result, err := handler.store.DB.ExecContext(request.Context(),
+		"DELETE FROM settings WHERE id = ? AND app_code = ?", request.PathValue("id"), appCode)
 	if err != nil {
 		handler.fail(responseWriter, internalError())
 		return
@@ -257,10 +287,10 @@ func (handler *Handler) settingsDelete(responseWriter http.ResponseWriter, reque
 	writeNoContent(responseWriter)
 }
 
-func (handler *Handler) fetchSetting(ctx context.Context, id string) (setting, apiError) {
+func (handler *Handler) fetchSetting(ctx context.Context, id, appCode string) (setting, apiError) {
 	record, err := readSettingRecord(handler.store.DB.QueryRowContext(ctx, `
-		SELECT id, category, code, root_code, parent_code, payload, created_at, updated_at
-		FROM settings WHERE id = ?`, id))
+		SELECT id, app_code, category, code, root_code, parent_code, payload, created_at, updated_at
+		FROM settings WHERE id = ? AND app_code = ?`, id, appCode))
 	if isNoRows(err) {
 		return setting{}, notFound("setting not found")
 	}

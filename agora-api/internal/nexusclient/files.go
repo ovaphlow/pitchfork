@@ -53,6 +53,7 @@ func (c *Client) UploadFile(
 		return File{}, fmt.Errorf("build upload request: %w", err)
 	}
 	request.Header.Set("Accept", "application/json")
+	request.Header.Set("X-App-Code", appCode)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
 	if cookie := strings.TrimSpace(cookieHeader); cookie != "" {
 		request.Header.Set("Cookie", cookie)
@@ -100,6 +101,7 @@ func (c *Client) FileContent(ctx context.Context, cookieHeader, fileID string) (
 		return nil, fmt.Errorf("build file content request: %w", err)
 	}
 	request.Header.Set("Accept", "*/*")
+	request.Header.Set("X-App-Code", appCode)
 	if cookie := strings.TrimSpace(cookieHeader); cookie != "" {
 		request.Header.Set("Cookie", cookie)
 	}

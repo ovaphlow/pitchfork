@@ -88,6 +88,14 @@ func (deps Deps) currentSession(responseWriter http.ResponseWriter, request *htt
 		return
 	}
 
+	// Any subject opening Agora joins the Agora user registry. Other products'
+	// accounts never reach this handler.
+	if deps.Intents != nil {
+		if err := deps.Intents.Ensure(request.Context(), identity.SubjectID); err != nil {
+			deps.Logger.Warn("register Agora user failed", "request_id", requestIDFrom(request.Context()), "error", err)
+		}
+	}
+
 	writeJSON(responseWriter, http.StatusOK, deps.buildSession(request.Context(), identity, cookieHeader))
 }
 

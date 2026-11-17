@@ -37,13 +37,34 @@ func (deps Deps) listOrganizations(responseWriter http.ResponseWriter, request *
 		return
 	}
 
-	records, total, err := deps.Organizations.List(request.Context(), organizations.Filter{
+	filter := organizations.Filter{
 		City:    strings.TrimSpace(request.URL.Query().Get("city")),
 		OrgType: strings.TrimSpace(request.URL.Query().Get("org_type")),
 		Query:   strings.TrimSpace(request.URL.Query().Get("q")),
 		Limit:   limit,
 		Offset:  offset,
-	})
+	}
+	// The public listing always means verified organisations. Review states are
+	// only selectable by platform admins, otherwise pending records would leak.
+	if status := strings.TrimSpace(request.URL.Query().Get("status")); status != "" {
+		identity, ok := deps.optionalIdentity(request)
+		if !ok || !identity.PlatformAdmin {
+			writeError(responseWriter, http.StatusForbidden, "只有平台管理员可以按审核状态筛选机构")
+			return
+		}
+		if status == "全部" {
+			filter.AllStatuses = true
+		} else {
+			next := organizations.Status(status)
+			if !next.Valid() {
+				writeError(responseWriter, http.StatusBadRequest, "机构审核状态无效")
+				return
+			}
+			filter.Status = next
+		}
+	}
+
+	records, total, err := deps.Organizations.List(request.Context(), filter)
 	if err != nil {
 		deps.writeStoreError(responseWriter, request, err)
 		return

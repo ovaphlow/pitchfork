@@ -123,8 +123,8 @@ func TestInteractionsListFiltersOrderingAndPagination(t *testing.T) {
 		t.Helper()
 		id := seedID("01J", index)
 		harness.seed(t, `
-			INSERT INTO interactions (id, actor_id, target_type, target_id, interaction_type, value, payload, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, 0.5, '{"seed":true}', ?, ?)`,
+			INSERT INTO interactions (id, app_code, actor_id, target_type, target_id, interaction_type, value, payload, created_at, updated_at)
+			VALUES (?, 'aceso', ?, ?, ?, ?, 0.5, '{"seed":true}', ?, ?)`,
 			id, actor, targetType, targetID, interactionType, createdAt, createdAt)
 		return id
 	}

@@ -22,7 +22,7 @@ const uniqueViolation = "23505"
 const selectColumns = `p.id, p.organization_id, o.name, p.title, p.category,
 	p.employment_type, p.work_mode, p.headcount, p.salary_negotiable, p.salary_min, p.salary_max,
 	p.salary_unit, p.education, p.experience, p.province, p.city, p.district,
-	p.status, p.published_at, p.expires_at, p.view_count, p.created_by, p.metadata,
+	p.status, p.published_at, p.expires_at, p.open_until, p.view_count, p.created_by, p.metadata,
 	p.created_at, p.updated_at`
 
 // returningColumns serves UPDATE ... RETURNING and SELECT ... FOR UPDATE, where
@@ -31,7 +31,7 @@ const returningColumns = `id, organization_id,
 	(SELECT name FROM organizations WHERE id = job_positions.organization_id),
 	title, category, employment_type, work_mode, headcount, salary_negotiable, salary_min,
 	salary_max, salary_unit, education, experience, province, city, district,
-	status, published_at, expires_at, view_count, created_by, metadata,
+	status, published_at, expires_at, open_until, view_count, created_by, metadata,
 	created_at, updated_at`
 
 // Store persists job postings in PostgreSQL.
@@ -42,6 +42,20 @@ type Store struct {
 // NewStore binds the store to a connection pool.
 func NewStore(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
+}
+
+// expireDueOpenings stops postings whose 14-day recruitment window has ended.
+// Expiry is lazy — there is no scheduler — so every read and state change
+// applies it first. The partial index on open_until keeps the update cheap when
+// nothing is due, and the update is idempotent.
+func (s *Store) expireDueOpenings(ctx context.Context) error {
+	if _, err := s.pool.Exec(ctx, `
+		UPDATE job_positions
+		SET status = '已停招', updated_at = NOW()
+		WHERE status = '招聘中' AND open_until IS NOT NULL AND open_until <= NOW()`); err != nil {
+		return fmt.Errorf("expire open positions: %w", err)
+	}
+	return nil
 }
 
 // Create inserts a draft posting in the caller's organisation.
@@ -79,6 +93,9 @@ func (s *Store) Create(ctx context.Context, input CreateInput, actorSubjectID st
 
 // Get reads one posting by ULID.
 func (s *Store) Get(ctx context.Context, positionID string) (Position, error) {
+	if err := s.expireDueOpenings(ctx); err != nil {
+		return Position{}, err
+	}
 	position, err := scanPosition(s.pool.QueryRow(ctx, `
 		SELECT `+selectColumns+`
 		FROM job_positions p JOIN organizations o ON o.id = p.organization_id
@@ -103,8 +120,12 @@ func (s *Store) IncreaseViewCount(ctx context.Context, positionID string) (int64
 
 // List returns public postings, optionally filtered.
 func (s *Store) List(ctx context.Context, filter Filter) ([]Position, int64, error) {
+	if err := s.expireDueOpenings(ctx); err != nil {
+		return nil, 0, err
+	}
 	conditions := &dbx.Conditions{}
 	conditions.Raw("p.status = '" + string(StatusOpen) + "'")
+	conditions.Raw("(p.open_until IS NULL OR p.open_until > NOW())")
 	conditions.Raw("(p.expires_at IS NULL OR p.expires_at > NOW())")
 	conditions.EQ("p.organization_id", filter.OrganizationID)
 	conditions.EQ("p.city", filter.City)
@@ -154,6 +175,9 @@ func (s *Store) List(ctx context.Context, filter Filter) ([]Position, int64, err
 // ListByOrganization returns every posting of an organisation, drafts included,
 // for the member-facing management view.
 func (s *Store) ListByOrganization(ctx context.Context, organizationID string, limit, offset int32) ([]Position, int64, error) {
+	if err := s.expireDueOpenings(ctx); err != nil {
+		return nil, 0, err
+	}
 	conditions := &dbx.Conditions{}
 	conditions.EQ("p.organization_id", organizationID)
 	where := conditions.Where()
@@ -266,12 +290,22 @@ func (s *Store) Update(ctx context.Context, positionID string, input UpdateInput
 }
 
 // SetStatus moves a posting through its publication state machine. The first
-// transition into 招聘中 stamps published_at.
+// transition into 招聘中 stamps published_at and opens a 14-day window; a
+// stopped or closed posting reopened through 招聘中 gets 7 more days.
 func (s *Store) SetStatus(ctx context.Context, positionID string, next Status) (Position, error) {
+	if err := s.expireDueOpenings(ctx); err != nil {
+		return Position{}, err
+	}
 	position, err := scanPosition(s.pool.QueryRow(ctx, `
 		UPDATE job_positions SET
-			status = $2,
+			status = $2::text,
 			published_at = CASE WHEN $3 THEN COALESCE(published_at, NOW()) ELSE published_at END,
+			open_until = CASE
+				WHEN $2::text <> '招聘中' THEN CASE WHEN $2::text = '已关闭' THEN NULL ELSE open_until END
+				WHEN published_at IS NULL THEN NOW() + INTERVAL '14 days'
+				WHEN open_until IS NULL OR open_until <= NOW() THEN NOW() + INTERVAL '7 days'
+				ELSE open_until
+			END,
 			updated_at = NOW()
 		WHERE id = $1
 		RETURNING `+returningColumns,
@@ -307,7 +341,8 @@ func scanPosition(row pgx.Row) (Position, error) {
 		&position.SalaryNegotiable, &position.SalaryMin, &position.SalaryMax, &position.SalaryUnit,
 		&position.Education, &position.Experience, &position.Province, &position.City,
 		&position.District, &position.Status, &position.PublishedAt, &position.ExpiresAt,
-		&position.ViewCount, &position.CreatedBy, &raw, &position.CreatedAt, &position.UpdatedAt,
+		&position.OpenUntil, &position.ViewCount, &position.CreatedBy, &raw,
+		&position.CreatedAt, &position.UpdatedAt,
 	); err != nil {
 		return Position{}, err
 	}
@@ -331,8 +366,8 @@ func collectPositions(rows pgx.Rows) ([]Position, int64, error) {
 			&position.SalaryNegotiable, &position.SalaryMin, &position.SalaryMax, &position.SalaryUnit,
 			&position.Education, &position.Experience, &position.Province, &position.City,
 			&position.District, &position.Status, &position.PublishedAt, &position.ExpiresAt,
-			&position.ViewCount, &position.CreatedBy, &raw, &position.CreatedAt, &position.UpdatedAt,
-			&total,
+			&position.OpenUntil, &position.ViewCount, &position.CreatedBy, &raw,
+			&position.CreatedAt, &position.UpdatedAt, &total,
 		); err != nil {
 			return nil, 0, fmt.Errorf("scan position: %w", err)
 		}

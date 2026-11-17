@@ -28,6 +28,17 @@
   const tags = $derived(
     [position.education, position.experience].filter((tag) => tag.length > 0),
   );
+
+  // Remaining days in the recruitment window; null when the API sends no window
+  // or the deadline already passed (a stale card from a long-lived page).
+  // Round, not ceil: a fresh 7-day window must read 7 even with clock skew.
+  const daysLeft = $derived.by(() => {
+    if (!position.open_until) return null;
+    const deadline = Date.parse(position.open_until);
+    if (!Number.isFinite(deadline)) return null;
+    const days = Math.round((deadline - Date.now()) / 86_400_000);
+    return days > 0 ? days : null;
+  });
 </script>
 
 <li class="rounded-2xl border border-line bg-ink-soft/90 px-4 py-3">
@@ -38,7 +49,7 @@
     <span class="shrink-0 text-[13px] tabular-nums text-acid">{salary}</span>
   </div>
   <p class="mt-1 truncate text-[11px] text-muted">{meta}</p>
-  {#if tags.length}
+  {#if tags.length || daysLeft !== null}
     <p class="mt-2 flex flex-wrap gap-1.5">
       {#each tags as tag (tag)}
         <span
@@ -47,6 +58,15 @@
           {tag}
         </span>
       {/each}
+      {#if daysLeft !== null}
+        <span
+          class={`rounded-full border px-2 py-0.5 font-mono text-[10px] ${
+            daysLeft <= 3 ? "border-amber-300/30 text-amber-300" : "border-line text-bone/60"
+          }`}
+        >
+          {$t.positions.daysLeft(daysLeft)}
+        </span>
+      {/if}
     </p>
   {/if}
 </li>

@@ -107,8 +107,8 @@ func TestMessagesListFiltersOrderingAndPagination(t *testing.T) {
 		t.Helper()
 		id := seedID("01J", index)
 		harness.seed(t, `
-			INSERT INTO messages (id, message_type, sender_id, sender_type, receiver_id, receiver_type, status, payload, created_at, updated_at)
-			VALUES (?, ?, ?, 'user', ?, 'resident', ?, '{"title":"seeded"}', ?, ?)`,
+			INSERT INTO messages (id, app_code, message_type, sender_id, sender_type, receiver_id, receiver_type, status, payload, created_at, updated_at)
+			VALUES (?, 'aceso', ?, ?, 'user', ?, 'resident', ?, '{"title":"seeded"}', ?, ?)`,
 			id, messageType, sender, receiver, status, createdAt, createdAt)
 		return id
 	}

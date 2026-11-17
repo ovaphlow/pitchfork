@@ -70,6 +70,27 @@ func TestCreateListAndDisableSubject(t *testing.T) {
 	if disabledAuditCount != 1 {
 		t.Fatalf("disable audit count after idempotent request = %d", disabledAuditCount)
 	}
+
+	enabled, err := identity.EnableSubject(context.Background(), databaseConnection, administrator.ID, created.ID)
+	if err != nil {
+		t.Fatalf("enable subject: %v", err)
+	}
+	if enabled.Status != "启用" || enabled.SecurityVersion != disabled.SecurityVersion+1 {
+		t.Fatalf("enabled subject = %#v", enabled)
+	}
+	if _, err := loginWithSource(context.Background(), databaseConnection, "zhangsan", "a sufficiently long password", "192.0.2.1"); err != nil {
+		t.Fatalf("login after enable: %v", err)
+	}
+	var enabledAuditCount int
+	if err := databaseConnection.QueryRow(
+		`SELECT COUNT(*) FROM identity_audit_events WHERE event_action = '主体状态变更' AND target_subject_id = ?`,
+		created.ID,
+	).Scan(&enabledAuditCount); err != nil {
+		t.Fatalf("count status audits: %v", err)
+	}
+	if enabledAuditCount != 2 {
+		t.Fatalf("status audit count after enable = %d, want 2", enabledAuditCount)
+	}
 }
 
 func TestCreateSubjectRejectsDuplicateAccountIdentifier(t *testing.T) {
@@ -363,5 +384,31 @@ func TestListDirectoryPaginationSearchAndWildcardEscaping(t *testing.T) {
 	}
 	if len(underscore.Entries) != 1 || underscore.Entries[0].DisplayName != "下划线_四号" {
 		t.Fatalf("search _ must be escaped to a literal, got %#v", underscore.Entries)
+	}
+}
+
+func TestListSubjectsByIDs(t *testing.T) {
+	databaseConnection := migratedDatabase(t)
+	administrator := bootstrapAdministrator(t, databaseConnection)
+
+	created, err := identity.CreateSubject(context.Background(), databaseConnection, administrator.ID, identity.CreateSubjectInput{
+		DisplayName: "李四",
+		Identifier:  "lisi",
+		Password:    "a sufficiently long password",
+	})
+	if err != nil {
+		t.Fatalf("create subject: %v", err)
+	}
+
+	subjects, err := identity.ListSubjectsByIDs(context.Background(), databaseConnection, []string{created.ID})
+	if err != nil {
+		t.Fatalf("list by ids: %v", err)
+	}
+	if len(subjects) != 1 || subjects[0].ID != created.ID {
+		t.Fatalf("subjects = %+v", subjects)
+	}
+	empty, err := identity.ListSubjectsByIDs(context.Background(), databaseConnection, []string{"01ARZ3NDEKTSV4RRFFQ69G5FAV"})
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("unknown ids = %+v, %v", empty, err)
 	}
 }

@@ -5,7 +5,7 @@ import "net/http"
 const (
 	accessControlAllowCredentials = "true"
 	accessControlAllowMethods     = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-	accessControlAllowHeaders     = "Accept, Content-Type, Authorization, X-CSRF-Token"
+	accessControlAllowHeaders     = "Accept, Content-Type, Authorization, X-CSRF-Token, X-App-Code"
 )
 
 type corsHandler struct {

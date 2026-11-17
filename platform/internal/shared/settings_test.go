@@ -88,6 +88,7 @@ func (harness sharedModulesHarness) request(t *testing.T, method, path, session 
 		reader = bytes.NewReader(encoded)
 	}
 	request := httptest.NewRequest(method, path, reader)
+	request.Header.Set(shared.AppCodeHeader, "aceso")
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}

@@ -17,6 +17,9 @@ import (
 
 const permissionsPath = "/crate-api/v1/subject-permissions"
 
+// appCode scopes every platformd shared call to the Agora product.
+const appCode = "agora"
+
 // Permissions is the resolved role and permission set for one subject.
 type Permissions struct {
 	RoleCodes       []string `json:"role_codes"`
@@ -44,6 +47,7 @@ func (c *Client) SubjectPermissions(ctx context.Context, cookieHeader, subjectID
 		return Permissions{}, fmt.Errorf("build permissions request: %w", err)
 	}
 	request.Header.Set("Accept", "application/json")
+	request.Header.Set("X-App-Code", appCode)
 	if cookie := strings.TrimSpace(cookieHeader); cookie != "" {
 		request.Header.Set("Cookie", cookie)
 	}

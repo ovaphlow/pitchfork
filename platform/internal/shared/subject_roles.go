@@ -79,6 +79,11 @@ func (handler *Handler) listSubjectRoles(responseWriter http.ResponseWriter, req
 	if _, ok := handler.requireSession(responseWriter, request); !ok {
 		return
 	}
+	appCode, appErr := handler.requireAppCode(request)
+	if appErr != (apiError{}) {
+		handler.fail(responseWriter, appErr)
+		return
+	}
 	subjectIDs, parseErr := parseSharedSubjectIDs(request.URL.Query().Get("subject_ids"))
 	if parseErr.status != 0 {
 		handler.fail(responseWriter, parseErr)
@@ -90,10 +95,10 @@ func (handler *Handler) listSubjectRoles(responseWriter http.ResponseWriter, req
 		return
 	}
 
-	query := selectSubjectRoleAssignments
-	arguments := make([]any, 0, len(subjectIDs)+2)
+	query := selectSubjectRoleAssignments + " WHERE role.app_code = ?"
+	arguments := []any{appCode}
 	if len(subjectIDs) > 0 {
-		query += " WHERE assignment.subject_id IN (" + sharedPlaceholders(len(subjectIDs)) + ")"
+		query += " AND assignment.subject_id IN (" + sharedPlaceholders(len(subjectIDs)) + ")"
 		for _, subjectID := range subjectIDs {
 			arguments = append(arguments, subjectID)
 		}
@@ -130,6 +135,11 @@ func (handler *Handler) replaceSubjectRoles(responseWriter http.ResponseWriter, 
 	if !ok {
 		return
 	}
+	appCode, appErr := handler.requireAppCode(request)
+	if appErr != (apiError{}) {
+		handler.fail(responseWriter, appErr)
+		return
+	}
 	subjectID, parameterErr := validateSharedSubjectID(request.PathValue("subjectID"))
 	if parameterErr.status != 0 {
 		handler.fail(responseWriter, parameterErr)
@@ -156,14 +166,17 @@ func (handler *Handler) replaceSubjectRoles(responseWriter http.ResponseWriter, 
 		handler.fail(responseWriter, internalError())
 		return
 	}
-	roleIDs, resolveErr := resolveSubjectRoleIDs(request, transaction, roleCodes)
+	roleIDs, resolveErr := resolveSubjectRoleIDs(request, transaction, roleCodes, appCode)
 	if resolveErr.status != 0 {
 		_ = transaction.Rollback()
 		handler.fail(responseWriter, resolveErr)
 		return
 	}
-	if _, err := transaction.ExecContext(request.Context(),
-		`DELETE FROM subject_roles WHERE subject_id = ?`, subjectID); err != nil {
+	// 只替换当前产品的角色分配；其他产品的分配必须保留。
+	if _, err := transaction.ExecContext(request.Context(), `
+		DELETE FROM subject_roles
+		WHERE subject_id = ?
+		  AND role_id IN (SELECT id FROM roles WHERE app_code = ?)`, subjectID, appCode); err != nil {
 		_ = transaction.Rollback()
 		handler.fail(responseWriter, internalError())
 		return
@@ -188,7 +201,7 @@ VALUES (?, ?, ?, ?)`, identifier, subjectID, roleID, session.SubjectID); err != 
 		return
 	}
 
-	assignments, fetchErr := handler.fetchSubjectRoleAssignments(request, subjectID)
+	assignments, fetchErr := handler.fetchSubjectRoleAssignments(request, subjectID, appCode)
 	if fetchErr.status != 0 {
 		handler.fail(responseWriter, fetchErr)
 		return
@@ -197,16 +210,17 @@ VALUES (?, ?, ?, ?)`, identifier, subjectID, roleID, session.SubjectID); err != 
 }
 
 // resolveSubjectRoleIDs 把角色码解析成目录里的角色 ID；未知角色码即 400。
-func resolveSubjectRoleIDs(request *http.Request, transaction *sql.Tx, roleCodes []string) ([]string, apiError) {
+func resolveSubjectRoleIDs(request *http.Request, transaction *sql.Tx, roleCodes []string, appCode string) ([]string, apiError) {
 	if len(roleCodes) == 0 {
 		return make([]string, 0, 1), apiError{}
 	}
-	arguments := make([]any, 0, len(roleCodes))
+	arguments := make([]any, 0, len(roleCodes)+1)
+	arguments = append(arguments, appCode)
 	for _, roleCode := range roleCodes {
 		arguments = append(arguments, roleCode)
 	}
 	rows, err := transaction.QueryContext(request.Context(),
-		"SELECT id, role_code FROM roles WHERE role_code IN ("+sharedPlaceholders(len(roleCodes))+")",
+		"SELECT id, role_code FROM roles WHERE app_code = ? AND role_code IN ("+sharedPlaceholders(len(roleCodes))+")",
 		arguments...)
 	if err != nil {
 		return nil, internalError()
@@ -242,9 +256,10 @@ func resolveSubjectRoleIDs(request *http.Request, transaction *sql.Tx, roleCodes
 	return roleIDs, apiError{}
 }
 
-func (handler *Handler) fetchSubjectRoleAssignments(request *http.Request, subjectID string) ([]subjectRoleAssignment, apiError) {
+func (handler *Handler) fetchSubjectRoleAssignments(request *http.Request, subjectID, appCode string) ([]subjectRoleAssignment, apiError) {
 	rows, err := handler.store.DB.QueryContext(request.Context(),
-		selectSubjectRoleAssignments+" WHERE assignment.subject_id = ? ORDER BY role.role_code", subjectID)
+		selectSubjectRoleAssignments+" WHERE assignment.subject_id = ? AND role.app_code = ? ORDER BY role.role_code",
+		subjectID, appCode)
 	if err != nil {
 		return nil, internalError()
 	}
@@ -270,6 +285,11 @@ func (handler *Handler) getSubjectPermissions(responseWriter http.ResponseWriter
 	if !ok {
 		return
 	}
+	appCode, appErr := handler.requireAppCode(request)
+	if appErr != (apiError{}) {
+		handler.fail(responseWriter, appErr)
+		return
+	}
 	subjectID, parameterErr := validateSharedSubjectID(request.URL.Query().Get("subject_id"))
 	if parameterErr.status != 0 {
 		handler.fail(responseWriter, parameterErr)
@@ -291,8 +311,8 @@ func (handler *Handler) getSubjectPermissions(responseWriter http.ResponseWriter
 SELECT role.role_code, role.permission_codes
 FROM subject_roles AS assignment
 JOIN roles AS role ON role.id = assignment.role_id
-WHERE assignment.subject_id = ?
-ORDER BY role.role_code`, subjectID)
+WHERE assignment.subject_id = ? AND role.app_code = ?
+ORDER BY role.role_code`, subjectID, appCode)
 	if err != nil {
 		handler.fail(responseWriter, internalError())
 		return

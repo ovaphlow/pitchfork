@@ -59,7 +59,10 @@ podman compose down      # 停止，数据保留在 ./.data/pg
 | `DELETE` | `/crate-api/agora/v1/auth/session` | 登出并清除会话 Cookie |
 | `POST` | `/crate-api/agora/v1/files` | 上传审核材料（营业执照）；multipart 字段名 `file`，仅收 JPG/PNG/WebP/PDF，≤ 8 MB；转发给 platformd 共享 files 并返回 `{id, content_url}` |
 | `GET` | `/crate-api/agora/v1/files/{id}/content` | 读取已上传文件；需要有效会话，转发 platformd 共享 files 内容 |
-| `GET` | `/crate-api/agora/v1/organizations` | 机构列表；仅返回已认证机构，支持 `city`、`org_type`、`q`、`limit`、`offset` |
+| `GET` | `/crate-api/agora/v1/organizations` | 机构列表；公开调用仅返回已认证机构，支持 `city`、`org_type`、`q`、`limit`、`offset`；平台管理员可用 `status` 筛选任一审核状态，`status=全部` 返回所有状态 |
+| `PUT` | `/crate-api/agora/v1/me/intent` | 记录本账号最近选择的身份：`{"user_type":"job_seeker"\|"recruiter"}`；仅偏好，不参与权限 |
+| `GET` | `/crate-api/agora/v1/admin/subjects` | Agora 用户列表（管理端「求职方」）；仅平台管理员，以 `subject_intents` 为注册表，再按 ID 向 platformd 批量取账号信息并附 `user_type` |
+| `PATCH` | `/crate-api/agora/v1/admin/subjects/{id}` | 启用/禁用平台账号；仅平台管理员，转发 `X-CSRF-Token` 到 platformd |
 | `POST` | `/crate-api/agora/v1/organizations` | 创建机构；当前主体成为所有者，状态 `待审核`；`metadata.credit_code` 与 `metadata.license_file_id` 作为审核材料 |
 | `GET` | `/crate-api/agora/v1/organizations/mine` | 我所属的机构及其中的角色 |
 | `GET` | `/crate-api/agora/v1/organizations/{id}` | 机构详情；未认证机构只对成员可见 |
@@ -73,7 +76,7 @@ podman compose down      # 停止，数据保留在 ./.data/pg
 | `POST` | `/crate-api/agora/v1/positions` | 新建岗位，初始为 `草稿`；机构成员 |
 | `GET` | `/crate-api/agora/v1/positions/{id}` | 岗位详情；未公开岗位只对成员可见，公开访问累加 `view_count` |
 | `PATCH` | `/crate-api/agora/v1/positions/{id}` | 修改岗位；机构成员 |
-| `POST` | `/crate-api/agora/v1/positions/{id}/status` | 状态流转：`草稿 → 招聘中 → 已暂停/已关闭`；上线要求机构已认证 |
+| `POST` | `/crate-api/agora/v1/positions/{id}/status` | 状态流转：`草稿 → 招聘中 → 已暂停/已关闭`，14 天后自动 `已停招`；`已停招` / `已关闭 → 招聘中` 恢复 7 天；上线要求机构已认证 |
 | `DELETE` | `/crate-api/agora/v1/positions/{id}` | 删除岗位；招聘专员只能删除自己创建的岗位 |
 
 ### 业务规则
@@ -82,7 +85,14 @@ podman compose down      # 停止，数据保留在 ./.data/pg
 - 一个主体可以创建并管理多家机构（例如集团、连锁），每家机构独立审核；约束只有 `name + city` 唯一，不限制每个主体的机构数量。机构成员角色按机构隔离。
 - 机构审核材料：`metadata.credit_code`（统一社会信用代码）与 `metadata.license_file_id`（营业执照，指向 platformd 共享 files.id）。文件经 `POST /crate-api/agora/v1/files` 上传，营业执照只接受图片与 PDF，单文件不超过 8 MB。
 - 机构成员角色：`所有者`（每机构唯一）> `管理员` > `招聘专员`。所有者与管理员可改档案、管成员；三者都可维护岗位。
-- 岗位状态 `已关闭` 是终态；「已过期」由 `expires_at` 推导，不落状态、不需要后台任务。
+- `GET /organizations` 默认只看已认证机构；带 `status` 参数时仅 `platform_admin` 可用，其他调用 403，
+  避免待审核记录外泄。审核接口 `POST /organizations/{id}/review` 同样只接受平台管理员。
+- 岗位发布后进入 14 天（2 周）招聘窗口（`open_until = NOW() + 14 days`）。窗口到期后，
+  store 在读取或状态流转时惰性把 `招聘中` 改为 `已停招` 并停止公开展示；不需要后台任务。
+- `已停招` 与 `已关闭` 的岗位都可通过 `POST /positions/{id}/status` 提交 `招聘中` 重新开放，
+  窗口为点击时刻起 7 天；重新开放同样要求机构已认证。`已停招` 不能由调用方直接设置，
+  `已关闭` 也不能直接转为 `已暂停`。
+- 机构自定义的 `expires_at` 仍按原规则推导「已过期」，不落状态。
 - 公开接口只暴露已认证机构与 `招聘中` 岗位；其余记录对非成员返回 404 而不是 403。
 
 ### 认证边界
@@ -100,6 +110,11 @@ browser ──cookie──▶ agora-api ──Cookie──▶ platformd  GET /se
 - 登录成功后读取 `platformd` 共享 API 的 `GET /crate-api/v1/subject-permissions?subject_id=`
   （只查当前主体），把角色和权限码附在会话响应里。共享 API 不可用时登录仍成功，
   `nexus_ready=false`（字段名沿用）。
+- 所有 platformd 共享调用（权限、文件上传/下载）都带 `X-App-Code: agora`；platformd 按该值
+  隔离 settings / files / messages / interactions / roles，Agora 看不到其他产品的数据。
+- `subject_intents` 同时是 Agora 用户注册表：每次解析有效 Agora 会话都会确保登记；迁移
+  `0006` 允许 `user_type` 为空，并从机构所有者/成员与岗位创建人回填存量用户。管理台只列
+  这张表里的主体，因此 Aceso 等其它产品的账号不会出现在「求职方」。
 - 登出会把 IDP 的 CSRF Cookie 值作为 `X-CSRF-Token` 转发，确保服务端会话被真正
   撤销，而不是只清浏览器 Cookie。
 - 浏览器 Cookie 使用 `SameSite=Lax`；面向互联网部署必须使用 HTTPS，并让 UI 与

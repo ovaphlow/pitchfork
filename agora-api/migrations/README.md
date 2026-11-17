@@ -20,6 +20,10 @@ runner 的行为：
 | `0001_organizations.sql` | `organizations`、`organization_members` |
 | `0002_job_positions.sql` | `job_positions` |
 | `0003_organization_license.sql` | 仅更新 `organizations.metadata` 契约注释（新增 `license_file_id`） |
+| `0004_job_positions_open_window.sql` | `job_positions.open_until` 招聘窗口与 `已停招` 状态 |
+| `0005_subject_intents.sql` | `subject_intents`：账号最近选择的求职/招聘身份（`user_type NOT NULL`） |
+| `0006_subject_intents_registry.sql` | 允许 `user_type` 为空，并把机构/岗位参与者回填为 Agora 用户 |
+| `0007_subject_intents_default_types.sql` | 存量类型回填：机构成员/岗位创建人 → `recruiter`，其余 → `job_seeker` |
 
 ## 字段切分规则
 
@@ -81,3 +85,5 @@ CREATE INDEX idx_job_positions_industry ON job_positions (industry);
 - 机构成员才能增删改本机构岗位；`member_role` 决定是否能改机构档案与成员。
 - 机构 `status <> '已认证'` 时只能存草稿，不能进入「招聘中」。
 - `status = '招聘中' AND expires_at < NOW()` 对外表现为「已过期」，不落状态。
+- 招聘窗口：首次发布 `open_until = NOW() + 14 days`，恢复招聘 `+7 days`；
+  `status = '招聘中' AND open_until <= NOW()` 由 store 在读取时转为 `已停招`。

@@ -57,6 +57,7 @@ internal class DepartmentDirectoryClient(
         return httpClient.request(HttpMethod.GET, port, host, target)
             .compose { request: HttpClientRequest ->
                 request.putHeader("Cookie", cookie)
+                request.putHeader("X-App-Code", "aceso")
                 request.send().compose { response: HttpClientResponse ->
                     response.body().map { body: Buffer -> Pair(response.statusCode(), body) }
                 }

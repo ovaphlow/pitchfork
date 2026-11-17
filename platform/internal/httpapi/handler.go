@@ -47,6 +47,8 @@ type Options struct {
 	SecureSessionCookie  bool
 	TrustedProxyPrefixes []netip.Prefix
 	CorsOrigins          []string
+	// AppCodes 是共享 API 接受的 X-App-Code 白名单。
+	AppCodes []string
 	// 共享模块（原 service-nexus-shared）：文件存储目录与单次上传上限。
 	SharedFilesDir       string
 	SharedMaxUploadBytes int64
@@ -118,6 +120,7 @@ func NewMux(database *sql.DB, options Options) http.Handler {
 		DB:             database,
 		FilesDir:       options.SharedFilesDir,
 		MaxUploadBytes: options.SharedMaxUploadBytes,
+		AppCodes:       options.AppCodes,
 		Logger:         logger,
 		RequireSession: func(request *http.Request) (shared.Session, bool) {
 			session, err := handler.currentSession(request)
@@ -406,6 +409,28 @@ func (handler Handler) listSubjects(responseWriter http.ResponseWriter, request 
 	if _, ok := handler.requireAdministrator(responseWriter, request); !ok {
 		return
 	}
+	if rawIDs := strings.TrimSpace(request.URL.Query().Get("subject_ids")); rawIDs != "" {
+		ids := make([]string, 0, 20)
+		for _, part := range strings.Split(rawIDs, ",") {
+			if id := strings.TrimSpace(part); id != "" {
+				ids = append(ids, id)
+			}
+		}
+		if len(ids) == 0 || len(ids) > 100 {
+			writeProblem(responseWriter, request, http.StatusBadRequest, "invalid-request", "invalid subject_ids")
+			return
+		}
+		subjects, err := identity.ListSubjectsByIDs(request.Context(), handler.database, ids)
+		if err != nil {
+			writeProblem(responseWriter, request, http.StatusInternalServerError, "internal-error", "could not list subjects")
+			return
+		}
+		writeJSON(responseWriter, http.StatusOK, map[string]any{
+			"records": subjects,
+			"meta":    map[string]int64{"total": int64(len(subjects))},
+		})
+		return
+	}
 	limit, offset, err := subjectListPagination(request)
 	if err != nil {
 		writeProblem(responseWriter, request, http.StatusBadRequest, "invalid-request", "invalid pagination")
@@ -595,6 +620,8 @@ func (handler Handler) updateSubject(responseWriter http.ResponseWriter, request
 	switch {
 	case input.Status == identity.StatusDisabled && input.TemporaryPassword == "" && input.PlatformAdmin == nil:
 		subject, err = identity.DisableSubject(request.Context(), handler.database, session.SubjectID, subjectID)
+	case input.Status == identity.StatusEnabled && input.TemporaryPassword == "" && input.PlatformAdmin == nil:
+		subject, err = identity.EnableSubject(request.Context(), handler.database, session.SubjectID, subjectID)
 	case input.Status == "" && input.TemporaryPassword != "" && input.PlatformAdmin == nil:
 		err = identity.SetTemporaryPassword(request.Context(), handler.database, session.SubjectID, subjectID, input.TemporaryPassword)
 		if err == nil {

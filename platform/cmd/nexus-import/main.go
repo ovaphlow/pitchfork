@@ -1,7 +1,7 @@
 // Command nexus-import 一次性把 service-nexus-shared 的 SQLite 数据与文件实体迁入 platformd。
 //
 // 迁移口径见 docs/plans/055.nexus-shared-merge-into-platform.md：
-//   - 只复制数据，不重建 schema；目标库的 000013–000020 迁移必须先应用（本工具会自动迁移）；
+//   - 只复制数据，不重建 schema；目标库的 000013–000021 迁移必须先应用（本工具会自动迁移）；
 //   - 幂等：INSERT OR IGNORE（主键/唯一键去重），可重复执行；
 //   - 迁移前默认用 VACUUM INTO 备份目标库；建议先停止 platformd 写入流量；
 //   - 文件实体按 stored_name 复制（Nexus 的 storage_path 就是 stored_name）。
@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/ovaphlow/pitchfork/platform/db/migrations"
@@ -31,6 +32,16 @@ var tables = []string{
 	"subject_roles",
 	"departments",
 	"subject_departments",
+}
+
+// appScopedTables 是 000021 之后带 app_code 的表及其历史数据归属。
+// 旧 Nexus 库没有该列，导入时按产品回填。
+var appScopedTables = map[string]string{
+	"settings":     "aceso",
+	"messages":     "aceso",
+	"files":        "agora",
+	"interactions": "aceso",
+	"roles":        "aceso",
 }
 
 func main() {
@@ -107,7 +118,10 @@ func run(sourceDatabasePath, sourceFilesDir, targetDatabasePath, targetFilesDir 
 	}
 
 	for _, table := range tables {
-		statement := fmt.Sprintf("INSERT OR IGNORE INTO main.%s SELECT * FROM nexus.%s", table, table)
+		statement, err := copyStatement(ctx, databaseConnection, table)
+		if err != nil {
+			return err
+		}
 		result, err := databaseConnection.ExecContext(ctx, statement)
 		if err != nil {
 			return fmt.Errorf("copy %s: %w", table, err)
@@ -149,15 +163,54 @@ func verifyColumns(ctx context.Context, databaseConnection *sql.DB, table string
 	if err != nil {
 		return err
 	}
-	if len(targetColumns) != len(sourceColumns) {
-		return fmt.Errorf("%s column mismatch: target=%v source=%v", table, targetColumns, sourceColumns)
+	expected := sourceColumns
+	if _, scoped := appScopedTables[table]; scoped {
+		expected = insertAppCodeColumn(sourceColumns)
+	}
+	if len(targetColumns) != len(expected) {
+		return fmt.Errorf("%s column mismatch: target=%v source=%v", table, targetColumns, expected)
 	}
 	for index := range targetColumns {
-		if targetColumns[index] != sourceColumns[index] {
-			return fmt.Errorf("%s column mismatch: target=%v source=%v", table, targetColumns, sourceColumns)
+		if targetColumns[index] != expected[index] {
+			return fmt.Errorf("%s column mismatch: target=%v source=%v", table, targetColumns, expected)
 		}
 	}
 	return nil
+}
+
+// insertAppCodeColumn 复刻 000021 的列顺序：app_code 紧跟 id。
+func insertAppCodeColumn(columns []string) []string {
+	expected := make([]string, 0, len(columns)+1)
+	for _, column := range columns {
+		expected = append(expected, column)
+		if column == "id" {
+			expected = append(expected, "app_code")
+		}
+	}
+	return expected
+}
+
+// copyStatement 为带 app_code 的表显式列出列并回填产品归属；其余表保持 SELECT *。
+func copyStatement(ctx context.Context, databaseConnection *sql.DB, table string) (string, error) {
+	appCode, scoped := appScopedTables[table]
+	if !scoped {
+		return fmt.Sprintf("INSERT OR IGNORE INTO main.%s SELECT * FROM nexus.%s", table, table), nil
+	}
+	sourceColumns, err := tableColumns(ctx, databaseConnection, "nexus", table)
+	if err != nil {
+		return "", err
+	}
+	targetColumns := insertAppCodeColumn(sourceColumns)
+	selectColumns := make([]string, 0, len(sourceColumns))
+	for _, column := range sourceColumns {
+		if column == "id" {
+			selectColumns = append(selectColumns, "id", "'"+appCode+"'")
+			continue
+		}
+		selectColumns = append(selectColumns, column)
+	}
+	return fmt.Sprintf("INSERT OR IGNORE INTO main.%s (%s) SELECT %s FROM nexus.%s",
+		table, strings.Join(targetColumns, ", "), strings.Join(selectColumns, ", "), table), nil
 }
 
 func tableColumns(ctx context.Context, databaseConnection *sql.DB, schema string, table string) ([]string, error) {

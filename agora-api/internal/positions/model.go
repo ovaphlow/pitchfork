@@ -13,18 +13,22 @@ import (
 // Status is the publication state of a posting.
 type Status string
 
-// Publication states. Expiry is derived from ExpiresAt, never stored.
+// Publication states. 已停招 is written by the store when a 14-day recruitment
+// window ends; it is never accepted as a user-requested transition.
 const (
-	StatusDraft  Status = "草稿"
-	StatusOpen   Status = "招聘中"
-	StatusPaused Status = "已暂停"
-	StatusClosed Status = "已关闭"
+	StatusDraft   Status = "草稿"
+	StatusOpen    Status = "招聘中"
+	StatusPaused  Status = "已暂停"
+	StatusStopped Status = "已停招"
+	StatusClosed  Status = "已关闭"
 )
 
 // Statuses lists every accepted posting state.
-var Statuses = []Status{StatusDraft, StatusOpen, StatusPaused, StatusClosed}
+var Statuses = []Status{StatusDraft, StatusOpen, StatusPaused, StatusStopped, StatusClosed}
 
-// CanTransitionTo reports whether a state change is allowed. 已关闭 is terminal.
+// CanTransitionTo reports whether a state change is allowed. 招聘中 → 已停招
+// happens automatically on window expiry; 已停招 and 已关闭 both reopen through
+// 招聘中, which the store grants a fresh 7-day recruitment window.
 func (s Status) CanTransitionTo(next Status) bool {
 	switch s {
 	case StatusDraft:
@@ -33,6 +37,10 @@ func (s Status) CanTransitionTo(next Status) bool {
 		return next == StatusPaused || next == StatusClosed
 	case StatusPaused:
 		return next == StatusOpen || next == StatusClosed
+	case StatusStopped:
+		return next == StatusOpen || next == StatusClosed
+	case StatusClosed:
+		return next == StatusOpen
 	default:
 		return false
 	}
@@ -44,9 +52,13 @@ func (s Status) IsPublic() bool {
 }
 
 // Public reports whether the posting is currently visible to anonymous callers.
-// Expiry is derived, so a 招聘中 posting past its deadline is no longer public.
+// Both the recruitment window (OpenUntil) and the employer deadline (ExpiresAt)
+// are checked, so a 招聘中 posting past either deadline is no longer public.
 func (p Position) Public(now time.Time) bool {
 	if p.Status != StatusOpen {
+		return false
+	}
+	if p.OpenUntil != nil && !p.OpenUntil.After(now) {
 		return false
 	}
 	return p.ExpiresAt == nil || p.ExpiresAt.After(now)
@@ -112,6 +124,7 @@ type Position struct {
 	Status           Status     `json:"status"`
 	PublishedAt      *time.Time `json:"published_at,omitempty"`
 	ExpiresAt        *time.Time `json:"expires_at,omitempty"`
+	OpenUntil        *time.Time `json:"open_until,omitempty"`
 	ViewCount        int64      `json:"view_count"`
 	CreatedBy        string     `json:"created_by"`
 	Metadata         Metadata   `json:"metadata"`

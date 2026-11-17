@@ -22,6 +22,7 @@ import (
 
 	"github.com/ovaphlow/pitchfork/agora-api/internal/database"
 	"github.com/ovaphlow/pitchfork/agora-api/internal/migrate"
+	"github.com/ovaphlow/pitchfork/agora-api/internal/intents"
 	"github.com/ovaphlow/pitchfork/agora-api/internal/organizations"
 	"github.com/ovaphlow/pitchfork/agora-api/internal/positions"
 	"github.com/ovaphlow/pitchfork/agora-api/migrations"
@@ -65,7 +66,7 @@ func openPool(t *testing.T) *pgxpool.Pool {
 func reset(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	if _, err := pool.Exec(context.Background(),
-		`TRUNCATE job_positions, organization_members, organizations`); err != nil {
+		`TRUNCATE subject_intents, job_positions, organization_members, organizations`); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
 }
@@ -96,6 +97,15 @@ func TestOrganizationLifecycle(t *testing.T) {
 	}
 	if created.Metadata.Industry != "医疗健康" {
 		t.Fatalf("metadata = %+v", created.Metadata)
+	}
+
+	// Pending organisations only show up in an explicit status listing.
+	if _, total, err := store.List(ctx, organizations.Filter{Limit: 20}); err != nil || total != 0 {
+		t.Fatalf("public listing leaked a pending organisation: %d, %v", total, err)
+	}
+	pending, total, err := store.List(ctx, organizations.Filter{Status: organizations.StatusPending, Limit: 20})
+	if err != nil || total != 1 || len(pending) != 1 || pending[0].ID != created.ID {
+		t.Fatalf("pending listing = %d, %v", total, err)
 	}
 
 	role, err := store.Role(ctx, created.ID, ownerSubject)
@@ -312,6 +322,95 @@ func TestPositionLifecycle(t *testing.T) {
 	}
 }
 
+func TestPositionRecruitmentWindow(t *testing.T) {
+	pool := openPool(t)
+	reset(t, pool)
+	ctx := context.Background()
+	orgStore := organizations.NewStore(pool)
+	store := positions.NewStore(pool)
+
+	organization, err := createOrganization(ctx, orgStore, organizations.CreateInput{Name: "丁医院", City: "成都"}, ownerSubject)
+	if err != nil {
+		t.Fatalf("create organisation: %v", err)
+	}
+	if _, err := orgStore.Review(ctx, organization.ID, organizations.ReviewInput{Status: organizations.StatusVerified}, strangerSubject); err != nil {
+		t.Fatalf("review: %v", err)
+	}
+
+	draftInput, err := (positions.CreateInput{
+		OrganizationID: organization.ID,
+		Title:          "夜班护士",
+		SalaryMin:      intPointer(8000),
+	}).Validate()
+	if err != nil {
+		t.Fatalf("validate position: %v", err)
+	}
+	draft, err := store.Create(ctx, draftInput, ownerSubject)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	published, err := store.SetStatus(ctx, draft.ID, positions.StatusOpen)
+	if err != nil {
+		t.Fatalf("SetStatus open: %v", err)
+	}
+	if published.OpenUntil == nil {
+		t.Fatal("publishing must open a recruitment window")
+	}
+	if left := time.Until(*published.OpenUntil); left < 13*24*time.Hour || left > 14*24*time.Hour {
+		t.Fatalf("first window = %v, want about 14 days", left)
+	}
+
+	// Move the window into the past: the next read stops the posting.
+	if _, err := pool.Exec(ctx,
+		`UPDATE job_positions SET open_until = NOW() - INTERVAL '1 minute' WHERE id = $1`, draft.ID); err != nil {
+		t.Fatalf("expire window: %v", err)
+	}
+	stopped, err := store.Get(ctx, draft.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if stopped.Status != positions.StatusStopped {
+		t.Fatalf("status = %q, want 已停招", stopped.Status)
+	}
+	if _, total, err := store.List(ctx, positions.Filter{Limit: 20}); err != nil || total != 0 {
+		t.Fatalf("stopped posting must leave the feed: %d, %v", total, err)
+	}
+
+	restored, err := store.SetStatus(ctx, draft.ID, positions.StatusOpen)
+	if err != nil {
+		t.Fatalf("SetStatus restore: %v", err)
+	}
+	if restored.Status != positions.StatusOpen || restored.OpenUntil == nil {
+		t.Fatalf("restored = %+v", restored)
+	}
+	if left := time.Until(*restored.OpenUntil); left < 6*24*time.Hour || left > 7*24*time.Hour {
+		t.Fatalf("restored window = %v, want about 7 days", left)
+	}
+	if _, total, err := store.List(ctx, positions.Filter{Limit: 20}); err != nil || total != 1 {
+		t.Fatalf("restored posting must return to the feed: %d, %v", total, err)
+	}
+
+	closed, err := store.SetStatus(ctx, draft.ID, positions.StatusClosed)
+	if err != nil {
+		t.Fatalf("SetStatus close: %v", err)
+	}
+	if closed.OpenUntil != nil {
+		t.Fatalf("closed posting kept open_until = %v", closed.OpenUntil)
+	}
+
+	reopened, err := store.SetStatus(ctx, draft.ID, positions.StatusOpen)
+	if err != nil {
+		t.Fatalf("SetStatus reopen closed: %v", err)
+	}
+	if reopened.Status != positions.StatusOpen || reopened.OpenUntil == nil {
+		t.Fatalf("reopened = %+v", reopened)
+	}
+	if left := time.Until(*reopened.OpenUntil); left < 6*24*time.Hour || left > 7*24*time.Hour {
+		t.Fatalf("reopened window = %v, want about 7 days", left)
+	}
+}
+
 func TestPositionConstraints(t *testing.T) {
 	pool := openPool(t)
 	reset(t, pool)
@@ -354,6 +453,53 @@ func TestPositionConstraints(t *testing.T) {
 	}
 	if _, err := store.Create(ctx, negotiableInput, ownerSubject); err != nil {
 		t.Fatalf("Create with a negotiable salary must succeed: %v", err)
+	}
+}
+
+func TestSubjectIntentsPersistLastChoice(t *testing.T) {
+	pool := openPool(t)
+	reset(t, pool)
+	ctx := context.Background()
+	store := intents.NewStore(pool)
+
+	if err := store.Set(ctx, ownerSubject, intents.JobSeeker); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	values, err := store.BySubjects(ctx, []string{ownerSubject, strangerSubject})
+	if err != nil {
+		t.Fatalf("BySubjects: %v", err)
+	}
+	if len(values) != 1 || values[ownerSubject] != intents.JobSeeker {
+		t.Fatalf("values = %v", values)
+	}
+
+	if err := store.Ensure(ctx, strangerSubject); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	ids, total, err := store.List(ctx, 10, 0)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if total != 2 || len(ids) != 2 {
+		t.Fatalf("registry = %v, total = %d", ids, total)
+	}
+	values, err = store.BySubjects(ctx, []string{ownerSubject, strangerSubject})
+	if err != nil {
+		t.Fatalf("BySubjects after Ensure: %v", err)
+	}
+	if len(values) != 1 || values[ownerSubject] != intents.JobSeeker {
+		t.Fatalf("untyped registry row leaked a type: %v", values)
+	}
+
+	if err := store.Set(ctx, ownerSubject, intents.Recruiter); err != nil {
+		t.Fatalf("Set update: %v", err)
+	}
+	values, err = store.BySubjects(ctx, []string{ownerSubject})
+	if err != nil {
+		t.Fatalf("BySubjects after update: %v", err)
+	}
+	if values[ownerSubject] != intents.Recruiter {
+		t.Fatalf("updated value = %v", values)
 	}
 }
 

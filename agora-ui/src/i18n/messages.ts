@@ -50,6 +50,101 @@ export interface Messages {
     empty: string;
     hint: string;
   };
+  admin: {
+    heading: string;
+    hint: string;
+    loading: string;
+    failed: string;
+    empty: string;
+    refresh: string;
+    refreshing: string;
+    creditCode: string;
+    openLicense: string;
+    createdAt: (date: string) => string;
+    approve: string;
+    approving: string;
+    reject: string;
+    rejecting: string;
+    reasonLabel: string;
+    reasonPlaceholder: string;
+    reasonRequired: string;
+    confirmReject: string;
+    cancel: string;
+    approved: string;
+    rejected: string;
+    actionFailed: string;
+    nav: {
+      home: string;
+      recruiters: string;
+      seekers: string;
+      platform: string;
+    };
+    home: {
+      heading: string;
+      hint: string;
+      pending: string;
+      verified: string;
+      rejected: string;
+      disabled: string;
+      subjects: string;
+      openPositions: string;
+      tasksHeading: string;
+      tasksEmpty: string;
+      viewAll: string;
+    };
+    organizations: {
+      heading: string;
+      hint: string;
+      searchPlaceholder: string;
+      statusLabel: string;
+      statusAll: string;
+      search: string;
+      searching: string;
+      empty: string;
+      disable: string;
+      disableReason: string;
+      disabled: string;
+    };
+    seekers: {
+      heading: string;
+      hint: string;
+      searchPlaceholder: string;
+      statusAll: string;
+      userTypeAll: string;
+      jobSeeker: string;
+      recruiter: string;
+      unset: string;
+      enabled: string;
+      disabled: string;
+      empty: string;
+      noMatch: string;
+      disable: string;
+      enable: string;
+      disableConfirm: (name: string) => string;
+      enableConfirm: (name: string) => string;
+      platformAdmin: string;
+      prev: string;
+      next: string;
+      page: (page: number, total: number) => string;
+    };
+    platform: {
+      heading: string;
+      hint: string;
+      serviceHeading: string;
+      api: string;
+      database: string;
+      ready: string;
+      notReady: string;
+      latency: string;
+      probe: string;
+      probing: string;
+      adminHeading: string;
+      subject: string;
+      roles: string;
+      permissions: string;
+      none: string;
+    };
+  };
   profile: {
     heading: string;
     name: string;
@@ -59,8 +154,6 @@ export interface Messages {
     identityHint: string;
   };
   positions: {
-    toggle: string;
-    collapse: string;
     loading: string;
     failed: string;
     empty: string;
@@ -77,6 +170,12 @@ export interface Messages {
     resume: string;
     close: string;
     actionFailed: string;
+    restore: string;
+    windowHint: string;
+    windowLeft: (days: number) => string;
+    daysLeft: (days: number) => string;
+    stoppedHint: string;
+    closedHint: string;
     headcountValue: (count: number) => string;
     fields: {
       title: string;
@@ -295,6 +394,101 @@ export const zhCN: Messages = {
     empty: "还没有消息。",
     hint: "站内消息与通知尚未接入。",
   },
+  admin: {
+    heading: "机构审核",
+    hint: "平台管理员处理待审核机构；通过认证后机构才能发布岗位。",
+    loading: "正在读取待审核机构…",
+    failed: "读取待审核机构失败。",
+    empty: "暂无待审核机构。",
+    refresh: "刷新",
+    refreshing: "刷新中…",
+    creditCode: "统一社会信用代码",
+    openLicense: "查看营业执照",
+    createdAt: (date) => `提交于 ${date}`,
+    approve: "通过认证",
+    approving: "通过中…",
+    reject: "驳回",
+    rejecting: "驳回中…",
+    reasonLabel: "驳回原因",
+    reasonPlaceholder: "说明需要补充或修正的材料",
+    reasonRequired: "驳回时必须填写原因。",
+    confirmReject: "确认驳回",
+    cancel: "取消",
+    approved: "机构已通过认证。",
+    rejected: "机构已驳回。",
+    actionFailed: "操作失败，请稍后再试。",
+    nav: {
+      home: "主页",
+      recruiters: "招聘方",
+      seekers: "求职方",
+      platform: "平台功能",
+    },
+    home: {
+      heading: "管理主页",
+      hint: "待处理事项与平台数据概览。",
+      pending: "待审核机构",
+      verified: "已认证机构",
+      rejected: "已驳回机构",
+      disabled: "已停用机构",
+      subjects: "平台账号",
+      openPositions: "在招岗位",
+      tasksHeading: "待处理",
+      tasksEmpty: "没有待处理事项。",
+      viewAll: "查看全部",
+    },
+    organizations: {
+      heading: "招聘方 / 企业",
+      hint: "按名称与审核状态查询机构，并完成认证、驳回或停用。",
+      searchPlaceholder: "机构名称",
+      statusLabel: "审核状态",
+      statusAll: "全部状态",
+      search: "查询",
+      searching: "查询中…",
+      empty: "没有符合条件的机构。",
+      disable: "停用",
+      disableReason: "停用原因（选填）",
+      disabled: "机构已停用。",
+    },
+    seekers: {
+      heading: "求职方 / 用户",
+      hint: "这里只显示使用过 Agora 的平台账号；可查询并启用或禁用账号。",
+      searchPlaceholder: "姓名或账号",
+      statusAll: "全部状态",
+      userTypeAll: "全部类型",
+      jobSeeker: "求职者",
+      recruiter: "招聘者",
+      unset: "未选择",
+      enabled: "账号已启用。",
+      disabled: "账号已禁用。",
+      empty: "暂无平台账号。",
+      noMatch: "当前页没有匹配的账号。",
+      disable: "禁用",
+      enable: "启用",
+      disableConfirm: (name) => `确定禁用「${name}」？该账号的会话会立即失效。`,
+      enableConfirm: (name) => `确定启用「${name}」？`,
+      platformAdmin: "平台管理员",
+      prev: "上一页",
+      next: "下一页",
+      page: (page, total) => `第 ${page} 页 · 共 ${total} 个账号`,
+    },
+    platform: {
+      heading: "平台功能",
+      hint: "服务状态与当前管理员权限。",
+      serviceHeading: "服务状态",
+      api: "接口",
+      database: "数据库",
+      ready: "就绪",
+      notReady: "未就绪",
+      latency: "延迟",
+      probe: "重新检测",
+      probing: "检测中…",
+      adminHeading: "当前管理员",
+      subject: "主体标识",
+      roles: "角色",
+      permissions: "权限码",
+      none: "无",
+    },
+  },
   profile: {
     heading: "我的",
     name: "显示名",
@@ -304,8 +498,6 @@ export const zhCN: Messages = {
     identityHint: "登录身份在登录时选定；需要切换请先退出登录。",
   },
   positions: {
-    toggle: "岗位",
-    collapse: "收起岗位",
     loading: "正在读取岗位…",
     failed: "读取岗位失败。",
     empty: "还没有岗位，先发布一个吧。",
@@ -322,6 +514,12 @@ export const zhCN: Messages = {
     resume: "恢复发布",
     close: "关闭",
     actionFailed: "操作失败，请稍后再试。",
+    restore: "恢复招聘（7 天）",
+    windowHint: "岗位发布 14 天后自动停招；停招后可恢复招聘 7 天。",
+    windowLeft: (days) => `招聘剩余 ${days} 天`,
+    daysLeft: (days) => `剩余 ${days} 天`,
+    stoppedHint: "发布满 14 天已自动停招，可恢复招聘 7 天。",
+    closedHint: "岗位已关闭，恢复招聘会重新开放 7 天。",
     headcountValue: (count) => `招 ${count} 人`,
     fields: {
       title: "岗位名称",
@@ -585,6 +783,101 @@ export const en: Messages = {
     empty: "No messages yet.",
     hint: "In-app messaging is not connected yet.",
   },
+  admin: {
+    heading: "Organisation review",
+    hint: "Platform admins review pending organisations; only verified organisations can post roles.",
+    loading: "Loading pending organisations…",
+    failed: "Could not load pending organisations.",
+    empty: "No organisations waiting for review.",
+    refresh: "Refresh",
+    refreshing: "Refreshing…",
+    creditCode: "Unified social credit code",
+    openLicense: "Open business licence",
+    createdAt: (date) => `Submitted ${date}`,
+    approve: "Verify",
+    approving: "Verifying…",
+    reject: "Reject",
+    rejecting: "Rejecting…",
+    reasonLabel: "Rejection reason",
+    reasonPlaceholder: "What the organisation must fix or provide",
+    reasonRequired: "A rejection needs a reason.",
+    confirmReject: "Confirm rejection",
+    cancel: "Cancel",
+    approved: "Organisation verified.",
+    rejected: "Organisation rejected.",
+    actionFailed: "The change failed. Try again later.",
+    nav: {
+      home: "Home",
+      recruiters: "Recruiters",
+      seekers: "Job seekers",
+      platform: "Platform",
+    },
+    home: {
+      heading: "Admin home",
+      hint: "Pending work and platform statistics.",
+      pending: "Pending organisations",
+      verified: "Verified organisations",
+      rejected: "Rejected organisations",
+      disabled: "Disabled organisations",
+      subjects: "Platform accounts",
+      openPositions: "Open roles",
+      tasksHeading: "To handle",
+      tasksEmpty: "Nothing waiting for review.",
+      viewAll: "View all",
+    },
+    organizations: {
+      heading: "Recruiters / organisations",
+      hint: "Search organisations by name and review state; verify, reject or disable them.",
+      searchPlaceholder: "Organisation name",
+      statusLabel: "Review state",
+      statusAll: "All states",
+      search: "Search",
+      searching: "Searching…",
+      empty: "No organisations match.",
+      disable: "Disable",
+      disableReason: "Disable reason (optional)",
+      disabled: "Organisation disabled.",
+    },
+    seekers: {
+      heading: "Job seekers / accounts",
+      hint: "Only platform accounts that have used Agora appear here; search and enable or disable them.",
+      searchPlaceholder: "Name or account",
+      statusAll: "All states",
+      userTypeAll: "All types",
+      jobSeeker: "Job seeker",
+      recruiter: "Recruiter",
+      unset: "Not chosen",
+      enabled: "Account enabled.",
+      disabled: "Account disabled.",
+      empty: "No platform accounts yet.",
+      noMatch: "No account on this page matches.",
+      disable: "Disable",
+      enable: "Enable",
+      disableConfirm: (name) => `Disable “${name}”? Their sessions end immediately.`,
+      enableConfirm: (name) => `Enable “${name}”?`,
+      platformAdmin: "Platform admin",
+      prev: "Previous",
+      next: "Next",
+      page: (page, total) => `Page ${page} · ${total} accounts`,
+    },
+    platform: {
+      heading: "Platform",
+      hint: "Service status and the current administrator's access.",
+      serviceHeading: "Service status",
+      api: "API",
+      database: "Database",
+      ready: "Ready",
+      notReady: "Not ready",
+      latency: "Latency",
+      probe: "Check again",
+      probing: "Checking…",
+      adminHeading: "Current administrator",
+      subject: "Subject ID",
+      roles: "Roles",
+      permissions: "Permission codes",
+      none: "None",
+    },
+  },
   profile: {
     heading: "Profile",
     name: "Display name",
@@ -594,8 +887,6 @@ export const en: Messages = {
     identityHint: "The role is chosen at sign-in. Sign out to switch.",
   },
   positions: {
-    toggle: "Roles",
-    collapse: "Hide roles",
     loading: "Loading roles…",
     failed: "Could not load roles.",
     empty: "No roles yet. Post one to get started.",
@@ -613,6 +904,14 @@ export const en: Messages = {
     resume: "Reopen",
     close: "Close",
     actionFailed: "The change failed. Try again later.",
+    restore: "Restore for 7 days",
+    windowHint:
+      "A role stops recruiting 14 days after publishing; once stopped you can restore it for 7 days.",
+    windowLeft: (days) => `${days} ${days === 1 ? "day" : "days"} of recruiting left`,
+    daysLeft: (days) => `${days} ${days === 1 ? "day" : "days"} left`,
+    stoppedHint:
+      "Stopped after 14 days. Restore it to keep recruiting for another 7 days.",
+    closedHint: "Closed. Restoring reopens the role for 7 days.",
     headcountValue: (count) => `${count} ${count === 1 ? "hire" : "hires"}`,
     fields: {
       title: "Role title",

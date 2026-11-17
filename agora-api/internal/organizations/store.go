@@ -164,7 +164,11 @@ func (s *Store) Review(ctx context.Context, organizationID string, input ReviewI
 // List returns verified organisations for the public directory.
 func (s *Store) List(ctx context.Context, filter Filter) ([]Organization, int64, error) {
 	conditions := &dbx.Conditions{}
-	conditions.Raw("status = '" + string(StatusVerified) + "'")
+	if filter.Status != "" {
+		conditions.EQ("status", string(filter.Status))
+	} else if !filter.AllStatuses {
+		conditions.Raw("status = '" + string(StatusVerified) + "'")
+	}
 	conditions.EQ("city", filter.City)
 	conditions.EQ("org_type", filter.OrgType)
 	conditions.ILIKE([]string{"name", "short_name", "metadata->>'industry'"}, filter.Query)

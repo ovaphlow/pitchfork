@@ -540,6 +540,10 @@ async function request<T>(
 ): Promise<T> {
   const url = `${serviceBase(service)}${path}`;
   const headers = new Headers(init.headers);
+  if (service === "nexus") {
+    // platformd 共享 API 按产品隔离数据；Aceso 的所有共享调用都带自己的 app_code。
+    headers.set("X-App-Code", "aceso");
+  }
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }

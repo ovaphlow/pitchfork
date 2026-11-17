@@ -60,6 +60,7 @@ internal class NexusMessageClient(
         return httpClient.request(HttpMethod.POST, port, host, target)
             .compose { request: HttpClientRequest ->
                 request.putHeader("Cookie", cookie)
+                request.putHeader("X-App-Code", "aceso")
                 request.putHeader("Content-Type", "application/json")
                 request.send(Buffer.buffer(body)).compose { response: HttpClientResponse ->
                     response.body().map { responseBody: Buffer -> Pair(response.statusCode(), responseBody) }

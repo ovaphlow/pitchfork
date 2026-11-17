@@ -76,6 +76,7 @@ func catalogRequest(t *testing.T, mux *http.ServeMux, method string, path string
 		payload = encoded
 	}
 	request := httptest.NewRequest(method, shared.Prefix+path, bytes.NewReader(payload))
+	request.Header.Set(shared.AppCodeHeader, "aceso")
 	request.Header.Set("Cookie", "platformd_session=test-session")
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")

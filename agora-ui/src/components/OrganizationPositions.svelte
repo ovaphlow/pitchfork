@@ -96,10 +96,34 @@
       case "招聘中":
         return "border-acid/30 text-acid";
       case "已暂停":
+      case "已停招":
         return "border-amber-300/30 text-amber-300";
       default:
         return "border-line text-muted";
     }
+  }
+
+  // The API stops a role once its window elapses, but a long-lived page can hold
+  // stale data; derive the same state from open_until so the UI matches.
+  function effectiveStatus(position: OrganizationPosition): string {
+    if (
+      position.status === "招聘中" &&
+      position.open_until !== null &&
+      Date.parse(position.open_until) <= Date.now()
+    ) {
+      return "已停招";
+    }
+    return position.status;
+  }
+
+  // Round, not ceil: the window is exactly N days at publish/restore time, and
+  // any client/server clock skew would make ceil report N+1 on that boundary.
+  function windowDaysLeft(position: OrganizationPosition): number {
+    if (!position.open_until) return 0;
+    return Math.max(
+      1,
+      Math.round((Date.parse(position.open_until) - Date.now()) / 86_400_000),
+    );
   }
 
   function resetForm() {
@@ -428,18 +452,21 @@
       </form>
     {/if}
 
+    <p class="mt-3 text-[11px] leading-5 text-muted">{$t.positions.windowHint}</p>
+
     {#if positions.length}
       <ul class="mt-3 space-y-2">
         {#each positions as position (position.id)}
+          {@const state = effectiveStatus(position)}
           <li class="rounded-xl border border-line bg-ink px-3 py-2.5">
             <div class="flex items-baseline justify-between gap-3">
               <p class="min-w-0 truncate text-[13px] text-bone/90">{position.title}</p>
               <span
                 class={`shrink-0 rounded-full border px-2 py-0.5 font-mono text-[10px] ${statusClass(
-                  position.status,
+                  state,
                 )}`}
               >
-                {position.status}
+                {state}
               </span>
             </div>
             <p class="mt-1 text-[11px] text-muted">
@@ -456,8 +483,22 @@
               {salaryLabel(position)}
             </p>
 
+            {#if state === "招聘中"}
+              <p class="mt-1 text-[11px] text-muted">
+                {$t.positions.windowLeft(windowDaysLeft(position))}
+              </p>
+            {:else if state === "已停招"}
+              <p class="mt-1 text-[11px] leading-5 text-amber-300">
+                {$t.positions.stoppedHint}
+              </p>
+            {:else if state === "已关闭"}
+              <p class="mt-1 text-[11px] leading-5 text-muted">
+                {$t.positions.closedHint}
+              </p>
+            {/if}
+
             <div class="mt-2 flex flex-wrap gap-2">
-              {#if position.status === "草稿"}
+              {#if state === "草稿"}
                 <button
                   type="button"
                   onclick={() => transition(position, "招聘中")}
@@ -466,7 +507,7 @@
                 >
                   {$t.positions.publish}
                 </button>
-              {:else if position.status === "招聘中"}
+              {:else if state === "招聘中"}
                 <button
                   type="button"
                   onclick={() => transition(position, "已暂停")}
@@ -483,7 +524,7 @@
                 >
                   {$t.positions.close}
                 </button>
-              {:else if position.status === "已暂停"}
+              {:else if state === "已暂停"}
                 <button
                   type="button"
                   onclick={() => transition(position, "招聘中")}
@@ -499,6 +540,32 @@
                   class={actionClass}
                 >
                   {$t.positions.close}
+                </button>
+              {:else if state === "已停招"}
+                <button
+                  type="button"
+                  onclick={() => transition(position, "招聘中")}
+                  disabled={!verified || actionID !== ""}
+                  class={`${actionClass} border-acid/30 text-acid`}
+                >
+                  {$t.positions.restore}
+                </button>
+                <button
+                  type="button"
+                  onclick={() => transition(position, "已关闭")}
+                  disabled={actionID !== ""}
+                  class={actionClass}
+                >
+                  {$t.positions.close}
+                </button>
+              {:else if state === "已关闭"}
+                <button
+                  type="button"
+                  onclick={() => transition(position, "招聘中")}
+                  disabled={!verified || actionID !== ""}
+                  class={`${actionClass} border-acid/30 text-acid`}
+                >
+                  {$t.positions.restore}
                 </button>
               {/if}
             </div>

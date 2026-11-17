@@ -26,6 +26,7 @@ type fakeOrganizations struct {
 	lastOwner  string
 	lastUpdate organizations.UpdateInput
 	lastReview organizations.ReviewInput
+	lastFilter organizations.Filter
 	lastActor  string
 }
 
@@ -102,9 +103,14 @@ func (f *fakeOrganizations) Review(_ context.Context, organizationID string, inp
 }
 
 func (f *fakeOrganizations) List(_ context.Context, filter organizations.Filter) ([]organizations.Organization, int64, error) {
+	f.lastFilter = filter
+	status := filter.Status
+	if status == "" && !filter.AllStatuses {
+		status = organizations.StatusVerified
+	}
 	out := make([]organizations.Organization, 0, len(f.byID))
 	for _, organization := range f.byID {
-		if organization.Status != organizations.StatusVerified {
+		if status != "" && organization.Status != status {
 			continue
 		}
 		out = append(out, organization)

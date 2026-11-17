@@ -17,6 +17,7 @@ import (
 	"github.com/ovaphlow/pitchfork/platform/internal/database"
 	"github.com/ovaphlow/pitchfork/platform/internal/httpapi"
 	"github.com/ovaphlow/pitchfork/platform/internal/identity"
+	"github.com/ovaphlow/pitchfork/platform/internal/shared"
 )
 
 // 055：共享路由（/crate-api/v1/*）的真实接线测试——用 platformd 真实
@@ -57,6 +58,7 @@ func TestSharedRoutesUsePlatformSessionAndAuthorizationGate(t *testing.T) {
 	t.Run("platform administrator can write the role directory", func(t *testing.T) {
 		request := httptest.NewRequest(http.MethodPost, "/crate-api/v1/roles", strings.NewReader(
 			`{"role_code":"nursing.staff","display_name":"护理"}`))
+		request.Header.Set(shared.AppCodeHeader, "aceso")
 		request.AddCookie(adminSessionCookie)
 		response := httptest.NewRecorder()
 		mux.ServeHTTP(response, request)
@@ -86,6 +88,7 @@ func TestSharedRoutesUsePlatformSessionAndAuthorizationGate(t *testing.T) {
 
 	t.Run("read routes accept any full session", func(t *testing.T) {
 		request := httptest.NewRequest(http.MethodGet, "/crate-api/v1/roles", nil)
+		request.Header.Set(shared.AppCodeHeader, "aceso")
 		request.AddCookie(nurseSessionCookie)
 		response := httptest.NewRecorder()
 		mux.ServeHTTP(response, request)
@@ -101,6 +104,7 @@ func TestSharedRoutesUsePlatformSessionAndAuthorizationGate(t *testing.T) {
 	t.Run("write routes keep the 043 authorization gate", func(t *testing.T) {
 		request := httptest.NewRequest(http.MethodPost, "/crate-api/v1/roles", strings.NewReader(
 			`{"role_code":"escalation","display_name":"提权"}`))
+		request.Header.Set(shared.AppCodeHeader, "aceso")
 		request.AddCookie(nurseSessionCookie)
 		response := httptest.NewRecorder()
 		mux.ServeHTTP(response, request)
@@ -122,6 +126,7 @@ func TestSharedRoutesUsePlatformSessionAndAuthorizationGate(t *testing.T) {
 		}
 
 		request := httptest.NewRequest(http.MethodPost, "/crate-api/v1/files/upload", &body)
+		request.Header.Set(shared.AppCodeHeader, "aceso")
 		request.Header.Set("Content-Type", writer.FormDataContentType())
 		request.AddCookie(adminSessionCookie)
 		response := httptest.NewRecorder()

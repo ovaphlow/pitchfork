@@ -25,6 +25,7 @@ func (handler *Handler) registerMessages(mux *http.ServeMux) {
 // message 是 messages 模块的 HTTP 输出形状（与 Nexus Message 同形）。
 type message struct {
 	ID           string          `json:"id"`
+	AppCode      string          `json:"app_code"`
 	MessageType  string          `json:"message_type"`
 	SenderID     string          `json:"sender_id"`
 	SenderType   string          `json:"sender_type"`
@@ -59,6 +60,7 @@ type messageStatusInput struct {
 // messageRecord 是 messages 表的一行。
 type messageRecord struct {
 	ID           string
+	AppCode      string
 	MessageType  string
 	SenderID     string
 	SenderType   string
@@ -74,6 +76,7 @@ func readMessageRecord(scanner sharedModuleRowScanner) (messageRecord, error) {
 	var record messageRecord
 	err := scanner.Scan(
 		&record.ID,
+		&record.AppCode,
 		&record.MessageType,
 		&record.SenderID,
 		&record.SenderType,
@@ -94,6 +97,7 @@ func (record messageRecord) message() (message, apiError) {
 	}
 	return message{
 		ID:           record.ID,
+		AppCode:      record.AppCode,
 		MessageType:  record.MessageType,
 		SenderID:     record.SenderID,
 		SenderType:   record.SenderType,
@@ -110,14 +114,19 @@ func (handler *Handler) messagesList(responseWriter http.ResponseWriter, request
 	if _, ok := handler.requireSession(responseWriter, request); !ok {
 		return
 	}
+	appCode, failure := handler.requireAppCode(request)
+	if failure != (apiError{}) {
+		handler.fail(responseWriter, failure)
+		return
+	}
 	limit, offset, failure := pageQuery(request)
 	if failure != (apiError{}) {
 		handler.fail(responseWriter, failure)
 		return
 	}
 
-	statement := "SELECT id, message_type, sender_id, sender_type, receiver_id, receiver_type, status, payload, created_at, updated_at FROM messages WHERE 1 = 1"
-	arguments := make([]any, 0, 6)
+	statement := "SELECT id, app_code, message_type, sender_id, sender_type, receiver_id, receiver_type, status, payload, created_at, updated_at FROM messages WHERE app_code = ?"
+	arguments := []any{appCode}
 	for _, filter := range []struct {
 		name   string
 		column string
@@ -168,6 +177,11 @@ func (handler *Handler) messagesCreate(responseWriter http.ResponseWriter, reque
 	if !ok {
 		return
 	}
+	appCode, failure := handler.requireAppCode(request)
+	if failure != (apiError{}) {
+		handler.fail(responseWriter, failure)
+		return
+	}
 	var input messageCreateInput
 	if failure := decodeJSON(request, &input); failure != (apiError{}) {
 		handler.fail(responseWriter, failure)
@@ -191,15 +205,15 @@ func (handler *Handler) messagesCreate(responseWriter http.ResponseWriter, reque
 		return
 	}
 	_, err = handler.store.DB.ExecContext(request.Context(), `
-		INSERT INTO messages (id, message_type, sender_id, sender_type, receiver_id, receiver_type, payload)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		id, input.MessageType, session.SubjectID, input.SenderType, input.ReceiverID, input.ReceiverType, string(payload),
+		INSERT INTO messages (id, app_code, message_type, sender_id, sender_type, receiver_id, receiver_type, payload)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, appCode, input.MessageType, session.SubjectID, input.SenderType, input.ReceiverID, input.ReceiverType, string(payload),
 	)
 	if err != nil {
 		handler.fail(responseWriter, internalError())
 		return
 	}
-	item, failure := handler.fetchMessage(request.Context(), id)
+	item, failure := handler.fetchMessage(request.Context(), id, appCode)
 	if failure != (apiError{}) {
 		handler.fail(responseWriter, failure)
 		return
@@ -211,7 +225,12 @@ func (handler *Handler) messagesGet(responseWriter http.ResponseWriter, request 
 	if _, ok := handler.requireSession(responseWriter, request); !ok {
 		return
 	}
-	item, failure := handler.fetchMessage(request.Context(), request.PathValue("id"))
+	appCode, failure := handler.requireAppCode(request)
+	if failure != (apiError{}) {
+		handler.fail(responseWriter, failure)
+		return
+	}
+	item, failure := handler.fetchMessage(request.Context(), request.PathValue("id"), appCode)
 	if failure != (apiError{}) {
 		handler.fail(responseWriter, failure)
 		return
@@ -221,6 +240,11 @@ func (handler *Handler) messagesGet(responseWriter http.ResponseWriter, request 
 
 func (handler *Handler) messagesUpdate(responseWriter http.ResponseWriter, request *http.Request) {
 	if _, ok := handler.requireSession(responseWriter, request); !ok {
+		return
+	}
+	appCode, failure := handler.requireAppCode(request)
+	if failure != (apiError{}) {
+		handler.fail(responseWriter, failure)
 		return
 	}
 	var input messageUpdateInput
@@ -238,7 +262,7 @@ func (handler *Handler) messagesUpdate(responseWriter http.ResponseWriter, reque
 		return
 	}
 	id := request.PathValue("id")
-	existing, failure := handler.fetchMessage(request.Context(), id)
+	existing, failure := handler.fetchMessage(request.Context(), id, appCode)
 	if failure != (apiError{}) {
 		handler.fail(responseWriter, failure)
 		return
@@ -257,14 +281,14 @@ func (handler *Handler) messagesUpdate(responseWriter http.ResponseWriter, reque
 	_, err := handler.store.DB.ExecContext(request.Context(), `
 		UPDATE messages
 		SET status = ?, payload = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-		WHERE id = ?`,
-		status, string(payload), id,
+		WHERE id = ? AND app_code = ?`,
+		status, string(payload), id, appCode,
 	)
 	if err != nil {
 		handler.fail(responseWriter, internalError())
 		return
 	}
-	item, failure := handler.fetchMessage(request.Context(), id)
+	item, failure := handler.fetchMessage(request.Context(), id, appCode)
 	if failure != (apiError{}) {
 		handler.fail(responseWriter, failure)
 		return
@@ -274,6 +298,11 @@ func (handler *Handler) messagesUpdate(responseWriter http.ResponseWriter, reque
 
 func (handler *Handler) messagesUpdateStatus(responseWriter http.ResponseWriter, request *http.Request) {
 	if _, ok := handler.requireSession(responseWriter, request); !ok {
+		return
+	}
+	appCode, failure := handler.requireAppCode(request)
+	if failure != (apiError{}) {
+		handler.fail(responseWriter, failure)
 		return
 	}
 	var input messageStatusInput
@@ -289,8 +318,8 @@ func (handler *Handler) messagesUpdateStatus(responseWriter http.ResponseWriter,
 	result, err := handler.store.DB.ExecContext(request.Context(), `
 		UPDATE messages
 		SET status = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-		WHERE id = ?`,
-		input.Status, id,
+		WHERE id = ? AND app_code = ?`,
+		input.Status, id, appCode,
 	)
 	if err != nil {
 		handler.fail(responseWriter, internalError())
@@ -305,7 +334,7 @@ func (handler *Handler) messagesUpdateStatus(responseWriter http.ResponseWriter,
 		handler.fail(responseWriter, notFound("message not found"))
 		return
 	}
-	item, failure := handler.fetchMessage(request.Context(), id)
+	item, failure := handler.fetchMessage(request.Context(), id, appCode)
 	if failure != (apiError{}) {
 		handler.fail(responseWriter, failure)
 		return
@@ -317,7 +346,13 @@ func (handler *Handler) messagesDelete(responseWriter http.ResponseWriter, reque
 	if _, ok := handler.requireSession(responseWriter, request); !ok {
 		return
 	}
-	result, err := handler.store.DB.ExecContext(request.Context(), "DELETE FROM messages WHERE id = ?", request.PathValue("id"))
+	appCode, failure := handler.requireAppCode(request)
+	if failure != (apiError{}) {
+		handler.fail(responseWriter, failure)
+		return
+	}
+	result, err := handler.store.DB.ExecContext(request.Context(),
+		"DELETE FROM messages WHERE id = ? AND app_code = ?", request.PathValue("id"), appCode)
 	if err != nil {
 		handler.fail(responseWriter, internalError())
 		return
@@ -334,10 +369,10 @@ func (handler *Handler) messagesDelete(responseWriter http.ResponseWriter, reque
 	writeNoContent(responseWriter)
 }
 
-func (handler *Handler) fetchMessage(ctx context.Context, id string) (message, apiError) {
+func (handler *Handler) fetchMessage(ctx context.Context, id, appCode string) (message, apiError) {
 	record, err := readMessageRecord(handler.store.DB.QueryRowContext(ctx, `
-		SELECT id, message_type, sender_id, sender_type, receiver_id, receiver_type, status, payload, created_at, updated_at
-		FROM messages WHERE id = ?`, id))
+		SELECT id, app_code, message_type, sender_id, sender_type, receiver_id, receiver_type, status, payload, created_at, updated_at
+		FROM messages WHERE id = ? AND app_code = ?`, id, appCode))
 	if isNoRows(err) {
 		return message{}, notFound("message not found")
 	}

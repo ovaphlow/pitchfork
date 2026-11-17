@@ -264,6 +264,8 @@ export interface OrganizationPosition {
   experience: string;
   city: string;
   status: string;
+  /** End of the current recruitment window; absent for drafts and closed roles. */
+  open_until: string | null;
   created_at: string;
 }
 
@@ -290,6 +292,7 @@ function normalizeOrganizationPosition(value: unknown): OrganizationPosition | n
     experience: optionalText(record.experience),
     city: optionalText(record.city),
     status: optionalText(record.status),
+    open_until: optionalText(record.open_until) || null,
     created_at: optionalText(record.created_at),
   };
 }
@@ -369,7 +372,7 @@ export async function createPosition(
   return position;
 }
 
-/** 岗位状态流转：草稿 → 招聘中 → 已暂停 / 已关闭。 */
+/** 岗位状态流转：草稿 → 招聘中 → 已暂停 / 已关闭；已停招 → 招聘中 为恢复招聘 7 天。 */
 export async function setPositionStatus(
   positionID: string,
   status: string,
@@ -451,6 +454,8 @@ export interface PositionSummary {
   salary_unit: string;
   salary_negotiable: boolean;
   published_at: string | null;
+  /** End of the recruitment window; absent for postings published before it existed. */
+  open_until: string | null;
 }
 
 function optionalNumber(value: unknown): number | null {
@@ -483,6 +488,7 @@ function normalizePosition(value: unknown): PositionSummary | null {
     salary_unit: optionalText(record.salary_unit),
     salary_negotiable: record.salary_negotiable === true,
     published_at: typeof record.published_at === "string" ? record.published_at : null,
+    open_until: typeof record.open_until === "string" ? record.open_until : null,
   };
 }
 
@@ -550,6 +556,216 @@ export async function listMyOrganizations(signal?: AbortSignal): Promise<Members
     .map(normalizeMembership)
     .filter((membership): membership is Membership => membership !== null);
 }
+/** 机构审核记录（平台管理员视图）。 */
+export interface OrganizationRecord {
+  id: string;
+  name: string;
+  short_name: string;
+  org_type: string;
+  city: string;
+  district: string;
+  status: string;
+  reject_reason: string;
+  created_at: string;
+  metadata: {
+    credit_code: string;
+    license_file_id: string;
+    industry: string;
+  };
+}
+
+function normalizeOrganizationRecord(value: unknown): OrganizationRecord | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  if (typeof record.id !== "string" || typeof record.name !== "string") {
+    return null;
+  }
+  const metadata = (record.metadata ?? {}) as Record<string, unknown>;
+  return {
+    id: record.id,
+    name: record.name,
+    short_name: optionalText(record.short_name),
+    org_type: optionalText(record.org_type),
+    city: optionalText(record.city),
+    district: optionalText(record.district),
+    status: optionalText(record.status),
+    reject_reason: optionalText(record.reject_reason),
+    created_at: optionalText(record.created_at),
+    metadata: {
+      credit_code: optionalText(metadata.credit_code),
+      license_file_id: optionalText(metadata.license_file_id),
+      industry: optionalText(metadata.industry),
+    },
+  };
+}
+
+/** 机构列表；status 只有平台管理员可用，公开调用始终只返回已认证机构。 */
+export async function listOrganizations(
+  options: {
+    status?: string;
+    q?: string;
+    city?: string;
+    org_type?: string;
+    limit?: number;
+    offset?: number;
+  } = {},
+  signal?: AbortSignal,
+): Promise<Page<OrganizationRecord>> {
+  const query = new URLSearchParams();
+  if (options.status) query.set("status", options.status);
+  if (options.q) query.set("q", options.q);
+  if (options.city) query.set("city", options.city);
+  if (options.org_type) query.set("org_type", options.org_type);
+  if (options.limit !== undefined) query.set("limit", String(options.limit));
+  if (options.offset !== undefined) query.set("offset", String(options.offset));
+  const search = query.toString();
+
+  const response = await fetch(
+    endpoint(`/crate-api/agora/v1/organizations${search ? `?${search}` : ""}`),
+    { headers: { Accept: "application/json" }, credentials: "include", signal },
+  );
+  if (!response.ok) {
+    throw new ApiError(await errorMessage(response), response.status);
+  }
+  return pageFrom(await parseJson(response), normalizeOrganizationRecord);
+}
+
+/** 平台管理员审核机构；驳回时必须带原因。 */
+export async function reviewOrganization(
+  organizationID: string,
+  input: { status: string; reason?: string },
+): Promise<OrganizationRecord> {
+  const response = await fetch(
+    endpoint(`/crate-api/agora/v1/organizations/${encodeURIComponent(organizationID)}/review`),
+    {
+      method: "POST",
+      credentials: "include",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  if (!response.ok) {
+    throw new ApiError(await errorMessage(response), response.status);
+  }
+  const organization = normalizeOrganizationRecord(await parseJson(response));
+  if (!organization) {
+    throw new ApiError("unexpected organization response", 502);
+  }
+  return organization;
+}
+
+/** 平台账号（管理端「求职用户」视图）。 */
+export interface SubjectRecord {
+  id: string;
+  status: string;
+  display_name: string;
+  identifier: string;
+  platform_admin: boolean;
+  /** Agora intent: job_seeker / recruiter; empty when never chosen. */
+  user_type: string;
+  created_at: string;
+}
+
+function normalizeSubject(value: unknown): SubjectRecord | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  if (typeof record.id !== "string") {
+    return null;
+  }
+  return {
+    id: record.id,
+    status: optionalText(record.status),
+    display_name: optionalText(record.display_name),
+    identifier: optionalText(record.identifier),
+    platform_admin: record.platform_admin === true,
+    user_type: optionalText(record.user_type),
+    created_at: optionalText(record.created_at),
+  };
+}
+
+/** 记录本账号最近选择的求职/招聘身份；不参与权限判定。 */
+export async function saveIntent(userType: "job_seeker" | "recruiter"): Promise<void> {
+  const response = await fetch(endpoint("/crate-api/agora/v1/me/intent"), {
+    method: "PUT",
+    credentials: "include",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({ user_type: userType }),
+  });
+  if (!response.ok) {
+    throw new ApiError(await errorMessage(response), response.status);
+  }
+}
+
+/** 平台账号列表；仅平台管理员可用。 */
+export async function listSubjects(
+  options: { limit?: number; offset?: number } = {},
+  signal?: AbortSignal,
+): Promise<Page<SubjectRecord>> {
+  const query = new URLSearchParams();
+  if (options.limit !== undefined) query.set("limit", String(options.limit));
+  if (options.offset !== undefined) query.set("offset", String(options.offset));
+  const search = query.toString();
+
+  const response = await fetch(
+    endpoint(`/crate-api/agora/v1/admin/subjects${search ? `?${search}` : ""}`),
+    { headers: { Accept: "application/json" }, credentials: "include", signal },
+  );
+  if (!response.ok) {
+    throw new ApiError(await errorMessage(response), response.status);
+  }
+  return pageFrom(await parseJson(response), normalizeSubject);
+}
+
+/** 启用/禁用平台账号；platformd 要求随会话 Cookie 一起提交 CSRF token。 */
+export async function updateSubjectStatus(
+  subjectID: string,
+  status: "启用" | "禁用",
+): Promise<SubjectRecord> {
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+    "Content-Type": "application/json",
+  };
+  const csrf = cookieValue("platformd_csrf");
+  if (csrf) headers["X-CSRF-Token"] = csrf;
+
+  const response = await fetch(
+    endpoint(`/crate-api/agora/v1/admin/subjects/${encodeURIComponent(subjectID)}`),
+    {
+      method: "PATCH",
+      credentials: "include",
+      headers,
+      body: JSON.stringify({ status }),
+    },
+  );
+  if (!response.ok) {
+    throw new ApiError(await errorMessage(response), response.status);
+  }
+  const subject = normalizeSubject(await parseJson(response));
+  if (!subject) {
+    throw new ApiError("unexpected subject response", 502);
+  }
+  return subject;
+}
+
+/** 读取浏览器 Cookie（platformd 的 CSRF token 不是 HttpOnly）。 */
+function cookieValue(name: string): string {
+  if (typeof document === "undefined") return "";
+  for (const part of document.cookie.split(";")) {
+    const [key, ...rest] = part.trim().split("=");
+    if (key === name) return decodeURIComponent(rest.join("="));
+  }
+  return "";
+}
+
+/** 营业执照内容地址；需要登录 Cookie，直接在新标签打开。 */
+export function organizationLicenseURL(fileID: string): string {
+  return endpoint(`/crate-api/agora/v1/files/${encodeURIComponent(fileID)}/content`);
+}
+
 export async function logout(): Promise<void> {
   const response = await fetch(endpoint("/crate-api/agora/v1/auth/session"), {
     method: "DELETE",

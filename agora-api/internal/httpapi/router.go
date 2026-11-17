@@ -30,6 +30,7 @@ type Deps struct {
 	TrustedProxies []netip.Prefix
 	Organizations  OrganizationStore
 	Positions      PositionStore
+	Intents        IntentStore
 	// EmailLinkRedirectURI is the Agora UI landing page for mail links; it must
 	// match platformd's PLATFORMD_EMAIL_LINK_REDIRECT_URIS exactly.
 	EmailLinkRedirectURI string
@@ -105,6 +106,12 @@ func New(deps Deps) http.Handler {
 
 	mux.HandleFunc("POST /crate-api/agora/v1/files", deps.uploadFile)
 	mux.HandleFunc("GET /crate-api/agora/v1/files/{id}/content", deps.getFile)
+
+	mux.HandleFunc("PUT /crate-api/agora/v1/me/intent", deps.saveMyIntent)
+
+	// 管理端：求职用户（平台账号）查询与启用/禁用。
+	mux.HandleFunc("GET /crate-api/agora/v1/admin/subjects", deps.adminListSubjects)
+	mux.HandleFunc("PATCH /crate-api/agora/v1/admin/subjects/{id}", deps.adminUpdateSubject)
 
 	mux.HandleFunc("GET /crate-api/agora/v1/positions", deps.listPositions)
 	mux.HandleFunc("POST /crate-api/agora/v1/positions", deps.createPosition)

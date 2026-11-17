@@ -9,9 +9,10 @@ The initial implementation provides configuration parsing, SQLite startup with
 WAL and defensive connection settings, embedded ordered migrations, mandatory
 first-run bootstrap administration, Argon2id local login, opaque browser
 sessions, CSRF-protected logout, a minimal protected dashboard, and a JSON
-administrator API for listing, creating, inspecting, and disabling subjects.
-Disabling a subject increments its security version, revokes its active
-sessions, and cannot disable the final enabled `identity.admin` holder.
+administrator API for listing, creating, inspecting, enabling, and disabling
+subjects. Disabling a subject increments its security version, revokes its
+active sessions, and cannot disable the final enabled `identity.admin` holder;
+enabling increments the security version again and requires a fresh sign-in.
 Administrators can set an audited temporary password; its `需更新` credential
 status restricts the next browser session to password change and sign-out.
 Changing a password uses credential-revision optimistic locking, increments the
@@ -85,7 +86,7 @@ The subject endpoints require a `完整` browser session whose subject has the
 cookie value in the `X-CSRF-Token` request header. Create requests contain
 `display_name`, `identifier`, and `password`. `PATCH /password` accepts
 `{"current_password":"...","new_password":"..."}`. `PATCH /subjects/{subjectID}`
-accepts either `{"status":"禁用"}` or
+accepts `{"status":"禁用"}`, `{"status":"启用"}`, or
 `{"temporary_password":"a sufficiently long password"}`. The latter marks
 the credential `需更新`; the next successful login receives a `仅改密` session
 that can access only the password route and sign-out. Lists use
@@ -147,6 +148,17 @@ data on `http://127.0.0.1:8420`:
 
 All endpoints require a `完整` platformd session cookie and are authenticated
 in-process; the old HTTP call to `GET /crate-api/identity/v1/session` is gone.
+
+Shared data is scoped per product. `settings`, `messages`, `interactions`,
+`files`, `roles`, `subject-roles` and `subject-permissions` require the
+`X-App-Code` header (for example `agora` or `aceso`); writes store that code and
+reads filter by it, so one product cannot see or mutate another's rows. The
+allowlist comes from `PLATFORMD_APP_CODES` (default `agora,aceso,trainova`).
+`departments` and `subject-departments` stay global. Migration `000021` adds the
+column and backfills existing rows (`files` → `agora`, the rest → `aceso`).
+`roles.role_code` stays globally unique, so product roles keep an `<app>.` prefix
+(for example `agora.user`); replacing a subject's roles only touches that app's
+assignments.
 Write routes keep the 043 authorization gate: `roles`, `subject-roles` and
 `subject-departments` require `access:manage`; `departments` writes require
 `base_data:manage`; `platform_admin` subjects may always write. Read routes

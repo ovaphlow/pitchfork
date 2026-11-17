@@ -136,6 +136,14 @@ SET status = :disabled_status,
     updated_at = :updated_at
 WHERE id = :id AND status = :enabled_status`
 
+const enableSubject = `
+UPDATE identity_subjects
+SET status = :enabled_status,
+    security_version = security_version + 1,
+    disabled_at = NULL,
+    updated_at = :updated_at
+WHERE id = :id AND status = :disabled_status`
+
 const setSubjectPlatformAdmin = `
 UPDATE identity_subjects
 SET is_platform_admin = :is_platform_admin,
@@ -175,6 +183,52 @@ func ListSubjects(ctx context.Context, database *sql.DB, input ListSubjectsInput
 		))
 	}
 	return ListSubjectsResult{Subjects: subjects, Total: total}, nil
+}
+
+// ListSubjectsByIDs returns the management view for the requested subjects.
+// Product backends use it to render their own user registry without reading
+// every platform account.
+func ListSubjectsByIDs(ctx context.Context, database *sql.DB, subjectIDs []string) ([]Subject, error) {
+	if len(subjectIDs) == 0 {
+		return []Subject{}, nil
+	}
+	if len(subjectIDs) > 100 {
+		return nil, fmt.Errorf("at most 100 subject ids are allowed")
+	}
+	queries := newQuerier(database)
+	placeholders := make([]string, len(subjectIDs))
+	arguments := make([]any, 0, len(subjectIDs)+1)
+	arguments = append(arguments, IdentifierUsagePrimaryLogin)
+	for index, subjectID := range subjectIDs {
+		placeholders[index] = "?"
+		arguments = append(arguments, subjectID)
+	}
+	query := `
+SELECT s.id, s.status, s.security_version, s.is_platform_admin, p.display_name, i.identifier_value, s.created_at, s.updated_at
+FROM identity_subjects s
+JOIN identity_profiles p ON p.subject_id = s.id
+JOIN identity_identifiers i ON i.subject_id = s.id
+WHERE i.identifier_usage = ? AND s.id IN (` + strings.Join(placeholders, ", ") + `)
+ORDER BY s.created_at DESC`
+
+	var rows []managementSubjectRow
+	if err := queries.SelectContext(ctx, &rows, queries.Rebind(query), arguments...); err != nil {
+		return nil, fmt.Errorf("list subjects by ids: %w", err)
+	}
+	subjects := make([]Subject, 0, len(rows))
+	for _, row := range rows {
+		subjects = append(subjects, subjectFromManagementValues(
+			row.ID,
+			row.Status,
+			row.SecurityVersion,
+			row.PlatformAdmin,
+			row.DisplayName,
+			row.IdentifierValue,
+			row.CreatedAt,
+			row.UpdatedAt,
+		))
+	}
+	return subjects, nil
 }
 
 // DirectoryEntry 是**业务人员目录**条目：只暴露「主体 ID + 姓名」。
@@ -526,6 +580,58 @@ func DisableSubject(ctx context.Context, database *sql.DB, actorSubjectID string
 	}
 
 	subject.Status = StatusDisabled
+	subject.SecurityVersion++
+	subject.UpdatedAt = now
+	return subject, nil
+}
+
+// EnableSubject re-enables a disabled subject. Existing sessions were revoked
+// at disable time, so the next sign-in starts a fresh session.
+func EnableSubject(ctx context.Context, database *sql.DB, actorSubjectID string, subjectID string) (Subject, error) {
+	transaction, err := newQuerier(database).BeginTxx(ctx, nil)
+	if err != nil {
+		return Subject{}, fmt.Errorf("begin enable subject transaction: %w", err)
+	}
+	defer transaction.Rollback()
+
+	subject, err := getSubject(ctx, transaction, subjectID)
+	if err != nil {
+		return Subject{}, err
+	}
+	if subject.Status == StatusEnabled {
+		if err := transaction.Commit(); err != nil {
+			return Subject{}, fmt.Errorf("commit existing enabled subject: %w", err)
+		}
+		return subject, nil
+	}
+
+	now := time.Now().UTC()
+	updated, err := namedExecRows(ctx, transaction, enableSubject, map[string]any{
+		"enabled_status":  StatusEnabled,
+		"disabled_status": StatusDisabled,
+		"updated_at":      now,
+		"id":              subjectID,
+	})
+	if err != nil {
+		return Subject{}, fmt.Errorf("enable subject: %w", err)
+	}
+	if updated != 1 {
+		return Subject{}, fmt.Errorf("enable subject: expected one disabled subject, updated %d", updated)
+	}
+	if err := insertAuditEvent(ctx, transaction, auditEvent{
+		Action:          AuditActionSubjectStatusChanged,
+		Outcome:         OutcomeSucceeded,
+		ActorSubjectID:  actorSubjectID,
+		TargetSubjectID: subjectID,
+		Metadata:        fmt.Sprintf(`{"status":%q}`, StatusEnabled),
+	}, now); err != nil {
+		return Subject{}, fmt.Errorf("write subject enable audit event: %w", err)
+	}
+	if err := transaction.Commit(); err != nil {
+		return Subject{}, fmt.Errorf("commit enable subject transaction: %w", err)
+	}
+
+	subject.Status = StatusEnabled
 	subject.SecurityVersion++
 	subject.UpdatedAt = now
 	return subject, nil

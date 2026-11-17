@@ -23,6 +23,19 @@ const (
 	StatusDisabled Status = "已停用"
 )
 
+// Statuses lists every accepted review state.
+var Statuses = []Status{StatusPending, StatusVerified, StatusRejected, StatusDisabled}
+
+// Valid reports whether s is a known review state.
+func (s Status) Valid() bool {
+	for _, candidate := range Statuses {
+		if candidate == s {
+			return true
+		}
+	}
+	return false
+}
+
 // OrgTypes are the accepted organisation categories.
 var OrgTypes = []string{"企业", "医院", "学校", "社会组织", "政府机关", "其他"}
 
@@ -126,13 +139,18 @@ type ReviewInput struct {
 	Reason string `json:"reason"`
 }
 
-// Filter selects organisations for the public listing.
+// Filter selects organisations for the listing. Status is only honoured for
+// platform-admin review listings; the public path leaves it empty.
 type Filter struct {
 	City    string
 	OrgType string
-	Query   string
-	Limit   int32
-	Offset  int32
+	Status  Status
+	// AllStatuses is only set by the platform-admin review listing; the public
+	// path leaves it false and therefore stays verified-only.
+	AllStatuses bool
+	Query       string
+	Limit       int32
+	Offset      int32
 }
 
 // Member is one subject's membership in an organisation.

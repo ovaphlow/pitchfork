@@ -178,7 +178,28 @@ func TestPublishRequiresVerifiedOrganization(t *testing.T) {
 	}
 }
 
-func TestPublishRejectsIllegalTransition(t *testing.T) {
+func TestStatusRejectsIllegalTransition(t *testing.T) {
+	orgs, board, handler, cleanup := newPositionFixture(t)
+	defer cleanup()
+	orgs.grant(testOrganizationID, "SUB1", organizations.RoleOwner)
+	board.byID[testPositionID] = positions.Position{
+		ID:             testPositionID,
+		OrganizationID: testOrganizationID,
+		Status:         positions.StatusClosed,
+	}
+
+	response := doRequest(handler, http.MethodPost, "/crate-api/agora/v1/positions/"+testPositionID+"/status",
+		`{"status":"已暂停"}`, withSession(nil))
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", response.Code, response.Body.String())
+	}
+	if message := decodeError(t, response.Body.Bytes()); message != "岗位状态不能从「已关闭」变为「已暂停」" {
+		t.Fatalf("error = %q", message)
+	}
+}
+
+func TestReopenClosedPositionThroughStatus(t *testing.T) {
 	orgs, board, handler, cleanup := newPositionFixture(t)
 	defer cleanup()
 	orgs.grant(testOrganizationID, "SUB1", organizations.RoleOwner)
@@ -191,11 +212,39 @@ func TestPublishRejectsIllegalTransition(t *testing.T) {
 	response := doRequest(handler, http.MethodPost, "/crate-api/agora/v1/positions/"+testPositionID+"/status",
 		`{"status":"招聘中"}`, withSession(nil))
 
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400: %s", response.Code, response.Body.String())
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
 	}
-	if message := decodeError(t, response.Body.Bytes()); message != "岗位状态不能从「已关闭」变为「招聘中」" {
-		t.Fatalf("error = %q", message)
+	if board.lastStatus != positions.StatusOpen {
+		t.Fatalf("store status = %q, want 招聘中", board.lastStatus)
+	}
+}
+
+func TestRestoreStoppedPositionReopensThroughStatus(t *testing.T) {
+	orgs, board, handler, cleanup := newPositionFixture(t)
+	defer cleanup()
+	orgs.grant(testOrganizationID, "SUB1", organizations.RoleOwner)
+	board.byID[testPositionID] = positions.Position{
+		ID:             testPositionID,
+		OrganizationID: testOrganizationID,
+		Status:         positions.StatusStopped,
+	}
+
+	response := doRequest(handler, http.MethodPost, "/crate-api/agora/v1/positions/"+testPositionID+"/status",
+		`{"status":"招聘中"}`, withSession(nil))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
+	}
+	if board.lastStatus != positions.StatusOpen {
+		t.Fatalf("store status = %q, want 招聘中", board.lastStatus)
+	}
+	var body positions.Position
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Status != positions.StatusOpen {
+		t.Fatalf("status = %q, want 招聘中", body.Status)
 	}
 }
 

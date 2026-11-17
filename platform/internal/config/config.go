@@ -21,6 +21,7 @@ const (
 	defaultThrottleLockout  = 15 * time.Minute
 	defaultThrottleFailures = 5
 	defaultTrustedProxyCIDR = "127.0.0.1/32"
+	defaultAppCodes         = "agora,aceso,trainova"
 
 	defaultEmailLinkTTL         = 10 * time.Minute
 	defaultEmailLinkRateWindow  = 15 * time.Minute
@@ -48,6 +49,8 @@ type Config struct {
 	PublicURL                 *url.URL
 	TrustedProxyPrefixes      []netip.Prefix
 	CorsOrigins               []string
+	// AppCodes is the allowlist accepted in the shared APIs' X-App-Code header.
+	AppCodes []string
 
 	// 共享模块：文件存储目录与单次上传上限（字节）。
 	FilesDir       string
@@ -116,6 +119,11 @@ func LoadFromLookup(lookup func(string) string) (Config, error) {
 	}
 
 	corsOrigins, err := corsOriginsValue(lookup("PLATFORMD_CORS_ORIGINS"))
+	if err != nil {
+		return Config{}, err
+	}
+
+	appCodes, err := appCodeValues(stringValue(lookup, "PLATFORMD_APP_CODES", defaultAppCodes))
 	if err != nil {
 		return Config{}, err
 	}
@@ -203,6 +211,7 @@ func LoadFromLookup(lookup func(string) string) (Config, error) {
 		PublicURL:                 publicURL,
 		TrustedProxyPrefixes:      trustedProxyPrefixes,
 		CorsOrigins:               corsOrigins,
+		AppCodes:                  appCodes,
 		FilesDir:                  stringValue(lookup, "PLATFORMD_FILES_DIR", defaultFilesDir),
 		MaxUploadBytes:            maxUploadBytes,
 
@@ -268,6 +277,38 @@ func corsOriginsValue(value string) ([]string, error) {
 		origins = append(origins, origin)
 	}
 	return origins, nil
+}
+
+// appCodeValues 解析逗号分隔的产品 app_code 白名单（小写字母、数字、连字符）。
+func appCodeValues(value string) ([]string, error) {
+	parts := strings.Split(value, ",")
+	codes := make([]string, 0, len(parts))
+	seen := map[string]bool{}
+	for _, part := range parts {
+		code := strings.ToLower(strings.TrimSpace(part))
+		if code == "" {
+			return nil, fmt.Errorf("PLATFORMD_APP_CODES contains an empty entry")
+		}
+		valid := code[0] >= 'a' && code[0] <= 'z'
+		for _, character := range code {
+			if (character >= 'a' && character <= 'z') ||
+				(character >= '0' && character <= '9') ||
+				character == '-' {
+				continue
+			}
+			valid = false
+			break
+		}
+		if !valid || len(code) > 32 {
+			return nil, fmt.Errorf("PLATFORMD_APP_CODES contains an invalid code")
+		}
+		if seen[code] {
+			return nil, fmt.Errorf("PLATFORMD_APP_CODES contains a duplicate code")
+		}
+		seen[code] = true
+		codes = append(codes, code)
+	}
+	return codes, nil
 }
 
 func throttleSecretValue(value string) ([]byte, error) {

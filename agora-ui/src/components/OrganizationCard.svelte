@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { t } from "../i18n";
   import type { Membership } from "../lib/api";
   import OrganizationPositions from "./OrganizationPositions.svelte";
 
@@ -8,8 +7,6 @@
   }
 
   let { membership }: Props = $props();
-
-  let expanded = $state(false);
 </script>
 
 <li class="rounded-2xl border border-line bg-ink-soft/90 px-4 py-3">
@@ -29,17 +26,5 @@
       .join(" · ")}
   </p>
 
-  <button
-    type="button"
-    onclick={() => (expanded = !expanded)}
-    aria-expanded={expanded}
-    class="mt-2 flex min-h-9 w-full items-center justify-between rounded-lg border border-line px-3 text-[12px] text-muted transition-colors active:text-bone focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-acid"
-  >
-    <span>{expanded ? $t.positions.collapse : $t.positions.toggle}</span>
-    <span class="text-[10px]" aria-hidden="true">{expanded ? "▾" : "▸"}</span>
-  </button>
-
-  {#if expanded}
-    <OrganizationPositions organization={membership.organization} />
-  {/if}
+  <OrganizationPositions organization={membership.organization} />
 </li>

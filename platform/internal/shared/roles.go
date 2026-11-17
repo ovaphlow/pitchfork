@@ -25,6 +25,7 @@ func (handler *Handler) registerRoles(mux *http.ServeMux) {
 // roleResource 是响应形状，与 Nexus 的 Role 完全同形。
 type roleResource struct {
 	ID              string   `json:"id"`
+	AppCode         string   `json:"app_code"`
 	RoleCode        string   `json:"role_code"`
 	DisplayName     string   `json:"display_name"`
 	Description     string   `json:"description"`
@@ -42,7 +43,7 @@ type roleInput struct {
 }
 
 const selectRole = `
-SELECT id, role_code, display_name, description, permission_codes, created_at, updated_at
+SELECT id, app_code, role_code, display_name, description, permission_codes, created_at, updated_at
 FROM roles`
 
 // rowScanner 抽象 *sql.Row 与 *sql.Rows 共有的 Scan。
@@ -55,6 +56,7 @@ func scanRole(scanner rowScanner) (roleResource, error) {
 	var permissionCodes string
 	if err := scanner.Scan(
 		&role.ID,
+		&role.AppCode,
 		&role.RoleCode,
 		&role.DisplayName,
 		&role.Description,
@@ -88,13 +90,18 @@ func (handler *Handler) listRoles(responseWriter http.ResponseWriter, request *h
 	if _, ok := handler.requireSession(responseWriter, request); !ok {
 		return
 	}
+	appCode, appErr := handler.requireAppCode(request)
+	if appErr != (apiError{}) {
+		handler.fail(responseWriter, appErr)
+		return
+	}
 	limit, offset, queryErr := pageQuery(request)
 	if queryErr.status != 0 {
 		handler.fail(responseWriter, queryErr)
 		return
 	}
 	rows, err := handler.store.DB.QueryContext(request.Context(),
-		selectRole+" ORDER BY role_code LIMIT ? OFFSET ?", limit, offset)
+		selectRole+" WHERE app_code = ? ORDER BY role_code LIMIT ? OFFSET ?", appCode, limit, offset)
 	if err != nil {
 		handler.fail(responseWriter, internalError())
 		return
@@ -119,6 +126,11 @@ func (handler *Handler) listRoles(responseWriter http.ResponseWriter, request *h
 
 func (handler *Handler) createRole(responseWriter http.ResponseWriter, request *http.Request) {
 	if _, ok := handler.requirePermission(responseWriter, request, AccessManagePermission); !ok {
+		return
+	}
+	appCode, appErr := handler.requireAppCode(request)
+	if appErr != (apiError{}) {
+		handler.fail(responseWriter, appErr)
 		return
 	}
 	var input roleInput
@@ -146,9 +158,10 @@ func (handler *Handler) createRole(responseWriter http.ResponseWriter, request *
 		return
 	}
 	_, err = handler.store.DB.ExecContext(request.Context(), `
-INSERT INTO roles (id, role_code, display_name, description, permission_codes)
-VALUES (?, ?, ?, ?, ?)`,
+INSERT INTO roles (id, app_code, role_code, display_name, description, permission_codes)
+VALUES (?, ?, ?, ?, ?, ?)`,
 		identifier,
+		appCode,
 		trimSpace(input.RoleCode),
 		trimSpace(input.DisplayName),
 		roleDescription(input.Description),
@@ -162,7 +175,7 @@ VALUES (?, ?, ?, ?, ?)`,
 		handler.fail(responseWriter, internalError())
 		return
 	}
-	created, fetchErr := handler.fetchRole(request, identifier)
+	created, fetchErr := handler.fetchRole(request, identifier, appCode)
 	if fetchErr.status != 0 {
 		handler.fail(responseWriter, fetchErr)
 		return
@@ -174,7 +187,12 @@ func (handler *Handler) getRole(responseWriter http.ResponseWriter, request *htt
 	if _, ok := handler.requireSession(responseWriter, request); !ok {
 		return
 	}
-	role, fetchErr := handler.fetchRole(request, request.PathValue("id"))
+	appCode, appErr := handler.requireAppCode(request)
+	if appErr != (apiError{}) {
+		handler.fail(responseWriter, appErr)
+		return
+	}
+	role, fetchErr := handler.fetchRole(request, request.PathValue("id"), appCode)
 	if fetchErr.status != 0 {
 		handler.fail(responseWriter, fetchErr)
 		return
@@ -184,6 +202,11 @@ func (handler *Handler) getRole(responseWriter http.ResponseWriter, request *htt
 
 func (handler *Handler) replaceRole(responseWriter http.ResponseWriter, request *http.Request) {
 	if _, ok := handler.requirePermission(responseWriter, request, AccessManagePermission); !ok {
+		return
+	}
+	appCode, appErr := handler.requireAppCode(request)
+	if appErr != (apiError{}) {
+		handler.fail(responseWriter, appErr)
 		return
 	}
 	var input roleInput
@@ -196,7 +219,7 @@ func (handler *Handler) replaceRole(responseWriter http.ResponseWriter, request 
 		return
 	}
 	identifier := request.PathValue("id")
-	existing, fetchErr := handler.fetchRole(request, identifier)
+	existing, fetchErr := handler.fetchRole(request, identifier, appCode)
 	if fetchErr.status != 0 {
 		handler.fail(responseWriter, fetchErr)
 		return
@@ -219,12 +242,13 @@ func (handler *Handler) replaceRole(responseWriter http.ResponseWriter, request 
 	result, err := handler.store.DB.ExecContext(request.Context(), `
 UPDATE roles
 SET display_name = ?, description = ?, permission_codes = ?, updated_at = ?
-WHERE id = ?`,
+WHERE id = ? AND app_code = ?`,
 		trimSpace(input.DisplayName),
 		roleDescription(input.Description),
 		string(encodedPermissions),
 		timestampNow(),
 		identifier,
+		appCode,
 	)
 	if err != nil {
 		if isSharedUniqueViolation(err) {
@@ -238,7 +262,7 @@ WHERE id = ?`,
 		handler.fail(responseWriter, notFound("role not found"))
 		return
 	}
-	updated, fetchErr := handler.fetchRole(request, identifier)
+	updated, fetchErr := handler.fetchRole(request, identifier, appCode)
 	if fetchErr.status != 0 {
 		handler.fail(responseWriter, fetchErr)
 		return
@@ -250,7 +274,16 @@ func (handler *Handler) deleteRole(responseWriter http.ResponseWriter, request *
 	if _, ok := handler.requirePermission(responseWriter, request, AccessManagePermission); !ok {
 		return
 	}
+	appCode, appErr := handler.requireAppCode(request)
+	if appErr != (apiError{}) {
+		handler.fail(responseWriter, appErr)
+		return
+	}
 	identifier := request.PathValue("id")
+	if _, fetchErr := handler.fetchRole(request, identifier, appCode); fetchErr.status != 0 {
+		handler.fail(responseWriter, fetchErr)
+		return
+	}
 	var assignments int64
 	if err := handler.store.DB.QueryRowContext(request.Context(),
 		`SELECT COUNT(*) FROM subject_roles WHERE role_id = ?`, identifier).Scan(&assignments); err != nil {
@@ -264,7 +297,7 @@ func (handler *Handler) deleteRole(responseWriter http.ResponseWriter, request *
 		return
 	}
 	result, err := handler.store.DB.ExecContext(request.Context(),
-		`DELETE FROM roles WHERE id = ?`, identifier)
+		`DELETE FROM roles WHERE id = ? AND app_code = ?`, identifier, appCode)
 	if err != nil {
 		if isSharedForeignKeyViolation(err) {
 			var count int64
@@ -289,8 +322,8 @@ func (handler *Handler) deleteRole(responseWriter http.ResponseWriter, request *
 	writeNoContent(responseWriter)
 }
 
-func (handler *Handler) fetchRole(request *http.Request, identifier string) (roleResource, apiError) {
-	row := handler.store.DB.QueryRowContext(request.Context(), selectRole+" WHERE id = ?", identifier)
+func (handler *Handler) fetchRole(request *http.Request, identifier, appCode string) (roleResource, apiError) {
+	row := handler.store.DB.QueryRowContext(request.Context(), selectRole+" WHERE id = ? AND app_code = ?", identifier, appCode)
 	role, err := scanRole(row)
 	if isNoRows(err) {
 		return roleResource{}, notFound("role not found")

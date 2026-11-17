@@ -104,6 +104,7 @@ func main() {
 			SecureSessionCookie:  configuration.SecureSessionCookie,
 			TrustedProxyPrefixes: configuration.TrustedProxyPrefixes,
 			CorsOrigins:          configuration.CorsOrigins,
+			AppCodes:             configuration.AppCodes,
 			SharedFilesDir:       configuration.FilesDir,
 			SharedMaxUploadBytes: configuration.MaxUploadBytes,
 			EmailLoginLinkSettings: identity.EmailLoginLinkSettings{
