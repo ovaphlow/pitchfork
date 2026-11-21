@@ -93,7 +93,7 @@ class AuditLogIntegrationTest {
         private const val ACCESS_MANAGE = "access:manage"
         private const val MOUNT = "/crate-api"
         private const val AUDIT_LOGS = "$MOUNT/healthcare/v1/audit-logs"
-        private const val PACKAGES = "$MOUNT/healthcare/v1/child-service-packages"
+        private const val FEE_ITEMS = "$MOUNT/healthcare/v1/fee-items"
     }
 
     private lateinit var host: String
@@ -311,35 +311,33 @@ class AuditLogIntegrationTest {
 
     @Test
     fun `写方法各落一条且GET零落库`(vertx: Vertx, ctx: VertxTestContext) {
-        val code = "$PREFIX" + "pkg-$RUN"
-        var packageId = ""
+        var feeItemId = ""
         post(
             vertx,
-            PACKAGES,
-            JsonObject().put("code", code).put("name", "054F3 套餐").put("price", 1.0)
-                .put("items", serviceItems()),
+            FEE_ITEMS,
+            JsonObject().put("category", "护理费").put("name", "054F3 费用项")
+                .put("unit_price", 1).put("nursing_level", "低风险"),
         ).compose { (s1, created) ->
             ctx.verify {
                 assertEquals(201, s1, "POST 必须 201，实际: $created")
-                packageId = created!!.getString("id")
+                feeItemId = created!!.getString("id")
             }
             put(
                 vertx,
-                "$PACKAGES/$packageId",
-                JsonObject().put("code", code).put("name", "054F3 套餐改名").put("price", 2.0)
-                    .put("items", serviceItems()),
+                "$FEE_ITEMS/$feeItemId",
+                JsonObject().put("category", "护理费").put("name", "054F3 费用项改名")
+                    .put("unit_price", 2).put("nursing_level", "低风险"),
             )
         }.compose { (s2, _) ->
             ctx.verify { assertEquals(200, s2, "PUT 必须 200") }
-            patch(vertx, "$MOUNT/healthcare/v1/invoices/${PREFIX}missing/status", JsonObject().put("status", "已作废"))
+            patch(vertx, "$FEE_ITEMS/${PREFIX}missing/status", JsonObject().put("status", "启用"))
         }.compose { (s3, _) ->
-            ctx.verify { assertEquals(404, s3, "PATCH 不存在的发票必须 404（仍应入账）") }
-            send(HttpMethod.DELETE, "$MOUNT/healthcare/v1/child-service-packages/${PREFIX}missing", null)
+            ctx.verify { assertEquals(405, s3, "PATCH 无匹配路由必须 405（仍应入账）") }
+            send(HttpMethod.DELETE, "$FEE_ITEMS/${PREFIX}missing", null)
         }.compose { (s4, _) ->
-            // 该路径无 DELETE 路由 → Vert.x 返回 405（Method Not Allowed）；无论状态码，写方法都必须入账
-            ctx.verify { assertEquals(405, s4, "DELETE 无匹配路由必须 405（仍应入账）") }
+            ctx.verify { assertEquals(200, s4, "DELETE 不存在的费用项必须 200 或 404（仍应入账）") }
             // GET 必须零落库
-            get(vertx, "$MOUNT/healthcare/v1/child-service-packages?limit=1")
+            get(vertx, "$FEE_ITEMS?limit=1")
         }.compose { (s5, _) ->
             ctx.verify { assertEquals(200, s5, "GET 必须 200") }
             pollUntil(vertx, 5_000) {
@@ -362,7 +360,7 @@ class AuditLogIntegrationTest {
                     "SELECT path || '|' || status_code FROM healthcare.audit_logs " +
                         "WHERE actor = '$TESTER' AND method = 'POST'",
                 )
-                assertEquals("$PACKAGES|201", postRow, "POST 行 path 必须为挂载点+规范化路径，status 与响应一致")
+                assertEquals("$FEE_ITEMS|201", postRow, "POST 行 path 必须为挂载点+规范化路径，status 与响应一致")
                 assertEquals(
                     0L,
                     queryLong("SELECT count(*) FROM healthcare.audit_logs WHERE method = 'GET' AND actor LIKE '$PREFIX%'"),
@@ -397,9 +395,9 @@ class AuditLogIntegrationTest {
         currentSubject = NOBODY
         post(
             vertx,
-            PACKAGES,
-            JsonObject().put("code", "$PREFIX" + "denied-$RUN").put("name", "x").put("price", 1.0)
-                .put("items", serviceItems()),
+            FEE_ITEMS,
+            JsonObject().put("category", "护理费").put("name", "$PREFIX" + "denied-$RUN")
+                .put("unit_price", 1).put("nursing_level", "低风险"),
         ).compose { (status, body) ->
             ctx.verify {
                 assertEquals(403, status, "缺权限必须 403，实际: $body")
@@ -421,7 +419,7 @@ class AuditLogIntegrationTest {
                 assertEquals("POST|403|$NOBODY", row, "门禁 403 尝试必须入账（证明中间件在门禁之前）")
                 assertEquals(
                     0L,
-                    queryLong("SELECT count(*) FROM healthcare.child_service_packages WHERE code LIKE '$PREFIX%'"),
+                    queryLong("SELECT count(*) FROM healthcare.fee_items WHERE name LIKE '$PREFIX%'"),
                     "403 不得产生业务副作用",
                 )
             }
@@ -484,11 +482,9 @@ class AuditLogIntegrationTest {
         val secretIdCard = "110101199001011234"
         post(
             vertx,
-            PACKAGES,
-            JsonObject().put("code", "$PREFIX" + "phi-$RUN").put("name", secretName).put("price", 3.0)
-                .put("items", JsonArray().add(
-                    JsonObject().put("item_code", "SVC-1").put("item_name", secretIdCard).put("quantity", 1),
-                )),
+            FEE_ITEMS,
+            JsonObject().put("category", "护理费").put("name", secretName).put("unit_price", 3)
+                .put("remark", secretIdCard).put("nursing_level", "低风险"),
         ).compose { (status, body) ->
             ctx.verify { assertEquals(201, status, "写入必须 201，实际: $body") }
             pollUntil(vertx, 5_000) {
@@ -521,8 +517,8 @@ class AuditLogIntegrationTest {
     @Test
     fun `过滤真库语义_前缀闭区间精确与空结果`(vertx: Vertx, ctx: VertxTestContext) {
         // 造两条不同 actor 的审计行（直接落库，避免依赖门禁路径）
-        insertAudit("$PREFIX" + "a1", "POST", "$MOUNT/healthcare/v1/base-vaccination-types", 201)
-        insertAudit("$PREFIX" + "a2", "GET", "$MOUNT/healthcare/v1/base-developmental-scales", 200)
+        insertAudit("$PREFIX" + "a1", "POST", "$MOUNT/healthcare/v1/fee-items", 201)
+        insertAudit("$PREFIX" + "a2", "GET", "$MOUNT/dining/v1/weekly-menus", 200)
         val iso = "YYYY-MM-DD\"T\"HH24:MI:SS.USOF"
         val from = queryString(
             "SELECT to_char(min(occurred_at), '$iso') FROM healthcare.audit_logs WHERE actor LIKE '$PREFIX%'",
@@ -533,7 +529,7 @@ class AuditLogIntegrationTest {
 
         get(
             vertx,
-            "$AUDIT_LOGS?path=${enc("$MOUNT/healthcare/v1/base-vaccination")}&limit=50",
+            "$AUDIT_LOGS?path=${enc("$MOUNT/healthcare/v1/fee-items")}&limit=50",
         ).compose { (s1, byPrefix) ->
             ctx.verify {
                 assertEquals(200, s1, "path 前缀过滤必须 200，实际: $byPrefix")
@@ -574,11 +570,6 @@ class AuditLogIntegrationTest {
     // ========================================================================
     //  辅助
     // ========================================================================
-
-    /** 套餐 `items` 合法最小数组（服务端要求非空且含 item_name）。 */
-    private fun serviceItems(): JsonArray = JsonArray().add(
-        JsonObject().put("item_code", "SVC-1").put("item_name", "服务项").put("quantity", 1),
-    )
 
     private fun colType(column: String): String =
         "SELECT data_type FROM information_schema.columns WHERE table_schema='healthcare' " +
@@ -676,15 +667,15 @@ class AuditLogIntegrationTest {
     /** 残差清理：按测试专用 `actor` 前缀 + 测试 `path`/`code` 前缀（中间件会记录测试自身的写请求）。 */
     private fun cleanupFixtures() {
         exec("DELETE FROM healthcare.audit_logs WHERE actor LIKE '$PREFIX%'")
-        exec("DELETE FROM healthcare.child_service_packages WHERE code LIKE '$PREFIX%'")
+        exec("DELETE FROM healthcare.fee_items WHERE name LIKE '$PREFIX%'")
     }
 
     private fun assertNoResidual() {
         val residuals = mapOf(
             "healthcare.audit_logs" to
                 "SELECT count(*) FROM healthcare.audit_logs WHERE actor LIKE '$PREFIX%'",
-            "healthcare.child_service_packages" to
-                "SELECT count(*) FROM healthcare.child_service_packages WHERE code LIKE '$PREFIX%'",
+            "healthcare.fee_items" to
+                "SELECT count(*) FROM healthcare.fee_items WHERE name LIKE '$PREFIX%'",
         )
         val leftovers = residuals.mapNotNull { (table, sql) ->
             val count = queryLong(sql)

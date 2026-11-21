@@ -32,10 +32,6 @@ object DiningRoutes {
         val rosterService = RosterService(pool)
         val mealExecutionService = MealExecutionService(pool)
         val statisticsService = DiningStatisticsService(pool)
-        val mealIntakeService = MealIntakeService(pool)
-        val nutritionAnalysisService = NutritionAnalysisService(pool)
-        val specialDietRequestService = SpecialDietRequestService(pool)
-        val weeklyReportService = NutritionWeeklyReportService(pool)
 
         router.route().handler(BodyHandler.create())
 
@@ -51,7 +47,7 @@ object DiningRoutes {
             "/diet-profiles/:id" to listOf("PUT", "PATCH", "DELETE"),
             // 054 A4：过敏原标记覆盖式写入（复用既有 allergies 列，不新建主数据表）
             "/diet-profiles/:id/allergens" to listOf("PUT"),
-            // 054 A4b：按 patient 维度 upsert 最小启用档案 + 覆盖式写过敏原（儿保儿童无入住可达）
+            // 按 patient 维度覆盖式写过敏原（只更新既有启用档案，不新建）
             "/diet-profiles/by-patient/:patient_id/allergens" to listOf("PUT"),
         )
 
@@ -264,109 +260,6 @@ object DiningRoutes {
                     dateFrom = ctx.request().getParam("date_from") ?: "",
                     dateTo = ctx.request().getParam("date_to") ?: "",
                     mealTime = ctx.request().getParam("meal_time"),
-                )
-            }) { ctx.json(it) }
-        }
-
-        // ========================================================================
-        //  每餐膳食摄入记录（054 A1）
-        //  本段无 :id 参数段；若后续新增，静态段必须先于参数段注册
-        //  （与 /weekly-menus/by-date 同规则）。服务端按「食物项 × 菜品营养 × 摄入比例」
-        //  汇总营养素，客户端提交的同名字段一律忽略。
-        // ========================================================================
-        registerAuth(router, authHandler, "/meal-intake-records" to listOf("POST"))
-
-        router.post("/meal-intake-records").handler { ctx ->
-            val userId = userId(ctx) ?: return@handler
-            api(ctx, { mealIntakeService.register(body(ctx), userId) }) { result ->
-                ctx.response().setStatusCode(201); ctx.json(result)
-            }
-        }
-        router.get("/meal-intake-records").handler { ctx ->
-            api(ctx, {
-                mealIntakeService.list(
-                    patientId = ctx.request().getParam("patient_id"),
-                    date = ctx.request().getParam("date"),
-                    mealTime = ctx.request().getParam("meal_time"),
-                    from = ctx.request().getParam("from"),
-                    to = ctx.request().getParam("to"),
-                    limit = limit(ctx),
-                    offset = offset(ctx),
-                )
-            }) { ctx.json(it) }
-        }
-
-        // ========================================================================
-        //  营养分析（054 A3，读时聚合，读路由不上门禁）
-        //  结论与缺口项一律服务端派生；当天无摄入记录返回零值结论，不 500。
-        // ========================================================================
-        router.get("/nutrition-analysis").handler { ctx ->
-            api(ctx, {
-                nutritionAnalysisService.analyze(
-                    patientId = ctx.request().getParam("patient_id"),
-                    date = ctx.request().getParam("date"),
-                    mealTime = ctx.request().getParam("meal_time"),
-                )
-            }) { ctx.json(it) }
-        }
-
-        // ========================================================================
-        //  特殊膳食申请（054 A4）
-        //  状态机 待审批 → 已批准/已驳回 → 已终止（见 SpecialDietRequestService）；
-        //  非法流转由服务层抛 400。过敏原复用既有列，不新建过敏主数据表。
-        // ========================================================================
-        registerAuth(router, authHandler,
-            "/special-diet-requests" to listOf("POST"),
-            "/special-diet-requests/:id/status" to listOf("PATCH"),
-        )
-
-        router.post("/special-diet-requests").handler { ctx ->
-            val userId = userId(ctx) ?: return@handler
-            api(ctx, { specialDietRequestService.create(body(ctx), userId) }) { result ->
-                ctx.response().setStatusCode(201); ctx.json(result)
-            }
-        }
-        router.get("/special-diet-requests").handler { ctx ->
-            api(ctx, {
-                specialDietRequestService.list(
-                    patientId = ctx.request().getParam("patient_id"),
-                    status = ctx.request().getParam("status"),
-                    limit = limit(ctx),
-                    offset = offset(ctx),
-                )
-            }) { ctx.json(it) }
-        }
-        router.patch("/special-diet-requests/:id/status").handler { ctx ->
-            val userId = userId(ctx) ?: return@handler
-            api(ctx, {
-                specialDietRequestService.updateStatus(
-                    requiredId(ctx),
-                    body(ctx).getString("status"),
-                    userId,
-                )
-            }) { ctx.json(it) }
-        }
-
-        // ========================================================================
-        //  营养周报（054 A5）
-        //  显式生成 + 快照落库；同儿童同周重复生成覆盖（ON CONFLICT 唯一索引）。
-        //  静态段 /nutrition-weekly-reports/generate 先于任何参数段注册。
-        // ========================================================================
-        registerAuth(router, authHandler, "/nutrition-weekly-reports/generate" to listOf("POST"))
-
-        router.post("/nutrition-weekly-reports/generate").handler { ctx ->
-            val userId = userId(ctx) ?: return@handler
-            api(ctx, { weeklyReportService.generate(body(ctx), userId) }) { result ->
-                ctx.response().setStatusCode(201); ctx.json(result)
-            }
-        }
-        router.get("/nutrition-weekly-reports").handler { ctx ->
-            api(ctx, {
-                weeklyReportService.list(
-                    patientId = ctx.request().getParam("patient_id"),
-                    weekStart = ctx.request().getParam("week_start"),
-                    limit = limit(ctx),
-                    offset = offset(ctx),
                 )
             }) { ctx.json(it) }
         }

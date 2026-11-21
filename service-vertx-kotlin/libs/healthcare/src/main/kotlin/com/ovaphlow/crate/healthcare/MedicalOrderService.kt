@@ -508,16 +508,20 @@ class MedicalOrderService(
         }
 
     /**
-     * 053 D3：读取患者月龄（原生参数化 SQL）。
+     * 读取患者月龄（原生参数化 SQL）。
      *
      * 无该患者行或 `birth_date` 为空 → null（跳过年龄禁忌），不抛错；
-     * 月龄按业务今天（Asia/Shanghai）用 [ChildHealth.ageMonths] 派生，与 052/053 同口径。
+     * 月龄按业务今天（Asia/Shanghai）按整月对齐派生（日不足则退一月）。
      */
     private fun loadAgeMonths(client: SqlClient, patientId: String): Future<Int?> =
         client.preparedQuery(PATIENT_BIRTH_DATE_SQL).execute(Tuple.of(patientId)).map { rows ->
             val birthDate = rows.iterator().asSequence().firstOrNull()?.getLocalDate("birth_date")
                 ?: return@map null
-            ChildHealth.ageMonths(birthDate, ChildHealth.today())
+            val today = LocalDate.now(ZoneId.of("Asia/Shanghai"))
+            if (today.isBefore(birthDate)) return@map 0
+            var months = (today.year - birthDate.year) * 12 + (today.monthValue - birthDate.monthValue)
+            if (today.dayOfMonth < birthDate.dayOfMonth) months -= 1
+            months.coerceAtLeast(0)
         }
 
     /** 单条提醒 → JSON：`{severity, reason, source, matched}`（脱敏，不含 PHI）。 */

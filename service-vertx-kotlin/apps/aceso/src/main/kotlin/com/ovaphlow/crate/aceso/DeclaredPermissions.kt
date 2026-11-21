@@ -81,25 +81,11 @@ internal val DECLARED_PERMISSIONS: List<DeclaredPermission> = listOf(
     DeclaredPermission("PATCH", "/nursing/v1/executions/:id/status", REHAB_EXECUTE_PERMISSION, PermissionWiring.INJECTED),
 
     // —— 054 B1 儿童康复：服务周期与训练计划（直接挂聚合路由，非子路由）——
-    DeclaredPermission("POST", "/nursing/v1/child-rehab-periods", REHAB_EXECUTE_PERMISSION),
-    DeclaredPermission("PATCH", "/nursing/v1/child-rehab-periods/:id/status", REHAB_EXECUTE_PERMISSION),
-    DeclaredPermission("POST", "/nursing/v1/child-rehab-plans", REHAB_EXECUTE_PERMISSION),
     // 054 B2：训练执行（会话）——「是否完成训练」的唯一事实源（查询为读路由，不上门禁）
-    DeclaredPermission("POST", "/nursing/v1/child-rehab-sessions", REHAB_EXECUTE_PERMISSION),
     // 054 B3：里程碑登记（读时状态派生与查询为读路由，不上门禁）
-    DeclaredPermission("POST", "/nursing/v1/child-rehab-milestones", REHAB_EXECUTE_PERMISSION),
     // 054 B4：手册分发与签收（模板查询/台账查询为读路由，不上门禁）
-    DeclaredPermission("POST", "/nursing/v1/child-rehab-handouts", REHAB_EXECUTE_PERMISSION),
-    DeclaredPermission("PATCH", "/nursing/v1/child-rehab-handouts/:id/acknowledge", REHAB_EXECUTE_PERMISSION),
     // 054 C1：保育员活动日志与行为观测（复用 nursing:document，零新增权限码；查询为读路由）
-    DeclaredPermission("POST", "/nursing/v1/childcare-activity-logs", NURSING_DOCUMENT_PERMISSION),
-    DeclaredPermission("POST", "/nursing/v1/childcare-behavior-observations", NURSING_DOCUMENT_PERMISSION),
     // 054 C2：班级日程排课/状态流转 + 环境安全巡查建查/追加整改项/关闭（复用 nursing:document；查询为读路由）
-    DeclaredPermission("POST", "/nursing/v1/childcare-class-schedules", NURSING_DOCUMENT_PERMISSION),
-    DeclaredPermission("PATCH", "/nursing/v1/childcare-class-schedules/:id/status", NURSING_DOCUMENT_PERMISSION),
-    DeclaredPermission("POST", "/nursing/v1/childcare-safety-inspections", NURSING_DOCUMENT_PERMISSION),
-    DeclaredPermission("POST", "/nursing/v1/childcare-safety-inspections/:id/items", NURSING_DOCUMENT_PERMISSION),
-    DeclaredPermission("PATCH", "/nursing/v1/childcare-safety-inspections/:id/close", NURSING_DOCUMENT_PERMISSION),
 
     // —— 护理文书：服务周期、评估、计划、任务、访视日程（047 D1/D3）——
     // 路径带尾斜杠是**契约的一部分**：护理子路由以 `/xxx/*` 挂载 + 子路由内 `post("/")`，
@@ -158,35 +144,6 @@ internal val DECLARED_PERMISSIONS: List<DeclaredPermission> = listOf(
     DeclaredPermission("POST", "/healthcare/v1/vital-signs/:id/review", CLINICAL_WRITE_PERMISSION),
     DeclaredPermission("POST", "/healthcare/v1/vital-signs/:id/refer", CLINICAL_WRITE_PERMISSION),
 
-    // —— 儿保日常功能链（052 P1–P5）：体检 / 成长 / 接种 / 异常通报 / 指导 ——
-    // 全部复用 `health:manage`（052 D8 / 裁定 6：不新增 child:manage）；读路由不上门禁。
-    DeclaredPermission("POST", "/healthcare/v1/child-health-checkups", HEALTH_MANAGE_PERMISSION),
-    DeclaredPermission("PATCH", "/healthcare/v1/child-health-checkups/:id", HEALTH_MANAGE_PERMISSION),
-    DeclaredPermission("POST", "/healthcare/v1/child-growth-measurements", HEALTH_MANAGE_PERMISSION),
-    DeclaredPermission("PATCH", "/healthcare/v1/child-growth-measurements/:id", HEALTH_MANAGE_PERMISSION),
-    DeclaredPermission("DELETE", "/healthcare/v1/child-growth-measurements/:id", HEALTH_MANAGE_PERMISSION),
-    DeclaredPermission("POST", "/healthcare/v1/child-vaccinations", HEALTH_MANAGE_PERMISSION),
-    DeclaredPermission("POST", "/healthcare/v1/child-vaccination-status/:patient_id/remind", HEALTH_MANAGE_PERMISSION),
-    DeclaredPermission("POST", "/healthcare/v1/child-health-notifications", HEALTH_MANAGE_PERMISSION),
-    DeclaredPermission("POST", "/healthcare/v1/child-guidance-records", HEALTH_MANAGE_PERMISSION),
-
-    // —— 053 A2 发育筛查录入：筛查可护士执行，沿用 052 的 `health:manage`（053 §11 裁定 3）——
-    // 判读/转诊（A3）将改用 `clinical:write`；本任务只登记录入写路由。
-    DeclaredPermission("POST", "/healthcare/v1/child-developmental-screenings", HEALTH_MANAGE_PERMISSION),
-
-    // —— 053 B2 健康问题转诊：临床判断/指令，复用 046 的 `clinical:write`（053 §11 裁定 3）——
-    DeclaredPermission("POST", "/healthcare/v1/child-referrals", CLINICAL_WRITE_PERMISSION),
-    DeclaredPermission("PATCH", "/healthcare/v1/child-referrals/:id/status", CLINICAL_WRITE_PERMISSION),
-
-    // —— 053 B1 儿保体检诊断：医生回写诊断，复用 046 的 `clinical:write`（053 §11 裁定 2）——
-    DeclaredPermission("POST", "/healthcare/v1/child-health-checkups/:id/diagnosis", CLINICAL_WRITE_PERMISSION),
-
-    // —— 053 A3 筛查结论判读：医生临床判断，复用 046 的 `clinical:write`（053 §11 裁定 3）——
-    DeclaredPermission("POST", "/healthcare/v1/child-developmental-screenings/:id/conclusion", CLINICAL_WRITE_PERMISSION),
-
-    // —— 053 B3 疾病防控指导：医生指令复用 052 的指导路径；**同路径双码**（health:manage / clinical:write，
-    //    任一放行），`kind` 为业务字段而非权限边界（053 §5 + §11 裁定 5）——
-    DeclaredPermission("POST", "/healthcare/v1/child-guidance-records", CLINICAL_WRITE_PERMISSION),
 
     // —— 053 D1 药物过敏史规范化：临床过敏史增改查删，复用 046 的 `clinical:write`（053 §3 Da）——
     // 写路由 POST/PATCH/DELETE 三条；GET 读开放，不登记。
@@ -233,17 +190,6 @@ internal val DECLARED_PERMISSIONS: List<DeclaredPermission> = listOf(
     DeclaredPermission("POST", "/healthcare/v1/encounters/:id/billing-settlement", BILLING_WRITE_PERMISSION),
     DeclaredPermission("POST", "/healthcare/v1/encounters/:id/deposits", BILLING_WRITE_PERMISSION),
     DeclaredPermission("POST", "/healthcare/v1/encounters/:id/deposits/refunds", BILLING_WRITE_PERMISSION),
-    // 054 E1：儿保服务套餐与订阅（独立于 bills；复用 billing:write，不新增码）
-    DeclaredPermission("POST", "/healthcare/v1/child-service-packages", BILLING_WRITE_PERMISSION),
-    DeclaredPermission("PUT", "/healthcare/v1/child-service-packages/:id", BILLING_WRITE_PERMISSION),
-    DeclaredPermission("POST", "/healthcare/v1/child-package-subscriptions", BILLING_WRITE_PERMISSION),
-    DeclaredPermission("PATCH", "/healthcare/v1/child-package-subscriptions/:id/status", BILLING_WRITE_PERMISSION),
-    // 054 E2：儿保服务结算单与收款（独立于 bills；复用 billing:write，不新增码）
-    DeclaredPermission("POST", "/healthcare/v1/child-service-settlements", BILLING_WRITE_PERMISSION),
-    DeclaredPermission("POST", "/healthcare/v1/child-service-settlements/:id/payments", BILLING_WRITE_PERMISSION),
-    // 054 E3：儿保发票台账（独立于 bills；复用 billing:write，不新增码）
-    DeclaredPermission("POST", "/healthcare/v1/invoices", BILLING_WRITE_PERMISSION),
-    DeclaredPermission("PATCH", "/healthcare/v1/invoices/:id/status", BILLING_WRITE_PERMISSION),
 
     // —— 膳食：饮食档案、菜品、周菜单、配餐名单、用餐执行（046 D3）——
     DeclaredPermission("POST", "/dining/v1/diet-profiles", DINING_MANAGE_PERMISSION),
@@ -262,15 +208,7 @@ internal val DECLARED_PERMISSIONS: List<DeclaredPermission> = listOf(
     DeclaredPermission("POST", "/dining/v1/rosters/:id/items", DINING_MANAGE_PERMISSION),
     DeclaredPermission("DELETE", "/dining/v1/rosters/:id/items/:itemId", DINING_MANAGE_PERMISSION),
     DeclaredPermission("POST", "/dining/v1/executions", DINING_MANAGE_PERMISSION),
-    // 054 A1：每餐膳食摄入记录（读路由不上门禁，046 D7）
-    DeclaredPermission("POST", "/dining/v1/meal-intake-records", DINING_MANAGE_PERMISSION),
-    // 054 A4：过敏原标记（覆盖既有 allergies 列）+ 特殊膳食申请状态机
     DeclaredPermission("PUT", "/dining/v1/diet-profiles/:id/allergens", DINING_MANAGE_PERMISSION),
-    DeclaredPermission("POST", "/dining/v1/special-diet-requests", DINING_MANAGE_PERMISSION),
-    DeclaredPermission("PATCH", "/dining/v1/special-diet-requests/:id/status", DINING_MANAGE_PERMISSION),
-    // 054 A5：营养周报显式生成（查询为读路由，不上门禁）
-    DeclaredPermission("POST", "/dining/v1/nutrition-weekly-reports/generate", DINING_MANAGE_PERMISSION),
-    // 054 A4b：儿保儿童无入住也可按 patient 维度标记过敏原（upsert 最小启用档案）
     DeclaredPermission("PUT", "/dining/v1/diet-profiles/by-patient/:patient_id/allergens", DINING_MANAGE_PERMISSION),
 
     // —— 物资与采购：物资目录、批次、入库、采购订单与收货（046 D3）——
@@ -304,14 +242,8 @@ internal val DECLARED_PERMISSIONS: List<DeclaredPermission> = listOf(
     DeclaredPermission("PUT", "/pharmacy/v1/requisitions/:id/dispense", PHARMACY_DISPENSE_PERMISSION),
     DeclaredPermission("PUT", "/pharmacy/v1/requisitions/:id/cancel", PHARMACY_DISPENSE_PERMISSION),
     // 054 D2：儿科用药规则库（写路由直接挂 PharmacyRoutes 聚合；复用 pharmacy:dispense，不新增码）
-    DeclaredPermission("POST", "/pharmacy/v1/pediatric-dose-rules", PHARMACY_DISPENSE_PERMISSION),
-    DeclaredPermission("PUT", "/pharmacy/v1/pediatric-dose-rules/:id", PHARMACY_DISPENSE_PERMISSION),
     // 054 F2：基础数据维护（疫苗类型 / 发育量表内容表建查改；写码 base_data:manage，不新增码）
     // 说明：base_data:manage 同时仍由 Nexus 承载 /v1/departments 等写路由（NEXUS_ENFORCED_PERMISSIONS 不变）。
-    DeclaredPermission("POST", "/healthcare/v1/base-vaccination-types", BASE_DATA_MANAGE_PERMISSION),
-    DeclaredPermission("PUT", "/healthcare/v1/base-vaccination-types/:id", BASE_DATA_MANAGE_PERMISSION),
-    DeclaredPermission("POST", "/healthcare/v1/base-developmental-scales", BASE_DATA_MANAGE_PERMISSION),
-    DeclaredPermission("PUT", "/healthcare/v1/base-developmental-scales/:id", BASE_DATA_MANAGE_PERMISSION),
     // 054 F3：审计查询（**全系统第一条受门禁的读路由**，受 access:manage；054 §11.2 Q8）
     DeclaredPermission("GET", "/healthcare/v1/audit-logs", ACCESS_MANAGE_PERMISSION),
 )

@@ -28,7 +28,7 @@ import java.time.OffsetDateTime
 import java.time.ZoneId
 
 /**
- * 体检管理服务（医疗/养老/儿保共用）。
+ * 体检管理服务（056 后仅养老在用；医疗服务保留）。
  *
  * 业务规则（服务端强制）：
  *  1. 批次按业务年唯一（checkup_year），重复创建返回 409；状态机单向流转

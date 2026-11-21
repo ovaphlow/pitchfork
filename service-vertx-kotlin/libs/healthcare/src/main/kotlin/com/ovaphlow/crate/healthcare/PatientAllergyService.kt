@@ -206,7 +206,7 @@ class PatientAllergyService(private val pool: Pool) {
      * 记录不存在 → [HealthcareNotFoundException]（路由 404）。
      *
      * `operator` 为冻结签名的一部分：过敏史行的 `operator` 以创建时的认证主体为准，
-     * 本接口不覆写该列（042 审计语义，与 `ChildReferralService.updateStatus` 一致）。
+     * 本接口不覆写该列（042 审计语义）。
      */
     fun update(id: String, body: JsonObject, operator: String): Future<JsonObject> {
         val parsed = try {

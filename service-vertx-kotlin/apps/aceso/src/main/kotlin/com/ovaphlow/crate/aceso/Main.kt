@@ -3,7 +3,6 @@ package com.ovaphlow.crate.aceso
 import com.ovaphlow.crate.database.DatabaseConfig
 import com.ovaphlow.crate.dining.DiningRoutes
 import com.ovaphlow.crate.healthcare.AuditLogService
-import com.ovaphlow.crate.healthcare.BaseDataService
 import com.ovaphlow.crate.healthcare.DrugCatalogMaterial
 import com.ovaphlow.crate.healthcare.DrugCatalogPort
 import com.ovaphlow.crate.healthcare.HealthcareRoutes
@@ -138,15 +137,6 @@ fun main() {
         buildApiRouter(vertx, pool, idpBaseUrl, nexusBaseUrl, idpSessionTimeoutMs),
     )
 
-    // 054 F2：**应用启动**时加载基础数据内容（读库优先、常量回落）。
-    // 刻意放在 `main()` 而**不在 `buildApiRouter` 内**：后者是 DB-free 路由测试共用的装配入口，
-    // 若在其中发查询，每个测试装配都会多出 2 条 SQL，撞「未认证/非法入参不得触发任何 SQL」断言。
-    // 冷启动到首次内容写入/管理页访问之间消费方走常量回落（库空等价性成立，仅"读库优先"延迟生效）；
-    // refreshAll() 失败只 warn，不影响启动。
-    BaseDataService(pool).refreshAll().onFailure {
-        log.warn("054 F2 基础数据启动加载失败，消费方继续走常量回落: {}", it.message)
-    }
-
     mainRouter.route("/health").handler { ctx ->
         ctx.json(JsonObject().put("status", "ok").put("app", "aceso"))
     }
@@ -280,7 +270,6 @@ internal fun buildApiRouter(
             idpSessionAuthHandler(vertx, idpBaseUrl, idpSessionTimeoutMs),
             idpSessionAuthHandler(vertx, idpBaseUrl, idpSessionTimeoutMs),
             drugCatalogPort = healthcareDrugCatalogPort(materialService),
-            childHealthMessagePort = NexusMessageClient(vertx, nexusBaseUrl, idpSessionTimeoutMs),
         ),
     )
     apiRouter.route("/nursing/v1/*").subRouter(

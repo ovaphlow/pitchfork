@@ -96,7 +96,6 @@ class DeclaredPermissionsTest {
                 INVENTORY_WRITE_PERMISSION,
                 PHARMACY_DISPENSE_PERMISSION,
                 BILLING_WRITE_PERMISSION,
-                BASE_DATA_MANAGE_PERMISSION,
                 ACCESS_MANAGE_PERMISSION,
             ),
             codes,
@@ -120,19 +119,19 @@ class DeclaredPermissionsTest {
             "INJECTED 项必须与护理 3 条一一对应：集中式注册不得把它们重复挂一遍",
         )
         assertEquals(
-            169,
+            122,
             DECLARED_PERMISSIONS.count { it.wiring == PermissionWiring.CENTRAL },
-            "046 52 + 047 的 27 + 048 的 17 + 049 的 16 + 050 的 pharmacy:dispense 4 + 052 的儿保 9 + 053 A2 筛查 1 + 053 B2 转诊 2 + 053 B1 诊断 1 + 053 A3 筛查判读 1 + 053 B3 疾病防控指导 1 + 054 A1 膳食摄入 1 + 053 D1 过敏 3 + 054 A4 过敏原/特殊膳食 3 + 054 A5 周报生成 1 + 054 B1 儿童康复 3 + 054 A4b 儿保过敏原 1 + 054 B2 训练执行 1 + 054 B3 里程碑 1 + 054 D2 儿科用药规则 2 + 054 B4 手册分发 2 + 054 C1 保育文书 2 + 054 E1 儿保套餐 4 + 054 C2 保育日程与巡查 5 + 054 E2 儿保结算 2 + 054 E3 儿保发票 2 + 054 F2 基础数据 4 + 054 F3 审计查询（**首条受门禁读路由**）1 = 169",
+            "056：儿保（052/053/054 A–F）路由声明已随儿保下线全部移除；剩余集中式声明 = 046 52 + 047 的 27 + 048 的 17 + 049 的 16 + 050 的 pharmacy:dispense 4 + 053 D1 过敏 3 + 054 F3 审计查询（**首条受门禁读路由**）1 = 122",
         )
         assertEquals(
-            29,
+            22,
             DECLARED_PERMISSIONS.count { it.permissionCode == NURSING_DOCUMENT_PERMISSION },
-            "047 §4.1：nursing:document 29 条（护理文书 13 条 + 054 C1 保育文书 2 条 + 054 C2 保育日程与巡查 5 条 + healthcare 侧护理类 9 条）",
+            "047 §4.1：nursing:document 22 条（护理文书 13 条 + healthcare 侧护理类 9 条；056 已移除 054 C1/C2 保育 7 条）",
         )
         assertEquals(
-            25,
+            15,
             DECLARED_PERMISSIONS.count { it.permissionCode == HEALTH_MANAGE_PERMISSION },
-            "048 §4.1：health:manage 15 条（体征 3 + 体检/结果 7 + 随访 3 + 慢病 2）+ 052 儿保 9 条 + 053 A2 筛查 1 = 25",
+            "048 §4.1：health:manage 15 条（体征 3 + 体检/结果 7 + 随访 3 + 慢病 2）；056 已移除 052 儿保 9 条与 053 A2 筛查 1 条",
         )
         assertEquals(
             8,
@@ -146,18 +145,9 @@ class DeclaredPermissionsTest {
             "049：fee_item:manage 4 条",
         )
         assertEquals(
-            17,
+            15,
             DECLARED_PERMISSIONS.count { it.permissionCode == PHARMACY_DISPENSE_PERMISSION },
-            "046 发药/退药 11 + 050 领用申领/调拨 4 + 054 D2 儿科用药规则 2 = 17 条",
-        )
-        // 054 F2（Lead 裁定）：`base_data:manage` 由「仅 Nexus 承载」扩展为「Nexus + Aceso 双承载」——
-        // F2 新增的 `/healthcare/v1/base-vaccination-types`、`/base-developmental-scales` 写路由是
-        // **Aceso 侧路由**，Nexus 门禁覆盖不到，必须在 Aceso 集中声明（否则 4 条写路由裸奔）。
-        // 049 D1 的原断言「Aceso 不得声明」据此**反转**；Nexus 侧仍保留自身门禁（`NEXUS_ENFORCED_PERMISSIONS` 不变）。
-        assertEquals(
-            4,
-            DECLARED_PERMISSIONS.count { it.permissionCode == BASE_DATA_MANAGE_PERMISSION },
-            "054 F2：Aceso 侧基础数据写路由 4 条（疫苗类型 POST/PUT + 发育量表 POST/PUT）",
+            "046 发药/退药 11 + 050 领用申领/调拨 4 = 15 条；056 已移除 054 D2 儿科用药规则 2 条",
         )
         // 054 F3：`access:manage` 此前只由 Nexus 承载（`/v1/departments` 3 条）；
         // 054 新增 `GET /healthcare/v1/audit-logs` 后，Aceso 侧出现**第一条**受该码门禁的路由。
@@ -247,14 +237,13 @@ class DeclaredPermissionsTest {
                 INVENTORY_WRITE_PERMISSION,
                 PHARMACY_DISPENSE_PERMISSION,
                 BILLING_WRITE_PERMISSION,
-                BASE_DATA_MANAGE_PERMISSION,
                 ACCESS_MANAGE_PERMISSION,
             ),
             payload.getJsonArray("permission_codes").map { it as String }.toSet(),
             "自省端点的 permission_codes 必须是清单里真实接线的全部码（去重）",
         )
         val routes = payload.getJsonArray("routes")
-        assertEquals(172, routes.size(), "DECLARED_PERMISSIONS 172 条逐条列出：$routes")
+        assertEquals(125, routes.size(), "DECLARED_PERMISSIONS 125 条逐条列出：$routes")
         val first = routes.getJsonObject(0)
         assertEquals("POST", first.getString("method"))
         assertEquals("/nursing/v1/executions/:id/administration", first.getString("path"))
@@ -478,40 +467,6 @@ class DeclaredPermissionsTest {
             declaredUnder("/healthcare/v1").filter(::inMasterDataScope).toSet(),
             healthcareReal.filter(::inMasterDataScope).toSet(),
             "healthcare 侧患者/入住/床位/费用项写路由整组必须与声明一致（8 admission:write + 4 bed:manage + 4 fee_item:manage）",
-        )
-
-        // —— 054 E 链（儿保收费）：套餐 / 订阅 / 结算 / 发票 全等 ——
-        // 054 M2（架构评审）：此前 `/healthcare/v1` 只有单向 `declared ⊆ real`，漏登记不会被抓；
-        // 这里为 054 新增前缀补上整组全等断言，与 `/dining/v1`、`/nursing/v1` 口径一致。
-        val childServiceScopePrefixes = listOf(
-            "/healthcare/v1/child-service-packages",
-            "/healthcare/v1/child-package-subscriptions",
-            "/healthcare/v1/child-service-settlements",
-            "/healthcare/v1/invoices",
-        )
-        fun inChildServiceScope(route: Pair<String, String>): Boolean =
-            childServiceScopePrefixes.any { route.second.startsWith(it) }
-        assertEquals(
-            declaredUnder("/healthcare/v1").filter(::inChildServiceScope).toSet(),
-            healthcareReal.filter(::inChildServiceScope).toSet(),
-            "healthcare 侧儿保收费写路由整组必须与声明一致（套餐/订阅/结算/发票；漏登记或新裸奔写路由都会失败）",
-        )
-
-        // —— 054 F 链（管理员基础设施）：基础数据写路由全等 ——
-        // 说明：`audit-logs` 的**读**路由（F3，046 D7 读路由门禁唯一例外）**不在此 scope 内**——
-        // 本 scope 语义是「写路由整组全等」，混入读路由会让口径含糊。该读路由**只能**由 F3 落地时
-        // 新增的**单列断言**把关（自省端点测试目前只校验 `routes.size()` 计数与 `permission_codes`
-        // 集合，**不校验 method/path**）。F3 落地时同时需要：① 单列断言；② `routes.size()` 计数 +1。
-        val baseDataScopePrefixes = listOf(
-            "/healthcare/v1/base-vaccination-types",
-            "/healthcare/v1/base-developmental-scales",
-        )
-        fun inBaseDataScope(route: Pair<String, String>): Boolean =
-            baseDataScopePrefixes.any { route.second.startsWith(it) }
-        assertEquals(
-            declaredUnder("/healthcare/v1").filter(::inBaseDataScope).toSet(),
-            healthcareReal.filter(::inBaseDataScope).toSet(),
-            "healthcare 侧基础数据写路由整组必须与声明一致（F2；审计读路由不在本 scope，由 F3 单列断言覆盖；漏登记或新裸奔写路由都会失败）",
         )
     }
 

@@ -79,61 +79,11 @@ object PharmacyRoutes {
         router.route("/purchase-orders*").subRouter(orderRouter)
         router.route("/purchase-receipts*").subRouter(receiptRouter)
 
-        // ====================================================================
-        //  054 D2 儿科用药规则库与用量计算
-        //  **直接挂聚合路由**（非子路由）：`DeclaredPermissionsTest` 的 BL2 门禁按聚合
-        //  `writeRoutes(PharmacyRoutes.create(...), "/pharmacy/v1")` 全等比对，故新增写路由
-        //  必须直接注册在本 router 上，否则门禁失效。
-        //  写路由（POST /pediatric-dose-rules、PUT /pediatric-dose-rules/:id）由 `Main.kt`
-        //  的集中式门禁按 `DECLARED_PERMISSIONS` 声明接线（`pharmacy:dispense`）；
-        //  `GET /pediatric-dose-calculations` 为读路由，读开放（054 §5.4）。
-        // ====================================================================
-        val pediatricDoseRuleService = PediatricDoseRuleService(mPool)
-
-        router.post("/pediatric-dose-rules").handler { ctx ->
-            api(ctx, { pediatricDoseRuleService.create(body(ctx), ctx.get<String>("userId")) }) { result ->
-                ctx.response().setStatusCode(201)
-                ctx.json(result)
-            }
-        }
-
-        router.get("/pediatric-dose-rules").handler { ctx ->
-            val params = ctx.request()
-            api(ctx, {
-                pediatricDoseRuleService.list(
-                    materialId = params.getParam("material_id"),
-                    status = params.getParam("status"),
-                    limit = params.getParam("limit")?.toIntOrNull()?.coerceIn(1, 100) ?: 50,
-                    offset = params.getParam("offset")?.toIntOrNull()?.coerceAtLeast(0) ?: 0,
-                )
-            }) { ctx.json(it) }
-        }
-
-        router.put("/pediatric-dose-rules/:id").handler { ctx ->
-            val id = ctx.pathParam("id")?.takeIf(String::isNotBlank)
-                ?: return@handler respond(ctx, 400, "id is required")
-            api(ctx, { pediatricDoseRuleService.update(id, body(ctx), ctx.get<String>("userId")) }) { ctx.json(it) }
-        }
-
-        router.get("/pediatric-dose-calculations").handler { ctx ->
-            val params = ctx.request()
-            val materialId = params.getParam("material_id")?.trim()
-            if (materialId.isNullOrEmpty()) return@handler respond(ctx, 400, "material_id is required")
-            api(ctx, {
-                pediatricDoseRuleService.calculate(
-                    materialId = materialId,
-                    weightKg = PediatricDoseCalculator.parseWeightKg(params.getParam("weight_kg")),
-                    ageMonths = PediatricDoseCalculator.parseAgeMonths(params.getParam("age_months")),
-                )
-            }) { ctx.json(it) }
-        }
-
         return router
     }
 
     /**
-     * 统一执行服务调用：同步抛出的参数校验异常（`IllegalArgumentException`，例如
-     * [PediatricDoseCalculator.parseWeightKg] 拒绝 NaN/无穷/非正数）也映射为 400，
+     * 统一执行服务调用：同步抛出的参数校验异常（`IllegalArgumentException`）也映射为 400，
      * 避免 Vert.x 将其当作 500（与 dining 路由 `api()` 同口径）。
      */
     private fun <T> api(ctx: RoutingContext, action: () -> Future<T>, success: (T) -> Unit) {

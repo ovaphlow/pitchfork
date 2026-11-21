@@ -124,14 +124,14 @@ class AuditLogAccessTest {
         val (status, body) = send(
             port,
             HttpMethod.POST,
-            "/crate-api/healthcare/v1/base-vaccination-types",
+            "/crate-api/healthcare/v1/followup-plans",
             cookie,
-            """{"code":"HEPB","name":"乙肝疫苗","dose_count":1,"recommended_months":[0]}""",
+            """{"encounter_id":"enc-1","title":"随访"}""",
         )
-        assertEquals(403, status, "无 base_data:manage 必须 403：body=$body")
+        assertEquals(403, status, "无 health:manage 必须 403：body=$body")
 
         // 审计落库发生在响应 endHandler（异步）：轮询等待，最多 3 秒
-        val entry = awaitAuditEntry(stub, "/crate-api/healthcare/v1/base-vaccination-types")
+        val entry = awaitAuditEntry(stub, "/crate-api/healthcare/v1/followup-plans")
         assertTrue(entry != null, "403 尝试必须入账（中间件在门禁之前）：${stub.queries}")
         assertEquals("POST", entry!![2], "审计记录 method")
         assertEquals(403, entry[4], "审计记录 status_code 必须为门禁的 403")

@@ -43,14 +43,8 @@ class DietProfileService(
     private val patients = DSL.table(DSL.name("healthcare", "patients"))
 
     companion object {
-        /** 儿童 `person_type`（052/053 口径）。 */
-        const val CHILD_PERSON_TYPE = "儿童"
-
         /** 最小启用档案缺省餐食类型。 */
         const val DEFAULT_MEAL_TYPE = "普食"
-
-        private const val PERSON_TYPE_SQL =
-            "SELECT id, person_type FROM healthcare.patients WHERE id = \$1"
 
         private const val ACTIVE_PROFILE_SQL =
             "SELECT id FROM dining.dining_diet_profiles " +
@@ -58,20 +52,6 @@ class DietProfileService(
 
         private const val UPDATE_ALLERGENS_SQL =
             "UPDATE dining.dining_diet_profiles SET allergies = \$1, updated_at = \$2 WHERE id = \$3"
-
-        /**
-         * 054 A4b：儿童按 patient 维度 upsert 最小启用档案（`encounter_id = NULL`）。
-         * `ON CONFLICT` 的推断谓词必须与部分唯一索引
-         * `uq_dining_diet_profiles_active_patient (patient_id) WHERE status='启用'` 一致。
-         */
-        private const val UPSERT_CHILD_PROFILE_SQL =
-            "INSERT INTO dining.dining_diet_profiles " +
-                "(id, patient_id, encounter_id, meal_type, allergies, portion_preference, remark, " +
-                "status, metadata, created_at, updated_at) " +
-                "VALUES (\$1, \$2, NULL, \$3, \$4, \$5, \$6, '启用', \$7, \$8, \$9) " +
-                "ON CONFLICT (patient_id) WHERE status = '启用' DO UPDATE SET " +
-                "allergies = EXCLUDED.allergies, updated_at = EXCLUDED.updated_at " +
-                "RETURNING id"
 
         fun toJson(row: Row): JsonObject = JsonObject()
             .put("id", row.getValue("id")?.toString())
@@ -90,13 +70,9 @@ class DietProfileService(
     }
 
     /**
-     * 建档。054 A4b：按 `healthcare.patients.person_type` 分流——
-     * **儿童（person_type=儿童）允许 `encounter_id` 为空**（儿保儿童无入住周期，
-     * 落 NULL；V603 已放开该列 NOT NULL）；**非儿童保持既有校验，行为完全不变**
-     * （必须给出 ACTIVE 的 ELDERLY_CARE 入住且与 patient_id 一致）。
+     * 建档。必须给出 ACTIVE 的 ELDERLY_CARE 入住且与 `patient_id` 一致。
      *
-     * 「非儿童必须有 ACTIVE 的 ELDERLY_CARE 入住」是**服务层规则**：它依赖跨表状态，
-     * 无法用 `CHECK` 表达，故只能在此强制（V603 注释同口径）。
+     * 该规则依赖跨表状态，无法用 `CHECK` 表达，故只能在此强制。
      */
     fun create(body: JsonObject): Future<JsonObject> {
         val patientId = body.getString("patient_id")
@@ -104,37 +80,28 @@ class DietProfileService(
             return Future.failedFuture(IllegalArgumentException("patient_id is required"))
         val encounterId = body.getString("encounter_id")
 
-        return loadPersonType(patientId).compose { personType ->
-            val childWithoutEncounter = personType == CHILD_PERSON_TYPE && encounterId.isNullOrBlank()
-            if (!childWithoutEncounter && encounterId.isNullOrBlank())
-                return@compose Future.failedFuture(IllegalArgumentException("encounter_id is required"))
+        if (encounterId.isNullOrBlank())
+            return Future.failedFuture(IllegalArgumentException("encounter_id is required"))
 
-            val mealType = body.getString("meal_type")
-            if (mealType.isNullOrBlank() || mealType !in DiningConstants.MEAL_TYPES)
-                return@compose Future.failedFuture(IllegalArgumentException("invalid meal_type, must be one of: ${DiningConstants.MEAL_TYPES}"))
+        val mealType = body.getString("meal_type")
+        if (mealType.isNullOrBlank() || mealType !in DiningConstants.MEAL_TYPES)
+            return Future.failedFuture(IllegalArgumentException("invalid meal_type, must be one of: ${DiningConstants.MEAL_TYPES}"))
 
-            val allergies = allergiesOf(body)
-            val portion = body.getString("portion_preference")
-            if (!portion.isNullOrBlank() && portion !in DiningConstants.PORTION_PREFERENCES)
-                return@compose Future.failedFuture(IllegalArgumentException("invalid portion_preference, must be one of: ${DiningConstants.PORTION_PREFERENCES}"))
+        val allergies = allergiesOf(body)
+        val portion = body.getString("portion_preference")
+        if (!portion.isNullOrBlank() && portion !in DiningConstants.PORTION_PREFERENCES)
+            return Future.failedFuture(IllegalArgumentException("invalid portion_preference, must be one of: ${DiningConstants.PORTION_PREFERENCES}"))
 
-            val validated = if (childWithoutEncounter) {
-                Future.succeededFuture(Unit)
-            } else {
-                // 入住自动生效：仅允许为活动 ELDERLY_CARE 入住建档
-                validateElderlyEncounter(requireNotNull(encounterId), patientId)
-            }
-
-            validated.compose {
-                insertProfile(
-                    patientId = patientId,
-                    encounterId = if (childWithoutEncounter) null else encounterId,
-                    mealType = mealType,
-                    allergies = allergies,
-                    portion = portion,
-                    body = body,
-                )
-            }
+        // 入住自动生效：仅允许为活动 ELDERLY_CARE 入住建档
+        return validateElderlyEncounter(encounterId, patientId).compose {
+            insertProfile(
+                patientId = patientId,
+                encounterId = encounterId,
+                mealType = mealType,
+                allergies = allergies,
+                portion = portion,
+                body = body,
+            )
         }
     }
 
@@ -194,21 +161,11 @@ class DietProfileService(
         }
     }
 
-    /** 读取 `person_type`（054 A4b，原生参数化 SQL）；患者不存在返回 `null`。 */
-    private fun loadPersonType(patientId: String): Future<String?> =
-        pool.preparedQuery(PERSON_TYPE_SQL).execute(Tuple.of(patientId)).map { rows ->
-            rows.iterator().asSequence().firstOrNull()?.getString("person_type")
-        }
-
     /**
-     * 054 A4b：按 patient 维度**过敏原标记**（`PUT /diet-profiles/by-patient/:patient_id/allergens`）。
+     * 按 patient 维度**过敏原标记**（`PUT /diet-profiles/by-patient/:patient_id/allergens`）。
      *
-     * - 儿童：**upsert 最小启用档案**（`encounter_id = NULL`，`meal_type` 缺省「普食」）
-     *   并**覆盖式**写 `allergies`；同儿童已有启用档案时由
-     *   `ON CONFLICT (patient_id) WHERE status='启用'` 只更新过敏原与 `updated_at`。
-     * - 非儿童：**不新建档案**（无入住无法建档），仅覆盖更新其既有启用档案的过敏原；
-     *   没有启用档案 → 400。
-     * - 复用 V600 既有列 `dining_diet_profiles.allergies`，**不新建过敏主数据表**（L2 裁定）。
+     * 只覆盖更新其既有启用档案的 `allergies`；没有启用档案 → 400（无入住无法建档）。
+     * 复用 V600 既有列 `dining_diet_profiles.allergies`，不新建过敏主数据表。
      */
     fun upsertAllergensByPatient(patientId: String?, body: JsonObject): Future<JsonObject> {
         val id = patientId?.trim()
@@ -216,43 +173,7 @@ class DietProfileService(
         if (!body.containsKey("allergies"))
             throw IllegalArgumentException("allergies is required")
         val allergies = allergiesOf(body)
-
-        return loadPersonType(id).compose { personType ->
-            when (personType) {
-                null -> Future.failedFuture(DiningNotFoundException("patient not found: $id"))
-                CHILD_PERSON_TYPE -> upsertChildProfileAllergens(id, allergies, body)
-                else -> updateExistingProfileAllergens(id, allergies)
-            }
-        }
-    }
-
-    private fun upsertChildProfileAllergens(
-        patientId: String,
-        allergies: JsonArray,
-        body: JsonObject,
-    ): Future<JsonObject> {
-        val mealType = body.getString("meal_type")?.trim()?.takeIf { it.isNotEmpty() } ?: DEFAULT_MEAL_TYPE
-        if (mealType !in DiningConstants.MEAL_TYPES)
-            throw IllegalArgumentException("invalid meal_type, must be one of: ${DiningConstants.MEAL_TYPES}")
-
-        val id = Ulid.generate()
-        val now = OffsetDateTime.now()
-        val tuple = Tuple.tuple()
-        tuple.addString(id)
-        tuple.addString(patientId)
-        tuple.addString(mealType)
-        // JSONB 一律绑 Vert.x JsonArray（pgclient 原生编解码）；不要绑 org.jooq.JSONB
-        tuple.addValue(allergies)
-        tuple.addValue(body.getString("portion_preference"))
-        tuple.addValue(body.getString("remark"))
-        tuple.addValue(body.containsKey("metadata").let { if (it) body.getJsonObject("metadata") else null })
-        tuple.addOffsetDateTime(now)
-        tuple.addOffsetDateTime(now)
-
-        return pool.preparedQuery(UPSERT_CHILD_PROFILE_SQL).execute(tuple).compose { rows ->
-            val savedId = rows.iterator().asSequence().firstOrNull()?.getString("id") ?: id
-            get(savedId)
-        }
+        return updateExistingProfileAllergens(id, allergies)
     }
 
     private fun updateExistingProfileAllergens(patientId: String, allergies: JsonArray): Future<JsonObject> {
