@@ -1,5 +1,6 @@
 package com.ovaphlow.crate.nursing
 
+import com.ovaphlow.crate.database.testing.IntegrationDb
 import com.ovaphlow.crate.database.DatabaseConfig
 import io.vertx.core.Future
 import io.vertx.core.Vertx
@@ -24,23 +25,23 @@ import java.util.concurrent.TimeUnit
  *   创建 REHABILITATION 任务（含频次/起止日期）→ 列表可见 → generate 指定日期范围
  *   → 生成对应执行计划 → 打卡完成/跳过 → 状态、实际时间、执行人落库 → 列表与统计可见。
  *
- * 运行方式（需用户授权且使用独立可销毁的 aceso_test 测试库）：
+ * 运行方式（需用户授权；库名由 -Dintegration.db.database 指定，测试不建不删库）：
  *
  *   export PITCHFORK_DB_PASSWORD=pitchfork-test-only
  *   ./gradlew :libs:nursing:test \
  *     -Dintegration.db.host=localhost -Dintegration.db.port=55432 \
- *     -Dintegration.db.database=aceso_test -Dintegration.db.user=ovaphlow \
+ *     -Dintegration.db.database=<库名> -Dintegration.db.user=ovaphlow \
  *     --tests "*TaskExecutionRehabilitationIntegrationTest*" --rerun-tasks
  *
  * fixture 统一使用 `rh-` 前缀，@AfterAll 校验清理无残留。
  */
 @ExtendWith(VertxExtension::class)
 @EnabledIfSystemProperty(named = "integration.db.host", matches = ".+")
+@EnabledIfSystemProperty(named = "integration.db.database", matches = ".+")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class TaskExecutionRehabilitationIntegrationTest {
 
     companion object {
-        private const val TEST_DB = "aceso_test"
         private const val FIXTURE_PREFIX = "rh-"
         private const val ELDERLY_TASK = "rh-task-elderly" // REHABILITATION QD，挂活跃周期
         private const val ORG_TASK = "rh-task-org" // REHABILITATION BID+schedule_times，全院性（无周期）
@@ -71,21 +72,16 @@ class TaskExecutionRehabilitationIntegrationTest {
         try {
             // 干净库：DROP 后重建并执行 Flyway 迁移
             val rootUrl = "jdbc:postgresql://$host:$port/postgres"
-            DriverManager.getConnection(rootUrl, user, password).use { conn ->
-                conn.createStatement().execute("DROP DATABASE IF EXISTS $TEST_DB")
-                conn.createStatement().execute("CREATE DATABASE $TEST_DB")
-            }
-
             val dbConfig = JsonObject()
                 .put("host", host)
                 .put("port", port.toInt())
-                .put("database", TEST_DB)
+                .put("database", IntegrationDb.database())
                 .put("user", user)
             try {
-                DatabaseConfig.migrate(dbConfig)
+                IntegrationDb.migrateIfRequested(dbConfig)
             } catch (e: Exception) {
                 // 与既有集成测试一致：V404 迁移可能因 schema 前缀失败，手工补齐
-                val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
+                val jdbcUrl = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
                 DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
                     val stmt = conn.createStatement()
                     stmt.execute("SET search_path TO nursing, public")
@@ -110,7 +106,7 @@ class TaskExecutionRehabilitationIntegrationTest {
     @AfterAll
     fun cleanup(ctx: VertxTestContext) {
         try {
-            val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
+            val jdbcUrl = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
             DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
                 conn.autoCommit = false
                 val stmt = conn.createStatement()
@@ -149,7 +145,7 @@ class TaskExecutionRehabilitationIntegrationTest {
         }
     }
 
-    private fun jdbcUrl() = "jdbc:postgresql://$host:$port/$TEST_DB"
+    private fun jdbcUrl() = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
 
     private fun fixtureId(suffix: String): String = "${FIXTURE_PREFIX}${suffix}"
 

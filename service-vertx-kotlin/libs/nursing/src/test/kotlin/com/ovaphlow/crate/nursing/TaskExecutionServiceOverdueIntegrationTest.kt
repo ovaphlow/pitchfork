@@ -1,5 +1,6 @@
 package com.ovaphlow.crate.nursing
 
+import com.ovaphlow.crate.database.testing.IntegrationDb
 import com.ovaphlow.crate.database.DatabaseConfig
 import io.vertx.core.Vertx
 import io.vertx.core.json.JsonObject
@@ -31,7 +32,7 @@ import java.util.UUID
  * 环境变量 PITCHFORK_DB_PASSWORD 必须设置为数据库密码。
  *
  * 测试行为：
- *   1. 在 @BeforeAll 中自动创建独立测试数据库 aceso_test（如不存在）
+ *   1. 连接 -Dintegration.db.database 指定的库（测试不建库、不删库）
  *   2. 执行 Flyway 迁移创建 nursing schema 和表
  *   3. 插入隔离的 fixture 数据（ID 以 test- 前缀标记）
  *   4. 执行查询并验证逾期判定逻辑
@@ -39,11 +40,11 @@ import java.util.UUID
  */
 @ExtendWith(VertxExtension::class)
 @EnabledIfSystemProperty(named = "integration.db.host", matches = ".+")
+@EnabledIfSystemProperty(named = "integration.db.database", matches = ".+")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class TaskExecutionServiceOverdueIntegrationTest {
 
     companion object {
-        private const val TEST_DB = "aceso_test"
         /** fixture 数据统一前缀，用于清理 */
         private const val FIXTURE_PREFIX = "to-"
     }
@@ -66,25 +67,14 @@ class TaskExecutionServiceOverdueIntegrationTest {
         Assumptions.assumeTrue(password.isNotBlank(), "integration test skipped: 需要 PITCHFORK_DB_PASSWORD 才会运行")
 
         try {
-            // 1. 创建测试数据库（如不存在）
-            val rootUrl = "jdbc:postgresql://$host:$port/postgres"
-            DriverManager.getConnection(rootUrl, user, password).use { conn ->
-                val rs = conn.createStatement().executeQuery(
-                    "SELECT 1 FROM pg_database WHERE datname = '$TEST_DB'"
-                )
-                if (!rs.next()) {
-                    conn.createStatement().execute("CREATE DATABASE $TEST_DB")
-                }
-            }
-
             // 2. 在测试数据库上执行 Flyway 迁移
-            val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
+            val jdbcUrl = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
             val dbConfig = JsonObject()
                 .put("host", host)
                 .put("port", port.toInt())
-                .put("database", TEST_DB)
+                .put("database", IntegrationDb.database())
                 .put("user", user)
-            DatabaseConfig.migrate(dbConfig)
+            IntegrationDb.migrateIfRequested(dbConfig)
 
             // 3. 用 JDBC 建立依赖表和 fixture 数据
             setupFixturesJdbc()
@@ -102,7 +92,7 @@ class TaskExecutionServiceOverdueIntegrationTest {
     @AfterAll
     fun cleanup(ctx: VertxTestContext) {
         try {
-            val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
+            val jdbcUrl = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
             DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
                 conn.autoCommit = false
                 val stmt = conn.createStatement()
@@ -140,7 +130,7 @@ class TaskExecutionServiceOverdueIntegrationTest {
         }
     }
 
-    private fun jdbcUrl() = "jdbc:postgresql://$host:$port/$TEST_DB"
+    private fun jdbcUrl() = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
 
     /**
      * 用 JDBC 创建 healthcare.patients 表和 fixture 数据。

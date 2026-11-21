@@ -11,7 +11,7 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty
 
 /**
- * 032 P4 每次数量（基础单位）PostgreSQL 集成测试（仅隔离 `aceso_test`）。
+ * 032 P4 每次数量（基础单位）PostgreSQL 集成测试（目标库由 -Dintegration.db.database 指定）。
  *
  * 覆盖「服务端推导本疗程应发总量」的真实链路（与生产 `apps/aceso/Main.kt` 装配等价）：
  *   开嘱（MEDICATION，`dose_quantity=1`、`frequency_code=QD`、`duration_days=3`，走真实校验与落库）
@@ -25,6 +25,7 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty
  * 每次数量 × 每日次数 × 疗程天数」这一侧。
  */
 @EnabledIfSystemProperty(named = "integration.db.host", matches = ".+")
+@EnabledIfSystemProperty(named = "integration.db.database", matches = ".+")
 class DoseQuantityIntegrationTest : AcesoDbIntegrationTestBase() {
 
     override val fixturePrefix = "dq-"

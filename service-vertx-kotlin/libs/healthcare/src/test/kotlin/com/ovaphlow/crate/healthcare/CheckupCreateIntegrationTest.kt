@@ -1,5 +1,6 @@
 package com.ovaphlow.crate.healthcare
 
+import com.ovaphlow.crate.database.testing.IntegrationDb
 import com.ovaphlow.crate.database.DatabaseConfig
 import io.vertx.core.Future
 import io.vertx.core.Vertx
@@ -26,7 +27,7 @@ import java.sql.DriverManager
 import java.util.concurrent.TimeUnit
 
 /**
- * 体检批次创建 / 名单补录的 PostgreSQL 集成测试（仅授权 aceso_test 运行）。
+ * 体检批次创建 / 名单补录的 PostgreSQL 集成测试（库名由 -Dintegration.db.database 指定，测试不建不删库）。
  *
  * 由来（2026-10-01 缺陷）：活动锚点优先级写成
  * `case encounter_type when :5 then :6 else :7 end`，其中 `then/else` 的 0/1
@@ -39,16 +40,16 @@ import java.util.concurrent.TimeUnit
  * 直接返回成功，跳过了参数编码，无法发现。本文件把口径钉在真库上。
  *
  * fixture 统一 `hci-` 前缀 + 专属业务年，按依赖逆序清理，前后残差为零；
- * 只操作既有 aceso_test，绝不 DROP/CREATE 数据库、绝不触碰非 `hci-` 前缀数据。
+ * 只操作既有库，绝不 DROP/CREATE 数据库、绝不触碰非 `hci-` 前缀数据。
  * 通过 `-Dintegration.db.*` 启用；默认运行被跳过。
  */
 @ExtendWith(VertxExtension::class)
 @EnabledIfSystemProperty(named = "integration.db.host", matches = ".+")
+@EnabledIfSystemProperty(named = "integration.db.database", matches = ".+")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class CheckupCreateIntegrationTest {
 
     companion object {
-        private const val TEST_DB = "aceso_test"
         private const val FIXTURE_PREFIX = "hci-"
 
         /** 专属业务年：`uq_health_checkups_year` 全局唯一，固定年份避免与任何数据抢号 */
@@ -75,7 +76,7 @@ class CheckupCreateIntegrationTest {
     private lateinit var password: String
     private lateinit var pool: Pool
 
-    private fun jdbcUrl(): String = "jdbc:postgresql://$host:$port/$TEST_DB"
+    private fun jdbcUrl(): String = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
 
     @BeforeAll
     fun setup(vertx: Vertx, ctx: VertxTestContext) {
@@ -87,13 +88,12 @@ class CheckupCreateIntegrationTest {
         Assumptions.assumeTrue(password.isNotBlank(), "integration test skipped: 需要 PITCHFORK_DB_PASSWORD 才会运行")
 
         try {
-            check(port == "55432" || port == "5432") { "integration test must target the authorized aceso_test port" }
             val dbConfig = JsonObject()
                 .put("host", host)
                 .put("port", port.toInt())
-                .put("database", TEST_DB)
+                .put("database", IntegrationDb.database())
                 .put("user", user)
-            DatabaseConfig.migrate(dbConfig)
+            IntegrationDb.migrateIfRequested(dbConfig)
             pool = DatabaseConfig.createPool(vertx, dbConfig)
             ctx.completeNow()
         } catch (e: Exception) {

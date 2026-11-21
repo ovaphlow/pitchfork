@@ -5,8 +5,8 @@
 # 用法：
 #   cd service-vertx-kotlin && ./scripts/aceso-test.sh
 #
-# 它会自动完成：取密码 → 找到或拉起测试 PostgreSQL → 重置 aceso_test →
-# 跑 :libs:healthcare:test 与 :apps:aceso:test（顺序是硬约束：先 healthcare、后 aceso）→ 收摊（默认停掉自己起的容器）。
+# 它会自动完成：取密码 → 找到或拉起 PostgreSQL →（库不存在才）建库 →
+# 一次 gradle 调用跑 :libs:healthcare:test 与 :apps:aceso:test → 收摊（默认停掉自己起的容器）。
 #
 # 生命周期（2026-09-29 仓库策略，见根 AGENTS.md「服务与资源生命周期」）：
 #   - 开发服务（Aceso API 8422 / UI 4324 / Identity 8420 / Nexus 8421 / 开发库 5432）
@@ -14,7 +14,7 @@
 #   - 测试库容器（pitchfork-aceso-test-db，端口 55432）属于「测试资源」，可以由
 #     agent/脚本用 -d 后台启动；但本脚本在退出时（含失败与 Ctrl+C）必定 down 掉
 #     自己启动的那个，并打印 `podman ps` 证据确认已消失，绝不跨会话留存。
-#   - `--port 5432` 只借用用户已启动的开发库容器来放 aceso_test，脚本不会停它。
+#   - `--port 5432 --database <库名>` 借用用户已启动的实例；脚本不删库、不停它。
 #   - `--keep` 会显式警告容器仍在运行并给出收尾命令，不静默遗留。
 #   - 收摊如实：`down` 失败 / 容器仍在 / 端口仍监听时，只打印「收摊未成功」+ 残留资源
 #     + 人工清理命令，绝不打印成功措辞；收摊未成功而测试本身通过时，脚本以 exit 3 结束
@@ -36,13 +36,14 @@
 #     gradle 之前检测并（必要时）chmod +x，且把这件事打印出来，不静默、不掩盖真实错误。
 #
 # 安全性：
-#   - 只允许操作名为 aceso_test 的库（ACESO_TEST_DB 覆盖后仍会被校验）；绝不连接 aceso 业务库。
+#   - 库名必须显式给出（一次性容器除外）：--database，或环境变量 ACESO_DB_NAME。
+#   - 绝不 DROP DATABASE；已有库只增量迁移。
 #   - 密码只从环境变量或 apps/aceso/.env 读取，绝不回显到 stdout / 日志。
 #   - 密码通过环境变量传给 Gradle，不进入命令行参数。
 #
-# 与 scripts/aceso-integration-tests.sh 的关系：后者是旧的窄口径入口（只跑 2 个
-# Healthcare 类、要求手动 export 密码、默认端口 55432）；本脚本是推荐入口，覆盖
-# 两个模块的全部测试类。详见 docs/aceso-test-database.md。
+# 旧的 scripts/aceso-integration-tests.sh（DROP/CREATE 窄口径入口）已于 2026-11-21 删除：
+# 它依赖「每次重置库」的模型，与本仓库现行口径（不删库、库名显式给出）冲突。
+# 唯一入口就是本脚本。详见 docs/aceso-test-database.md。
 
 set -euo pipefail
 
@@ -54,7 +55,7 @@ ENV_FILE="$BACKEND_DIR/apps/aceso/.env"
 
 # ---- 常量 ---------------------------------------------------------------
 
-DB_NAME="${ACESO_TEST_DB:-aceso_test}"
+DB_NAME="${ACESO_DB_NAME:-}"   # 空 = 待定：一次性容器用容器自带库，否则必须 --database
 DB_USER="${PITCHFORK_TEST_DB_USER:-ovaphlow}"
 DB_HOST="127.0.0.1"
 
@@ -80,7 +81,7 @@ PORT=""                 # 目标端口，探测或 --port 决定
 CONTAINER=""            # 用哪个容器里的 psql 重置库
 CONTAINER_CHOSEN_BY_USER=0
 KEEP=0
-SKIP_RESET="${ACESO_SKIP_DB_RESET:-0}"
+NO_MIGRATE="${ACESO_NO_MIGRATE:-0}"
 OFFLINE=0
 PASSTHROUGH_ARGS=()
 STARTED_CONTAINER=0
@@ -105,38 +106,36 @@ aceso-test.sh —— 一条命令跑 Aceso / Healthcare 数据库集成测试
   ./scripts/aceso-test.sh [选项] [-- <额外的 gradlew 参数>]
 
 选项：
-  --port <55432|5432>    指定测试库端口，跳过自动探测。
-                         55432 = 测试专用容器（默认，容器名 pitchfork-aceso-test-db）
-                         5432  = 开发库端口所在的容器（容器名 pitchfork-aceso-db），
-                                 仍只操作 aceso_test，不碰 aceso 业务库。
-  --container <name>     指定用于执行 psql / pg_isready 的容器名（覆盖上面的默认值）。
+  --database <name>      目标库名。**不给就不猜**：
+                           - 由本脚本自己启动一次性容器时，缺省用容器自带的 aceso_test；
+                           - 指向既有实例（--port 5432 / --container ...）时必须显式给出。
+  --port <55432|5432>    目标端口，跳过自动探测（55432 = 本脚本的一次性容器，5432 = 既有实例）。
+  --container <name>     指定执行 psql / pg_isready 的容器名（覆盖上面的默认值）。
+  --no-migrate           不执行 Flyway（-Dintegration.db.migrate=false）：只复用既有 schema。
+                         指向既有库、又不想让测试推进迁移时用它。
   --keep                 跑完保留容器，方便下次更快（下次若端口已通会自动复用）。
-                         注意：保留的容器必须由你在本轮结束前收掉，不得跨会话存活；
-                         脚本会提示收尾命令。
-  --skip-reset           不执行 DROP/CREATE aceso_test（等价于 ACESO_SKIP_DB_RESET=1）。
-  --offline              给 gradlew 加 --offline（依赖已缓存时可加速、避免联网）。
+                         注意：保留的容器必须由你在本轮结束前收掉，不得跨会话存活。
+  --offline              给 gradlew 加 --offline。
   -h, --help             显示本帮助。
 
-执行顺序（硬约束，实测依据）：
-  先 :libs:healthcare:test，再 :apps:aceso:test。
-  原因是 :apps:aceso 的 testRuntimeClasspath 是全集（database / common / inventories /
-  nursing / pharmacy / healthcare / dining），先跑它会把 dining 段迁移 V600 铺进库；
-  而 :libs:healthcare 的 classpath 不含 dining，它再做 Flyway validate 时会直接失败：
-  "Detected applied migration not resolved locally: 600"。
-  反过来（healthcare 先、apps 后）不会出问题：healthcare 只铺自己那套子集迁移，apps 随后
-  解析的是超集，不存在「已应用但解析不到」。
-  兜底的 schema 预检（public.stocks）只在「前置 gradle 成功」且 --skip-reset（沿用上一轮
-  库内容）时才跑；默认流程刚重置过库，public.stocks 必然不存在，此时预检无意义因而跳过。
-  ⚠️ 若前置 gradle 以非 0 退出，一律跳过预检并打印「前置 gradle 未成功（exit N），schema
-  预检无意义」，也不把失败归因成 classpath 问题；真实原因保留在 gradle 的原始输出里。
+数据库生命周期（2026-11-21 起）：
+  测试与脚本**都不再 DROP / CREATE 数据库**。目标库只在「不存在」时被 CREATE 一次，
+  已有内容一律保留；数据隔离靠测试自身的 fixture 前缀 + 清理 + 残差断言。
+  因此同一台实例上的任意库都能跑：一次性 tmpfs 容器、本机开发库、CI 的服务库。
+  ⚠️ 指向既有库时默认仍会执行 Flyway migrate（幂等，但会把「待应用迁移」推到该库）；
+     --no-migrate 用于只读 schema、不动迁移。
 
-容器项目隔离（2026-09-29 险情修复）：
+Flyway 冲突（已解决，不再是执行顺序约束）：
+  DatabaseConfig.migrate 配了 baselineOnMigrate + ignoreMigrationPatterns("*:missing","*:ignored")
+  + outOfOrder(true)，各模块号段（V2xx/V3xx/V4xx/V5xx/V6xx）共享一个 schema history 也能共存。
+  历史上要求的「先 :libs:healthcare:test、再 :apps:aceso:test」因此不再必要；
+  本脚本改为一次 gradle 调用同时跑两个模块。
+
+容器项目隔离（2026-09-29 险情修复，保持不变）：
   测试 compose 固定在项目 pitchfork-aceso-test（compose.test.yaml 顶层 name:，
   每次调用还显式带 -p pitchfork-aceso-test，另有 COMPOSE_PROJECT_NAME 兜底）。
   脚本在执行任何 down 之前会断言项目名等于 pitchfork-aceso-test，不等就拒绝执行并报错退出；
-  绝不使用 -f/--force，也不使用 remove-orphans。原因是 compose.test.yaml 与开发库
-  compose.yaml 同在 apps/aceso，项目名一旦退回目录名 'aceso'，测试的 down 就会删掉
-  用户开发库 pitchfork-aceso-db 所在的 pod 与网络（详见 compose.test.yaml 顶部注释）。
+  绝不使用 -f/--force，也不使用 remove-orphans。
 
 密码来源（按顺序，取到即用，绝不回显）：
   1) 环境变量 PITCHFORK_DB_PASSWORD
@@ -144,11 +143,11 @@ aceso-test.sh —— 一条命令跑 Aceso / Healthcare 数据库集成测试
   3) apps/aceso/.env 里的 PITCHFORK_DB_PASSWORD
 
 示例：
-  # 最常用：.env 里已填好密码，直接跑
+  # 最常用：用脚本自己起的一次性容器 + 容器自带库 aceso_test
   ./scripts/aceso-test.sh
 
-  # 用开发库端口上的容器，只重置 aceso_test
-  ./scripts/aceso-test.sh --port 5432
+  # 直接对已有实例跑（库名必须给），且不推进迁移
+  ./scripts/aceso-test.sh --port 5432 --database aceso --no-migrate
 
   # 保持容器不销毁
   ./scripts/aceso-test.sh --keep
@@ -175,8 +174,13 @@ while [[ $# -gt 0 ]]; do
             KEEP=1
             shift
             ;;
-        --skip-reset)
-            SKIP_RESET=1
+        --database)
+            [[ $# -ge 2 ]] || { fail "--database 需要一个库名"; exit 2; }
+            DB_NAME="$2"
+            shift 2
+            ;;
+        --no-migrate)
+            NO_MIGRATE=1
             shift
             ;;
         --offline)
@@ -207,12 +211,18 @@ if [[ -n "$PORT" && "$PORT" != "55432" && "$PORT" != "5432" ]]; then
     exit 2
 fi
 
-# ---- 护栏：只允许 aceso_test -------------------------------------------
+# ---- 护栏：不猜库名、不删库 ---------------------------------------------
+# 2026-11-21 之前：库名硬编码 aceso_test，且非 aceso_test 一律拒绝。
+# 现在：库名由 --database / ACESO_DB_NAME 决定；缺省只在「本脚本自己启动一次性容器」时
+# 取容器自带库。指向既有实例却不给库名时直接报错，避免猜错库。
 
-if [[ "$DB_NAME" != "aceso_test" ]]; then
-    fail "拒绝执行：只能操作 aceso_test，当前为 '$DB_NAME'（ACESO_TEST_DB）。"
-    echo "  本脚本不会连接 aceso 业务库或共享开发库。" >&2
-    exit 2
+if [[ -n "$DB_NAME" ]]; then
+    case "$DB_NAME" in
+        *[!A-Za-z0-9_]*)
+            fail "库名只允许字母数字下划线：'$DB_NAME'"
+            exit 2
+            ;;
+    esac
 fi
 
 # ---- 1) 取密码 ----------------------------------------------------------
@@ -626,7 +636,7 @@ else
      然后重跑本脚本；脚本会自动复用 127.0.0.1:$TEST_PORT。
   2) 使用开发库端口所在容器（请先确认该容器在跑）：
        ./scripts/aceso-test.sh --port $DEV_PORT
-     脚本仍只 DROP/CREATE $DB_NAME，不会碰 aceso 业务库。
+     库名用 --database 指定；脚本只在库不存在时 CREATE，绝不 DROP。
 
 脚本不会静默降级到其它端口或跳过测试。
 EOF
@@ -643,10 +653,10 @@ if [[ -n "$RUNTIME" ]] && container_exists "$CONTAINER"; then
 fi
 
 if [[ "$CONTAINER_PSQL" == "0" && "$HOST_PSQL" == "0" ]]; then
-    fail "无法重置 $DB_NAME：容器 '$CONTAINER' 不存在/不可用，宿主机也没有 psql。"
+    fail "无法确认库 $DB_NAME 是否存在：容器 '$CONTAINER' 不可用，宿主机也没有 psql。"
     cat >&2 <<EOF
 注意：127.0.0.1:$PORT 上确实有服务在监听，但本脚本既 exec 不进它的容器，
-      宿主机也没有 psql，所以没有安全的办法 DROP/CREATE $DB_NAME。
+      宿主机也没有 psql，因此无法查询/创建目标库。
 常见原因：
   a) 当前 shell 里容器运行时不可用（例如 podman 无权限写 runroot，或用了 rootful 容器而
      当前是非 root 的 rootless podman）；
@@ -657,10 +667,8 @@ if [[ "$CONTAINER_PSQL" == "0" && "$HOST_PSQL" == "0" ]]; then
        ./scripts/aceso-test.sh --container <容器名>
   2) 让容器运行时在当前 shell 可用后重跑（脚本会自动启动 $TEST_CONTAINER）：
        ./scripts/aceso-test.sh
-  3) 自己准备可用的测试库，再手工重置：
-       psql -h $DB_HOST -p $PORT -U $DB_USER -d postgres \\
-         -c "DROP DATABASE IF EXISTS $DB_NAME WITH (FORCE);" -c "CREATE DATABASE $DB_NAME;"
-     然后 ./scripts/aceso-test.sh --skip-reset
+  3) 库里已经齐备、只是想跑测试（脚本不会删库）：
+       ./scripts/aceso-test.sh --database <库名> --no-migrate
 EOF
     exit 1
 fi
@@ -688,7 +696,29 @@ EOF
     info "密码校验通过。"
 fi
 
-# ---- 3) 重置库（只用 aceso_test） --------------------------------------
+# ---- 2b) 解析目标库名（不猜） -------------------------------------------
+
+if [[ -z "$DB_NAME" ]]; then
+    if [[ "$PORT" == "$TEST_PORT" && "$CONTAINER" == "$TEST_CONTAINER" ]]; then
+        DB_NAME="aceso_test"
+        info "未指定 --database：使用一次性测试容器自带的库 $DB_NAME。"
+        info "  指向既有库时请显式 --database <库名>（脚本不猜你的库）。"
+    else
+        fail "缺少 --database <库名>：目标看似是既有实例（$DB_HOST:$PORT，容器 '$CONTAINER'），脚本不猜库名。"
+        cat >&2 <<EOF
+请显式给出库名，例如：
+  ./scripts/aceso-test.sh --port $PORT --database aceso --no-migrate
+
+说明：
+  - 脚本不再硬编码 aceso_test，也不会替你决定该连哪个库；
+  - 已有库一律保留（不 DROP/CREATE）；只有库不存在时才会 CREATE 一次；
+  - --no-migrate 表示不执行 Flyway，只复用既有 schema。
+EOF
+        exit 2
+    fi
+fi
+
+# ---- 3) 确认目标库存在（只 CREATE，不 DROP） ---------------------------
 
 psql_admin() {
     if [[ "$CONTAINER_PSQL" == "1" ]]; then
@@ -698,42 +728,34 @@ psql_admin() {
     fi
 }
 
-reset_db() {
-    if [[ "$SKIP_RESET" == "1" ]]; then
-        info "SKIP_RESET / --skip-reset：保留现有 $DB_NAME 内容，不重置。"
-        return 0
-    fi
-    info "重置独立测试库（只操作 $DB_NAME）：DROP DATABASE IF EXISTS $DB_NAME WITH (FORCE); CREATE DATABASE $DB_NAME;"
+psql_admin_scalar() {
+    local sql="$1"
     if [[ "$CONTAINER_PSQL" == "1" ]]; then
-        info "  通过容器 '$CONTAINER' 内的 psql 执行（宿主机无需安装 psql）。"
-        info "  等价命令：$RUNTIME exec $CONTAINER psql -U $DB_USER -d postgres -v ON_ERROR_STOP=1 -c '<下一条>'"
-        "$RUNTIME" exec "$CONTAINER" psql -U "$DB_USER" -d postgres -v ON_ERROR_STOP=1 \
-            -c "DROP DATABASE IF EXISTS $DB_NAME WITH (FORCE);" || {
-                fail "DROP DATABASE $DB_NAME 失败。请确认容器 '$CONTAINER' 正常、$DB_USER 有权限。"
-                exit 1
-            }
-        "$RUNTIME" exec "$CONTAINER" psql -U "$DB_USER" -d postgres -v ON_ERROR_STOP=1 \
-            -c "CREATE DATABASE $DB_NAME;" || {
-                fail "CREATE DATABASE $DB_NAME 失败。请检查容器日志：$RUNTIME logs $CONTAINER"
-                exit 1
-            }
+        "$RUNTIME" exec "$CONTAINER" psql -U "$DB_USER" -d postgres -tAc "$sql" 2>/dev/null
     else
-        info "  容器不可用，使用宿主机 psql（$DB_HOST:$PORT）。"
-        psql_admin -c "DROP DATABASE IF EXISTS $DB_NAME WITH (FORCE);" || {
-            fail "DROP DATABASE $DB_NAME 失败（宿主机 psql，$DB_HOST:$PORT）。"
-            exit 1
-        }
-        psql_admin -c "CREATE DATABASE $DB_NAME;" || {
-            fail "CREATE DATABASE $DB_NAME 失败（宿主机 psql，$DB_HOST:$PORT）。"
-            exit 1
-        }
+        PGPASSWORD="$PASSWORD" psql -h "$DB_HOST" -p "$PORT" -U "$DB_USER" -d postgres -tAc "$sql" 2>/dev/null
     fi
-    info "重置完成。"
 }
 
-reset_db
+# 只在库不存在时建一次；已有库一律保留（2026-11-21：不再 DROP DATABASE）。
+ensure_database_exists() {
+    local exists
+    exists="$(psql_admin_scalar "SELECT 1 FROM pg_database WHERE datname = '$DB_NAME'" | tr -d '[:space:]')"
+    if [[ "$exists" == "1" ]]; then
+        info "目标库 $DB_NAME 已存在：保留现有内容（不 DROP、不重建）。"
+        return 0
+    fi
+    info "目标库 $DB_NAME 不存在：仅创建，不 DROP。"
+    psql_admin -c "CREATE DATABASE $DB_NAME;" || {
+        fail "CREATE DATABASE $DB_NAME 失败。请检查容器/实例日志与 $DB_USER 的建库权限。"
+        exit 1
+    }
+    info "创建完成。"
+}
 
-# ---- 4) 跑测试 ----------------------------------------------------------
+ensure_database_exists
+
+# ---- 4) 跑测试（单次 gradle 调用；顺序不再有硬约束） --------------------
 
 GRADLE_DB_ARGS=(
     "-Dintegration.db.host=$DB_HOST"
@@ -741,18 +763,15 @@ GRADLE_DB_ARGS=(
     "-Dintegration.db.database=$DB_NAME"
     "-Dintegration.db.user=$DB_USER"
 )
+# 指向既有库、不想让测试推进迁移时用（不动 schema，只复用既有表）
+[[ "$NO_MIGRATE" == "1" ]] && GRADLE_DB_ARGS+=("-Dintegration.db.migrate=false")
 
 GRADLEW="$BACKEND_DIR/gradlew"
+GRADLE_TASKS=(":libs:healthcare:test" ":apps:aceso:test")
 
 # gradlew 的可执行位：git index 里 gradlew 登记为 100644，且本仓库 core.fileMode=false，
 # 所以主检出里的 +x 是用户手工 chmod 的，任何新克隆 / worktree 都不会带上它，直接
 # ./gradlew 会得到 "env: ./gradlew: 权限不够"（126/127），gradle 根本没跑。
-# 取舍：这里选「检测 + chmod +x 并打印」，而不是「sh ./gradlew」。
-#   - chmod 修的是根因，且与脚本里打印的 ./gradlew 完全一致（可直接复制）；
-#   - 本仓库 core.fileMode=false，chmod 不会污染 git 状态或产生 diff 噪音；
-#   - 若改用 sh ./gradlew，打印出来的命令就必须改成 sh ./gradlew，否则「实际执行的
-#     完整命令」又是一句假话；而 /bin/sh 未必是 bash，gradlew 官方只保证 bash 语义。
-# chmod 失败会明确报错（不静默、不掩盖），因为那才是后面 gradle 失败的真实原因。
 ensure_gradlew_executable() {
     if [[ ! -f "$GRADLEW" ]]; then
         fail "找不到 gradle wrapper：$GRADLEW"
@@ -764,159 +783,65 @@ ensure_gradlew_executable() {
     warn "gradlew 缺少可执行位（git index 里是 100644，且 core.fileMode=false，克隆/worktree 不会带上 +x）。"
     info "  正在修复：chmod +x $GRADLEW"
     if ! chmod +x "$GRADLEW"; then
-        fail "chmod +x $GRADLEW 失败（权限不足或只读文件系统）——这就是接下来 gradle 失败的真实原因，不是 classpath 问题。"
-        cat >&2 <<EOF
-请先修好再重跑：
-  chmod +x $GRADLEW
-仓库侧（推荐，交给维护者）：
-  git update-index --chmod=+x service-vertx-kotlin/gradlew
-EOF
+        fail "chmod +x $GRADLEW 失败（权限不足或只读文件系统）——这就是接下来 gradle 失败的真实原因。"
         exit 1
     fi
-    if [[ ! -x "$GRADLEW" ]]; then
-        fail "chmod 已执行但 $GRADLEW 仍不可执行（请检查挂载选项或 ACL）。"
-        exit 1
-    fi
-    info "  已修复 $GRADLEW 的可执行位（只影响本工作树；仓库侧修复为 git update-index --chmod=+x）。"
+    info "  已修复 $GRADLEW 的可执行位（只影响本工作树）。"
 }
 
-run_module_tests() {
-    local task="$1"
+run_tests() {
     local extra=()
     [[ "$OFFLINE" == "1" ]] && extra+=(--offline)
     [[ ${#PASSTHROUGH_ARGS[@]} -gt 0 ]] && extra+=("${PASSTHROUGH_ARGS[@]}")
 
     ensure_gradlew_executable
 
-    local rendered="PITCHFORK_DB_PASSWORD=<hidden> ./gradlew $task --rerun ${GRADLE_BASE_ARGS[*]} ${GRADLE_DB_ARGS[*]}"
+    local rendered="PITCHFORK_DB_PASSWORD=<hidden> ./gradlew ${GRADLE_TASKS[*]} --rerun ${GRADLE_BASE_ARGS[*]} ${GRADLE_DB_ARGS[*]}"
     [[ ${#extra[@]} -gt 0 ]] && rendered+=" ${extra[*]}"
 
     info "---------------------------------------------------------------"
-    info "运行 $task"
+    info "运行 ${GRADLE_TASKS[*]}"
     printf '[aceso-test] 实际执行的完整命令（密码已隐藏）：\n  %s\n' "$rendered"
+    [[ "$NO_MIGRATE" == "1" ]] && info "本次不执行 Flyway（-Dintegration.db.migrate=false）"
     info "---------------------------------------------------------------"
 
     local rc=0
     (
         cd "$BACKEND_DIR"
-        env "PITCHFORK_DB_PASSWORD=$PASSWORD" ./gradlew "$task" --rerun \
+        env "PITCHFORK_DB_PASSWORD=$PASSWORD" ./gradlew "${GRADLE_TASKS[@]}" --rerun \
             "${GRADLE_BASE_ARGS[@]}" "${GRADLE_DB_ARGS[@]}" ${extra[@]+"${extra[@]}"}
     ) || rc=$?
 
     if [[ "$rc" == "126" || "$rc" == "127" ]]; then
-        warn "$task 的 gradle 根本没跑起来（exit $rc，通常是 wrapper 不可执行或 java 不在 PATH）；这不是测试失败，也不是 classpath 问题。"
+        warn "gradle 根本没跑起来（exit $rc，通常是 wrapper 不可执行或 java 不在 PATH）；这不是测试失败。"
         warn "  检查：ls -l $GRADLEW（应有 x 位）；java -version"
     fi
     return "$rc"
 }
 
-# 在目标库 aceso_test 里执行一条标量查询（用于跑 healthcare 前的防御性 schema 检查）。
-db_scalar() {
-    local sql="$1"
-    if [[ "$CONTAINER_PSQL" == "1" ]]; then
-        "$RUNTIME" exec "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAc "$sql" 2>/dev/null
-    else
-        PGPASSWORD="$PASSWORD" psql -h "$DB_HOST" -p "$PORT" -U "$DB_USER" -d "$DB_NAME" -tAc "$sql" 2>/dev/null
-    fi
-}
-
-# 防御性检查（兜底，只用于「不重置库、沿用上一轮内容」的 --skip-reset 情形）：
-# :libs:healthcare:test 的 MedicalOrderIntegrationTest 会往 public.materials /
-# public.lots / public.stocks 写 fixture，这三张表由 libs/inventories 的迁移 V200/V201
-# 创建。正常情况下 healthcare 自己的 Flyway migrate 就会建出来（依赖链
-# healthcare → nursing → inventories，nursing 用 api 暴露 inventories，
-# DatabaseConfig.migrate 扫 classpath:db/migration）；一旦缺失，说明 inventories 的
-# 迁移没进本次 classpath，此时提前报错好过让用户面对一堆
-# "relation public.stocks does not exist"。
-# 注意：刚 DROP/CREATE 过的空库（默认流程）里 public.stocks 必然不存在，此时调用本函数
-# 一律会失败 —— 所以默认流程不调用它，只打印说明；顺序（healthcare 先）才是根因修复，
-# 本预检只是兜底，不能替代顺序。
-require_healthcare_schema() {
-    local stocks
-    stocks="$(db_scalar "SELECT to_regclass('public.stocks') IS NOT NULL" | tr -d '[:space:]')"
-    if [[ "$stocks" == "t" ]]; then
-        info "schema 预检：$DB_NAME 里 public.stocks 存在 ✅"
-        return 0
-    fi
-    fail "承接上一轮内容的 $DB_NAME 里没有 public.stocks（预检结果：'$stocks'，空表示连查询本身都没成功）。"
-    cat >&2 <<EOF
-原因：:libs:healthcare:test 的 MedicalOrderIntegrationTest 会 INSERT 到
-      public.materials / public.lots / public.stocks，这些表来自 libs/inventories
-      的迁移 V200__create_inventory_tables.sql / V201__add_stock_operations.sql。
-      若它们不在本次运行的 classpath 上，healthcare 的 migrate 就建不出这些表。
-
-正常情况：healthcare 依赖链是 healthcare → nursing → inventories（nursing 用 api 暴露），
-      本预检是在 --skip-reset 下做兜底体检（默认流程会先重置库，不会走这里）。
-
-请任选一种出路：
-  1) 先确认 libs/nursing/build.gradle.kts 里仍是对 libs:inventories 的 api 依赖；
-  2) 手工看一眼库：psql -h $DB_HOST -p $PORT -U $DB_USER -d $DB_NAME -c "\\dt public.*"
-  3) 只跑 aceso 侧：./scripts/aceso-test.sh -- <给 gradlew 的额外参数>，
-     或直接 ./gradlew :apps:aceso:test -Dintegration.db.host=... -Dintegration.db.port=...
-EOF
-    exit 1
-}
-
-# ---- 4b) 执行顺序：先 :libs:healthcare:test，再 :apps:aceso:test --------------
-# 顺序是**硬约束**，不是偏好（2026-09-29 调度者在干净库上单写入者实测）：
-#   把 5432 上的 aceso_test 重置为空库，按「apps 先 → healthcare 后」跑：
-#     - :apps:aceso:test 通过（它的 classpath 含 dining，把 V600 等 dining 段迁移铺进了库）；
-#     - 随后 :libs:healthcare:test 挂在
-#         org.flywaydb.core.api.exception.FlywayValidateException:
-#         Validate failed: Migrations have failed validation —
-#         Detected applied migration not resolved locally: 600
-#   V600 是 Aceso dining 段；:libs:healthcare 的 classpath 不含 dining，所以 Flyway 校验时
-#   看到「库里已应用、本地解析不到」→ 直接失败。也就是说 :apps:aceso 的 classpath 是全集
-#   （含 dining/pharmacy），先跑它会污染 healthcare 的校验。
-#   反过来（healthcare 先、apps 后）不会出问题：healthcare 只铺它自己那套子集迁移；apps
-#   随后解析的是**超集**，不存在「已应用但解析不到」。
-# 其它相关事实：
-#   - healthcare 自身的 classpath 已覆盖 public.stocks（healthcare → nursing → inventories，
-#     nursing 用 api 暴露 inventories），所以它先跑能自己把表建起来；
-#   - healthcare 里的 ElderlyDeathIntegrationTest / NursingIncidentHandoverIntegrationTest
-#     会 DROP/CREATE aceso_test，因此它们之后再有模块依赖库内容是不可靠的，apps 在后正好
-#     由它自己的 migrate 重新铺满；
-#   - require_healthcare_schema 只是兜底，不能替代顺序：默认流程刚重置过库，
-#     public.stocks 必然不存在，所以预检只在「前置 gradle 成功 且 --skip-reset」时才跑。
-RC_ACESO=0
-RC_HEALTHCARE=0
-run_module_tests ":libs:healthcare:test" || RC_HEALTHCARE=$?
-
-if [[ "$RC_HEALTHCARE" != "0" ]]; then
-    warn "前置 gradle 未成功（exit $RC_HEALTHCARE），schema 预检无意义：跳过 public.stocks 预检。"
-    info "  真实原因保留在上面 :libs:healthcare:test 的原始输出里，本脚本不做任何 classpath 归因。"
-    info "  :apps:aceso:test 仍会照跑一遍；若它同样失败，请以第一段日志为准。"
-elif [[ "$SKIP_RESET" == "1" ]]; then
-    # 只有「沿用上一轮库内容」时，public.stocks 才可能有意义地作为兜底体检。
-    require_healthcare_schema
-else
-    info "本轮刚重置过 $DB_NAME：public.stocks 必然还不存在（由 healthcare 自己的 Flyway migrate 建），故不做 DB 预检。"
-    info "  若 healthcare 之后真报 relation public.stocks does not exist，那才是 classpath 里没有 inventories 迁移（V200/V201）。"
-fi
-
-run_module_tests ":apps:aceso:test" || RC_ACESO=$?
+RC=0
+run_tests || RC=$?
 
 # ---- 5) 汇总 ------------------------------------------------------------
 
 info "================ 结果汇总 ================"
-if [[ "$RC_HEALTHCARE" == "0" ]]; then
-    info ":libs:healthcare:test  通过（exit 0）"
+if [[ "$RC" == "0" ]]; then
+    info ":libs:healthcare:test + :apps:aceso:test  全部通过（exit 0）"
 else
-    warn ":libs:healthcare:test  失败（exit $RC_HEALTHCARE）"
+    warn ":libs:healthcare:test + :apps:aceso:test  有失败（exit $RC）"
+    info "  两个 task 在同一次 gradle 调用里跑，失败信息已在上面完整输出。"
 fi
-if [[ "$RC_ACESO" == "0" ]]; then
-    info ":apps:aceso:test       通过（exit 0）"
+info "目标库：$DB_NAME @ $DB_HOST:$PORT（用户 $DB_USER）"
+info "  - 不 DROP/CREATE 已存在的库；数据隔离靠测试自身的 fixture 前缀 + 清理 + 残差断言"
+if [[ "$NO_MIGRATE" == "1" ]]; then
+    info "  - Flyway：未执行（-Dintegration.db.migrate=false，复用既有 schema）"
 else
-    warn ":apps:aceso:test       失败（exit $RC_ACESO）"
+    info "  - Flyway：已执行 migrate（baselineOnMigrate + ignore missing/ignored + outOfOrder）"
 fi
-info "执行顺序（硬约束）：:libs:healthcare:test（子集 classpath）→ :apps:aceso:test（全集：含 dining/pharmacy）"
-info "  原因：apps 的 classpath 含 dining 段（V600）；若它先跑，healthcare 的 Flyway validate 会报"
-info "        'Detected applied migration not resolved locally: 600'（healthcare 的 classpath 不含 dining）。"
-info "测试库：$DB_NAME @ $DB_HOST:$PORT（用户 $DB_USER）"
 info "逐类 tests/failures/errors/skipped 见各模块 build/test-results/test/*.xml"
 info "========================================="
 
-if [[ "$RC_HEALTHCARE" != "0" || "$RC_ACESO" != "0" ]]; then
+if [[ "$RC" != "0" ]]; then
     exit 1
 fi
 exit 0

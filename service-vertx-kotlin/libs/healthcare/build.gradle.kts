@@ -12,6 +12,7 @@ dependencies {
     api(libs.vertx.web)
     api(libs.jooq)
     implementation(libs.slf4j.api)
+    testImplementation(testFixtures(project(":libs:database")))
     testImplementation(libs.junit.jupiter)
     testImplementation(libs.junit.platform.launcher)
     testImplementation(libs.mockk)

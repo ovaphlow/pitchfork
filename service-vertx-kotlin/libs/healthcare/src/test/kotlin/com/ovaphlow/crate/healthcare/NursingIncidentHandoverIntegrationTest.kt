@@ -1,5 +1,6 @@
 package com.ovaphlow.crate.healthcare
 
+import com.ovaphlow.crate.database.testing.IntegrationDb
 import com.ovaphlow.crate.database.DatabaseConfig
 import com.ovaphlow.crate.nursing.ConflictException
 import com.ovaphlow.crate.nursing.NursingIncidentService
@@ -40,23 +41,23 @@ import java.util.concurrent.TimeUnit
  * 因此本文件置于 `libs/healthcare/src/test`，包名不变，内容即 §7.2 项 1–3
  * 的真实事务验证。除本文件外不修改任何生产代码、Shared API、UI 或开发测试。
  *
- * 前置：独立、可销毁的 `aceso_test`（apps/aceso/compose.test.yaml，端口 55432）。
+ * 前置：已迁移的目标库（`-Dintegration.db.database`）；一次性实例可选，非必需。
  * 运行（仅本类）：
  *   cd service-vertx-kotlin
  *   PITCHFORK_DB_PASSWORD=pitchfork-test-only ./gradlew :libs:healthcare:test \
  *     -Dintegration.db.host=localhost -Dintegration.db.port=55432 \
- *     -Dintegration.db.database=aceso_test -Dintegration.db.user=ovaphlow \
+ *     -Dintegration.db.database=<库名> -Dintegration.db.user=ovaphlow \
  *     --tests "*NursingIncidentHandoverIntegrationTest" --rerun-tasks
  *
  * 清理：@AfterAll 按子表→父表删除 FIXTURE_PREFIX 残留；库本身由 compose down 销毁。
  */
 @ExtendWith(VertxExtension::class)
 @EnabledIfSystemProperty(named = "integration.db.host", matches = ".+")
+@EnabledIfSystemProperty(named = "integration.db.database", matches = ".+")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class NursingIncidentHandoverIntegrationTest {
 
     companion object {
-        private const val TEST_DB = "aceso_test"
         private const val FIXTURE_PREFIX = "iht-"
         private val businessToday: LocalDate = LocalDate.now(ZoneIds.SHANGHAI)
     }
@@ -77,7 +78,7 @@ class NursingIncidentHandoverIntegrationTest {
     private fun fixtureId(suffix: String): String = "${FIXTURE_PREFIX}$suffix"
 
     // ========================================================================
-    // 生命周期：DROP/CREATE aceso_test → Flyway 迁移 → fixture → 服务
+    // 生命周期：按开关执行 Flyway 迁移 → fixture → 服务（不 DROP/CREATE 库）
     // ========================================================================
 
     @BeforeAll
@@ -91,18 +92,13 @@ class NursingIncidentHandoverIntegrationTest {
 
         try {
             val rootUrl = "jdbc:postgresql://$host:$port/postgres"
-            DriverManager.getConnection(rootUrl, user, password).use { conn ->
-                conn.createStatement().execute("DROP DATABASE IF EXISTS $TEST_DB")
-                conn.createStatement().execute("CREATE DATABASE $TEST_DB")
-            }
-
             val dbConfig = JsonObject()
                 .put("host", host)
                 .put("port", port.toInt())
-                .put("database", TEST_DB)
+                .put("database", IntegrationDb.database())
                 .put("user", user)
             // nursing V400–V408 + healthcare V500–V507 全部按序应用；验证 V408 新表可迁移
-            DatabaseConfig.migrate(dbConfig)
+            IntegrationDb.migrateIfRequested(dbConfig)
             pool = DatabaseConfig.createPool(vertx, dbConfig)
 
             setupFixturesJdbc()
@@ -119,7 +115,7 @@ class NursingIncidentHandoverIntegrationTest {
     @AfterAll
     fun cleanup(ctx: VertxTestContext) {
         try {
-            val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
+            val jdbcUrl = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
             DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
                 val stmt = conn.createStatement()
                 // 子表 → 父表顺序清理；服务创建的行是 ULID 主键，必须按引用（period/encounter/idempotency_key）删除
@@ -140,7 +136,7 @@ class NursingIncidentHandoverIntegrationTest {
         ctx.completeNow()
     }
 
-    private fun jdbcUrl() = "jdbc:postgresql://$host:$port/$TEST_DB"
+    private fun jdbcUrl() = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
 
     // ========================================================================
     // Fixture：两名长者；同一长者两次入住（活动/终态）；另一单元活动入住；

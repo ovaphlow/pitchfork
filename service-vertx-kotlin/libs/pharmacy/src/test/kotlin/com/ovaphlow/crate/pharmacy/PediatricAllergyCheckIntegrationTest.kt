@@ -1,5 +1,6 @@
 package com.ovaphlow.crate.pharmacy
 
+import com.ovaphlow.crate.database.testing.IntegrationDb
 import com.ovaphlow.crate.database.DatabaseConfig
 import io.vertx.core.Future
 import io.vertx.core.Vertx
@@ -47,11 +48,12 @@ import java.util.concurrent.atomic.AtomicInteger
  * 端口注入：本库内定义 [DrugAllergyCheckPort] / [MedicalOrderReader] / [InventoryOutboundPort]，
  * 由测试注入桩（真实适配器在 Aceso `Main.kt` 装配）。
  *
- * 运行方式（自包含：类自身重置 `aceso_test`，只应用 pharmacy 段 V300–V304）：
+ * 运行方式（-Dintegration.db.database 指定库；类自身不建不删库，只应用 pharmacy 段 V300–V303）：
  * ```
  * cd service-vertx-kotlin
- * export PITCHFORK_DB_PASSWORD=<hidden> PITCHFORK_TEST_DB_HOST=127.0.0.1 \
- *        PITCHFORK_TEST_DB_PORT=55432 PITCHFORK_TEST_DB_DATABASE=aceso_test PITCHFORK_TEST_DB_USER=ovaphlow
+ * export PITCHFORK_DB_PASSWORD=<hidden>
+ * ./gradlew :libs:pharmacy:test -Dintegration.db.host=127.0.0.1 -Dintegration.db.port=5432 \
+ *   -Dintegration.db.database=<库名> -Dintegration.db.user=ovaphlow
  * ./gradlew :libs:pharmacy:test --rerun --tests '*PediatricAllergyCheckIntegrationTest' \
  *   --no-daemon -Pkotlin.compiler.execution.strategy=in-process
  * ```
@@ -62,7 +64,6 @@ import java.util.concurrent.atomic.AtomicInteger
 class PediatricAllergyCheckIntegrationTest {
 
     companion object {
-        private const val TEST_DB = "aceso_test"
         private const val PREFIX = "qa054d3-"
         private val RUN: String = UUID.randomUUID().toString().replace("-", "").take(6)
 
@@ -74,15 +75,9 @@ class PediatricAllergyCheckIntegrationTest {
         private const val SEVERE = "严重"
         private const val MILD = "一般"
 
-        /**
-         * 真库门控：显式给出测试库 host 才运行（系统属性 `integration.db.host` 或环境变量
-         * `PITCHFORK_TEST_DB_HOST`）；`libs/pharmacy/build.gradle.kts` 不转发 `-D`，故以环境变量为主。
-         * **绝不回落到 5432 开发库。**
-         */
+        /** 真库门控：`-Dintegration.db.host` 与 `-Dintegration.db.database` 都给全才运行（无缺省、不猜库名）。 */
         @JvmStatic
-        fun integrationDbAvailable(): Boolean =
-            System.getProperty("integration.db.host")?.takeIf { it.isNotBlank() } != null ||
-                System.getenv("PITCHFORK_TEST_DB_HOST")?.takeIf { it.isNotBlank() } != null
+        fun integrationDbAvailable(): Boolean = IntegrationDb.isConfigured()
     }
 
     private lateinit var host: String
@@ -105,27 +100,22 @@ class PediatricAllergyCheckIntegrationTest {
 
     @BeforeAll
     fun setup(vertx: Vertx, ctx: VertxTestContext) {
-        host = System.getProperty("integration.db.host")?.takeIf { it.isNotBlank() }
-            ?: System.getenv("PITCHFORK_TEST_DB_HOST")?.takeIf { it.isNotBlank() } ?: "127.0.0.1"
-        port = System.getProperty("integration.db.port")?.takeIf { it.isNotBlank() }
-            ?: System.getenv("PITCHFORK_TEST_DB_PORT")?.takeIf { it.isNotBlank() } ?: "55432"
-        user = System.getProperty("integration.db.user")?.takeIf { it.isNotBlank() }
-            ?: System.getenv("PITCHFORK_TEST_DB_USER")?.takeIf { it.isNotBlank() } ?: "ovaphlow"
-        password = System.getenv("PITCHFORK_DB_PASSWORD") ?: ""
-
         Assumptions.assumeTrue(
-            password.isNotBlank(),
-            "integration test skipped: 需要 PITCHFORK_DB_PASSWORD 才会运行",
+            IntegrationDb.isConfigured(),
+            "integration test skipped: 需要 -Dintegration.db.host 与 -Dintegration.db.database 才会运行",
         )
+        host = IntegrationDb.host()
+        port = IntegrationDb.portString()
+        user = IntegrationDb.user()
+        password = IntegrationDb.password()
 
         try {
-            resetTestDb()
             val dbConfig = JsonObject()
                 .put("host", host)
                 .put("port", port.toInt())
-                .put("database", TEST_DB)
+                .put("database", IntegrationDb.database())
                 .put("user", user)
-            DatabaseConfig.migrate(dbConfig)
+            IntegrationDb.migrateIfRequested(dbConfig)
             createPeerSchema()
             pool = DatabaseConfig.createPool(vertx, dbConfig)
             client = vertx.createHttpClient()
@@ -469,16 +459,8 @@ class PediatricAllergyCheckIntegrationTest {
         )
     }
 
-    private fun resetTestDb() {
-        val rootUrl = "jdbc:postgresql://$host:$port/postgres"
-        DriverManager.getConnection(rootUrl, user, password).use { conn ->
-            conn.createStatement().execute("DROP DATABASE IF EXISTS $TEST_DB WITH (FORCE)")
-            conn.createStatement().execute("CREATE DATABASE $TEST_DB")
-        }
-    }
-
     private fun <T> jdbc(block: (Connection) -> T): T =
-        DriverManager.getConnection("jdbc:postgresql://$host:$port/$TEST_DB", user, password).use(block)
+        DriverManager.getConnection("jdbc:postgresql://$host:$port/$IntegrationDb.database()", user, password).use(block)
 
     private fun exec(sql: String) {
         jdbc { conn -> conn.createStatement().use { it.execute(sql) } }

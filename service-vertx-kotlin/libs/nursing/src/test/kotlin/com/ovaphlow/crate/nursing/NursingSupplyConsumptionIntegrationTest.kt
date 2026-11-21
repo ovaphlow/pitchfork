@@ -1,5 +1,6 @@
 package com.ovaphlow.crate.nursing
 
+import com.ovaphlow.crate.database.testing.IntegrationDb
 import com.ovaphlow.crate.database.DatabaseConfig
 import com.ovaphlow.crate.inventories.ConflictException as InventoryConflictException
 import com.ovaphlow.crate.inventories.InventoryConsumptionService
@@ -32,6 +33,7 @@ import java.util.concurrent.ExecutionException
 import java.util.concurrent.TimeUnit
 
 @EnabledIfSystemProperty(named = "integration.db.host", matches = ".+")
+@EnabledIfSystemProperty(named = "integration.db.database", matches = ".+")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @Execution(ExecutionMode.SAME_THREAD)
 class NursingSupplyConsumptionIntegrationTest {
@@ -61,20 +63,16 @@ class NursingSupplyConsumptionIntegrationTest {
 
     @BeforeAll
     fun setUpDatabase() {
-        val host = System.getProperty("integration.db.host", "localhost")
-        val port = System.getProperty("integration.db.port", "5432").toInt()
-        user = System.getProperty("integration.db.user", "ovaphlow")
-        password = System.getenv("PITCHFORK_DB_PASSWORD") ?: ""
-        // 兜底门控：只给了 -Dintegration.db.host 而缺密码时，按 JUnit 假设失败 skip 整个类，不让模块变红。
-        Assumptions.assumeTrue(password.isNotBlank(), "integration test skipped: 需要 PITCHFORK_DB_PASSWORD 才会运行")
-        jdbcUrl = "jdbc:postgresql://$host:$port/aceso_test"
-
-        val config = JsonObject()
-            .put("host", host)
-            .put("port", port)
-            .put("database", "aceso_test")
-            .put("user", user)
-        DatabaseConfig.migrate(config)
+        // 门控与连接参数统一走 IntegrationDb（库名必须显式给出，无缺省）
+        Assumptions.assumeTrue(
+            IntegrationDb.isConfigured(),
+            "integration test skipped: 需要 -Dintegration.db.host 与 -Dintegration.db.database 才会运行",
+        )
+        user = IntegrationDb.user()
+        password = IntegrationDb.password()
+        jdbcUrl = IntegrationDb.jdbcUrl()
+        val config = IntegrationDb.config()
+        IntegrationDb.migrateIfRequested(config)
 
         vertx = Vertx.vertx()
         pool = DatabaseConfig.createPool(vertx, config)

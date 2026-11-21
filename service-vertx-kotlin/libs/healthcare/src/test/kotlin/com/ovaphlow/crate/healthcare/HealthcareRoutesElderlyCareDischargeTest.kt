@@ -1,5 +1,6 @@
 package com.ovaphlow.crate.healthcare
 
+import com.ovaphlow.crate.database.testing.IntegrationDb
 import com.ovaphlow.crate.database.DatabaseConfig
 import com.ovaphlow.crate.nursing.TaskExecutionService
 import io.vertx.core.Handler
@@ -29,16 +30,16 @@ import java.time.LocalDate
  *   - 正常离院原子收束周期为 COMPLETED 并保留历史执行
  *   - 非养老 encounter 离院保持原行为，重复离院仍冲突
  *
- * 依赖真实 PostgreSQL（与测试的 aceso_test 共享授权环境），
+ * 依赖真实 PostgreSQL（库名由 -Dintegration.db.database 指定），
  * 通过 -Dintegration.db.* 系统属性启用；默认运行被跳过。
  */
 @ExtendWith(VertxExtension::class)
 @EnabledIfSystemProperty(named = "integration.db.host", matches = ".+")
+@EnabledIfSystemProperty(named = "integration.db.database", matches = ".+")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class HealthcareRoutesElderlyCareDischargeTest {
 
     companion object {
-        private const val TEST_DB = "aceso_test"
         private const val TEST_PORT = 18424
         private const val FIXTURE_PREFIX = "hd-"
         private val BASE_PATH = "/healthcare/v1"
@@ -83,17 +84,12 @@ class HealthcareRoutesElderlyCareDischargeTest {
 
         try {
             val rootUrl = "jdbc:postgresql://$host:$port/postgres"
-            DriverManager.getConnection(rootUrl, user, password).use { conn ->
-                conn.createStatement().execute("DROP DATABASE IF EXISTS $TEST_DB")
-                conn.createStatement().execute("CREATE DATABASE $TEST_DB")
-            }
-
             val dbConfig = JsonObject()
                 .put("host", host)
                 .put("port", port.toInt())
-                .put("database", TEST_DB)
+                .put("database", IntegrationDb.database())
                 .put("user", user)
-            DatabaseConfig.migrate(dbConfig)
+            IntegrationDb.migrateIfRequested(dbConfig)
             pool = DatabaseConfig.createPool(vertx, dbConfig)
             taskExecutionService = TaskExecutionService(pool)
 
@@ -152,7 +148,7 @@ class HealthcareRoutesElderlyCareDischargeTest {
 
     /** 直接查库取单个字符串标量：用于「落库证据」断言（响应回显不能替代写库结果）。 */
     private fun queryString(sql: String): String? {
-        val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
+        val jdbcUrl = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
         return DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
             conn.createStatement().executeQuery(sql).use { rs -> if (rs.next()) rs.getString(1) else null }
         }
@@ -160,14 +156,14 @@ class HealthcareRoutesElderlyCareDischargeTest {
 
     /** 直接查库取单个 long 标量（count 等）。 */
     private fun queryLong(sql: String): Long {
-        val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
+        val jdbcUrl = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
         return DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
             conn.createStatement().executeQuery(sql).use { rs -> if (rs.next()) rs.getLong(1) else -1L }
         }
     }
 
     private fun cleanupFixtures() {
-        val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
+        val jdbcUrl = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
         DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
             val stmt = conn.createStatement()
             stmt.execute("DELETE FROM nursing.nursing_task_executions WHERE id LIKE '${FIXTURE_PREFIX}%' OR task_id IN (SELECT id FROM nursing.nursing_tasks WHERE id LIKE '${FIXTURE_PREFIX}%' OR period_id IN (SELECT id FROM nursing.nursing_service_periods WHERE id LIKE '${FIXTURE_PREFIX}%' OR encounter_id IN (SELECT id FROM healthcare.encounters WHERE id LIKE '${FIXTURE_PREFIX}%' OR patient_id LIKE '${FIXTURE_PREFIX}%')))")
@@ -198,7 +194,7 @@ class HealthcareRoutesElderlyCareDischargeTest {
      *   - hd-patient-4 + hd-enc-outpatient（OUTPATIENT, ACTIVE）→ 非养老离院保持原行为
      */
     private fun setupFixtures() {
-        val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
+        val jdbcUrl = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
         DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
             val stmt = conn.createStatement()
             for (i in 1..5) {
@@ -367,7 +363,7 @@ class HealthcareRoutesElderlyCareDischargeTest {
 
     @Test
     fun `存在执行中任务时离院返回409且无副作用`(vertx: Vertx, ctx: VertxTestContext) {
-        val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
+        val jdbcUrl = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
         request(
             vertx,
             HttpMethod.PATCH,
@@ -400,7 +396,7 @@ class HealthcareRoutesElderlyCareDischargeTest {
 
     @Test
     fun `正常离院收束周期并保留历史执行`(vertx: Vertx, ctx: VertxTestContext) {
-        val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
+        val jdbcUrl = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
         taskExecutionService.ensureExecutionsForDateRange(
             LocalDate.now(),
             LocalDate.now().plusDays(7),

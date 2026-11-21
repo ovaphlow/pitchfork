@@ -1,5 +1,6 @@
 package com.ovaphlow.crate.healthcare
 
+import com.ovaphlow.crate.database.testing.IntegrationDb
 import com.ovaphlow.crate.database.DatabaseConfig
 import com.ovaphlow.crate.inventories.MaterialService
 import com.ovaphlow.crate.nursing.NursingRoutes
@@ -19,9 +20,9 @@ import java.sql.DriverManager
 import java.time.OffsetDateTime
 
 /**
- * 养老入住去世/离院终局收束 PostgreSQL 集成测试（仅授权 aceso_test 运行）。
+ * 养老入住去世/离院终局收束 PostgreSQL 集成测试（库名由 -Dintegration.db.database 指定，测试不建不删库）。
  *
- * fixture 统一使用 `ed-` 前缀，按依赖逆序清理，前后残差为零；连接既有 aceso_test，
+ * fixture 统一使用 `ed-` 前缀，按依赖逆序清理，前后残差为零；连接既有库，
  * 绝不 DROP/CREATE 数据库、绝不触碰非 `ed-` 前缀数据。
  *
  * 覆盖计划「获授权的 PostgreSQL 集成测试」第 3 项：
@@ -39,11 +40,11 @@ import java.time.OffsetDateTime
  */
 @ExtendWith(VertxExtension::class)
 @EnabledIfSystemProperty(named = "integration.db.host", matches = ".+")
+@EnabledIfSystemProperty(named = "integration.db.database", matches = ".+")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ElderlyDeathIntegrationTest {
 
     companion object {
-        private const val TEST_DB = "aceso_test"
         private const val TEST_PORT = 18427
         private const val FIXTURE_PREFIX = "ed-"
         private const val HEALTHCARE_BASE = "/healthcare/v1"
@@ -67,7 +68,7 @@ class ElderlyDeathIntegrationTest {
 
     private fun fixtureId(suffix: String): String = "${FIXTURE_PREFIX}$suffix"
 
-    private fun jdbcUrl(): String = "jdbc:postgresql://$host:$port/$TEST_DB"
+    private fun jdbcUrl(): String = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
 
     @BeforeAll
     fun setup(vertx: Vertx, ctx: VertxTestContext) {
@@ -79,14 +80,13 @@ class ElderlyDeathIntegrationTest {
         Assumptions.assumeTrue(password.isNotBlank(), "integration test skipped: 需要 PITCHFORK_DB_PASSWORD 才会运行")
 
         try {
-            check(port == "55432" || port == "5432") { "integration test must target the authorized aceso_test port" }
 
             val dbConfig = JsonObject()
                 .put("host", host)
                 .put("port", port.toInt())
-                .put("database", TEST_DB)
+                .put("database", IntegrationDb.database())
                 .put("user", user)
-            DatabaseConfig.migrate(dbConfig)
+            IntegrationDb.migrateIfRequested(dbConfig)
             pool = DatabaseConfig.createPool(vertx, dbConfig)
 
             val rootRouter = Router.router(vertx)

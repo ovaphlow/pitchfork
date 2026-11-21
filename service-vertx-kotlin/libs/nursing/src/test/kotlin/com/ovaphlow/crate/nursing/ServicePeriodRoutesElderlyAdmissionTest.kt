@@ -1,5 +1,6 @@
 package com.ovaphlow.crate.nursing
 
+import com.ovaphlow.crate.database.testing.IntegrationDb
 import com.ovaphlow.crate.database.DatabaseConfig
 import io.vertx.core.Vertx
 import io.vertx.core.http.HttpMethod
@@ -22,16 +23,16 @@ import java.sql.DriverManager
  *   - 首次补建 201，重复补建 200（幂等返回同一周期）
  *   - GET /periods?encounter_id= 精确过滤，不匹配同患者其它周期
  *
- * 依赖真实 PostgreSQL（与测试的 aceso_test 共享授权环境），
+ * 依赖真实 PostgreSQL（库名由 -Dintegration.db.database 指定），
  * 通过 -Dintegration.db.* 系统属性启用；默认运行被跳过。
  */
 @ExtendWith(VertxExtension::class)
 @EnabledIfSystemProperty(named = "integration.db.host", matches = ".+")
+@EnabledIfSystemProperty(named = "integration.db.database", matches = ".+")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ServicePeriodRoutesElderlyAdmissionTest {
 
     companion object {
-        private const val TEST_DB = "aceso_test"
         private const val TEST_PORT = 18423
         private const val FIXTURE_PREFIX = "el-"
         private val BASE_PATH = "/nursing/v1/periods"
@@ -55,22 +56,12 @@ class ServicePeriodRoutesElderlyAdmissionTest {
         Assumptions.assumeTrue(password.isNotBlank(), "integration test skipped: 需要 PITCHFORK_DB_PASSWORD 才会运行")
 
         try {
-            val rootUrl = "jdbc:postgresql://$host:$port/postgres"
-            DriverManager.getConnection(rootUrl, user, password).use { conn ->
-                val rs = conn.createStatement().executeQuery(
-                    "SELECT 1 FROM pg_database WHERE datname = '$TEST_DB'"
-                )
-                if (!rs.next()) {
-                    conn.createStatement().execute("CREATE DATABASE $TEST_DB")
-                }
-            }
-
             val dbConfig = JsonObject()
                 .put("host", host)
                 .put("port", port.toInt())
-                .put("database", TEST_DB)
+                .put("database", IntegrationDb.database())
                 .put("user", user)
-            DatabaseConfig.migrate(dbConfig)
+            IntegrationDb.migrateIfRequested(dbConfig)
             val pool = DatabaseConfig.createPool(vertx, dbConfig)
 
             setupFixtures()
@@ -97,7 +88,7 @@ class ServicePeriodRoutesElderlyAdmissionTest {
     @AfterAll
     fun teardown(ctx: VertxTestContext) {
         try {
-            val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
+            val jdbcUrl = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
             DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
                 val stmt = conn.createStatement()
                 stmt.execute("DELETE FROM nursing.nursing_service_periods WHERE id LIKE '${FIXTURE_PREFIX}%' OR encounter_id LIKE '${FIXTURE_PREFIX}%'")
@@ -114,7 +105,7 @@ class ServicePeriodRoutesElderlyAdmissionTest {
 
     /** fixture：两名长者、一个活动养老入住、一个已离院养老入住、一个非养老入住、一条 HOME_CARE 周期 */
     private fun setupFixtures() {
-        val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
+        val jdbcUrl = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
         DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
             val stmt = conn.createStatement()
             stmt.execute("INSERT INTO healthcare.patients (id, name, status) VALUES ('${fixtureId("patient-1")}', '养老测试长者一', 'ACTIVE') ON CONFLICT (id) DO NOTHING")

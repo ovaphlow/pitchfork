@@ -14,7 +14,7 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty
 import java.math.BigDecimal
 
 /**
- * 033 E：历史文本医嘱补绑路径的给药来源真库回归（仅隔离 `aceso_test`）。
+ * 033 E：历史文本医嘱补绑路径的给药来源真库回归（目标库由 -Dintegration.db.database 指定）。
  *
  * 与生产 `apps/aceso/Main.kt` 装配等价：全局身份门注入 `userId`
  * （`AcesoIntegrationTestSupport.fakeAuth`），`/healthcare`、`/nursing`、`/pharmacy`
@@ -31,6 +31,7 @@ import java.math.BigDecimal
  * 断言不得为了让用例变绿而放宽：来源为空或非 200 即为真实缺陷证据。
  */
 @EnabledIfSystemProperty(named = "integration.db.host", matches = ".+")
+@EnabledIfSystemProperty(named = "integration.db.database", matches = ".+")
 class TextOrderRebindAdministrationIntegrationTest : AcesoDbIntegrationTestBase() {
 
     override val fixturePrefix = "tr-"

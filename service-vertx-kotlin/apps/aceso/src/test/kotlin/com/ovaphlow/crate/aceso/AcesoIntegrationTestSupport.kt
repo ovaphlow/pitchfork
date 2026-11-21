@@ -54,7 +54,7 @@ import java.math.BigDecimal
 /**
  * 共享的 Aceso 集成测试支撑：在测试 JVM 内挂载与生产 Main.kt 等效的路由，
  * 使用假认证（把 userId 放入上下文），并注入与 Main.kt 相同的同连接端口适配器。
- * 仅用于隔离 aceso_test 数据库测试。
+ * 仅用于数据库集成测试（目标库由 -Dintegration.db.database 指定）。
  */
 object AcesoIntegrationTestSupport {
 

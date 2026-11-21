@@ -1,5 +1,6 @@
 plugins {
     `java-library`
+    `java-test-fixtures`
 }
 
 val jooqCodegen by configurations.registering
@@ -12,6 +13,9 @@ dependencies {
     implementation(libs.flyway.core)
     implementation(libs.flyway.database.postgresql)
     implementation(libs.scram.client)
+    // 集成测试公共入口（IntegrationDb）：仅测试可见，不进生产 jar
+    testFixturesImplementation(libs.vertx.pg.client)
+    testFixturesImplementation(libs.jooq)
     jooqCodegen(libs.jooq.codegen)
     jooqCodegen(libs.jooq.meta)
     jooqCodegen(libs.postgresql)

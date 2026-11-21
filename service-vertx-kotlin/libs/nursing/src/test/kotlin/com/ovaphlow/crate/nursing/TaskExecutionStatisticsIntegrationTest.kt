@@ -1,5 +1,6 @@
 package com.ovaphlow.crate.nursing
 
+import com.ovaphlow.crate.database.testing.IntegrationDb
 import com.ovaphlow.crate.database.DatabaseConfig
 import io.vertx.core.Vertx
 import io.vertx.core.json.JsonObject
@@ -16,11 +17,11 @@ import java.time.OffsetDateTime
 
 @ExtendWith(VertxExtension::class)
 @EnabledIfSystemProperty(named = "integration.db.host", matches = ".+")
+@EnabledIfSystemProperty(named = "integration.db.database", matches = ".+")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class TaskExecutionStatisticsIntegrationTest {
 
     companion object {
-        private const val TEST_DB = "aceso_test"
         private const val FIXTURE_PREFIX = "si-"
     }
 
@@ -44,21 +45,16 @@ class TaskExecutionStatisticsIntegrationTest {
         try {
             // Drop and recreate test database to ensure clean Flyway state
             val rootUrl = "jdbc:postgresql://$host:$port/postgres"
-            DriverManager.getConnection(rootUrl, user, password).use { conn ->
-                conn.createStatement().execute("DROP DATABASE IF EXISTS $TEST_DB")
-                conn.createStatement().execute("CREATE DATABASE $TEST_DB")
-            }
-
             val dbConfig = JsonObject()
                 .put("host", host)
                 .put("port", port.toInt())
-                .put("database", TEST_DB)
+                .put("database", IntegrationDb.database())
                 .put("user", user)
             try {
-                DatabaseConfig.migrate(dbConfig)
+                IntegrationDb.migrateIfRequested(dbConfig)
             } catch (e: Exception) {
                 // V404 migration may fail due to missing schema prefix; apply manually
-                val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
+                val jdbcUrl = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
                 DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
                     val stmt = conn.createStatement()
                     stmt.execute("SET search_path TO nursing, public")
@@ -85,7 +81,7 @@ class TaskExecutionStatisticsIntegrationTest {
     @AfterAll
     fun cleanup(ctx: VertxTestContext) {
         try {
-            val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
+            val jdbcUrl = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
             DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
                 val stmt = conn.createStatement()
                 stmt.execute("DELETE FROM nursing.nursing_task_executions WHERE id LIKE '${FIXTURE_PREFIX}%'")
@@ -99,7 +95,7 @@ class TaskExecutionStatisticsIntegrationTest {
         ctx.completeNow()
     }
 
-    private fun jdbcUrl() = "jdbc:postgresql://$host:$port/$TEST_DB"
+    private fun jdbcUrl() = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
 
     private fun fixtureId(suffix: String): String = "${FIXTURE_PREFIX}${suffix}"
 
@@ -347,7 +343,7 @@ class TaskExecutionStatisticsIntegrationTest {
     @Test
     fun `统计接口不创建新的执行记录`(ctx: VertxTestContext) {
         val today = LocalDate.now()
-        val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
+        val jdbcUrl = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
 
         val countBefore: Long
         DriverManager.getConnection(jdbcUrl, user, password).use { conn ->

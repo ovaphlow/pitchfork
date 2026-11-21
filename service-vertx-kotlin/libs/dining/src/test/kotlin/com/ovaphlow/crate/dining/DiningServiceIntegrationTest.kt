@@ -1,5 +1,6 @@
 package com.ovaphlow.crate.dining
 
+import com.ovaphlow.crate.database.testing.IntegrationDb
 import com.ovaphlow.crate.database.DatabaseConfig
 import io.vertx.core.Vertx
 import io.vertx.core.json.JsonArray
@@ -16,7 +17,7 @@ import java.time.LocalDate
 import java.time.OffsetDateTime
 
 /**
- * 膳食营养模块服务层集成测试（aceso_test 独立可销毁数据库）。
+ * 膳食营养模块服务层集成测试（目标库由 -Dintegration.db.database 指定，测试不建不删库）。
  *
  * 前置：healthcare.patients / healthcare.encounters 最小表结构先行创建
  * （V600 迁移包含跨 schema 外键），随后 Flyway 迁移 dining V600。
@@ -26,11 +27,11 @@ import java.time.OffsetDateTime
  */
 @ExtendWith(VertxExtension::class)
 @EnabledIfSystemProperty(named = "integration.db.host", matches = ".+")
+@EnabledIfSystemProperty(named = "integration.db.database", matches = ".+")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class DiningServiceIntegrationTest {
 
     companion object {
-        private const val TEST_DB = "aceso_test"
         private const val FIXTURE_PREFIX = "si-"
 
         private const val PATIENT_1 = "${FIXTURE_PREFIX}patient-1"
@@ -68,13 +69,8 @@ class DiningServiceIntegrationTest {
         try {
             // Drop and recreate test database to ensure clean Flyway state
             val rootUrl = "jdbc:postgresql://$host:$port/postgres"
-            DriverManager.getConnection(rootUrl, user, password).use { conn ->
-                conn.createStatement().execute("DROP DATABASE IF EXISTS $TEST_DB")
-                conn.createStatement().execute("CREATE DATABASE $TEST_DB")
-            }
-
             // V600 迁移含 healthcare 跨 schema 外键，先行创建最小依赖表
-            val fixtureUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
+            val fixtureUrl = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
             DriverManager.getConnection(fixtureUrl, user, password).use { conn ->
                 val stmt = conn.createStatement()
                 stmt.execute("CREATE SCHEMA IF NOT EXISTS healthcare")
@@ -112,9 +108,9 @@ class DiningServiceIntegrationTest {
             val dbConfig = JsonObject()
                 .put("host", host)
                 .put("port", port.toInt())
-                .put("database", TEST_DB)
+                .put("database", IntegrationDb.database())
                 .put("user", user)
-            DatabaseConfig.migrate(dbConfig)
+            IntegrationDb.migrateIfRequested(dbConfig)
 
             setupFixturesJdbc()
 
@@ -135,7 +131,7 @@ class DiningServiceIntegrationTest {
     @AfterAll
     fun cleanup(ctx: VertxTestContext) {
         try {
-            val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
+            val jdbcUrl = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
             DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
                 val stmt = conn.createStatement()
                 stmt.execute("DELETE FROM dining.dining_meal_executions WHERE id LIKE '${FIXTURE_PREFIX}%' OR roster_item_id IN (SELECT id FROM dining.dining_roster_items WHERE patient_id LIKE '${FIXTURE_PREFIX}%')")
@@ -155,7 +151,7 @@ class DiningServiceIntegrationTest {
     }
 
     private fun setupFixturesJdbc() {
-        val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
+        val jdbcUrl = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
         DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
             val stmt = conn.createStatement()
             stmt.execute("INSERT INTO healthcare.patients (id, name, status, person_type) VALUES ('$PATIENT_1', '测试长者甲', 'ACTIVE', '长者')")
@@ -171,7 +167,7 @@ class DiningServiceIntegrationTest {
     /** 每个用例前清空 dining 表数据，保证用例间独立（healthcare fixture 常驻）。 */
     @BeforeEach
     fun resetDiningData() {
-        val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
+        val jdbcUrl = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
         DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
             val stmt = conn.createStatement()
             stmt.execute("DELETE FROM dining.dining_meal_executions")

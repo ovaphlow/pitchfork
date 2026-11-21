@@ -12,7 +12,7 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty
 import java.math.BigDecimal
 
 /**
- * 030/031 给药闭环（MAR）PostgreSQL 集成测试（仅隔离 `aceso_test`）。
+ * 030/031 给药闭环（MAR）PostgreSQL 集成测试（目标库由 -Dintegration.db.database 指定）。
  *
  * 与生产 `apps/aceso/Main.kt` 的装配等价：全局身份门注入 `userId`
  * （`AcesoIntegrationTestSupport.fakeAuth`），路由挂载 `/nursing/v1/...` 与
@@ -31,6 +31,7 @@ import java.math.BigDecimal
  *   `UPDATE ... AS e SET e.status` 的 PostgreSQL 非法限定而退化为 500。
  */
 @EnabledIfSystemProperty(named = "integration.db.host", matches = ".+")
+@EnabledIfSystemProperty(named = "integration.db.database", matches = ".+")
 class MedicationAdministrationIntegrationTest : AcesoDbIntegrationTestBase() {
 
     override val fixturePrefix = "ma-"

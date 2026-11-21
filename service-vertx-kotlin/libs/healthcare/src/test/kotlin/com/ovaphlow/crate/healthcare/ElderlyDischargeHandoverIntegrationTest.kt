@@ -1,5 +1,6 @@
 package com.ovaphlow.crate.healthcare
 
+import com.ovaphlow.crate.database.testing.IntegrationDb
 import com.ovaphlow.crate.database.DatabaseConfig
 import io.vertx.core.Vertx
 import io.vertx.core.http.HttpMethod
@@ -25,16 +26,16 @@ import java.time.LocalDate
  *   5. 创建摘要前后，原始数据不变；没有新生成执行或库存操作
  *   6. 摘要创建后新增护理记录更正，GET 仍返回已归档快照
  *
- * 依赖真实 PostgreSQL（与测试的 aceso_test 共享授权环境），
+ * 依赖真实 PostgreSQL（库名由 -Dintegration.db.database 指定），
  * 通过 -Dintegration.db.* 系统属性启用；默认运行被跳过。
  */
 @ExtendWith(VertxExtension::class)
 @EnabledIfSystemProperty(named = "integration.db.host", matches = ".+")
+@EnabledIfSystemProperty(named = "integration.db.database", matches = ".+")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ElderlyDischargeHandoverIntegrationTest {
 
     companion object {
-        private const val TEST_DB = "aceso_test"
         private const val TEST_PORT = 18425
         private const val FIXTURE_PREFIX = "dha-"
         private val BASE_PATH = "/healthcare/v1"
@@ -60,17 +61,12 @@ class ElderlyDischargeHandoverIntegrationTest {
 
         try {
             val rootUrl = "jdbc:postgresql://$host:$port/postgres"
-            DriverManager.getConnection(rootUrl, user, password).use { conn ->
-                conn.createStatement().execute("DROP DATABASE IF EXISTS $TEST_DB")
-                conn.createStatement().execute("CREATE DATABASE $TEST_DB")
-            }
-
             val dbConfig = JsonObject()
                 .put("host", host)
                 .put("port", port.toInt())
-                .put("database", TEST_DB)
+                .put("database", IntegrationDb.database())
                 .put("user", user)
-            DatabaseConfig.migrate(dbConfig)
+            IntegrationDb.migrateIfRequested(dbConfig)
             pool = DatabaseConfig.createPool(vertx, dbConfig)
 
             val healthcareRouter = HealthcareRoutes.create(vertx, pool)
@@ -121,7 +117,7 @@ class ElderlyDischargeHandoverIntegrationTest {
     }
 
     private fun cleanupFixtures() {
-        val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
+        val jdbcUrl = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
         DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
             val stmt = conn.createStatement()
             // 按依赖顺序清理：文书 → 执行 → 任务 → 措施 → 计划 → 评估 → 周期 → encounter → 患者
@@ -164,7 +160,7 @@ class ElderlyDischargeHandoverIntegrationTest {
      *   - dha-patient-6 + dha-enc-datediff（ELDERLY_CARE, DISCHARGED，日期不一致）→ 日期不一致拒绝
      */
     private fun setupFixtures() {
-        val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
+        val jdbcUrl = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
         DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
             val stmt = conn.createStatement()
 
@@ -617,7 +613,7 @@ class ElderlyDischargeHandoverIntegrationTest {
                 assertTrue(setOf(response1.first, response2.first) == setOf(201, 200), "responses: $response1 / $response2")
                 assertEquals(response1.second.getString("id"), response2.second.getString("id"))
 
-                DriverManager.getConnection("jdbc:postgresql://$host:$port/$TEST_DB", user, password).use { conn ->
+                DriverManager.getConnection("jdbc:postgresql://$host:$port/$IntegrationDb.database()", user, password).use { conn ->
                     conn.prepareStatement("SELECT count(*) FROM healthcare.medical_records WHERE record_type = 'DISCHARGE_SUMMARY' AND encounter_id = ? AND metadata ->> 'is_elderly_discharge_handover' = 'true'").use { statement ->
                         statement.setString(1, fixtureId("enc-discharged"))
                         statement.executeQuery().use { rows ->
@@ -650,7 +646,7 @@ class ElderlyDischargeHandoverIntegrationTest {
 
     @Test
     fun `创建摘要前后原始数据行数不变`(vertx: Vertx, ctx: VertxTestContext) {
-        val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
+        val jdbcUrl = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
 
         // 记录创建前的行数
         val beforeCounts = DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
@@ -697,7 +693,7 @@ class ElderlyDischargeHandoverIntegrationTest {
 
     @Test
     fun `归档后新增护理记录更正GET仍返回原快照`(vertx: Vertx, ctx: VertxTestContext) {
-        val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
+        val jdbcUrl = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
         val originalSnapshotHolder = mutableListOf<String>()
 
         // 首次归档并获取冻结快照

@@ -11,7 +11,7 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty
 
 /**
- * 011/025 药房发药闭环 PostgreSQL 集成测试（仅隔离 `aceso_test`）。
+ * 011/025 药房发药闭环 PostgreSQL 集成测试（目标库由 -Dintegration.db.database 指定）。
  *
  * 与生产 `apps/aceso/Main.kt` 的装配等价：全局身份门注入 `userId`（`AcesoIntegrationTestSupport.fakeAuth`）、
  * 医嘱只读端口与库存出库端口都用同连接适配器、025 药品目录端口用 `MaterialService.findMaterialById`。
@@ -27,6 +27,7 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty
  * （且已绑定医嘱在同一无身份挂载点上仍可正常发药，证明 401 只作用于补绑路径）。
  */
 @EnabledIfSystemProperty(named = "integration.db.host", matches = ".+")
+@EnabledIfSystemProperty(named = "integration.db.database", matches = ".+")
 class DispenseIntegrationTest : AcesoDbIntegrationTestBase() {
 
     override val fixturePrefix = "dp-"

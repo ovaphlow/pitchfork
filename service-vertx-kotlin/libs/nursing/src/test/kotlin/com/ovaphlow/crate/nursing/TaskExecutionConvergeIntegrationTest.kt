@@ -1,5 +1,6 @@
 package com.ovaphlow.crate.nursing
 
+import com.ovaphlow.crate.database.testing.IntegrationDb
 import com.ovaphlow.crate.database.DatabaseConfig
 import io.vertx.core.Vertx
 import io.vertx.core.json.JsonObject
@@ -26,10 +27,10 @@ import java.time.OffsetDateTime
  * `convergeOverdueExecutions` 的候选谓词、`metadata.convergence` 的 JSONB 浅合并、
  * `truncated` 判定与幂等语义（这些都不是 mock 形状断言能证明的）。
  *
- * 运行方式（隔离库，`aceso_test`，与仓库 `scripts/aceso-test.sh` 同一容器约定）：
+ * 运行方式（库名由 -Dintegration.db.database 指定；容器/实例由调用方提供）：
  *
  *   ./gradlew :libs:nursing:test -Dintegration.db.host=localhost -Dintegration.db.port=55432 \
- *     -Dintegration.db.database=aceso_test -Dintegration.db.user=ovaphlow \
+ *     -Dintegration.db.database=<库名> -Dintegration.db.user=ovaphlow \
  *     --tests "*TaskExecutionConvergeIntegrationTest*"
  *
  * 前置：库必须已由**含 healthcare 段**的 classpath 迁移过（本类只建 nursing 表的 fixture；
@@ -41,11 +42,11 @@ import java.time.OffsetDateTime
  */
 @ExtendWith(VertxExtension::class)
 @EnabledIfSystemProperty(named = "integration.db.host", matches = ".+")
+@EnabledIfSystemProperty(named = "integration.db.database", matches = ".+")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class TaskExecutionConvergeIntegrationTest {
 
     companion object {
-        private const val TEST_DB = "aceso_test"
         private const val FIXTURE_PREFIX = "cv-"
 
         /** S1：两条逾期（PENDING + IN_PROGRESS，后者带既有 metadata）+ 终态 + 未到期 */
@@ -86,17 +87,12 @@ class TaskExecutionConvergeIntegrationTest {
         Assumptions.assumeTrue(password.isNotBlank(), "integration test skipped: 需要 PITCHFORK_DB_PASSWORD 才会运行")
 
         try {
-            DriverManager.getConnection("jdbc:postgresql://$host:$port/postgres", user, password).use { conn ->
-                val exists = conn.createStatement()
-                    .executeQuery("SELECT 1 FROM pg_database WHERE datname = '$TEST_DB'").use { it.next() }
-                if (!exists) conn.createStatement().execute("CREATE DATABASE $TEST_DB")
-            }
             val dbConfig = JsonObject()
                 .put("host", host)
                 .put("port", port.toInt())
-                .put("database", TEST_DB)
+                .put("database", IntegrationDb.database())
                 .put("user", user)
-            DatabaseConfig.migrate(dbConfig)
+            IntegrationDb.migrateIfRequested(dbConfig)
             setupFixturesJdbc()
             pool = DatabaseConfig.createPool(Vertx.vertx(), dbConfig)
             service = TaskExecutionService(pool)
@@ -222,7 +218,7 @@ class TaskExecutionConvergeIntegrationTest {
 
     // ─── fixture / 查询辅助 ─────────────────────────────────────────────
 
-    private fun jdbc(): Connection = DriverManager.getConnection("jdbc:postgresql://$host:$port/$TEST_DB", user, password)
+    private fun jdbc(): Connection = DriverManager.getConnection("jdbc:postgresql://$host:$port/$IntegrationDb.database()", user, password)
 
     private fun queryText(sql: String): String? =
         jdbc().use { conn -> conn.createStatement().executeQuery(sql).use { rs -> if (rs.next()) rs.getString(1) else null } }

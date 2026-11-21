@@ -15,7 +15,7 @@ import java.math.BigDecimal
 import java.sql.DriverManager
 
 /**
- * 034 账单红冲（A2 反向单）真库端到端回归 —— 只走真实 HTTP 接口与隔离的 `aceso_test`。
+ * 034 账单红冲（A2 反向单）真库端到端回归 —— 只走真实 HTTP 接口与 -Dintegration.db.database 指定的库。
  *
  * 装配与生产 `apps/aceso/Main.kt` 等价：`AcesoIntegrationTestSupport.createRouter` 挂
  * Healthcare/Inventories/Nursing/Pharmacy 子路由，全局身份门注入 `userId`
@@ -37,6 +37,7 @@ import java.sql.DriverManager
  * 不使用「null 也接受」「≥0 条」这类恒真断言。任何一条变红都是真实缺陷证据，不得放宽。
  */
 @EnabledIfSystemProperty(named = "integration.db.host", matches = ".+")
+@EnabledIfSystemProperty(named = "integration.db.database", matches = ".+")
 class BillReversalIntegrationTest : AcesoDbIntegrationTestBase() {
 
     override val fixturePrefix = "brv-"
@@ -464,7 +465,7 @@ class BillReversalIntegrationTest : AcesoDbIntegrationTestBase() {
                     dueBefore = decimal(body, "due_amount")
                     paidBefore = decimal(body, "paid_amount")
                     arrearsBefore = decimal(body, "arrears_amount")
-                    // 基线必须满足全仓恒等式 应缴 − 已缴 = 欠费（隔离库 aceso_test 中只有本类账单）
+                    // 基线必须满足全仓恒等式 应缴 − 已缴 = 欠费（目标库只应含本类前缀账单，否则按前缀过滤断言）
                     assertEquals(
                         0,
                         dueBefore.subtract(paidBefore).compareTo(arrearsBefore),

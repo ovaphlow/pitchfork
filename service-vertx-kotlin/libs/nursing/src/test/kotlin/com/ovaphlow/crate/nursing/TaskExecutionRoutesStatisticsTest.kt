@@ -1,5 +1,6 @@
 package com.ovaphlow.crate.nursing
 
+import com.ovaphlow.crate.database.testing.IntegrationDb
 import com.ovaphlow.crate.database.DatabaseConfig
 import io.vertx.core.Vertx
 import io.vertx.core.http.HttpMethod
@@ -24,15 +25,15 @@ import java.time.LocalDate
  *   - 超过 31 天范围 → 400
  *   - 合法请求返回 200
  *
- * 依赖真实的 PostgreSQL 数据库（与集成测试共享 aceso_test）。
+ * 依赖真实的 PostgreSQL 数据库（库名由 -Dintegration.db.database 指定）。
  */
 @ExtendWith(VertxExtension::class)
 @EnabledIfSystemProperty(named = "integration.db.host", matches = ".+")
+@EnabledIfSystemProperty(named = "integration.db.database", matches = ".+")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class TaskExecutionRoutesStatisticsTest {
 
     companion object {
-        private const val TEST_DB = "aceso_test"
         private const val TEST_PORT = 18423
         private val BASE_PATH = "/nursing/v1/executions/statistics"
     }
@@ -46,16 +47,15 @@ class TaskExecutionRoutesStatisticsTest {
         val user = System.getProperty("integration.db.user", "ovaphlow")
 
         try {
-            ensureTestDb(host, port, user)
             val dbConfig = JsonObject()
                 .put("host", host)
                 .put("port", port.toInt())
-                .put("database", TEST_DB)
+                .put("database", IntegrationDb.database())
                 .put("user", user)
             try {
-                DatabaseConfig.migrate(dbConfig)
+                IntegrationDb.migrateIfRequested(dbConfig)
             } catch (e: Exception) {
-                val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
+                val jdbcUrl = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
                 DriverManager.getConnection(jdbcUrl, user, System.getenv("PITCHFORK_DB_PASSWORD") ?: "").use { conn ->
                     val stmt = conn.createStatement()
                     stmt.execute("SET search_path TO nursing, public")
@@ -94,15 +94,6 @@ class TaskExecutionRoutesStatisticsTest {
         server?.close { ar ->
             if (ar.succeeded()) ctx.completeNow()
             else ctx.failNow(ar.cause())
-        }
-    }
-
-    private fun ensureTestDb(host: String, port: String, user: String) {
-        val password = System.getenv("PITCHFORK_DB_PASSWORD") ?: ""
-        val jdbcUrl = "jdbc:postgresql://$host:$port/postgres"
-        DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
-            conn.createStatement().execute("DROP DATABASE IF EXISTS $TEST_DB")
-            conn.createStatement().execute("CREATE DATABASE $TEST_DB")
         }
     }
 

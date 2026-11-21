@@ -1,5 +1,6 @@
 package com.ovaphlow.crate.dining
 
+import com.ovaphlow.crate.database.testing.IntegrationDb
 import com.ovaphlow.crate.database.DatabaseConfig
 import io.vertx.core.Vertx
 import io.vertx.core.buffer.Buffer
@@ -17,18 +18,18 @@ import org.junit.jupiter.api.extension.ExtendWith
 import java.sql.DriverManager
 
 /**
- * 膳食营养模块 HTTP 路由集成测试（嵌入式 Vert.x 服务器 + aceso_test）。
+ * 膳食营养模块 HTTP 路由集成测试（嵌入式 Vert.x 服务器 + 由 -Dintegration.db.database 指定的库）。
  *
  * - /dining/v1 挂载 stub 认证（userId=tester），验证写路由业务行为；
  * - /dining-open/v1 不挂认证，验证写路由 401 兜底。
  */
 @ExtendWith(VertxExtension::class)
 @EnabledIfSystemProperty(named = "integration.db.host", matches = ".+")
+@EnabledIfSystemProperty(named = "integration.db.database", matches = ".+")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class DiningRoutesIntegrationTest {
 
     companion object {
-        private const val TEST_DB = "aceso_test"
         private const val TEST_PORT = 18426
         private const val FIXTURE_PREFIX = "sr-"
 
@@ -55,8 +56,7 @@ class DiningRoutesIntegrationTest {
         Assumptions.assumeTrue(password.isNotBlank(), "integration test skipped: 需要 PITCHFORK_DB_PASSWORD 才会运行")
 
         try {
-            ensureTestDb()
-            val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
+            val jdbcUrl = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
             DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
                 val stmt = conn.createStatement()
                 stmt.execute("CREATE SCHEMA IF NOT EXISTS healthcare")
@@ -103,9 +103,9 @@ class DiningRoutesIntegrationTest {
             val dbConfig = JsonObject()
                 .put("host", host)
                 .put("port", port.toInt())
-                .put("database", TEST_DB)
+                .put("database", IntegrationDb.database())
                 .put("user", user)
-            DatabaseConfig.migrate(dbConfig)
+            IntegrationDb.migrateIfRequested(dbConfig)
             pool = DatabaseConfig.createPool(vertx, dbConfig)
 
             // stub 认证：写入 userId=tester
@@ -141,16 +141,6 @@ class DiningRoutesIntegrationTest {
             if (::pool.isInitialized) pool.close()
             if (ar.succeeded()) ctx.completeNow()
             else ctx.failNow(ar.cause())
-        }
-    }
-
-    private fun ensureTestDb() {
-        val rootUrl = "jdbc:postgresql://$host:$port/postgres"
-        DriverManager.getConnection(rootUrl, user, password).use { conn ->
-            val rs = conn.createStatement().executeQuery("SELECT 1 FROM pg_database WHERE datname = '$TEST_DB'")
-            if (!rs.next()) {
-                conn.createStatement().execute("CREATE DATABASE $TEST_DB")
-            }
         }
     }
 
@@ -192,7 +182,7 @@ class DiningRoutesIntegrationTest {
     /** 每个用例前清空 dining 表数据，保证用例间独立（healthcare fixture 常驻）。 */
     @BeforeEach
     fun resetDiningData() {
-        val jdbcUrl = "jdbc:postgresql://$host:$port/$TEST_DB"
+        val jdbcUrl = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
         DriverManager.getConnection(jdbcUrl, user, password).use { conn ->
             val stmt = conn.createStatement()
             stmt.execute("DELETE FROM dining.dining_meal_executions")

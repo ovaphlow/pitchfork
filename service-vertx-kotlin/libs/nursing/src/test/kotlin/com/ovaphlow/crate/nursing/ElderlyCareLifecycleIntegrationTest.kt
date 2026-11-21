@@ -1,5 +1,6 @@
 package com.ovaphlow.crate.nursing
 
+import com.ovaphlow.crate.database.testing.IntegrationDb
 import com.ovaphlow.crate.database.DatabaseConfig
 import io.vertx.core.Vertx
 import io.vertx.core.json.JsonObject
@@ -25,15 +26,15 @@ import java.time.OffsetDateTime
  *   5. 存在执行中记录时离院失败且事务全部回滚
  *   6. fixture 使用固定前缀；每个测试后按依赖顺序清理
  *
- * 仅在获准的 aceso_test 运行；默认被跳过。
+ * 仅在显式给出 -Dintegration.db.database 时运行；默认被跳过。
  */
 @ExtendWith(VertxExtension::class)
 @EnabledIfSystemProperty(named = "integration.db.host", matches = ".+")
+@EnabledIfSystemProperty(named = "integration.db.database", matches = ".+")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ElderlyCareLifecycleIntegrationTest {
 
     companion object {
-        private const val TEST_DB = "aceso_test"
         private const val FIXTURE_PREFIX = "lc-"
     }
 
@@ -57,17 +58,12 @@ class ElderlyCareLifecycleIntegrationTest {
 
         try {
             val rootUrl = "jdbc:postgresql://$host:$port/postgres"
-            DriverManager.getConnection(rootUrl, user, password).use { conn ->
-                conn.createStatement().execute("DROP DATABASE IF EXISTS $TEST_DB")
-                conn.createStatement().execute("CREATE DATABASE $TEST_DB")
-            }
-
             val dbConfig = JsonObject()
                 .put("host", host)
                 .put("port", port.toInt())
-                .put("database", TEST_DB)
+                .put("database", IntegrationDb.database())
                 .put("user", user)
-            DatabaseConfig.migrate(dbConfig)
+            IntegrationDb.migrateIfRequested(dbConfig)
 
             pool = DatabaseConfig.createPool(Vertx.vertx(), dbConfig)
             servicePeriodService = ServicePeriodService(pool)
@@ -98,7 +94,7 @@ class ElderlyCareLifecycleIntegrationTest {
         ctx.completeNow()
     }
 
-    private fun jdbcUrl() = "jdbc:postgresql://$host:$port/$TEST_DB"
+    private fun jdbcUrl() = "jdbc:postgresql://$host:$port/$IntegrationDb.database()"
 
     private fun fixtureId(suffix: String): String = "${FIXTURE_PREFIX}$suffix"
 

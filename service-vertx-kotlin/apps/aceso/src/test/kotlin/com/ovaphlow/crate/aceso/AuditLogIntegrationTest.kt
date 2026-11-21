@@ -1,5 +1,6 @@
 package com.ovaphlow.crate.aceso
 
+import com.ovaphlow.crate.database.testing.IntegrationDb
 import com.ovaphlow.crate.database.DatabaseConfig
 import com.ovaphlow.crate.healthcare.AuditLogService
 import com.ovaphlow.crate.healthcare.HealthcareRoutes
@@ -61,17 +62,18 @@ import java.util.UUID
  *  8. 残差 0：按测试专用 `actor` 前缀清理与过滤。
  *  9. 异步时序：落库在 `endHandler`，断言前**轮询等待 ≤5s**。
  *
- * 运行方式（自包含：类自身重置 `aceso_test`，app 类路径应用全量迁移）：
+ * 运行方式（-Dintegration.db.database 指定库；类自身不建不删库，app 类路径应用全量迁移）：
  * ```
  * cd service-vertx-kotlin && set -a && . apps/aceso/.env && set +a
  * ./gradlew :apps:aceso:test --rerun --tests '*AuditLogIntegrationTest' \
  *   -Dintegration.db.host=127.0.0.1 -Dintegration.db.port=55432 \
- *   -Dintegration.db.database=aceso_test -Dintegration.db.user=ovaphlow \
+ *   -Dintegration.db.database=<库名> -Dintegration.db.user=ovaphlow \
  *   --no-daemon -Pkotlin.compiler.execution.strategy=in-process
  * ```
  */
 @ExtendWith(VertxExtension::class)
 @EnabledIfSystemProperty(named = "integration.db.host", matches = ".+")
+@EnabledIfSystemProperty(named = "integration.db.database", matches = ".+")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class AuditLogIntegrationTest {
 
@@ -83,7 +85,6 @@ class AuditLogIntegrationTest {
      * （替身 recorder 返回失败 future）。故本条**标注未覆盖**，不计入本次真库通过项。
      */
     companion object {
-        private const val TEST_DB = "aceso_test"
         private const val PREFIX = "qa054f3-"
         private val RUN: String = UUID.randomUUID().toString().replace("-", "").take(6)
 
@@ -128,13 +129,12 @@ class AuditLogIntegrationTest {
         )
 
         try {
-            resetTestDb()
             val dbConfig = JsonObject()
                 .put("host", host)
                 .put("port", port.toInt())
-                .put("database", TEST_DB)
+                .put("database", IntegrationDb.database())
                 .put("user", user)
-            DatabaseConfig.migrate(dbConfig)
+            IntegrationDb.migrateIfRequested(dbConfig)
             pool = DatabaseConfig.createPool(vertx, dbConfig)
             client = vertx.createHttpClient()
 
@@ -635,16 +635,8 @@ class AuditLogIntegrationTest {
     private fun patch(vertx: Vertx, path: String, body: JsonObject): Future<Pair<Int, JsonObject?>> =
         send(HttpMethod.PATCH, path, body)
 
-    private fun resetTestDb() {
-        val rootUrl = "jdbc:postgresql://$host:$port/postgres"
-        DriverManager.getConnection(rootUrl, user, password).use { conn ->
-            conn.createStatement().execute("DROP DATABASE IF EXISTS $TEST_DB WITH (FORCE)")
-            conn.createStatement().execute("CREATE DATABASE $TEST_DB")
-        }
-    }
-
     private fun <T> jdbc(block: (Connection) -> T): T =
-        DriverManager.getConnection("jdbc:postgresql://$host:$port/$TEST_DB", user, password).use(block)
+        DriverManager.getConnection("jdbc:postgresql://$host:$port/$IntegrationDb.database()", user, password).use(block)
 
     private fun exec(sql: String) {
         jdbc { conn -> conn.createStatement().use { it.execute(sql) } }

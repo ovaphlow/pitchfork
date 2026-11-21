@@ -1,5 +1,6 @@
 package com.ovaphlow.crate.aceso
 
+import com.ovaphlow.crate.database.testing.IntegrationDb
 import io.vertx.core.Vertx
 import io.vertx.core.http.HttpMethod
 import io.vertx.core.json.JsonObject
@@ -18,21 +19,24 @@ import java.sql.DriverManager
 
 /**
  * 共享的 Aceso 数据库集成测试基类。
- * 仅连接用户授权的独立 aceso_test，不 DROP/CREATE 数据库；
- * 每个测试类使用固定 prefix 的 fixture，并在每个测试前后清理和断言残差为零。
+ *
+ * **不 DROP/CREATE 数据库、不预设库名**：目标库由 `-Dintegration.db.database` 显式给出
+ * （见 `com.ovaphlow.crate.database.testing.IntegrationDb`）。数据隔离一律靠固定前缀 fixture
+ * + 每个测试前后清理 + 残差断言，因此本类可以跑在一次性实例上，也可以跑在任何已迁移的库上。
  *
  * 门控：JUnit 的条件注解不会从抽象基类继承到子类，因此每个具体子类都必须自带
- * `@EnabledIfSystemProperty(named = "integration.db.host", matches = ".+")`。
+ * `integration.db.host` 与 `integration.db.database` 两条 `@EnabledIfSystemProperty`。
  * 基类 @BeforeAll 里另有一道 Assumptions 兜底，保证漏加注解时只 skip、不报错。
  */
 @ExtendWith(VertxExtension::class)
 @EnabledIfSystemProperty(named = "integration.db.host", matches = ".+")
+@EnabledIfSystemProperty(named = "integration.db.database", matches = ".+")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 abstract class AcesoDbIntegrationTestBase {
 
     companion object {
         const val SKIP_REASON: String =
-            "integration test skipped: 需要 PITCHFORK_DB_PASSWORD 与 -Dintegration.db.host 才会运行"
+            "integration test skipped: 需要 PITCHFORK_DB_PASSWORD、-Dintegration.db.host 与 -Dintegration.db.database 才会运行"
     }
 
     abstract val fixturePrefix: String
@@ -45,7 +49,7 @@ abstract class AcesoDbIntegrationTestBase {
     protected lateinit var pool: io.vertx.sqlclient.Pool
     private var server: io.vertx.core.http.HttpServer? = null
 
-    protected fun jdbcUrl(): String = "jdbc:postgresql://$host:$port/aceso_test"
+    protected fun jdbcUrl(): String = IntegrationDb.jdbcUrl()
 
     @BeforeAll
     fun setup(vertx: Vertx, ctx: VertxTestContext) {
@@ -61,18 +65,11 @@ abstract class AcesoDbIntegrationTestBase {
         // 判据必须与类注解**同口径**（integration.db.host 非空），不能只看密码：
         // 只要环境里导出了 PITCHFORK_DB_PASSWORD（文档就教用户 source apps/aceso/.env），
         // 漏加注解的子类就会在**没有任何 -Dintegration.db.\*** 的情况下静默连库跑测试
-        // （实测：DispenseIntegrationTest 无注解时曾连到 localhost:5432/aceso_test 真跑并通过）。
-        Assumptions.assumeTrue(
-            System.getProperty("integration.db.host", "").isNotBlank() && password.isNotBlank(),
-            SKIP_REASON,
-        )
+        // （实测：DispenseIntegrationTest 无注解时曾连到真实库真跑并通过）。
+        Assumptions.assumeTrue(IntegrationDb.isConfigured(), SKIP_REASON)
         try {
-            val dbConfig = JsonObject()
-                .put("host", host)
-                .put("port", port.toInt())
-                .put("database", "aceso_test")
-                .put("user", user)
-            AcesoIntegrationTestSupport.migrate(dbConfig)
+            val dbConfig = IntegrationDb.config()
+            IntegrationDb.migrateIfRequested(dbConfig)
             pool = com.ovaphlow.crate.database.DatabaseConfig.createPool(vertx, dbConfig)
             val rootRouter = Router.router(vertx)
             rootRouter.route("/*").subRouter(AcesoIntegrationTestSupport.createRouter(vertx, pool))
