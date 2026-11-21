@@ -1,0 +1,9 @@
+---
+import DashboardLayout from "../../layouts/DashboardLayout.astro";
+import NursingPage from "../../components/NursingPage";
+
+---
+
+<DashboardLayout title="照护管理">
+  <NursingPage client:only="react" />
+</DashboardLayout>

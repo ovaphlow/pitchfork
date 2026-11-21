@@ -19,12 +19,12 @@ const EXEC = process.env.PLAYWRIGHT_EXECUTABLE_PATH || undefined;
     }
   });
 
-  await page.goto(`${BASE}/dashboard/admission`, { waitUntil: "networkidle" });
+  await page.goto(`${BASE}/eldercare/admission`, { waitUntil: "networkidle" });
   console.log("URL after goto:", page.url());
   if (page.url().includes("/login")) {
     await page.getByLabel("账号").fill(USER);
     await page.getByLabel("密码").fill(PASS);
-    await Promise.all([page.waitForURL(/\/dashboard/), page.getByRole("button", { name: "登录" }).click()]);
+    await Promise.all([page.waitForURL(/\/eldercare/), page.getByRole("button", { name: "登录" }).click()]);
   }
   console.log("URL after login:", page.url());
 
@@ -56,12 +56,12 @@ const EXEC = process.env.PLAYWRIGHT_EXECUTABLE_PATH || undefined;
   }, { api: API, patientId });
   console.log("createAdmission:", admRes.status, admRes.body.slice(0, 300));
 
-  await page.goto(`${BASE}/dashboard/admission`, { waitUntil: "networkidle" });
+  await page.goto(`${BASE}/eldercare/admission`, { waitUntil: "networkidle" });
   console.log("=== ADMISSION PAGE after create ===");
   console.log("body:", (await page.evaluate(() => document.body.innerText)).slice(0, 400));
   console.log("rows:", await page.locator("tbody tr, table tr").count());
 
-  await page.goto(`${BASE}/dashboard/orders`, { waitUntil: "networkidle" });
+  await page.goto(`${BASE}/eldercare/orders`, { waitUntil: "networkidle" });
   console.log("=== ORDERS PAGE ===");
   console.log("body:", (await page.evaluate(() => document.body.innerText)).slice(0, 400));
   console.log("开立医嘱 buttons:", await page.getByRole("button", { name: "开立医嘱" }).count());

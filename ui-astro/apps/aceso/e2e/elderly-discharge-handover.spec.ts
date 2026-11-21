@@ -197,14 +197,14 @@ async function api<T>(page: Page, path: string, options: { method?: string; body
 }
 
 async function ensureAuthenticated(page: Page) {
-  await page.goto("/dashboard/admission", { waitUntil: "networkidle" });
+  await page.goto("/eldercare/admission", { waitUntil: "networkidle" });
   if (!page.url().includes("/login")) return;
   const identifier = requiredEnvironment("PLAYWRIGHT_USERNAME", LOGIN_IDENTIFIER);
   const password = requiredEnvironment("PLAYWRIGHT_PASSWORD", LOGIN_PASSWORD);
   await page.getByLabel("账号").fill(identifier);
   await page.getByLabel("密码").fill(password);
   await Promise.all([
-    page.waitForURL(/\/dashboard/),
+    page.waitForURL(/\/eldercare/),
     page.getByRole("button", { name: "登录" }).click(),
   ]);
 }
@@ -239,7 +239,7 @@ class AdmissionsPage {
   constructor(private readonly page: Page) {}
 
   async goto() {
-    await this.page.goto("/dashboard/admission");
+    await this.page.goto("/eldercare/admission");
     await this.page.waitForLoadState("networkidle");
   }
 

@@ -10,10 +10,9 @@ import {
   type BedInput,
   type BedStatus,
 } from "@pitchfork/shared/aceso";
-import { DOMAIN_ENTITY } from "../lib/domain";
 import { formatDateTime } from "../lib/datetime";
-import { useDomain } from "../lib/useDomain";
 import { Badge, Button, Card, ConfirmDialog, EmptyState, Input, Modal, Table, type Column } from "@pitchfork/ui";
+import { ENTITY_LABELS } from "../lib/labels";
 
 const PAGE_SIZE = 50;
 /** department/ward 上限：与服务端 BedService.MAX_IDENTITY_LENGTH 一致 */
@@ -96,7 +95,7 @@ function bedIdentity(row: Bed): string {
 
 export default function BedsPage() {
   // 床位页三个域都可见：占用者称呼必须随域切换（居民 / 长者 / 儿童）
-  const { person } = DOMAIN_ENTITY[useDomain()];
+  const { person } = ENTITY_LABELS;
   const [items, setItems] = useState<Bed[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);

@@ -333,14 +333,14 @@ async function api<T>(page: Page, path: string, options: { method?: string; body
 }
 
 async function ensureAuthenticated(page: Page) {
-  await page.goto("/dashboard/pharmacy", { waitUntil: "networkidle" });
+  await page.goto("/eldercare/pharmacy", { waitUntil: "networkidle" });
   if (!page.url().includes("/login")) return;
   const identifier = requiredEnvironment("PLAYWRIGHT_USERNAME", LOGIN_IDENTIFIER);
   const password = requiredEnvironment("PLAYWRIGHT_PASSWORD", LOGIN_PASSWORD);
   await page.getByLabel("账号").fill(identifier);
   await page.getByLabel("密码").fill(password);
   await Promise.all([
-    page.waitForURL(/\/dashboard/),
+    page.waitForURL(/\/eldercare/),
     page.getByRole("button", { name: "登录" }).click(),
   ]);
 }
@@ -491,7 +491,7 @@ async function createDispenseViaUi(
   order: MedicalOrder,
   warehouse: string,
 ): Promise<void> {
-  await page.goto("/dashboard/pharmacy", { waitUntil: "networkidle" });
+  await page.goto("/eldercare/pharmacy", { waitUntil: "networkidle" });
   const orderRow = page.getByRole("row").filter({ hasText: order.order_content });
   await expect(orderRow).toBeVisible();
   await orderRow.getByRole("button", { name: "创建发药单" }).click();

@@ -84,13 +84,12 @@ import {
   toOffsetDateTime,
   todayLocal,
 } from "../lib/datetime";
-import { DOMAIN_ENTITY, currentEntityLabels } from "../lib/domain";
 import { formatOrderItemLabel } from "../lib/orderDetailDisplay";
 import { nursingErrorMessage } from "./nursingMessages";
 import NursingExecutionStatisticsPanel from "./NursingExecutionStatisticsPanel";
 import OperatorPicker, { type CurrentUser } from "./OperatorPicker";
 import { useSubjectDirectory } from "../lib/identity";
-import { useDomain } from "../lib/useDomain";
+import { ENTITY_LABELS } from "../lib/labels";
 
 type Tab = "overview" | "assessments" | "plans" | "tasks" | "orders" | "incidents" | "handovers" | "timeline";
 type MainView = "today" | "resident";
@@ -395,8 +394,8 @@ const revisionDefaults = (): RevisionForm => ({
 });
 
 export default function NursingPage() {
-  // 照护管理页在医疗/养老都可见：主体称呼随域切换（居民 / 长者）
-  const { person } = DOMAIN_ENTITY[useDomain()];
+  // 056：养老单产品，主体称呼固定为「长者」
+  const { person } = ENTITY_LABELS;
   const [admissions, setAdmissions] = useState<ActiveAdmission[]>([]);
   const [selectedEncounterId, setSelectedEncounterId] = useState("");
   const [period, setPeriod] = useState<NursingServicePeriod | null>(null);
@@ -587,7 +586,7 @@ export default function NursingPage() {
       setSelectedEncounterId((current) => records.some((record) => record.id === current) ? current : records[0]?.id ?? "");
     } catch (error) {
       // 兜底文案按出错那一刻的域取词：该回调依赖含 admissionSearch，不能再加域依赖
-      setPageError(errorMessage(error, `无法加载当前入住${currentEntityLabels().person}`));
+      setPageError(errorMessage(error, `无法加载当前入住${ENTITY_LABELS.person}`));
     } finally {
       setLoading(false);
     }

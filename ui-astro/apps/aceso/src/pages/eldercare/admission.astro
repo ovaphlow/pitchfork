@@ -1,0 +1,9 @@
+---
+import DashboardLayout from "../../layouts/DashboardLayout.astro";
+import AdmissionsPage from "../../components/AdmissionsPage";
+
+---
+
+<DashboardLayout title="入住管理">
+  <AdmissionsPage client:only="react" />
+</DashboardLayout>

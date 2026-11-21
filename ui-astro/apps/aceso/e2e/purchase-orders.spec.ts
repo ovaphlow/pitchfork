@@ -195,7 +195,7 @@ async function ensureAuthenticated(page: Page) {
   await page.getByLabel("账号").fill(identifier);
   await page.getByLabel("密码").fill(password);
   await Promise.all([
-    page.waitForURL(/\/dashboard/),
+    page.waitForURL(/\/eldercare/),
     page.getByRole("button", { name: "登录" }).click(),
   ]);
 }
@@ -303,7 +303,7 @@ async function selectOptionIfPresent(page: Page, selectLocator: Locator, value: 
 // ─── UI 操作 ───────────────────────────────────────────────────────────────
 
 async function openPurchaseTab(page: Page) {
-  await page.goto("/dashboard/pharmacy", { waitUntil: "networkidle" });
+  await page.goto("/eldercare/pharmacy", { waitUntil: "networkidle" });
   await page.getByRole("button", { name: "采购收货" }).click();
 }
 

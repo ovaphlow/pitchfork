@@ -6,8 +6,7 @@ import {
   type NurseCheckPendingOrder,
 } from "@pitchfork/shared/aceso";
 import { formatDateTime } from "../lib/datetime";
-import { DOMAIN_ADMISSION_PHRASE, DOMAIN_ENTITY } from "../lib/domain";
-import { useDomain } from "../lib/useDomain";
+import { ENTITY_LABELS, ADMISSION_PHRASE } from "../lib/labels";
 
 const PAGE_SIZE = 50;
 
@@ -21,9 +20,8 @@ function details(row: NurseCheckPendingOrder): Record<string, unknown> {
 
 /** 医嘱核对汇总：跨入住展示所有待核对（未核对）的用药医嘱，护士在此直接核对 */
 export default function OrdersCheckPage() {
-  // 本页在医疗/养老都可见：主体称呼与入院口径随域切换（居民/入院 ↔ 长者/养老入住）
-  const domain = useDomain();
-  const { person } = DOMAIN_ENTITY[domain];
+  // 056：养老单产品，主体称呼与入院口径固定（长者 / 养老入住）
+  const { person } = ENTITY_LABELS;
   const [records, setRecords] = useState<NurseCheckPendingOrder[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -157,7 +155,7 @@ export default function OrdersCheckPage() {
           <EmptyState
             icon="✅"
             title="暂无待核对用药医嘱"
-            description={`当前所有活动${DOMAIN_ADMISSION_PHRASE[domain]}下的用药医嘱均已由护士核对。`}
+            description={`当前所有活动${ADMISSION_PHRASE}下的用药医嘱均已由护士核对。`}
           />
         ) : (
           <Table

@@ -120,7 +120,7 @@ async function ensureAuthenticated(page: Page) {
   await page.getByLabel("账号").fill(identifier);
   await page.getByLabel("密码").fill(password);
   await Promise.all([
-    page.waitForURL(/\/dashboard/),
+    page.waitForURL(/\/eldercare/),
     page.getByRole("button", { name: "登录" }).click(),
   ]);
 }
@@ -302,7 +302,7 @@ test.afterEach(async () => {
 });
 
 async function gotoResidentView(page: Page) {
-  await page.goto("/dashboard/inpatient", { waitUntil: "networkidle" });
+  await page.goto("/eldercare/inpatient", { waitUntil: "networkidle" });
   await page.getByRole("button", { name: "长者照护档案" }).click();
   // 等待自动选中的入住档案与标签页出现
   await expect(page.getByRole("button", { name: "异常事件" })).toBeVisible({ timeout: 10_000 });

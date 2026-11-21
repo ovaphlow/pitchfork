@@ -1,0 +1,9 @@
+---
+import DashboardLayout from "../../layouts/DashboardLayout.astro";
+import FollowupPage from "../../components/FollowupPage.tsx";
+
+---
+
+<DashboardLayout title="随访管理">
+  <FollowupPage client:only="react" />
+</DashboardLayout>

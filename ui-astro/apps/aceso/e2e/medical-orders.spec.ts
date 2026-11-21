@@ -298,14 +298,14 @@ async function api<T>(page: Page, path: string, options: { method?: string; body
 }
 
 async function ensureAuthenticated(page: Page) {
-  await page.goto("/dashboard/admission", { waitUntil: "networkidle" });
+  await page.goto("/eldercare/admission", { waitUntil: "networkidle" });
   if (!page.url().includes("/login")) return;
   const identifier = requiredEnvironment("PLAYWRIGHT_USERNAME", LOGIN_IDENTIFIER);
   const password = requiredEnvironment("PLAYWRIGHT_PASSWORD", LOGIN_PASSWORD);
   await page.getByLabel("账号").fill(identifier);
   await page.getByLabel("密码").fill(password);
   await Promise.all([
-    page.waitForURL(/\/dashboard/),
+    page.waitForURL(/\/eldercare/),
     page.getByRole("button", { name: "登录" }).click(),
   ]);
 }
@@ -391,7 +391,7 @@ test("选择活动入住并开立用药医嘱后列表详情与结构化输入�
   const admission = await createActiveAdmission(page, "CREATE");
   // 025：用药医嘱只能从药品目录选择，先按冻结契约取一条 ACTIVE 目录药品
   const drug = await demoDrug(page);
-  await page.goto(`/dashboard/orders?encounter_id=${admission.encounter.id}`);
+  await page.goto(`/eldercare/orders?encounter_id=${admission.encounter.id}`);
   await page.waitForLoadState("networkidle");
 
   // 打开开立弹窗
@@ -463,7 +463,7 @@ test("护士核对前药房不可见，核对后药房可见", async ({ page }) 
   });
 
   // 核对前：药房待接方列表不可见
-  await page.goto("/dashboard/pharmacy");
+  await page.goto("/eldercare/pharmacy");
   await page.waitForLoadState("networkidle");
   await expect(page.getByRole("row").filter({ hasText: "护士核对测试医嘱" })).not.toBeVisible();
 
@@ -496,7 +496,7 @@ test("护士核对前药房不可见，核对后药房可见", async ({ page }) 
   expect(String((before.body as { error?: string }).error)).toContain("nurse-checked");
 
   // 护理工作台进入“医嘱核对”并确认核对
-  await page.goto("/dashboard/inpatient");
+  await page.goto("/eldercare/inpatient");
   await page.waitForLoadState("networkidle");
   await page.getByRole("button", { name: "长者照护档案" }).click();
   await page.getByRole("button", { name: `${FIXTURE_PREFIX}NURSE` }).click();
@@ -513,7 +513,7 @@ test("护士核对前药房不可见，核对后药房可见", async ({ page }) 
   expect(checked.nurse_checked_at).toBeTruthy();
 
   // 药房待接方列表出现该医嘱及核对信息
-  await page.goto("/dashboard/pharmacy");
+  await page.goto("/eldercare/pharmacy");
   await page.waitForLoadState("networkidle");
   const pharmacyRow = page.getByRole("row").filter({ hasText: "护士核对测试医嘱" });
   await expect(pharmacyRow).toBeVisible();
@@ -522,7 +522,7 @@ test("护士核对前药房不可见，核对后药房可见", async ({ page }) 
 
 test("开立诊疗医嘱后列表筛选与刷新保持一致", async ({ page }) => {
   const admission = await createActiveAdmission(page, "THERAPY");
-  await page.goto(`/dashboard/orders?encounter_id=${admission.encounter.id}`);
+  await page.goto(`/eldercare/orders?encounter_id=${admission.encounter.id}`);
   await page.waitForLoadState("networkidle");
 
   // 诊疗医嘱
@@ -577,7 +577,7 @@ test("停嘱后显示服务端终态且重复点击不重发请求", async ({ pa
       order_details: medicationDetails(drug),
     },
   });
-  await page.goto(`/dashboard/orders?encounter_id=${admission.encounter.id}`);
+  await page.goto(`/eldercare/orders?encounter_id=${admission.encounter.id}`);
   await page.waitForLoadState("networkidle");
 
   const row = page.getByRole("row").filter({ hasText: "降压药 1 片" });
@@ -628,7 +628,7 @@ test("作废与完成显示服务端终态", async ({ page }) => {
       order_details: { item_name: "胸部X线" },
     },
   });
-  await page.goto(`/dashboard/orders?encounter_id=${admission.encounter.id}`);
+  await page.goto(`/eldercare/orders?encounter_id=${admission.encounter.id}`);
   await page.waitForLoadState("networkidle");
 
   // 作废
@@ -660,7 +660,7 @@ test("作废与完成显示服务端终态", async ({ page }) => {
 test("服务端校验错误可见且开立表单输入保留", async ({ page }) => {
   const admission = await createActiveAdmission(page, "ERR");
   const drug = await demoDrug(page);
-  await page.goto(`/dashboard/orders?encounter_id=${admission.encounter.id}`);
+  await page.goto(`/eldercare/orders?encounter_id=${admission.encounter.id}`);
   await page.waitForLoadState("networkidle");
 
   await page.getByRole("button", { name: "开立医嘱" }).click();
@@ -715,7 +715,7 @@ test("详情执行汇总只读展示且无执行入口", async ({ page }) => {
       order_details: medicationDetails(drug),
     },
   });
-  await page.goto(`/dashboard/orders?encounter_id=${admission.encounter.id}`);
+  await page.goto(`/eldercare/orders?encounter_id=${admission.encounter.id}`);
   await page.waitForLoadState("networkidle");
 
   const row = page.getByRole("row").filter({ hasText: "汇总测试医嘱" });
@@ -741,7 +741,7 @@ test("详情执行汇总只读展示且无执行入口", async ({ page }) => {
 test("医生诊疗工作台新增病程诊断与四类医嘱且刷新保留并跨入住隔离", async ({ page }) => {
   const admission = await createActiveAdmission(page, "CLINIC");
   const drug = await demoDrug(page);
-  await page.goto(`/dashboard/orders?encounter_id=${admission.encounter.id}`);
+  await page.goto(`/eldercare/orders?encounter_id=${admission.encounter.id}`);
   await page.waitForLoadState("networkidle");
 
   // 新增病程记录
@@ -818,7 +818,7 @@ test("医生诊疗工作台新增病程诊断与四类医嘱且刷新保留并�
 
   // 切换到另一位老人：不串数据
   const other = await createActiveAdmission(page, "CLINIC2");
-  await page.goto(`/dashboard/orders?encounter_id=${other.encounter.id}`);
+  await page.goto(`/eldercare/orders?encounter_id=${other.encounter.id}`);
   await page.waitForLoadState("networkidle");
   await expect(page.getByText("今日精神状态稳定，食欲一般，继续观察。")).not.toBeVisible();
   await expect(page.getByRole("row").filter({ hasText: "高血压" })).not.toBeVisible();
@@ -833,7 +833,7 @@ test("已离院医生诊疗只读且无新增入口", async ({ page }) => {
     method: "PATCH",
     body: { discharge_date: "2026-07-31T00:00:00+08:00" },
   });
-  await page.goto(`/dashboard/orders?encounter_id=${admission.encounter.id}`);
+  await page.goto(`/eldercare/orders?encounter_id=${admission.encounter.id}`);
   await page.waitForLoadState("networkidle");
   await expect(page.getByText(/^该入住已离院，仅可查看历史病程、诊断和医嘱。$/)).toBeVisible();
   await expect(page.getByRole("button", { name: "新增病程记录" })).not.toBeVisible();
@@ -858,7 +858,7 @@ test("窄屏下列表筛选开立与详情均可操作且文字不重叠", async
       order_details: medicationDetails(drug),
     },
   });
-  await page.goto(`/dashboard/orders?encounter_id=${admission.encounter.id}`);
+  await page.goto(`/eldercare/orders?encounter_id=${admission.encounter.id}`);
   await page.waitForLoadState("networkidle");
 
   await expect(page.getByRole("row").filter({ hasText: "窄屏用药医嘱" })).toBeVisible();

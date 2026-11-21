@@ -93,7 +93,7 @@ async function ensureAuthenticated(page: Page) {
   await page.getByLabel("账号").fill(identifier);
   await page.getByLabel("密码").fill(password);
   await Promise.all([
-    page.waitForURL(/\/dashboard/),
+    page.waitForURL(/\/eldercare/),
     page.getByRole("button", { name: "登录" }).click(),
   ]);
 }
@@ -251,7 +251,7 @@ async function inboundViaUi(
     unitCost: string;
   },
 ): Promise<void> {
-  await page.goto("/dashboard/inventory", { waitUntil: "networkidle" });
+  await page.goto("/eldercare/inventory", { waitUntil: "networkidle" });
   await page.getByRole("button", { name: "手工入库" }).click();
   const modal = modalByTitle(page, "手工入库");
   await expect(modal).toBeVisible();
@@ -388,7 +388,7 @@ test("016 §6.3-1：UI 新建片剂物资（片、0 位、盒=24）→ 库存页
   const name = `${FIXTURE_PREFIX}${suffix} 片剂`;
 
   // 物资管理页 UI 新建：片、0 位小数、盒=24
-  await page.goto("/dashboard/materials", { waitUntil: "networkidle" });
+  await page.goto("/eldercare/materials", { waitUntil: "networkidle" });
   await page.getByRole("button", { name: "新建物资" }).click();
   const modal = modalByTitle(page, "新建物资");
   await expect(modal).toBeVisible();

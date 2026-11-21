@@ -8,7 +8,7 @@
 import type { BillPrecheckBlockedBy } from "@pitchfork/shared/aceso";
 
 /** 费用项目维护页路径：字典缺项时的「去配置」入口 */
-export const FEE_ITEMS_PAGE_PATH = "/dashboard/fee-items";
+export const FEE_ITEMS_PAGE_PATH = "/eldercare/fee-items";
 
 /** 「系统设置 → 费用项目」在文案里的统一写法 */
 const FEE_ITEMS_LOCATION = "「系统设置 → 费用项目」";

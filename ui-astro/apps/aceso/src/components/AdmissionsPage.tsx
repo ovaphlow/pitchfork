@@ -20,10 +20,9 @@ import {
   type Patient,
 } from "@pitchfork/shared/aceso";
 import { admissionErrorMessage } from "./admissionMessages";
-import { DOMAIN_ENTITY, currentEntityLabels } from "../lib/domain";
 import { dayBoundary, formatDate, formatDateTime, toOffsetDateTime, todayLocal } from "../lib/datetime";
 import { useSubjectDirectory } from "../lib/identity";
-import { useDomain } from "../lib/useDomain";
+import { ENTITY_LABELS } from "../lib/labels";
 
 interface AdmissionForm {
   patientId: string;
@@ -134,7 +133,7 @@ function ExecutionSummary({ summary }: { summary: ElderlyDischargeHandoverSnapsh
 }
 
 function HandoverReadOnly({ handover, subjectLabel }: { handover: ElderlyDischargeHandover; subjectLabel: (value: string | null | undefined) => string }) {
-  const { person } = DOMAIN_ENTITY[useDomain()];
+  const { person } = ENTITY_LABELS;
   const snapshot = handover.snapshot;
   const patient = snapshot.patient;
   const encounter = snapshot.encounter;
@@ -365,8 +364,8 @@ function HandoverReadOnly({ handover, subjectLabel }: { handover: ElderlyDischar
 }
 
 export default function AdmissionsPage() {
-  // 入院管理页在医疗/养老都可见：主体称呼与档案名随域切换（居民 / 长者）
-  const { person, archive } = DOMAIN_ENTITY[useDomain()];
+  // 056：养老单产品，主体称呼与档案名固定（长者 / 长者档案）
+  const { person, archive } = ENTITY_LABELS;
   // 长者档案「入住」跳转带 ?view=：命中时直接落到对应视图（active/discharged/deceased）
   const [initialView] = useState(readAdmissionView);
   const [view, setView] = useState<"active" | "archive">(() =>
@@ -526,7 +525,7 @@ export default function AdmissionsPage() {
           if (requestId !== patientSearchRequest.current) return;
           setPatientOptions([]);
           // 兜底文案按出错那一刻的域取词：该 effect 的依赖必须保持稳定，避免切域重跑防抖搜索
-          setPatientSearchError(errorMessage(error, `无法搜索${currentEntityLabels().person}`));
+          setPatientSearchError(errorMessage(error, `无法搜索${ENTITY_LABELS.person}`));
         })
         .finally(() => {
           if (requestId === patientSearchRequest.current) setPatientSearchLoading(false);
@@ -822,7 +821,7 @@ export default function AdmissionsPage() {
       render: (row) => (
         <div className="flex items-center gap-3">
           <a
-            href={`/dashboard/orders?encounter_id=${row.id}`}
+            href={`/eldercare/orders?encounter_id=${row.id}`}
             className="text-sm text-accent hover:underline underline-offset-4"
           >
             医嘱

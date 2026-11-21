@@ -401,8 +401,8 @@ async function rawApi<T>(page: Page, path: string, options: { method?: string; b
 }
 
 async function ensureAuthenticated(page: Page) {
-  // 强制从登录页建立 IDP 会话：已登录会自动跳到 /dashboard，未登录则提交表单。
-  // 不依赖 /dashboard/pharmacy 的自动跳转——无会话时该页不会重定向到 /login。
+  // 强制从登录页建立 IDP 会话：已登录会自动跳到 /eldercare，未登录则提交表单。
+  // 不依赖 /eldercare/pharmacy 的自动跳转——无会话时该页不会重定向到 /login。
   await page.goto("/login", { waitUntil: "networkidle" });
   if (!page.url().includes("/login")) return; // 已登录
   const identifier = requiredEnvironment("PLAYWRIGHT_USERNAME", LOGIN_IDENTIFIER);
@@ -410,7 +410,7 @@ async function ensureAuthenticated(page: Page) {
   await page.getByLabel("账号").fill(identifier);
   await page.getByLabel("密码").fill(password);
   await Promise.all([
-    page.waitForURL(/\/dashboard/),
+    page.waitForURL(/\/eldercare/),
     page.getByRole("button", { name: "登录" }).click(),
   ]);
 }
@@ -579,7 +579,7 @@ async function createDispenseViaUi(
   order: MedicalOrder,
   warehouse: string,
 ): Promise<void> {
-  await page.goto("/dashboard/pharmacy", { waitUntil: "networkidle" });
+  await page.goto("/eldercare/pharmacy", { waitUntil: "networkidle" });
   const orderRow = page.getByRole("row").filter({ hasText: order.order_content });
   await expect(orderRow).toBeVisible();
   await orderRow.getByRole("button", { name: "创建发药单" }).click();
@@ -898,7 +898,7 @@ test("取消待确认退药单：UI 取消后不产生库存操作，可重新�
   // API 造一张待确认退药单，再用 UI 取消（药房退药 Tab 的取消入口）
   const created = await createReturnViaApi(page, dispense);
   expect(created.status).toBe("PENDING");
-  await page.goto("/dashboard/pharmacy", { waitUntil: "networkidle" });
+  await page.goto("/eldercare/pharmacy", { waitUntil: "networkidle" });
   await page.getByRole("button", { name: "退药单" }).click();
   await cancelReturnViaUi(page, patientName);
 

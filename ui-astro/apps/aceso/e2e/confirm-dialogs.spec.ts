@@ -7,12 +7,12 @@ import { expect, test, type Page } from "@playwright/test";
  * 背景：原生 `window.confirm` 由浏览器 chrome 渲染、不在 DOM 中，自动化测试只能用
  * dialog 处理器接受/拒绝，无法断言语义。本次改造把 6 个二次确认入口换成
  * `@pitchfork/ui` 的 `ConfirmDialog`（页面内 Modal），本套件逐个验收：
- *   1 物资删除     /dashboard/materials
- *   2 费用项目删除 /dashboard/fee-items
- *   3 床位删除     /dashboard/beds
- *   4 饮食档案删除 /dashboard/dining（饮食档案页签）
- *   5 配餐名单移除 /dashboard/dining（配餐名单页签）
- *   6 医嘱收束     /dashboard/orders
+ *   1 物资删除     /eldercare/materials
+ *   2 费用项目删除 /eldercare/fee-items
+ *   3 床位删除     /eldercare/beds
+ *   4 饮食档案删除 /eldercare/dining（饮食档案页签）
+ *   5 配餐名单移除 /eldercare/dining（配餐名单页签）
+ *   6 医嘱收束     /eldercare/orders
  *
  * 断言口径：确认框文案沿用原 `window.confirm` 的业务措辞；取消不产生副作用；
  * 确认后实体消失（前 5 项）或医嘱状态变为已完成（第 6 项）。
@@ -117,7 +117,7 @@ async function ensureAuthenticated(page: Page) {
   await page.getByLabel("账号").fill(identifier);
   await page.getByLabel("密码").fill(password);
   await Promise.all([
-    page.waitForURL(/\/dashboard/),
+    page.waitForURL(/\/eldercare/),
     page.getByRole("button", { name: "登录" }).click(),
   ]);
 }
@@ -314,7 +314,7 @@ test.afterEach(async () => {
 test("物资删除：确认框沿用原文案，取消无副作用，确认后行消失", async ({ page }, testInfo) => {
   skipBrokenMobileEmulation(testInfo);
   const material = await createMaterial(page, "MAT");
-  await page.goto("/dashboard/materials", { waitUntil: "networkidle" });
+  await page.goto("/eldercare/materials", { waitUntil: "networkidle" });
 
   const row = rowByText(page, material.code);
   await expect(row).toBeVisible();
@@ -343,7 +343,7 @@ test("物资删除：确认框沿用原文案，取消无副作用，确认后�
 test("费用项目删除：确认框保留计费影响说明，取消无副作用，确认后行消失", async ({ page }, testInfo) => {
   skipBrokenMobileEmulation(testInfo);
   const item = await createFeeItem(page, "FEE");
-  await page.goto("/dashboard/fee-items", { waitUntil: "networkidle" });
+  await page.goto("/eldercare/fee-items", { waitUntil: "networkidle" });
 
   const row = rowByText(page, item.name);
   await expect(row).toBeVisible();
@@ -368,7 +368,7 @@ test("费用项目删除：确认框保留计费影响说明，取消无副作�
 test("床位删除：确认框提示在住占用会被拒绝，确认后行消失", async ({ page }, testInfo) => {
   skipBrokenMobileEmulation(testInfo);
   const bed = await createBed(page, "BED");
-  await page.goto("/dashboard/beds", { waitUntil: "networkidle" });
+  await page.goto("/eldercare/beds", { waitUntil: "networkidle" });
 
   const row = rowByText(page, bed.ward);
   await expect(row).toBeVisible();
@@ -395,7 +395,7 @@ test("饮食档案删除：确认框点名长者，取消无副作用，确认�
   const admission = await createActiveAdmission(page, "PROFILE");
   await createDietProfile(page, admission);
 
-  await page.goto("/dashboard/dining", { waitUntil: "networkidle" });
+  await page.goto("/eldercare/dining", { waitUntil: "networkidle" });
   const row = rowByText(page, admission.patientName);
   await expect(row).toBeVisible();
   await row.getByRole("button", { name: "删除" }).click();
@@ -421,7 +421,7 @@ test("配餐名单移除：只对手工条目开放，确认后条目从名单�
   const roster = await generateRoster(page);
   await addManualRosterItem(page, roster.id, admission.patientId);
 
-  await page.goto("/dashboard/dining", { waitUntil: "networkidle" });
+  await page.goto("/eldercare/dining", { waitUntil: "networkidle" });
   await page.getByRole("button", { name: "配餐名单" }).click();
 
   // 打开该名单详情（标题含日期、餐次与人数，按「配餐名单（N 人）」定位浮层）
@@ -456,7 +456,7 @@ test("医嘱收束：确认框说明收束范围，取消不改状态，确认�
   const admission = await createActiveAdmission(page, "ORDER");
   const orderContent = await createExpiredOrder(page, admission.encounterId, "ORDER");
 
-  await page.goto(`/dashboard/orders?encounter_id=${admission.encounterId}`, { waitUntil: "networkidle" });
+  await page.goto(`/eldercare/orders?encounter_id=${admission.encounterId}`, { waitUntil: "networkidle" });
   const row = rowByText(page, orderContent);
   await expect(row).toBeVisible();
   await expect(row).toContainText("进行中");

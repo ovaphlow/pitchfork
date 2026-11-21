@@ -1,7 +1,7 @@
 /**
  * 054 F1：前端权限感知（菜单显隐）单元测试。
  *
- * Runner：内置 `node:test` + `node:assert/strict`（与 `domain-labels.test.ts` 同口径）。
+ * Runner：内置 `node:test` + `node:assert/strict`。
  * 运行（在 `ui-astro/` 下）：`pnpm test:unit:aceso`
  *
  * 锁定的验收口径（计划 §8.6 / §7 F1 + 架构师 BL3）：
@@ -16,7 +16,6 @@
  * 覆盖方式说明：`node:test` 无法加载 `.tsx`（没有 JSX 变换），所以菜单显隐由
  * `permissions.ts` 的纯函数 + `Sidebar.tsx` 源码接线断言共同覆盖；组件自身的类型
  * 与编译由 `pnpm --filter @pitchfork/aceso build`（`astro check` 硬门槛）把关。
- * 与 `domain-labels.test.ts` 读源码断言的既有口径一致。
  */
 
 import { test } from "node:test";
@@ -39,12 +38,12 @@ interface MenuEntry extends PermissionAwareEntry {
 }
 
 const MENU: MenuEntry[] = [
-	{ label: "儿童管理", path: "/dashboard/elders" },
-	{ label: "膳食营养", path: "/dashboard/dining", requiredPermissions: ["dining:manage"] },
-	{ label: "系统日志", path: "/dashboard/audit-logs", requiredPermissions: ["access:manage"] },
+	{ label: "长者管理", path: "/eldercare/elders" },
+	{ label: "膳食营养", path: "/eldercare/dining", requiredPermissions: ["dining:manage"] },
+	{ label: "系统日志", path: "/eldercare/audit-logs", requiredPermissions: ["access:manage"] },
 	{
 		label: "营养周报",
-		path: "/dashboard/nutrition-weekly",
+		path: "/eldercare/nutrition-weekly",
 		requiredPermissions: ["dining:manage", "access:manage"],
 	},
 ];
@@ -52,19 +51,19 @@ const MENU: MenuEntry[] = [
 const paths = (entries: MenuEntry[]): string[] => entries.map((entry) => entry.path);
 
 test("无权限码账号看不到受限菜单入口", () => {
-	assert.deepEqual(paths(filterVisibleMenuEntries(MENU, [])), ["/dashboard/elders"]);
+	assert.deepEqual(paths(filterVisibleMenuEntries(MENU, [])), ["/eldercare/elders"]);
 });
 
 test("有对应权限码账号可见受限菜单入口", () => {
 	assert.deepEqual(paths(filterVisibleMenuEntries(MENU, ["dining:manage"])), [
-		"/dashboard/elders",
-		"/dashboard/dining",
-		"/dashboard/nutrition-weekly",
+		"/eldercare/elders",
+		"/eldercare/dining",
+		"/eldercare/nutrition-weekly",
 	]);
 	assert.deepEqual(paths(filterVisibleMenuEntries(MENU, ["access:manage"])), [
-		"/dashboard/elders",
-		"/dashboard/audit-logs",
-		"/dashboard/nutrition-weekly",
+		"/eldercare/elders",
+		"/eldercare/audit-logs",
+		"/eldercare/nutrition-weekly",
 	]);
 });
 
@@ -76,7 +75,7 @@ test("声明多个权限码时任一命中即可见", () => {
 
 test("权限未知（读取中 / 读取失败）时不放行受限入口", () => {
 	// codes === null：加载中或 Nexus 读取失败，一律按无权限处理（fail-closed）
-	assert.deepEqual(paths(filterVisibleMenuEntries(MENU, null)), ["/dashboard/elders"]);
+	assert.deepEqual(paths(filterVisibleMenuEntries(MENU, null)), ["/eldercare/elders"]);
 	assert.equal(hasRequiredPermissions(["dining:manage"], null), false);
 });
 
@@ -90,12 +89,12 @@ test("平台管理员全量可见（后端短路放行，前端同口径）", ()
 });
 
 test("非管理员的无码账号仍看不到受限入口（平台管理员短路不扩散）", () => {
-	assert.deepEqual(paths(filterVisibleMenuEntries(MENU, [], false)), ["/dashboard/elders"]);
-	assert.deepEqual(paths(filterVisibleMenuEntries(MENU, [], undefined)), ["/dashboard/elders"]);
+	assert.deepEqual(paths(filterVisibleMenuEntries(MENU, [], false)), ["/eldercare/elders"]);
+	assert.deepEqual(paths(filterVisibleMenuEntries(MENU, [], undefined)), ["/eldercare/elders"]);
 });
 
 test("未声明门槛的既有菜单项在任何权限码集合下都可见（机制不误伤现有菜单）", () => {
-	const noRequirement: MenuEntry = { label: "床位管理", path: "/dashboard/beds" };
+	const noRequirement: MenuEntry = { label: "床位管理", path: "/eldercare/beds" };
 	for (const codes of [null, [], ["dining:manage"], ["access:manage"], ["unknown:code"]]) {
 		assert.equal(isMenuEntryVisible(noRequirement, codes), true, `codes=${JSON.stringify(codes)}`);
 	}
@@ -109,7 +108,7 @@ test("过滤是纯函数：不修改入参、保持项的相对顺序", () => {
 	const visible = filterVisibleMenuEntries(MENU, ["access:manage"]);
 	assert.notEqual(visible, MENU, "必须返回新数组");
 	assert.deepEqual(MENU, snapshot, "不得修改入参");
-	assert.deepEqual(paths(visible), ["/dashboard/elders", "/dashboard/audit-logs", "/dashboard/nutrition-weekly"]);
+	assert.deepEqual(paths(visible), ["/eldercare/elders", "/eldercare/audit-logs", "/eldercare/nutrition-weekly"]);
 });
 
 test("权限码规范化：去空白、丢空串、按首次出现去重且顺序稳定", () => {
@@ -129,7 +128,7 @@ test("权限感知钩子导出存在（不在单测中调用：需浏览器会�
 	assert.equal(typeof useSubjectPermissions, "function");
 });
 
-// —— Sidebar 接线断言（源码级，与 domain-labels.test.ts 同口径）——
+// —— Sidebar 接线断言（源码级）——
 
 const SIDEBAR_SOURCE = readFileSync(new URL("../src/components/Sidebar.tsx", import.meta.url), "utf8");
 
@@ -156,10 +155,16 @@ test("Sidebar 菜单模型支持 requiredPermissions 并接入权限过滤", () 
 	);
 });
 
-test("权限过滤不取代域过滤（既有 domains 行为保持）", () => {
-	assert.match(
-		SIDEBAR_SOURCE,
-		/domains\.includes\(domain\)/,
-		"按域筛选必须保留：权限机制只是叠加一层",
-	);
+test("056：菜单已无域过滤（养老单产品）", () => {
+	// 只看代码，不看注释（文件头注释会说明「056 之前有什么」，那是历史说明）
+	const code = SIDEBAR_SOURCE.split("\n")
+		.filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
+		.join("\n");
+	assert.doesNotMatch(code, /useDomain|readDomain|DOMAIN_ENTITY/, "056 后菜单不得再依赖域模块");
+	assert.doesNotMatch(code, /domains:\s*\[/, "056 后菜单项不得再带 domains 数组");
+	assert.doesNotMatch(code, /domainLabels/, "056 后菜单项不得再带 domainLabels");
+	// 所有菜单路径必须落在 /eldercare/*（儿童保健未来走独立 /childcare/*）
+	const paths = [...SIDEBAR_SOURCE.matchAll(/path:\s*"([^"]+)"/g)].map((m) => m[1]);
+	assert.ok(paths.length > 0, "必须能解析出菜单路径");
+	assert.ok(paths.every((p) => p.startsWith("/eldercare/")), `菜单路径必须全在 /eldercare/*：${paths}`);
 });

@@ -15,10 +15,9 @@ import {
   type FollowupPlanStats,
   type FollowupRecord,
 } from "@pitchfork/shared/aceso";
-import { DOMAIN_ENTITY, currentEntityLabels } from "../lib/domain";
 import { formatDate, formatDateTime, nowLocalInput, toOffsetDateTime, todayLocal } from "../lib/datetime";
 import { useSubjectDirectory } from "../lib/identity";
-import { useDomain } from "../lib/useDomain";
+import { ENTITY_LABELS } from "../lib/labels";
 
 const PAGE_SIZE = 20;
 
@@ -123,8 +122,8 @@ const recordFormDefaults: RecordForm = {
 };
 
 export default function FollowupPage() {
-  // 随访页在医疗/养老/儿保都可见：主体称呼随域切换（居民 / 长者 / 儿童）
-  const { person } = DOMAIN_ENTITY[useDomain()];
+  // 056：养老单产品，主体称呼固定为「长者」
+  const { person } = ENTITY_LABELS;
   // 主体目录（IdP）：责任人 / 记录人列存的是认证主体 ID，取不到目录时回退原始 ID
   const { subjectLabel } = useSubjectDirectory();
 
@@ -273,7 +272,7 @@ export default function FollowupPage() {
       setAdmissionOptions(options);
     } catch (error) {
       // 兜底文案按出错那一刻的域取词：loadAdmissionOptions 的依赖必须保持稳定
-      setPageError(errorMessage(error, `无法加载${currentEntityLabels().person}入住信息`));
+      setPageError(errorMessage(error, `无法加载${ENTITY_LABELS.person}入住信息`));
     }
   }, []);
 
@@ -526,7 +525,7 @@ export default function FollowupPage() {
     },
     { key: "followup_type", header: "随访类型", className: "min-w-[120px]", render: (row) =>
       row.followup_type === "慢病随访" ? (
-        <a href={`/dashboard/chronic?patient=${encodeURIComponent(row.patient_id)}`} className="text-accent hover:underline" title="查看慢病档案">
+        <a href={`/eldercare/chronic?patient=${encodeURIComponent(row.patient_id)}`} className="text-accent hover:underline" title="查看慢病档案">
           慢病随访 · 档案
         </a>
       ) : (
@@ -578,7 +577,7 @@ export default function FollowupPage() {
     },
     { key: "followup_type", header: "随访类型", className: "min-w-[120px]", render: (row) =>
       row.followup_type === "慢病随访" ? (
-        <a href={`/dashboard/chronic?patient=${encodeURIComponent(row.patient_id)}`} className="text-accent hover:underline" title="查看慢病档案">
+        <a href={`/eldercare/chronic?patient=${encodeURIComponent(row.patient_id)}`} className="text-accent hover:underline" title="查看慢病档案">
           慢病随访 · 档案
         </a>
       ) : (

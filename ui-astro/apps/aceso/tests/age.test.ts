@@ -2,7 +2,7 @@
  * 月龄派生（`src/lib/age.ts`）单元测试。
  *
  * Runner：内置 `node:test` + `node:assert/strict`，与 `datetime.test.ts` /
- * `domain-labels.test.ts` 同口径。运行（在 `ui-astro/` 下）：
+ * 运行（在 `ui-astro/` 下）：
  *
  *   pnpm test:unit:aceso
  *   # 或单独：

@@ -4,8 +4,6 @@ import PurchaseOrdersSection from "./PurchaseOrdersSection";
 import RequisitionsSection from "./RequisitionsSection";
 import OperatorPicker, { type CurrentUser } from "./OperatorPicker";
 import { useSubjectDirectory } from "../lib/identity";
-import { DOMAIN_ENTITY } from "../lib/domain";
-import { useDomain } from "../lib/useDomain";
 import {
   ApiRequestError,
   bindMaterialOrdersBatch,
@@ -41,6 +39,7 @@ import {
   type WarehouseOption,
 } from "@pitchfork/shared/aceso";
 import { formatDate, formatDateTime } from "../lib/datetime";
+import { ENTITY_LABELS } from "../lib/labels";
 
 type Tab = "orders" | "unbound" | "dispenses" | "returns" | "requisitions" | "purchase";
 
@@ -208,8 +207,8 @@ function returnableDraft(item: PharmacyDispense["items"][number] | undefined): s
 }
 
 export default function PharmacyPage() {
-  // 药房页在医疗/养老都可见：患者列与退药原因随域取词（居民 / 长者）
-  const { person } = DOMAIN_ENTITY[useDomain()];
+  // 056：养老单产品，患者列与退药原因固定取「长者」口径
+  const { person } = ENTITY_LABELS;
   const [activeTab, setActiveTab] = useState<Tab>("orders");
 
   // ── 人员与入住（操作人下拉、发药单长者名映射）─────────────────────
@@ -1293,7 +1292,7 @@ export default function PharmacyPage() {
           {!drugCatalogLoading && !drugCatalogError && drugCatalog.length === 0 && (
             <p className="px-5 pb-3 text-xs text-warning">
               药品目录为空：请先在「库存计量 → 物资」中新建类别为「药品」且状态为「启用」的物资，再回到此处补绑。
-              <a href="/dashboard/materials" className="ml-1 text-accent hover:underline">
+              <a href="/eldercare/materials" className="ml-1 text-accent hover:underline">
                 前往物资
               </a>
             </p>
@@ -1595,7 +1594,7 @@ export default function PharmacyPage() {
                 {!drugCatalogLoading && !drugCatalogError && drugCatalog.length === 0 && (
                   <p className="text-xs text-warning">
                     药品目录为空：请先在「库存计量 → 物资」中新建类别为「药品」且状态为「启用」的物资，再回到此处发药。
-                    <a href="/dashboard/materials" className="ml-1 text-accent hover:underline">
+                    <a href="/eldercare/materials" className="ml-1 text-accent hover:underline">
                       前往物资
                     </a>
                   </p>
@@ -1652,7 +1651,7 @@ export default function PharmacyPage() {
               {createForm.warehouse && createForm.materialId && !stocksLoading && stocks.length === 0 && (
                 <p className="text-xs text-warning">
                   该药品在「{createWarehouseName}」暂无可用库存，请先通过 库存计量 → 手工入库 补货。
-                  <a href="/dashboard/inventory" className="ml-1 text-accent hover:underline">
+                  <a href="/eldercare/inventory" className="ml-1 text-accent hover:underline">
                     前往手工入库
                   </a>
                 </p>

@@ -281,14 +281,14 @@ async function api<T>(page: Page, path: string, options: { method?: string; body
 }
 
 async function ensureAuthenticated(page: Page) {
-  await page.goto("/dashboard/admission", { waitUntil: "networkidle" });
+  await page.goto("/eldercare/admission", { waitUntil: "networkidle" });
   if (!page.url().includes("/login")) return;
   const identifier = requiredEnvironment("PLAYWRIGHT_USERNAME", LOGIN_IDENTIFIER);
   const password = requiredEnvironment("PLAYWRIGHT_PASSWORD", LOGIN_PASSWORD);
   await page.getByLabel("账号").fill(identifier);
   await page.getByLabel("密码").fill(password);
   await Promise.all([
-    page.waitForURL(/\/dashboard/),
+    page.waitForURL(/\/eldercare/),
     page.getByRole("button", { name: "登录" }).click(),
   ]);
 }
@@ -414,7 +414,7 @@ class AdmissionsPage {
   constructor(private readonly page: Page) {}
 
   async goto() {
-    await this.page.goto("/dashboard/admission");
+    await this.page.goto("/eldercare/admission");
     await this.page.waitForLoadState("networkidle");
   }
 
@@ -559,7 +559,7 @@ test("已离院与已去世入住没有医嘱入口", async ({ page }) => {
   await expect(admissionsPage.row(`${FIXTURE_PREFIX}DEC`)).not.toBeVisible();
 
   // 直接访问医嘱页：终局入住仍可只读查看历史，但不提供开立入口
-  await page.goto("/dashboard/orders");
+  await page.goto("/eldercare/orders");
   await page.waitForLoadState("networkidle");
   const select = page.locator("#orders-encounter");
   for (const suffix of ["DISC", "DEC"]) {
@@ -661,7 +661,7 @@ test("去世入住可在「已去世档案」与档案状态筛选中查到", as
   await expect(admissionsPage.row(`${FIXTURE_PREFIX}ARCHDEC`)).not.toBeVisible();
 
   // 档案页：状态筛选切到「已去世」后可查到该居民档案
-  await page.goto("/dashboard/elders");
+  await page.goto("/eldercare/elders");
   await page.waitForLoadState("networkidle");
   await page.getByRole("button", { name: "已去世", exact: true }).click();
   const deceasedArchiveRow = page.getByRole("row").filter({ hasText: `${FIXTURE_PREFIX}ARCHDEC-patient` });

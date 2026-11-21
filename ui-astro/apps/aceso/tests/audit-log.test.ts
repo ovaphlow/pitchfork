@@ -186,16 +186,15 @@ test("方法筛选校验：空串合法，其余必须在受审计方法白名�
 
 // ─── 菜单接线（F1/R9 + 路由可解析）─────────────────────────────────────────
 
-test("操作审计菜单项：儿保域可见 + access:manage 显隐控制", () => {
+test("操作审计菜单项：养老可见 + access:manage 显隐控制", () => {
 	const source = readFileSync(new URL("../src/components/Sidebar.tsx", import.meta.url), "utf8");
-	const line = source.split("\n").find((text) => text.includes('"/dashboard/audit-log"'));
+	const line = source.split("\n").find((text) => text.includes('"/eldercare/audit-log"'));
 	assert.ok(line, "Sidebar 必须包含操作审计菜单项");
-	assert.match(line, /domains:\s*\["儿保"\]/);
 	assert.match(line, /requiredPermissions:\s*\["access:manage"\]/);
 });
 
 test("菜单路径有对应 Astro 页面（静态构建下不会 404）", () => {
-	const page = readFileSync(new URL("../src/pages/dashboard/audit-log.astro", import.meta.url), "utf8");
+	const page = readFileSync(new URL("../src/pages/eldercare/audit-log.astro", import.meta.url), "utf8");
 	assert.match(page, /AuditLogPage/);
 });
 

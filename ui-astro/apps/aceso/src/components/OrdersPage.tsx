@@ -25,12 +25,11 @@ import {
   type ProgressNote,
 } from "@pitchfork/shared/aceso";
 import { formatDateTime, toOffsetDateTime, todayLocal } from "../lib/datetime";
-import { DOMAIN_ADMISSION_PHRASE, DOMAIN_ENTITY, PAGE_TITLE_DOMAIN_LABELS, displayLabel } from "../lib/domain";
 import { formatOrderDetailValue, formatOrderItemLabel } from "../lib/orderDetailDisplay";
-import { useDomain } from "../lib/useDomain";
 import { useSubjectDirectory } from "../lib/identity";
 import { useCurrentUser } from "../lib/currentUser";
 import OperatorPicker from "./OperatorPicker";
+import { ENTITY_LABELS, ADMISSION_PHRASE } from "../lib/labels";
 
 interface ActiveAdmission extends Encounter {
   patientName: string;
@@ -288,12 +287,10 @@ export default function OrdersPage() {
   // 046：临床署名字段只读展示当前登录用户（服务端按会话派生，不接受代签）。
   const currentUser = useCurrentUser();
 
-  // 本页在医疗/养老都可见：主体称呼与入院口径随域切换（居民/入院 ↔ 长者/养老入住）
-  const domain = useDomain();
-  const { person } = DOMAIN_ENTITY[domain];
-  const admissionPage = PAGE_TITLE_DOMAIN_LABELS["/dashboard/admission"];
-  // 页面名与侧边栏同源（医疗「入院管理」/ 养老「入住管理」）
-  const admissionLabel = displayLabel(admissionPage.base, admissionPage.labels, domain);
+  // 056：养老单产品，主体称呼与入院口径固定（长者 / 养老入住）
+  const { person } = ENTITY_LABELS;
+  // 页面名与侧边栏同源
+  const admissionLabel = "入住管理";
   const [admissions, setAdmissions] = useState<ActiveAdmission[]>([]);
   const [admissionsLoading, setAdmissionsLoading] = useState(true);
   const [pageError, setPageError] = useState("");
@@ -922,7 +919,7 @@ export default function OrdersPage() {
         if (row.icd_code?.trim()) params.set("icd", row.icd_code.trim());
         return (
           <a
-            href={`/dashboard/chronic?${params.toString()}`}
+            href={`/eldercare/chronic?${params.toString()}`}
             className="text-xs text-accent hover:underline"
             title="一键带入诊断登记为慢病档案（自动生成慢病随访计划）"
           >
@@ -979,10 +976,10 @@ export default function OrdersPage() {
           <EmptyState
             icon="🏠"
             title={`暂无入住${person}`}
-            description={`请先在${admissionLabel}办理${DOMAIN_ADMISSION_PHRASE[domain]}，再开展诊疗工作。`}
+            description={`请先在${admissionLabel}办理${ADMISSION_PHRASE}，再开展诊疗工作。`}
             action={
               <a
-                href="/dashboard/admission"
+                href="/eldercare/admission"
                 className="inline-flex items-center justify-center rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:brightness-110"
               >
                 前往{admissionLabel}
@@ -1465,7 +1462,7 @@ export default function OrdersPage() {
                   {!drugCatalogLoading && !drugCatalogError && drugCatalog.length === 0 && (
                     <p className="text-xs text-warning">
                       药品目录为空：请先在「库存计量 → 物资」中新建类别为「药品」且状态为「启用」的物资，再回到此处开药。
-                      <a href="/dashboard/materials" className="ml-1 text-accent hover:underline">
+                      <a href="/eldercare/materials" className="ml-1 text-accent hover:underline">
                         前往物资
                       </a>
                     </p>

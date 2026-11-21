@@ -15,9 +15,8 @@ import {
   type VitalSignType,
 } from "@pitchfork/shared/aceso";
 import { dayBoundary, daysAgoLocal, formatDate, formatDateTime, nowLocalInput, toInputValue, toOffsetDateTime } from "../lib/datetime";
-import { DOMAIN_ENTITY, currentEntityLabels } from "../lib/domain";
 import { useSubjectDirectory } from "../lib/identity";
-import { useDomain } from "../lib/useDomain";
+import { ENTITY_LABELS } from "../lib/labels";
 
 const PAGE_SIZE = 20;
 
@@ -182,8 +181,8 @@ function TrendChart({ records, type }: { records: VitalSignRecord[]; type: Vital
 }
 
 export default function HealthMonitorPage() {
-  // 健康监测页在养老/儿保都可见：主体称呼随域切换（长者 / 儿童）
-  const { person } = DOMAIN_ENTITY[useDomain()];
+  // 056：养老单产品，主体称呼固定为「长者」
+  const { person } = ENTITY_LABELS;
   /** 认证主体 ID（记录人）→ 姓名；目录不可用时回退原始 ID */
   const { subjectLabel } = useSubjectDirectory();
 
@@ -248,7 +247,7 @@ export default function HealthMonitorPage() {
       setPatientOptions(response.records);
     } catch (error) {
       // 兜底文案按出错那一刻的域取词（该回调依赖必须保持稳定）
-      setPatientError(errorMessage(error, `无法加载${currentEntityLabels().person}列表`));
+      setPatientError(errorMessage(error, `无法加载${ENTITY_LABELS.person}列表`));
       setPatientOptions([]);
     }
   }, []);

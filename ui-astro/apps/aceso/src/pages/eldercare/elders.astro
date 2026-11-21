@@ -1,0 +1,9 @@
+---
+import DashboardLayout from "../../layouts/DashboardLayout.astro";
+import EldersPage from "../../components/EldersPage.tsx";
+
+---
+
+<DashboardLayout title="长者档案">
+  <EldersPage client:only="react" />
+</DashboardLayout>

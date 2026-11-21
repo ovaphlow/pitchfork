@@ -1,0 +1,9 @@
+---
+import DashboardLayout from "../../layouts/DashboardLayout.astro";
+import BedsPage from "../../components/BedsPage.tsx";
+
+---
+
+<DashboardLayout title="床位管理">
+  <BedsPage client:only="react" />
+</DashboardLayout>

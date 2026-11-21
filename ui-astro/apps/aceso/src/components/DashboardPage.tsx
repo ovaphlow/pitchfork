@@ -1,46 +1,20 @@
-import { useState, useCallback } from "react";
-import { DOMAIN_CHANGE_EVENT, DOMAIN_STORAGE_KEY, readDomain, type Domain } from "./Sidebar";
-import { DOMAIN_ENTITY } from "../lib/domain";
+import { ENTITY_LABELS } from "../lib/labels";
 
-const subtitle: Record<Domain, string> = {
-  医疗: "临床诊疗平台",
-  养老: "养老照护平台",
-  儿保: "儿童保健平台",
-};
-
+/**
+ * 养老控制台（056：域切换器已移除）。
+ *
+ * 056 之前这里有一个「养老 / 医疗 / 儿保」切换器，改动的是
+ * `localStorage["aceso-domain"]` 并广播事件让菜单与文案跟随。产品收窄为养老后
+ * 不再存在第二、第三个域，切换器随之删除；文案统一取 `ENTITY_LABELS`。
+ */
 export default function DashboardPage() {
-  const [domain, setDomain] = useState<Domain>(readDomain);
-
-  const switchDomain = useCallback((d: Domain) => {
-    setDomain(d);
-    try {
-      localStorage.setItem(DOMAIN_STORAGE_KEY, d);
-      window.dispatchEvent(new Event(DOMAIN_CHANGE_EVENT));
-    } catch { /* SSR */ }
-  }, []);
-
   return (
     <div className="space-y-6">
-      {/* 业务线切换 + 欢迎 */}
+      {/* 欢迎 */}
       <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-fg-emphasis">欢迎回来</h1>
-          <p className="text-sm text-fg-muted mt-1">{subtitle[domain]}</p>
-        </div>
-        <div className="flex items-center gap-1 bg-surface-alt rounded-lg p-0.5">
-          {(["养老", "医疗", "儿保"] as Domain[]).map((d) => (
-            <button
-              key={d}
-              onClick={() => switchDomain(d)}
-              className={`px-3 py-1.5 text-sm rounded-md transition-all duration-150 ${
-                domain === d
-                  ? "bg-surface text-fg-emphasis font-medium shadow-sm"
-                  : "text-fg-muted hover:text-fg"
-              }`}
-            >
-              {d}
-            </button>
-          ))}
+          <p className="text-sm text-fg-muted mt-1">养老照护平台</p>
         </div>
       </div>
 
@@ -59,7 +33,7 @@ export default function DashboardPage() {
             <div>
               <p className="text-xs text-fg-dimmed uppercase tracking-wider">
                 {/* 与菜单/页面同源取词（居民 / 长者 / 儿童），不再各写一份三元表达式 */}
-                {`${DOMAIN_ENTITY[domain].person}健康档案`}
+                {`${ENTITY_LABELS.person}健康档案`}
               </p>
               <p className="text-xl font-semibold text-fg-emphasis">—</p>
             </div>
@@ -75,7 +49,7 @@ export default function DashboardPage() {
             </div>
             <div>
               <p className="text-xs text-fg-dimmed uppercase tracking-wider">
-                {domain === "儿保" ? "儿童随访管理" : domain === "养老" ? "老年人随访管理" : "随访管理"}
+                老年人随访管理
               </p>
               <p className="text-xl font-semibold text-fg-emphasis">—</p>
             </div>
@@ -94,7 +68,7 @@ export default function DashboardPage() {
             </div>
             <div>
               <p className="text-xs text-fg-dimmed uppercase tracking-wider">
-                {domain === "儿保" ? "儿童体检管理" : domain === "养老" ? "健康监测" : "体检管理"}
+                健康监测
               </p>
               <p className="text-xl font-semibold text-fg-emphasis">—</p>
             </div>

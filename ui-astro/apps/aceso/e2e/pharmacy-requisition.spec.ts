@@ -267,7 +267,7 @@ async function ensureAuthenticated(page: Page) {
   await page.getByLabel("账号").fill(identifier);
   await page.getByLabel("密码").fill(password);
   await Promise.all([
-    page.waitForURL(/\/dashboard/),
+    page.waitForURL(/\/eldercare/),
     page.getByRole("button", { name: "登录" }).click(),
   ]);
 }
@@ -404,7 +404,7 @@ async function createRequisitionViaUi(
   destinationWarehouse: string,
   items: Array<{ materialId: string; quantity: string }>,
 ): Promise<void> {
-  await page.goto("/dashboard/pharmacy", { waitUntil: "networkidle" });
+  await page.goto("/eldercare/pharmacy", { waitUntil: "networkidle" });
   await page.getByRole("button", { name: "护理站申领" }).click();
   await page.getByRole("button", { name: "新建申领" }).click();
   const modal = modalByTitle(page, "新建护理站申领");

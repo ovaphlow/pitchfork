@@ -81,14 +81,14 @@ async function cleanupDatabase() {
 }
 
 async function ensureAuthenticated(page: Page) {
-  await page.goto("/dashboard/admission", { waitUntil: "networkidle" });
+  await page.goto("/eldercare/admission", { waitUntil: "networkidle" });
   if (!page.url().includes("/login")) return;
   const identifier = requiredEnvironment("PLAYWRIGHT_USERNAME", process.env.PLAYWRIGHT_USERNAME);
   const password = requiredEnvironment("PLAYWRIGHT_PASSWORD", process.env.PLAYWRIGHT_PASSWORD);
   await page.getByLabel("账号").fill(identifier);
   await page.getByLabel("密码").fill(password);
   await Promise.all([
-    page.waitForURL(/\/dashboard/),
+    page.waitForURL(/\/eldercare/),
     page.getByRole("button", { name: "登录" }).click(),
   ]);
 }
@@ -265,7 +265,7 @@ class TodayWorkbench {
   constructor(private readonly page: Page) {}
 
   async goto() {
-    await this.page.goto("/dashboard/inpatient", { waitUntil: "networkidle" });
+    await this.page.goto("/eldercare/inpatient", { waitUntil: "networkidle" });
     await expect(this.page.getByRole("button", { name: "刷新" })).toBeVisible();
   }
 

@@ -9,14 +9,14 @@ export default function AuthCard() {
 
 	useEffect(() => {
 		getCurrentSession(false)
-			.then(() => window.location.assign("/dashboard"))
+			.then(() => window.location.assign("/eldercare"))
 			.catch(() => setChecking(false));
 	}, []);
 
 	function handleLoginSuccess() {
 		setSuccess(true);
 		setTimeout(() => {
-			window.location.assign("/dashboard");
+			window.location.assign("/eldercare");
 		}, 250);
 	}
 

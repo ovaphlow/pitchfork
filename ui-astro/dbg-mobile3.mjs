@@ -8,9 +8,9 @@ await page.goto(BASE + "/login", { waitUntil: "networkidle" });
 if (page.url().includes("/login")) {
   await page.getByLabel("账号").fill(process.env.PLAYWRIGHT_USERNAME);
   await page.getByLabel("密码").fill(process.env.PLAYWRIGHT_PASSWORD);
-  await Promise.all([page.waitForURL(/\/dashboard/), page.getByRole("button", { name: "登录" }).click()]);
+  await Promise.all([page.waitForURL(/\/eldercare/), page.getByRole("button", { name: "登录" }).click()]);
 }
-await page.goto(BASE + "/dashboard/pharmacy", { waitUntil: "networkidle" });
+await page.goto(BASE + "/eldercare/pharmacy", { waitUntil: "networkidle" });
 await page.getByRole("button", { name: "护理站申领" }).click();
 await page.getByRole("button", { name: "新建申领" }).click();
 const modal = page.getByRole("heading", { name: "新建护理站申领" }).locator("../..");

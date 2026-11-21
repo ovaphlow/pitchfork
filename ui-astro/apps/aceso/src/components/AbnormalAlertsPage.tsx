@@ -312,7 +312,7 @@ export default function AbnormalAlertsPage() {
             variant="ghost"
             size="sm"
             onClick={() => {
-              window.location.href = `/dashboard/health-monitor?patient=${encodeURIComponent(row.patient_id)}&type=${row.type}`;
+              window.location.href = `/eldercare/health-monitor?patient=${encodeURIComponent(row.patient_id)}&type=${row.type}`;
             }}
           >
             查看趋势
@@ -506,7 +506,7 @@ export default function AbnormalAlertsPage() {
                   onClick={() => {
                     const id = reviewing.patient_id;
                     setReviewing(null);
-                    window.location.href = `/dashboard/health-monitor?patient=${encodeURIComponent(id)}`;
+                    window.location.href = `/eldercare/health-monitor?patient=${encodeURIComponent(id)}`;
                   }}
                 >
                   去修正记录
@@ -554,7 +554,7 @@ export default function AbnormalAlertsPage() {
               {" · "}责任人 {subjectLabel(referResult.followup_plan.assignee)}
             </p>
             <div className="flex justify-end gap-2">
-              <Button variant="functional" onClick={() => { window.location.href = "/dashboard/followup"; }}>前往随访管理</Button>
+              <Button variant="functional" onClick={() => { window.location.href = "/eldercare/followup"; }}>前往随访管理</Button>
               <Button onClick={() => setReferring(null)}>完成</Button>
             </div>
           </div>

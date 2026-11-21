@@ -44,16 +44,16 @@ function requiredEnvironment(name: string, value: string | undefined): string {
 
 async function login(page: Page) {
   // networkidle 等待登录守卫与 401 重定向全部稳定后再判断 URL，避免竞态
-  await page.goto("/dashboard/roles", { waitUntil: "networkidle" });
+  await page.goto("/eldercare/roles", { waitUntil: "networkidle" });
   if (page.url().includes("/login")) {
     await page.getByLabel("账号").fill(LOGIN_IDENTIFIER);
     await page.getByLabel("密码").fill(LOGIN_PASSWORD);
-    // AuthCard 登录成功固定跳转 /dashboard
+    // AuthCard 登录成功固定跳转 /eldercare
     await Promise.all([
-      page.waitForURL(/\/dashboard\/?/),
+      page.waitForURL(/\/eldercare\/?/),
       page.getByRole("button", { name: "登录" }).click(),
     ]);
-    await page.goto("/dashboard/roles", { waitUntil: "domcontentloaded" });
+    await page.goto("/eldercare/roles", { waitUntil: "domcontentloaded" });
   }
 }
 
@@ -99,7 +99,7 @@ test("未认证访问：Nexus API 返回 401，角色页重定向登录页", asy
   const problem = await response.json();
   expect(problem.type).toContain("not-authenticated");
 
-  await page.goto("/dashboard/roles", { waitUntil: "domcontentloaded" });
+  await page.goto("/eldercare/roles", { waitUntil: "domcontentloaded" });
   await expect(page).toHaveURL(/\/login/);
 });
 
