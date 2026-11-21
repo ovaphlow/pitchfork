@@ -1,5 +1,15 @@
 # 054 架构决策备忘 — Aceso 儿保模式 角色 3–8
 
+> ⚠️ **部分条款已被取代（2026-11-21）**：本文件是 2026-10-06 的 054 架构决策存档，作为历史记录保留。
+> 已不再成立的内容：
+> - 「不使用全局 `outOfOrder`」——`DatabaseConfig.migrate` 现已配置
+>   `baselineOnMigrate` + `ignoreMigrationPatterns(*:missing,*:ignored)` + `outOfOrder(true)`，
+>   因为各模块号段共享一个 schema history 且模块 classpath 只见自己那段；
+> - 儿保（052/053/054）相关决策对象已全部下线（见 056）；`apps/trainova` 与
+>   `libs/{knowledge,skills,trainings,exams,onsite,analytics}` 已于 2026-11-21 删除，
+>   文中的「Trainova legacy 禁止依赖」条款不再有对象。
+> - 现行口径见 [`../../AGENTS.md`](../../AGENTS.md)、[`../architecture.md`](../architecture.md)。
+
 - 作者：架构师（architect）
 - 创建时间：2026-10-06
 - 状态：**架构约束已冻结（§1–§7）**；**§8 计划评审已完成**（6 项阻塞 BL2–BL7 已按 L7–L17 闭合）；**§9 实现评审（A/F1/B/D）已完成**（M1/M2/R-1/C-1/C-2 闭环，见 §9.9）；**§10 增量评审（C/E/F）已完成**（M3–M6 提出）；**§11 最终评审结论已出具** —— **054 六链（A/B/C/D/E/F）达到计划 §8 验收口径（含已声明受控例外），M1–M6 与 R-1/C-1/C-2 全部闭环，无阻塞交付的残余项**；唯一交付放行条件 = 调度者 §8.8 全量默认验证结果并入 §13（见 §11.3 / §11.6）

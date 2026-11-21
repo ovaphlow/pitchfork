@@ -51,8 +51,10 @@ func TestSharedAppScopeIsolation(t *testing.T) {
 	if got := len(settingsOf("aceso")); got != 1 {
 		t.Fatalf("aceso settings = %d, want 1", got)
 	}
-	if got := len(settingsOf("trainova")); got != 0 {
-		t.Fatalf("trainova settings = %d, want 0", got)
+	// 未写入过任何数据的 app code（无论是否在 PLATFORMD_APP_CODES 里）都必须读到空集。
+	// 2026-11-21 之前这里用的是 trainova；该产品已删除，改用一个从未写入的 code。
+	if got := len(settingsOf("unwritten-app")); got != 0 {
+		t.Fatalf("unwritten-app settings = %d, want 0", got)
 	}
 	harness.requestRawWithApp(http.MethodGet, sharedPath("/settings/"+agoraSettingID), contractStaffSession, "aceso", nil, "").
 		requireProblem(http.StatusNotFound, "not-found", "")

@@ -1,5 +1,10 @@
 # 054 开发基线验证与 dining 域侦察
 
+> ⚠️ **历史存档（2026-10-06）**：文中端口、模块与「未触碰 Trainova」等表述描述的是当时状态。
+> 2026-11-21 起 Trainova（`apps/trainova` 及 6 个 lib、3 个前端）已从仓库删除，
+> 儿保实现亦已下线；现行架构与测试口径见 [`../architecture.md`](../architecture.md) 与
+> [`../aceso-test-database.md`](../aceso-test-database.md)。
+
 - **任务**：共享任务板 `task-3`（054 开发基线验证与目标域侦察）
 - **角色**：开发（实现角色）
 - **日期**：2026-10-06

@@ -1,5 +1,9 @@
 # Aceso 养老收费链路修复 — 交接说明
 
+> ⚠️ **测试命令已失效（2026-11-21）**：文中 `-Dintegration.db.database=aceso_test` 与
+> 「先重置测试库」的用法不再适用——集成测试不建不删库、库名无默认值，脚本新增
+> `--database` / `--no-migrate`。现行口径见 [`../aceso-test-database.md`](../aceso-test-database.md)。
+
 日期：2026-09-28（夜）
 适用计划：`docs/plans/020` ~ `docs/plans/023`
 
