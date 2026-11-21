@@ -13,10 +13,6 @@
     "./aceso": {
       "types": "./src/aceso.ts",
       "default": "./src/aceso.ts"
-    },
-    "./merit": {
-      "types": "./src/merit.ts",
-      "default": "./src/merit.ts"
     }
   },
   "scripts": {
