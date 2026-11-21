@@ -4,7 +4,7 @@
 
 | 路径 | 作用 | 继续阅读 |
 |---|---|---|
-| `service-vertx-kotlin/` | Kotlin + Vert.x + jOOQ 后端（Trainova、Aceso） | `service-vertx-kotlin/AGENTS.md` |
+| `service-vertx-kotlin/` | Kotlin + Vert.x + jOOQ 后端（Aceso） | `service-vertx-kotlin/AGENTS.md` |
 | `ui-astro/` | Astro + React + Tailwind 前端 | `ui-astro/AGENTS.md` |
 | `docs/` | 架构、规格和实施计划 | `docs/architecture.md` |
 | `service-core-go-stdlib/` | Go 服务 | 不受本文档覆盖 |
@@ -13,7 +13,6 @@
 
 | 服务 | 端口 | 数据库 / 说明 |
 |---|---:|---|
-| Trainova API | `8421` | `ovaphlow`，`/crate-api/*` |
 | Aceso API | `8422` | `aceso`，`/crate-api/*` |
 | Aceso PostgreSQL | `5432` | Compose 容器 `pitchfork-aceso-db` |
 | Aceso UI | `4324` | Astro 开发服务（**由用户管理，AI agent 不得启停**） |
@@ -38,16 +37,16 @@
 ## Flyway 与模块边界
 
 - 领域表及迁移归属其 lib：`libs/<module>/src/main/resources/db/migration/`。只有依赖该 lib 的 app 才会获得对应迁移。
-- 迁移版本号按号段隔离：`V200+` inventories、`V300+` pharmacy、`V400+` nursing、`V500+` healthcare、`V600–V699` Aceso dining（膳食营养）；`apps/trainova` 的 `V5–V7` 是基线，不可移动或复制。
-- 不用全局 Flyway `outOfOrder` 解决顺序问题；先核对现有历史和归属。新增 lib 按最大号段递增 100。
+- 迁移版本号按号段隔离：`V200+` inventories、`V300+` pharmacy、`V400+` nursing、`V500+` healthcare、`V600–V699` Aceso dining（膳食营养）；应用组合根下不得新增迁移（Trainova 删除后已无白名单例外）。
+- 各模块号段共享一个 schema history：`DatabaseConfig.migrate` 已配 `baselineOnMigrate` + `ignoreMigrationPatterns(*:missing,*:ignored)` + `outOfOrder`，用于容纳「模块 classpath 只见自己那段」。新增 lib 仍按最大号段递增 100，不要靠乱序来塞新表。
 - 跨产品或跨领域改动必须保持最小范围，不把无关迁移、表、权限或后台任务并入小功能计划。
 
 ## 测试与数据库安全
 
 - 默认验证只运行不访问数据库的单元测试、编译和前端构建。
-- 数据库集成/E2E 仅在用户明确要求，或已提供可恢复测试环境时执行。使用独立、可销毁的测试数据库（如 `aceso_test`），不得连接共享开发库、业务库或生产库。
+- 数据库集成/E2E 仅在用户明确要求时执行。目标库由 `-Dintegration.db.database` 显式给出（测试不建不删库、无默认库名）；指向既有库时用 `-Dintegration.db.migrate=false` 避免推进迁移。
 - 集成测试必须自包含或清晰记录：Flyway 迁移、fixture 准备、执行命令、认证方式（不记录 token）、断言结果和清理步骤；不能把手工遗留数据或“构建成功”当作数据库验收。
-- 后续优先维护单命令的测试入口来管理测试数据库生命周期；agent 只调用该入口，不自行猜测或反复操作 PostgreSQL。
+- 单命令测试入口：`service-vertx-kotlin/scripts/aceso-test.sh`（`--database` / `--no-migrate`）；agent 只调用该入口，不自行猜测或反复操作 PostgreSQL。
 
 ### 服务与资源生命周期（2026-09-29 用户变更策略）
 

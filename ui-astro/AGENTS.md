@@ -17,9 +17,9 @@ Product boundaries and environment configuration are in
 ## Product API Boundary
 
 - Every app requires its own `PUBLIC_API_URL`; there is no fallback backend.
-- Trainova apps import only `@pitchfork/shared/trainova`; Aceso imports only
-  `@pitchfork/shared/aceso`. Add an API function to the matching client before
-  use, instead of writing a request or another product URL in an app.
+- `apps/aceso` imports only `@pitchfork/shared/aceso` (the only client left after
+  the 2026-11-21 Trainova removal). Add an API function to that client before use,
+  instead of writing a request or a raw product URL in an app.
 - The shared client owns JSON headers, JWT token handling, password encryption
   and 401 cleanup. Do not duplicate those behaviors in a component.
 

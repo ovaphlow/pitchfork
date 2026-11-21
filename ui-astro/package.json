@@ -2,13 +2,9 @@
   "name": "ui-astro",
   "private": true,
   "scripts": {
-    "dev": "pnpm --filter @pitchfork/auth dev",
-    "dev:admin": "pnpm --filter @pitchfork/admin dev",
-    "dev:worker": "pnpm --filter @pitchfork/worker dev",
-    "dev:aceso": "pnpm --filter @pitchfork/aceso dev",
+    "dev": "pnpm --filter @pitchfork/aceso dev",
     "build": "pnpm -r build",
-    "preview": "pnpm --filter @pitchfork/auth preview",
-    "preview:aceso": "pnpm --filter @pitchfork/aceso preview",
+    "preview": "pnpm --filter @pitchfork/aceso preview",
     "test:e2e": "playwright test",
     "test:e2e:aceso": "playwright test apps/aceso/e2e/elderly-care-lifecycle.spec.ts --project=chromium",
     "test:unit:aceso": "node --test apps/aceso/tests/*.test.ts"

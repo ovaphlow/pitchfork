@@ -12,11 +12,9 @@ allprojects {
     }
 }
 
-val legacyAppMigrations = setOf(
-    "apps/trainova/src/main/resources/db/migration/V5__factory_training_tables.sql",
-    "apps/trainova/src/main/resources/db/migration/V6__add_course_metadata.sql",
-    "apps/trainova/src/main/resources/db/migration/V7__rename_knowledge_entries_extra_to_metadata.sql",
-)
+// 无例外：所有迁移必须归属 libs/<module>。2026-11-21 删除 Trainova 后，
+// 曾经的 apps/trainova V5–V7 基线随之删除，这里不再有白名单条目。
+val legacyAppMigrations = emptySet<String>()
 
 val verifyMigrationOwnership by tasks.registering {
     group = "verification"

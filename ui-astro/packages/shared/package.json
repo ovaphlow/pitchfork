@@ -3,13 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "main": "./src/trainova.ts",
-  "types": "./src/trainova.ts",
+  "main": "./src/aceso.ts",
+  "types": "./src/aceso.ts",
   "exports": {
-    "./trainova": {
-      "types": "./src/trainova.ts",
-      "default": "./src/trainova.ts"
-    },
     "./aceso": {
       "types": "./src/aceso.ts",
       "default": "./src/aceso.ts"

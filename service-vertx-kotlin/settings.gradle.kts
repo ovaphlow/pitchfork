@@ -2,21 +2,14 @@ rootProject.name = "service-vertx-kotlin"
 
 include(
     "libs:database",
-    "libs:knowledge",
-    "libs:skills",
     "libs:common",
-    "libs:trainings",
-    "libs:exams",
-    "libs:onsite",
     "libs:inventories",
     "libs:logging",
     "libs:pharmacy",
-    "libs:analytics",
     "libs:healthcare",
     "libs:nursing",
     "libs:dining",
     "apps:aceso",
-    "apps:trainova",
 )
 
 pluginManagement {

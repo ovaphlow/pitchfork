@@ -21,7 +21,7 @@ const (
 	defaultThrottleLockout  = 15 * time.Minute
 	defaultThrottleFailures = 5
 	defaultTrustedProxyCIDR = "127.0.0.1/32"
-	defaultAppCodes         = "agora,aceso,trainova"
+	defaultAppCodes         = "agora,aceso"   // 2026-11-21：trainova 已删除
 
 	defaultEmailLinkTTL         = 10 * time.Minute
 	defaultEmailLinkRateWindow  = 15 * time.Minute

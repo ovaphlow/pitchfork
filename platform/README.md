@@ -153,7 +153,8 @@ Shared data is scoped per product. `settings`, `messages`, `interactions`,
 `files`, `roles`, `subject-roles` and `subject-permissions` require the
 `X-App-Code` header (for example `agora` or `aceso`); writes store that code and
 reads filter by it, so one product cannot see or mutate another's rows. The
-allowlist comes from `PLATFORMD_APP_CODES` (default `agora,aceso,trainova`).
+allowlist comes from `PLATFORMD_APP_CODES` (default `agora,aceso`; `trainova` was removed
+on 2026-11-21).
 `departments` and `subject-departments` stay global. Migration `000021` adds the
 column and backfills existing rows (`files` → `agora`, the rest → `aceso`).
 `roles.role_code` stays globally unique, so product roles keep an `<app>.` prefix

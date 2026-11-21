@@ -4,7 +4,6 @@
 
 | Product | Backend | Database | API | Frontend |
 |---|---|---|---:|---|
-| Trainova | `apps:trainova` | `ovaphlow` | `8421` | `auth` (`4321`), `admin` (`4322`), `worker` (`4323`) |
 | Aceso | `apps:aceso` | `aceso` | `8422` | `aceso` (`4324`)，路由前缀 `/eldercare/*` |
 
 Backend routes use `/crate-api/<module>/v1/<resource>`. Each product has its own
@@ -16,7 +15,6 @@ cross product boundaries.
 | Layer | Libraries |
 |---|---|
 | Platform | `logging`, `database`, `common` |
-| Trainova | `knowledge`, `skills`, `trainings`, `exams`, `onsite`, `analytics` |
 | Aceso | `healthcare`, `inventories`, `pharmacy`, `nursing`, `dining` |
 
 An app owns route mounting, runtime configuration and its declared libraries.
@@ -46,12 +44,16 @@ The former `service-nexus-shared` capabilities (`settings`, `messages`, `files`,
   secrets, local `config.json`, `.env` or generated jOOQ configuration.
 - A domain table, its Flyway migration and its jOOQ config belong to the owning
   `libs/<module>`. The app receives only migrations from its runtime libraries.
-- Trainova `apps/trainova/.../V5-V7` is executed legacy history: do not move,
-  duplicate or add new schema there. Migration bands are defined in root
-  [`AGENTS.md`](../AGENTS.md).
+- Application composition roots carry no migrations: every table belongs to a
+  `libs/<module>` band (defined in root [`AGENTS.md`](../AGENTS.md)).
 
 ## Frontend
 
-Every frontend requires an explicit `PUBLIC_API_URL`. Trainova apps import
-`@pitchfork/shared/trainova`; Aceso imports `@pitchfork/shared/aceso`. Add an API
-client export only after its backend route is mounted in that same product.
+Every frontend requires an explicit `PUBLIC_API_URL`. `apps/aceso` imports
+`@pitchfork/shared/aceso`; add an API client export only after its backend route
+is mounted in that same product.
+
+Trainova (backend `apps:trainova`, libs `knowledge`/`skills`/`trainings`/`exams`/
+`onsite`/`analytics`, frontends `auth`/`admin`/`worker`, DB `ovaphlow`, API `8421`)
+was removed on 2026-11-21 together with its `V5–V7` baseline migrations; the
+product is no longer part of this repository.

@@ -6,7 +6,7 @@ database-test safety rules. Product composition and configuration are in
 
 ## Product Boundaries
 
-- `apps:trainova` serves Trainova on `8421`; `apps:aceso` serves Aceso on `8422`.
+- `apps:aceso` serves Aceso on `8422` (Trainova was removed on 2026-11-21).
 - A product mounts only its own domain libraries. Do not add a cross-product lib
   dependency to reuse a table or endpoint.
 - Shared capabilities (`settings`, `messages`, `files`, `interactions`, role and
@@ -32,13 +32,11 @@ database-test safety rules. Product composition and configuration are in
   `nursing.nursing_task_executions`, `public.materials`, ...). Table and column
   names come only from the owning library's Flyway migration history; do not
   invent them.
-- Do not add new jOOQ usage. Existing jOOQ in Trainova-side code
-  (`libs/{knowledge,skills,trainings,exams,onsite,analytics}`, `apps/trainova`)
-  is legacy and out of the native-SQL default — convert it only when a task
-  explicitly scopes that migration. When editing legacy jOOQ code, keep its
-  conventions: omit `.set()` for nullable inserts/updates rather than binding
-  `null`, and use `ctx.select(listOf(...))` when a large select defeats type
-  inference.
+- Do not add new jOOQ usage. Legacy jOOQ remains only where already written
+  (e.g. parts of `libs/healthcare`); convert it only when a task explicitly
+  scopes that migration. When editing such code, keep its conventions: omit
+  `.set()` for nullable inserts/updates rather than binding `null`, and use
+  `ctx.select(listOf(...))` when a large select defeats type inference.
 
 ## Schema And Verification
 

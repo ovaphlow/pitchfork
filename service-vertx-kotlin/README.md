@@ -1,23 +1,14 @@
 # service-vertx-kotlin
 
-Vert.x Kotlin monorepo for the Trainova and Aceso products. The authoritative architecture reference is [`../docs/architecture.md`](../docs/architecture.md).
+Vert.x Kotlin backend for the Aceso product. The authoritative architecture reference is [`../docs/architecture.md`](../docs/architecture.md).
+
+Trainova (apps/trainova, its six domain libs, and the V5–V7 baseline migrations) was removed on 2026-11-21.
 
 ## Requirements
 
 - JDK 25 toolchain
 - PostgreSQL
 - Gradle wrapper
-
-## Run Trainova
-
-```bash
-cp apps/trainova/config.example.json apps/trainova/config.json
-export PITCHFORK_CONFIG="$PWD/apps/trainova/config.json"
-export PITCHFORK_DB_PASSWORD='local-development-password'
-./gradlew :apps:trainova:run
-```
-
-Trainova listens on `8421`.
 
 ## Run Aceso
 
