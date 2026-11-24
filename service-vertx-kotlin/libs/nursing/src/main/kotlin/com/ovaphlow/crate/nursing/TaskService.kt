@@ -1,55 +1,27 @@
 package com.ovaphlow.crate.nursing
 
 import com.ovaphlow.crate.common.Ulid
-import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingPlanItems.NURSING_PLAN_ITEMS
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingTasks.NURSING_TASKS
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
 import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
-import io.vertx.sqlclient.RowSet
 import io.vertx.sqlclient.SqlClient
-import org.jooq.DSLContext
-import org.jooq.JSONB
-import org.jooq.impl.DSL
-import org.jooq.impl.DSL.count
+import io.vertx.sqlclient.Tuple
 import java.time.LocalDate
 import java.time.OffsetDateTime
 
+/**
+ * 护理任务服务。
+ *
+ * 读路径（list/get）带 `LEFT JOIN healthcare.medical_orders` 取出医嘱类型与结构化明细；
+ * 别名 `nt` / `mo` 用于消歧（未限定列名在 PG 会因同名列报错）。
+ *
+ * 持久化一律原生参数化 SQL（`$1..$n` + `Tuple`），本文件无任何 jOOQ 引用。
+ */
 class TaskService(
     private val pool: Pool,
-    private val ctx: DSLContext = DatabaseConfig.createDSL()
 ) {
-    private val t = DSL.table(DSL.name("nursing", "nursing_tasks"))
-
-    // 读路径（list/get）需要 LEFT JOIN 绑定医嘱，取出医嘱类型与结构化明细。
-    // nursing_tasks 加别名 nt、medical_orders 加别名 mo，避免与 medical_orders 的
-    // encounter_id / status / created_at 等同名列歧义（未限定列名在 PG 直接报错）。
-    // 限定列一律用 `DSL.field("nt.列名", ...)`：别名表的 Table.field(String) 允许返回
-    // null（原始表没有已知 RowType），不能用来做非空限定引用。
-    private val ntAlias = t.`as`("nt")
-    private val moTable = DSL.table(DSL.name("healthcare", "medical_orders")).`as`("mo")
-    private val joinOrderOn =
-        DSL.field("nt.order_item_id", String::class.java).eq(DSL.field("mo.id", String::class.java))
-
-    private val cId = DSL.field("id", String::class.java)
-    private val cPeriodId = DSL.field("period_id", String::class.java)
-    private val cEncounterId = DSL.field("encounter_id", String::class.java)
-    private val cPlanItemId = DSL.field("plan_item_id", String::class.java)
-    private val cOrderItemId = DSL.field("order_item_id", String::class.java)
-    private val cTaskType = DSL.field("task_type", String::class.java)
-    private val cDescription = DSL.field("description", String::class.java)
-    private val cFrequencyCode = DSL.field("frequency_code", String::class.java)
-    private val cFrequencyName = DSL.field("frequency_name", String::class.java)
-    private val cStartDate = DSL.field("start_date", LocalDate::class.java)
-    private val cEndDate = DSL.field("end_date", LocalDate::class.java)
-    private val cStatus = DSL.field("status", String::class.java)
-    private val cMetadata = DSL.field("metadata", JSONB::class.java)
-    private val cCreatedAt = DSL.field("created_at", OffsetDateTime::class.java)
-    private val cUpdatedAt = DSL.field("updated_at", OffsetDateTime::class.java)
-
     companion object {
         internal val VALID_TASK_TYPES = setOf("NURSING", "REHABILITATION", "LIVING_CARE", "HEALTH_EDUCATION", "OTHER")
         private val ORDER_TASK_TYPES = setOf("MEDICATION", "TREATMENT")
@@ -59,6 +31,41 @@ class TaskService(
             "COMPLETED" to emptyList(),
             "CANCELLED" to emptyList()
         )
+
+        /** `nursing.nursing_tasks` 显式列清单（与 [toJson] 读取的键一致）。 */
+        internal const val TASK_COLUMNS =
+            "id, period_id, encounter_id, plan_item_id, order_item_id, task_type, description, " +
+                "frequency_code, frequency_name, start_date, end_date, status, metadata, " +
+                "created_at, updated_at"
+
+        /** 与 [TASK_COLUMNS] 同序，带 `nt.` 表别名限定（JOIN 读路径用）。 */
+        internal const val TASK_COLUMNS_NT =
+            "nt.id, nt.period_id, nt.encounter_id, nt.plan_item_id, nt.order_item_id, nt.task_type, " +
+                "nt.description, nt.frequency_code, nt.frequency_name, nt.start_date, nt.end_date, " +
+                "nt.status, nt.metadata, nt.created_at, nt.updated_at"
+
+        private const val JOINED_TASK_SQL =
+            "SELECT $TASK_COLUMNS_NT, mo.order_details AS order_details, mo.order_type AS order_type " +
+                "FROM nursing.nursing_tasks AS nt " +
+                "LEFT JOIN healthcare.medical_orders AS mo ON nt.order_item_id = mo.id "
+
+        private const val TASK_BY_ID_SQL = JOINED_TASK_SQL + "WHERE nt.id = \$1"
+
+        private const val LOCK_ORDER_TASK_SQL =
+            "SELECT $TASK_COLUMNS FROM nursing.nursing_tasks " +
+                "WHERE order_item_id = \$1 FOR UPDATE"
+
+        private const val TASK_STATUS_UPDATE_SQL =
+            "UPDATE nursing.nursing_tasks SET status = \$1, updated_at = \$2 " +
+                "WHERE nursing.nursing_tasks.id = \$3"
+
+        private const val LOCK_ACTIVE_PLAN_TASKS_SQL =
+            "SELECT t.id, t.period_id, t.encounter_id, t.plan_item_id, t.order_item_id, t.task_type, " +
+                "t.description, t.frequency_code, t.frequency_name, t.start_date, t.end_date, " +
+                "t.status, t.metadata, t.created_at, t.updated_at " +
+                "FROM nursing.nursing_tasks t " +
+                "JOIN nursing.nursing_plan_items i ON i.id = t.plan_item_id " +
+                "WHERE i.plan_id = \$1 AND t.status = 'ACTIVE' FOR UPDATE"
 
         fun toJson(row: Row): JsonObject = toJson(row, withBoundOrder = false)
 
@@ -113,46 +120,47 @@ class TaskService(
         val id = Ulid.generate()
         val now = OffsetDateTime.now()
 
-        val query = ctx.insertInto(t)
-            .set(cId, id)
-            .set(cPeriodId, body.getString("period_id"))
-            .set(cEncounterId, body.getString("encounter_id"))
-            .set(cPlanItemId, body.getString("plan_item_id"))
-            .set(cOrderItemId, body.getString("order_item_id"))
-            .set(cTaskType, taskType)
-            .set(cDescription, description)
-            .set(cFrequencyCode, body.getString("frequency_code"))
-            .set(cFrequencyName, body.getString("frequency_name"))
-            .set(cStartDate, body.getString("start_date")?.let { LocalDate.parse(it) })
-            .set(cEndDate, body.getString("end_date")?.let { LocalDate.parse(it) })
-            .set(cStatus, "ACTIVE")
-            .set(cMetadata, body.containsKey("metadata")
-                .let { if (it) JSONB.valueOf(body.getJsonObject("metadata").encode()) else null })
-            .set(cCreatedAt, now)
-            .set(cUpdatedAt, now)
+        val sql =
+            "INSERT INTO nursing.nursing_tasks ($TASK_COLUMNS) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11, \$12, \$13, \$14, \$15)"
+        val tuple = Tuple.of(
+            id,
+            body.getString("period_id"),
+            body.getString("encounter_id"),
+            body.getString("plan_item_id"),
+            body.getString("order_item_id"),
+            taskType,
+            description,
+            body.getString("frequency_code"),
+            body.getString("frequency_name"),
+            body.getString("start_date")?.let { LocalDate.parse(it) },
+            body.getString("end_date")?.let { LocalDate.parse(it) },
+            "ACTIVE",
+            if (body.containsKey("metadata")) body.getJsonObject("metadata") else null,
+            now,
+            now,
+        )
 
-        return pool.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
-            .map {
-                JsonObject()
-                    .put("id", id)
-                    .put("period_id", body.getString("period_id"))
-                    .put("encounter_id", body.getString("encounter_id"))
-                    .put("plan_item_id", body.getString("plan_item_id"))
-                    .put("order_item_id", body.getString("order_item_id"))
-                    .put("task_type", taskType)
-                    .put("description", description)
-                    .put("frequency_code", body.getString("frequency_code"))
-                    .put("frequency_name", body.getString("frequency_name"))
-                    .put("start_date", body.getString("start_date"))
-                    .put("end_date", body.getString("end_date"))
-                    .put("status", "ACTIVE")
-                    .put("metadata", body.getJsonObject("metadata"))
-                    .put("created_at", now.toString())
-                    .put("updated_at", now.toString())
-                    .put("order_details", null)
-                    .put("order_type", null)
-            }
+        return pool.preparedQuery(sql).execute(tuple).map {
+            JsonObject()
+                .put("id", id)
+                .put("period_id", body.getString("period_id"))
+                .put("encounter_id", body.getString("encounter_id"))
+                .put("plan_item_id", body.getString("plan_item_id"))
+                .put("order_item_id", body.getString("order_item_id"))
+                .put("task_type", taskType)
+                .put("description", description)
+                .put("frequency_code", body.getString("frequency_code"))
+                .put("frequency_name", body.getString("frequency_name"))
+                .put("start_date", body.getString("start_date"))
+                .put("end_date", body.getString("end_date"))
+                .put("status", "ACTIVE")
+                .put("metadata", body.getJsonObject("metadata"))
+                .put("created_at", now.toString())
+                .put("updated_at", now.toString())
+                .put("order_details", null)
+                .put("order_type", null)
+        }
     }
 
     fun list(
@@ -173,55 +181,45 @@ class TaskService(
         status?.let { filters["status"] = it }
         planItemId?.let { filters["plan_item_id"] = it }
 
-        val conditions = filters.map { (column, value) -> DSL.field(column, String::class.java).eq(value) }
-        val joinedConditions = filters.map { (column, value) -> DSL.field("nt.$column", String::class.java).eq(value) }
+        val countWhere = mutableListOf<String>()
+        val countArgs = mutableListOf<Any?>()
+        val dataWhere = mutableListOf<String>()
+        val dataArgs = mutableListOf<Any?>()
 
-        val countQuery = ctx.select(count().`as`("total")).from(t).where(conditions)
-        val dataQuery = ctx
-            .select(
-                ntAlias.asterisk(),
-                DSL.field("mo.order_details").`as`("order_details"),
-                DSL.field("mo.order_type").`as`("order_type"),
-            )
-            .from(ntAlias.leftJoin(moTable).on(joinOrderOn))
-            .where(joinedConditions)
-            .orderBy(DSL.field("nt.created_at", OffsetDateTime::class.java).desc())
-            .limit(limit)
-            .offset(offset)
+        for ((column, value) in filters) {
+            countWhere.add("$column = \$${countArgs.size + 1}")
+            countArgs.add(value)
+            dataWhere.add("nt.$column = \$${dataArgs.size + 1}")
+            dataArgs.add(value)
+        }
 
-        return pool.preparedQuery(DatabaseConfig.sql(countQuery))
-            .execute(DatabaseConfig.tuple(countQuery))
-            .flatMap { countRows ->
-                val total = countRows.iterator().next().getLong("total") ?: 0L
-                pool.preparedQuery(DatabaseConfig.sql(dataQuery))
-                    .execute(DatabaseConfig.tuple(dataQuery))
-                    .map { dataRows ->
-                        val records = JsonArray()
-                        // 该查询带 LEFT JOIN healthcare.medical_orders，行里确有这两列
-                        for (row in dataRows) records.add(toJson(row, withBoundOrder = true))
-                        JsonObject().put("records", records)
-                            .put("meta", JsonObject().put("total", total))
-                    }
+        val countWhereClause = if (countWhere.isEmpty()) "" else " WHERE " + countWhere.joinToString(" AND ")
+        val countSql = "SELECT count(*) AS total FROM nursing.nursing_tasks$countWhereClause"
+        val dataWhereClause = if (dataWhere.isEmpty()) "" else " WHERE " + dataWhere.joinToString(" AND ")
+        val dataSql =
+            JOINED_TASK_SQL + dataWhereClause +
+                " ORDER BY nt.created_at DESC LIMIT \$${dataArgs.size + 1} OFFSET \$${dataArgs.size + 2}"
+
+        return pool.preparedQuery(countSql).execute(Tuple.from(countArgs)).flatMap { countRows ->
+            val total = countRows.iterator().next().getLong("total") ?: 0L
+            val dataTuple = Tuple.from(dataArgs.toList() + listOf(limit, offset))
+            pool.preparedQuery(dataSql).execute(dataTuple).map { dataRows ->
+                val records = JsonArray()
+                // 该查询带 LEFT JOIN healthcare.medical_orders，行里确有这两列
+                for (row in dataRows) records.add(toJson(row, withBoundOrder = true))
+                JsonObject().put("records", records)
+                    .put("meta", JsonObject().put("total", total))
             }
+        }
     }
 
     fun get(id: String): Future<JsonObject> {
-        val query = ctx
-            .select(
-                ntAlias.asterisk(),
-                DSL.field("mo.order_details").`as`("order_details"),
-                DSL.field("mo.order_type").`as`("order_type"),
-            )
-            .from(ntAlias.leftJoin(moTable).on(joinOrderOn))
-            .where(DSL.field("nt.id", String::class.java).eq(id))
-        return pool.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
-            .flatMap { rows ->
-                if (rows.size() == 0)
-                    Future.failedFuture(NotFoundException("task not found: $id"))
-                // 该查询带 LEFT JOIN healthcare.medical_orders，行里确有这两列
-                else Future.succeededFuture(toJson(rows.iterator().next(), withBoundOrder = true))
-            }
+        return pool.preparedQuery(TASK_BY_ID_SQL).execute(Tuple.of(id)).flatMap { rows ->
+            if (rows.size() == 0)
+                Future.failedFuture(NotFoundException("task not found: $id"))
+            // 该查询带 LEFT JOIN healthcare.medical_orders，行里确有这两列
+            else Future.succeededFuture(toJson(rows.iterator().next(), withBoundOrder = true))
+        }
     }
 
     fun updateStatus(id: String, newStatus: String): Future<JsonObject> {
@@ -237,13 +235,8 @@ class TaskService(
                 )
 
             val now = OffsetDateTime.now()
-            val updateQuery = ctx.update(t)
-                .set(cStatus, newStatus)
-                .set(cUpdatedAt, now)
-                .where(cId.eq(id))
 
-            pool.preparedQuery(DatabaseConfig.sql(updateQuery))
-                .execute(DatabaseConfig.tuple(updateQuery))
+            pool.preparedQuery(TASK_STATUS_UPDATE_SQL).execute(Tuple.of(newStatus, now, id))
                 .flatMap { get(id) }
         }
     }
@@ -280,22 +273,24 @@ class TaskService(
         val id = Ulid.generate()
         val now = OffsetDateTime.now()
 
-        var insertQuery = ctx.insertInto(NURSING_TASKS)
-            .set(NURSING_TASKS.ID, id)
-            .set(NURSING_TASKS.PERIOD_ID, input.periodId)
-            .set(NURSING_TASKS.ENCOUNTER_ID, input.encounterId)
-            .set(NURSING_TASKS.ORDER_ITEM_ID, input.orderItemId)
-            .set(NURSING_TASKS.TASK_TYPE, input.taskType)
-            .set(NURSING_TASKS.DESCRIPTION, input.description)
-            .set(NURSING_TASKS.STATUS, "ACTIVE")
-            .set(NURSING_TASKS.CREATED_AT, now)
-            .set(NURSING_TASKS.UPDATED_AT, now)
-        input.frequencyCode?.let { insertQuery = insertQuery.set(NURSING_TASKS.FREQUENCY_CODE, it) }
-        input.frequencyName?.let { insertQuery = insertQuery.set(NURSING_TASKS.FREQUENCY_NAME, it) }
-        input.startDate?.let { insertQuery = insertQuery.set(NURSING_TASKS.START_DATE, it) }
-        input.endDate?.let { insertQuery = insertQuery.set(NURSING_TASKS.END_DATE, it) }
+        val columns = mutableListOf(
+            "id", "period_id", "encounter_id", "order_item_id", "task_type", "description",
+            "status", "created_at", "updated_at",
+        )
+        val values = mutableListOf<Any?>(
+            id, input.periodId, input.encounterId, input.orderItemId, input.taskType,
+            input.description, "ACTIVE", now, now,
+        )
+        input.frequencyCode?.let { columns.add("frequency_code"); values.add(it) }
+        input.frequencyName?.let { columns.add("frequency_name"); values.add(it) }
+        input.startDate?.let { columns.add("start_date"); values.add(it) }
+        input.endDate?.let { columns.add("end_date"); values.add(it) }
 
-        return execute(client, insertQuery).map {
+        val placeholders = values.indices.joinToString(", ") { "\$${it + 1}" }
+        val sql =
+            "INSERT INTO nursing.nursing_tasks (${columns.joinToString(", ")}) VALUES ($placeholders)"
+
+        return client.preparedQuery(sql).execute(Tuple.from(values)).map {
             JsonObject()
                 .put("id", id)
                 .put("period_id", input.periodId)
@@ -316,10 +311,7 @@ class TaskService(
     }
 
     fun lockOrderTask(client: SqlClient, orderItemId: String): Future<JsonObject?> {
-        val query = ctx.selectFrom(NURSING_TASKS)
-            .where(NURSING_TASKS.ORDER_ITEM_ID.eq(orderItemId))
-            .forUpdate()
-        return execute(client, query).map { rows ->
+        return client.preparedQuery(LOCK_ORDER_TASK_SQL).execute(Tuple.of(orderItemId)).map { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { toJson(it) }
         }
     }
@@ -341,11 +333,9 @@ class TaskService(
                 )
             }
             val now = OffsetDateTime.now()
-            val updateQuery = ctx.update(NURSING_TASKS)
-                .set(NURSING_TASKS.STATUS, targetStatus)
-                .set(NURSING_TASKS.UPDATED_AT, now)
-                .where(NURSING_TASKS.ID.eq(requireNotNull(task.getString("id"))))
-            execute(client, updateQuery).map<Void> { null }
+            client.preparedQuery(TASK_STATUS_UPDATE_SQL)
+                .execute(Tuple.of(targetStatus, now, requireNotNull(task.getString("id"))))
+                .map<Void> { null }
         }
     }
 
@@ -378,22 +368,24 @@ class TaskService(
 
         val id = Ulid.generate()
         val now = OffsetDateTime.now()
-        var insertQuery = ctx.insertInto(NURSING_TASKS)
-            .set(NURSING_TASKS.ID, id)
-            .set(NURSING_TASKS.PERIOD_ID, input.periodId)
-            .set(NURSING_TASKS.ENCOUNTER_ID, input.encounterId)
-            .set(NURSING_TASKS.PLAN_ITEM_ID, input.planItemId)
-            .set(NURSING_TASKS.TASK_TYPE, "NURSING")
-            .set(NURSING_TASKS.DESCRIPTION, input.description)
-            .set(NURSING_TASKS.STATUS, "ACTIVE")
-            .set(NURSING_TASKS.CREATED_AT, now)
-            .set(NURSING_TASKS.UPDATED_AT, now)
-        input.frequencyCode?.let { insertQuery = insertQuery.set(NURSING_TASKS.FREQUENCY_CODE, it) }
-        input.frequencyName?.let { insertQuery = insertQuery.set(NURSING_TASKS.FREQUENCY_NAME, it) }
-        input.startDate?.let { insertQuery = insertQuery.set(NURSING_TASKS.START_DATE, it) }
-        input.endDate?.let { insertQuery = insertQuery.set(NURSING_TASKS.END_DATE, it) }
+        val columns = mutableListOf(
+            "id", "period_id", "encounter_id", "plan_item_id", "task_type", "description",
+            "status", "created_at", "updated_at",
+        )
+        val values = mutableListOf<Any?>(
+            id, input.periodId, input.encounterId, input.planItemId, "NURSING",
+            input.description, "ACTIVE", now, now,
+        )
+        input.frequencyCode?.let { columns.add("frequency_code"); values.add(it) }
+        input.frequencyName?.let { columns.add("frequency_name"); values.add(it) }
+        input.startDate?.let { columns.add("start_date"); values.add(it) }
+        input.endDate?.let { columns.add("end_date"); values.add(it) }
 
-        return execute(client, insertQuery).map {
+        val placeholders = values.indices.joinToString(", ") { "\$${it + 1}" }
+        val sql =
+            "INSERT INTO nursing.nursing_tasks (${columns.joinToString(", ")}) VALUES ($placeholders)"
+
+        return client.preparedQuery(sql).execute(Tuple.from(values)).map {
             JsonObject()
                 .put("id", id)
                 .put("period_id", input.periodId)
@@ -419,13 +411,7 @@ class TaskService(
      * 锁定某计划（经 plan_item_id）的全部活动任务。必须在调用方外层事务内执行。
      */
     fun lockActivePlanTasks(client: SqlClient, planId: String): Future<List<JsonObject>> {
-        val query = ctx.select(NURSING_TASKS.fields().toList())
-            .from(NURSING_TASKS)
-            .join(NURSING_PLAN_ITEMS).on(NURSING_TASKS.PLAN_ITEM_ID.eq(NURSING_PLAN_ITEMS.ID))
-            .where(NURSING_PLAN_ITEMS.PLAN_ID.eq(planId))
-            .and(NURSING_TASKS.STATUS.eq("ACTIVE"))
-            .forUpdate()
-        return execute(client, query).map { rows ->
+        return client.preparedQuery(LOCK_ACTIVE_PLAN_TASKS_SQL).execute(Tuple.of(planId)).map { rows ->
             val tasks = mutableListOf<JsonObject>()
             for (row in rows) tasks.add(toJson(row))
             tasks
@@ -439,14 +425,13 @@ class TaskService(
     fun cancelPlanTasks(client: SqlClient, taskIds: List<String>): Future<Void> {
         if (taskIds.isEmpty()) return Future.succeededFuture()
         val now = OffsetDateTime.now()
-        val updateQuery = ctx.update(NURSING_TASKS)
-            .set(NURSING_TASKS.STATUS, "CANCELLED")
-            .set(NURSING_TASKS.UPDATED_AT, now)
-            .where(NURSING_TASKS.ID.`in`(taskIds))
-            .and(NURSING_TASKS.STATUS.eq("ACTIVE"))
-        return execute(client, updateQuery).map<Void> { null }
+        // 绑定顺序与 jOOQ 版逐位对齐：SET 列（status → updated_at）→ IN 列表 → 活动态守卫
+        val placeholders = taskIds.indices.joinToString(", ") { "\$${it + 3}" }
+        val sql =
+            "UPDATE nursing.nursing_tasks SET status = \$1, updated_at = \$2 " +
+                "WHERE id IN ($placeholders) AND status = \$${taskIds.size + 3}"
+        return client.preparedQuery(sql)
+            .execute(Tuple.from(listOf<Any?>("CANCELLED", now) + taskIds + listOf("ACTIVE")))
+            .map<Void> { null }
     }
-
-    private fun execute(client: SqlClient, query: org.jooq.Query): Future<RowSet<Row>> =
-        client.preparedQuery(DatabaseConfig.sql(query)).execute(DatabaseConfig.tuple(query))
 }

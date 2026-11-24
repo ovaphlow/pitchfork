@@ -396,14 +396,14 @@ class StockServiceTest {
         every { pq.execute() } returns io.vertx.core.Future.succeededFuture(mockk(relaxed = true))
     }
 
-    /** loadStock 行：getValue(0..4) 为 id/lot_id/quantity/locked_quantity/total_cost。 */
+    /** loadStock 行：按列名台账（stock_id/stock_lot_id/stock_quantity/...）。 */
     private fun stockRowSet(lotId: String?, quantity: BigDecimal, locked: BigDecimal): io.vertx.sqlclient.RowSet<io.vertx.sqlclient.Row> {
         val row = mockk<io.vertx.sqlclient.Row>(relaxed = true) {
-            every { getValue(0) } returns "stock-1"
-            every { getValue(1) } returns lotId
-            every { getValue(2) } returns quantity
-            every { getValue(3) } returns locked
-            every { getValue(4) } returns BigDecimal.TEN
+            every { getValue("stock_id") } returns "stock-1"
+            every { getValue("stock_lot_id") } returns lotId
+            every { getValue("stock_quantity") } returns quantity
+            every { getValue("stock_locked_quantity") } returns locked
+            every { getValue("stock_total_cost") } returns BigDecimal.TEN
         }
         return mockk<io.vertx.sqlclient.RowSet<io.vertx.sqlclient.Row>>(relaxed = true) {
             every { size() } returns 1
@@ -411,13 +411,13 @@ class StockServiceTest {
         }
     }
 
-    /** loadMaterial 行：getValue(0..3) 为 status/base_unit/quantity_scale/batch_control。 */
+    /** loadMaterial 行：按列名台账（material_status/material_base_unit/...）。 */
     private fun materialRowSet(batchControl: Boolean): io.vertx.sqlclient.RowSet<io.vertx.sqlclient.Row> {
         val row = mockk<io.vertx.sqlclient.Row>(relaxed = true) {
-            every { getValue(0) } returns "ACTIVE"
-            every { getValue(1) } returns "片"
-            every { getValue(2) } returns 0
-            every { getValue(3) } returns batchControl
+            every { getValue("material_status") } returns "ACTIVE"
+            every { getValue("material_base_unit") } returns "片"
+            every { getValue("material_quantity_scale") } returns 0
+            every { getValue("material_batch_control") } returns batchControl
         }
         return mockk<io.vertx.sqlclient.RowSet<io.vertx.sqlclient.Row>>(relaxed = true) {
             every { size() } returns 1
@@ -425,12 +425,12 @@ class StockServiceTest {
         }
     }
 
-    /** lot 行：getValue(0)=material_id、getValue(1)=expiry_date。 */
+    /** lot 行：按列名台账（lot_material_id/lot_expiry_date）。 */
     private fun lotRowSet(materialId: String, expired: Boolean): io.vertx.sqlclient.RowSet<io.vertx.sqlclient.Row> {
         val expiry = if (expired) java.time.LocalDate.now().minusDays(1) else java.time.LocalDate.now().plusDays(30)
         val row = mockk<io.vertx.sqlclient.Row>(relaxed = true) {
-            every { getValue(0) } returns materialId
-            every { getValue(1) } returns expiry
+            every { getValue("lot_material_id") } returns materialId
+            every { getValue("lot_expiry_date") } returns expiry
         }
         return mockk<io.vertx.sqlclient.RowSet<io.vertx.sqlclient.Row>>(relaxed = true) {
             every { size() } returns 1

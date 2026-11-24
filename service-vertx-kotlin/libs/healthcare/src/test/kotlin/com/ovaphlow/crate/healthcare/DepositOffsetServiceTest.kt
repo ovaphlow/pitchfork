@@ -322,7 +322,7 @@ class DepositOffsetServiceTest {
                     sql.contains("from healthcare.bills") && sql.contains("left outer join") -> {
                         val excludesReversed = sql.contains("reversed_at is null")
                         val scoped = bills
-                            .filter { it["encounter_id"] == values.getOrNull(2) && it["status"] == values.getOrNull(3) }
+                            .filter { it["encounter_id"] == values.getOrNull(0) && it["status"] == values.getOrNull(1) }
                             .filter { !excludesReversed || it["reversed_at"] == null }
                             .mapNotNull { bill ->
                                 val paid = payments

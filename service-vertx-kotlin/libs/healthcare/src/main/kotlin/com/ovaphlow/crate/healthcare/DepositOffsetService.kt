@@ -1,11 +1,6 @@
 package com.ovaphlow.crate.healthcare
 
 import com.ovaphlow.crate.common.Ulid
-import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.database.gen.healthcare.tables.Bills.BILLS
-import com.ovaphlow.crate.database.gen.healthcare.tables.DepositRecords.DEPOSIT_RECORDS
-import com.ovaphlow.crate.database.gen.healthcare.tables.Encounters.ENCOUNTERS
-import com.ovaphlow.crate.database.gen.healthcare.tables.Payments.PAYMENTS
 import com.ovaphlow.crate.nursing.ConflictException
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
@@ -13,9 +8,7 @@ import io.vertx.core.json.JsonObject
 import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.RowSet
 import io.vertx.sqlclient.SqlClient
-import org.jooq.JSONB
-import org.jooq.Query
-import org.jooq.impl.DSL
+import io.vertx.sqlclient.Tuple
 import java.math.BigDecimal
 import java.time.LocalDate
 import java.time.OffsetDateTime
@@ -38,13 +31,10 @@ import java.time.OffsetDateTime
  *  5. 核销金额必须 > 0、至多两位小数、不超过 9999999999.99；省略或 0 表示不核销
  *     （不查库、不写库），因此空请求体与改动前行为完全一致。
  *  6. 押金余额口径唯一来自 [DepositService.balanceOf]（余额 = Σ登记 − Σ退押 − Σ核销）。
+ *
+ * 持久化一律原生参数化 SQL（`$1..$n` + `Tuple`），无 jOOQ。
  */
-class DepositOffsetService(
-    private val ctx: org.jooq.DSLContext = DatabaseConfig.createDSL(),
-) {
-    /** V523 账单红冲列（未重跑 jOOQ codegen：按列名引用，SELECT 带表名限定）。 */
-    private val sReversedAt = DSL.field(DSL.name("bills", "reversed_at"), OffsetDateTime::class.java)
-
+class DepositOffsetService {
     companion object {
         /** deposit_records.type：押金核销减项 */
         const val TYPE_OFFSET = "核销"
@@ -54,6 +44,43 @@ class DepositOffsetService(
 
         /** 结算请求体唯一允许的键 */
         private const val KEY_OFFSET = "deposit_offset"
+
+        /** 事务内按 encounter 行锁读（只取收束标记判定 409）。 */
+        private const val ENCOUNTER_LOCK_SQL =
+            "SELECT healthcare.encounters.settled_at FROM healthcare.encounters " +
+                "WHERE healthcare.encounters.id = \$1 FOR UPDATE"
+
+        /**
+         * 目标账单 + 累计缴费 + 余额一次取回。
+         *
+         * 034 §2.6：排除已红冲原单（`bills.reversed_at` 非空）——它已被红字单抵消，
+         * 不该再被押金核销；红字单余额为负，靠应用层 `signum() <= 0` 判定天然排除，
+         * **不另加谓词**（保留既有逻辑）。
+         */
+        private const val TARGET_BILLS_SQL =
+            "SELECT healthcare.bills.id, healthcare.bills.period_start, healthcare.bills.period_end, healthcare.bills.total_amount, " +
+                "coalesce(sum(healthcare.payments.amount), 0) AS paid_amount, " +
+                "healthcare.bills.total_amount - coalesce(sum(healthcare.payments.amount), 0) AS balance " +
+                "FROM healthcare.bills LEFT OUTER JOIN healthcare.payments ON healthcare.payments.bill_id = healthcare.bills.id " +
+                "WHERE healthcare.bills.encounter_id = \$1 AND healthcare.bills.status = \$2 AND healthcare.bills.reversed_at IS NULL " +
+                "GROUP BY healthcare.bills.id, healthcare.bills.period_start, healthcare.bills.period_end, healthcare.bills.total_amount " +
+                "ORDER BY healthcare.bills.period_start ASC, healthcare.bills.id ASC"
+
+        /** 核销产生的缴费流水（method = 押金，计入已缴）。 */
+        private const val INSERT_PAYMENT_SQL =
+            "INSERT INTO healthcare.payments " +
+                "(id, bill_id, amount, method, operator, metadata, created_at, updated_at) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8)"
+
+        /** 核销的押金台账减项（type = 核销）。 */
+        private const val INSERT_OFFSET_SQL =
+            "INSERT INTO healthcare.deposit_records " +
+                "(id, encounter_id, type, amount, operator, metadata, created_at, updated_at) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8)"
+
+        /** 分配额使账单余额归零时同事务置 已结清。 */
+        private const val MARK_BILL_PAID_SQL =
+            "UPDATE healthcare.bills SET status = \$1, updated_at = \$2 WHERE healthcare.bills.id = \$3"
 
         /**
          * 解析并校验结算请求体：只允许 deposit_offset 一个键，返回核销额（省略/0 = 不核销）。
@@ -161,7 +188,7 @@ class DepositOffsetService(
 
     /** 事务内按 encounter 行锁读：不存在 404；已收束 409。 */
     private fun lockEncounter(client: SqlClient, encounterId: String): Future<Row> =
-        execute(client, ctx.selectFrom(ENCOUNTERS).where(ENCOUNTERS.ID.eq(encounterId)).forUpdate()).compose { rows ->
+        execute(client, ENCOUNTER_LOCK_SQL, Tuple.of(encounterId)).compose { rows ->
             val row = rows.iterator().asSequence().firstOrNull()
                 ?: return@compose Future.failedFuture(
                     HealthcareNotFoundException("encounter not found: $encounterId"),
@@ -176,27 +203,9 @@ class DepositOffsetService(
     /**
      * 该 encounter 全部 `待缴费` 账单及其累计缴费与余额，一次查询取回；
      * 只保留余额 > 0 的行，按 period_start 升序、同账期按 id 升序。
-     *
-     * 034 §2.6：排除已红冲原单（`reversed_at` 非空）——它已被红字单抵消，不该再被押金核销；
-     * 红字单余额为负，靠下方 `signum() <= 0` 判定天然排除，**不另加谓词**（保留既有逻辑）。
      */
-    private fun targetBills(client: SqlClient, encounterId: String): Future<List<TargetBill>> {
-        val paid = DSL.coalesce(DSL.sum(PAYMENTS.AMOUNT), BigDecimal.ZERO)
-        val query = ctx.select(
-            BILLS.ID,
-            BILLS.PERIOD_START,
-            BILLS.PERIOD_END,
-            BILLS.TOTAL_AMOUNT,
-            paid.`as`("paid_amount"),
-            BILLS.TOTAL_AMOUNT.subtract(paid).`as`("balance"),
-        ).from(BILLS)
-            .leftJoin(PAYMENTS).on(PAYMENTS.BILL_ID.eq(BILLS.ID))
-            .where(BILLS.ENCOUNTER_ID.eq(encounterId))
-            .and(BILLS.STATUS.eq(BillingEngine.STATUS_PENDING))
-            .and(sReversedAt.isNull())
-            .groupBy(BILLS.ID, BILLS.PERIOD_START, BILLS.PERIOD_END, BILLS.TOTAL_AMOUNT)
-            .orderBy(BILLS.PERIOD_START.asc(), BILLS.ID.asc())
-        return execute(client, query).map { rows ->
+    private fun targetBills(client: SqlClient, encounterId: String): Future<List<TargetBill>> =
+        execute(client, TARGET_BILLS_SQL, Tuple.of(encounterId, BillingEngine.STATUS_PENDING)).map { rows ->
             rows.mapNotNull { row ->
                 val balance = row.getBigDecimal("balance")
                 if (balance == null || balance.signum() <= 0) {
@@ -211,7 +220,6 @@ class DepositOffsetService(
                 }
             }
         }
-    }
 
     /** 押金余额：口径唯一来自 [DepositService.balance]（Σ登记 − Σ退押 − Σ核销）。 */
     private fun depositBalance(client: SqlClient, encounterId: String): Future<BigDecimal> =
@@ -237,15 +245,6 @@ class DepositOffsetService(
         val paymentMetadata = JsonObject()
             .put("deposit_offset", true)
             .put("encounter_id", encounterId)
-        val paymentQuery = ctx.insertInto(PAYMENTS)
-            .set(PAYMENTS.ID, paymentId)
-            .set(PAYMENTS.BILL_ID, bill.id)
-            .set(PAYMENTS.AMOUNT, amount)
-            .set(PAYMENTS.METHOD, PaymentService.METHOD_DEPOSIT)
-            .set(PAYMENTS.OPERATOR, operator)
-            .set(PAYMENTS.METADATA, JSONB.valueOf(paymentMetadata.encode()))
-            .set(PAYMENTS.CREATED_AT, now)
-            .set(PAYMENTS.UPDATED_AT, now)
 
         val depositId = Ulid.generate()
         val depositMetadata = JsonObject()
@@ -253,31 +252,37 @@ class DepositOffsetService(
             .put("payment_id", paymentId)
             .put("period_start", bill.periodStart.toString())
             .put("period_end", bill.periodEnd.toString())
-        val depositQuery = ctx.insertInto(DEPOSIT_RECORDS)
-            .set(DEPOSIT_RECORDS.ID, depositId)
-            .set(DEPOSIT_RECORDS.ENCOUNTER_ID, encounterId)
-            .set(DEPOSIT_RECORDS.TYPE, TYPE_OFFSET)
-            .set(DEPOSIT_RECORDS.AMOUNT, amount)
-            .set(DEPOSIT_RECORDS.OPERATOR, operator)
-            .set(DEPOSIT_RECORDS.METADATA, JSONB.valueOf(depositMetadata.encode()))
-            .set(DEPOSIT_RECORDS.CREATED_AT, now)
-            .set(DEPOSIT_RECORDS.UPDATED_AT, now)
 
-        return execute(client, paymentQuery)
-            .compose { execute(client, depositQuery) }
-            .compose {
-                if (amount.compareTo(bill.balance) == 0) {
-                    execute(
-                        client,
-                        ctx.update(BILLS)
-                            .set(BILLS.STATUS, BillingEngine.STATUS_PAID)
-                            .set(BILLS.UPDATED_AT, now)
-                            .where(BILLS.ID.eq(bill.id)),
-                    ).map { Unit }
-                } else {
-                    Future.succeededFuture(Unit)
-                }
+        return execute(
+            client,
+            INSERT_PAYMENT_SQL,
+            Tuple.of(
+                paymentId,
+                bill.id,
+                amount,
+                PaymentService.METHOD_DEPOSIT,
+                operator,
+                paymentMetadata,
+                now,
+                now,
+            ),
+        ).compose {
+            execute(
+                client,
+                INSERT_OFFSET_SQL,
+                Tuple.of(depositId, encounterId, TYPE_OFFSET, amount, operator, depositMetadata, now, now),
+            )
+        }.compose {
+            if (amount.compareTo(bill.balance) == 0) {
+                execute(
+                    client,
+                    MARK_BILL_PAID_SQL,
+                    Tuple.of(BillingEngine.STATUS_PAID, now, bill.id),
+                ).map { Unit }
+            } else {
+                Future.succeededFuture(Unit)
             }
+        }
     }
 
     // ========================================================================
@@ -309,6 +314,6 @@ class DepositOffsetService(
             .put("allocations", allocations)
     }
 
-    private fun execute(client: SqlClient, query: Query): Future<RowSet<Row>> =
-        client.preparedQuery(DatabaseConfig.sql(query)).execute(DatabaseConfig.tuple(query))
+    private fun execute(client: SqlClient, sql: String, args: Tuple): Future<RowSet<Row>> =
+        client.preparedQuery(sql).execute(args)
 }

@@ -1,7 +1,6 @@
 package com.ovaphlow.crate.dining
 
 import com.ovaphlow.crate.common.Ulid
-import com.ovaphlow.crate.database.DatabaseConfig
 import com.ovaphlow.crate.database.isUniqueViolation
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
@@ -9,42 +8,26 @@ import io.vertx.core.json.JsonObject
 import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.Tuple
-import org.jooq.DSLContext
-import org.jooq.JSONB
-import org.jooq.impl.DSL
-import org.jooq.impl.DSL.count
 import java.time.OffsetDateTime
 
 /**
  * 长者饮食档案（FR-1）：餐食类型/忌口过敏/份量偏好/备注。
  * 建档时校验活动 ELDERLY_CARE 入住（入住自动生效）；
  * 离院后因配餐口径只纳入在院入住而自然停用，亦可显式停用/启用。
+ *
+ * 持久化一律原生参数化 SQL（`$1..$n` + `Tuple`），无 jOOQ。
  */
 class DietProfileService(
     private val pool: Pool,
-    private val ctx: DSLContext = DatabaseConfig.createDSL(),
 ) {
-    private val t = DSL.table(DSL.name("dining", "dining_diet_profiles"))
-    private val cId = DSL.field("id", String::class.java)
-    private val cPatientId = DSL.field("patient_id", String::class.java)
-    private val cEncounterId = DSL.field("encounter_id", String::class.java)
-    private val cMealType = DSL.field("meal_type", String::class.java)
-    private val cAllergies = DSL.field("allergies", JSONB::class.java)
-    private val cPortionPreference = DSL.field("portion_preference", String::class.java)
-    private val cRemark = DSL.field("remark", String::class.java)
-    private val cStatus = DSL.field("status", String::class.java)
-    private val cMetadata = DSL.field("metadata", JSONB::class.java)
-    private val cCreatedAt = DSL.field("created_at", OffsetDateTime::class.java)
-    private val cUpdatedAt = DSL.field("updated_at", OffsetDateTime::class.java)
-
-    private val encounters = DSL.table(DSL.name("healthcare", "encounters"))
-    private val cEncounterType = DSL.field("encounter_type", String::class.java)
-    private val cEncounterStatus = DSL.field("status", String::class.java)
-    private val patients = DSL.table(DSL.name("healthcare", "patients"))
 
     companion object {
         /** 最小启用档案缺省餐食类型。 */
         const val DEFAULT_MEAL_TYPE = "普食"
+
+        private const val ENCOUNTER_SQL =
+            "SELECT encounter_type, status, patient_id AS enc_patient_id " +
+                "FROM healthcare.encounters WHERE id = \$1"
 
         private const val ACTIVE_PROFILE_SQL =
             "SELECT id FROM dining.dining_diet_profiles " +
@@ -52,6 +35,36 @@ class DietProfileService(
 
         private const val UPDATE_ALLERGENS_SQL =
             "UPDATE dining.dining_diet_profiles SET allergies = \$1, updated_at = \$2 WHERE id = \$3"
+
+        private const val INSERT_SQL =
+            "INSERT INTO dining.dining_diet_profiles " +
+                "(id, patient_id, encounter_id, meal_type, allergies, portion_preference, remark, " +
+                "status, metadata, created_at, updated_at) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11)"
+
+        private const val STATUS_SQL =
+            "UPDATE dining.dining_diet_profiles SET status = \$1, updated_at = \$2 WHERE id = \$3"
+
+        private const val DELETE_SQL =
+            "DELETE FROM dining.dining_diet_profiles WHERE id = \$1"
+
+        /** 联查列清单（`patient_name` 取自 patients，`encounter_status` 取自 encounters）。 */
+        private const val JOINED_COLUMNS =
+            "p.id AS id, p.patient_id AS patient_id, pa.name AS patient_name, " +
+                "p.encounter_id AS encounter_id, p.meal_type AS meal_type, p.allergies AS allergies, " +
+                "p.portion_preference AS portion_preference, p.remark AS remark, p.status AS status, " +
+                "p.metadata AS metadata, p.created_at AS created_at, p.updated_at AS updated_at, " +
+                "e.status AS encounter_status"
+
+        /**
+         * 054 A4b：`encounters` 必须 LEFT JOIN——儿童档案 `encounter_id IS NULL`（无入住），
+         * INNER JOIN 会把它们整行丢掉（upsert 后 get()/list() 查不到）。`patients` 保持 INNER
+         * （`patient_id` NOT NULL）。
+         */
+        private const val JOINED_FROM =
+            " FROM dining.dining_diet_profiles p " +
+                "LEFT JOIN healthcare.encounters e ON e.id = p.encounter_id " +
+                "JOIN healthcare.patients pa ON pa.id = p.patient_id"
 
         fun toJson(row: Row): JsonObject = JsonObject()
             .put("id", row.getValue("id")?.toString())
@@ -107,13 +120,7 @@ class DietProfileService(
 
     /** 入住校验（既有口径，逐字保留错误文案）。 */
     private fun validateElderlyEncounter(encounterId: String, patientId: String): Future<Unit> {
-        val encounterQuery = ctx.select(
-            cEncounterType,
-            cEncounterStatus,
-            DSL.field("patient_id", String::class.java).`as`("enc_patient_id"),
-        ).from(encounters).where(DSL.field("id").eq(encounterId))
-
-        return execute(pool, encounterQuery).compose { rows ->
+        return pool.preparedQuery(ENCOUNTER_SQL).execute(Tuple.of(encounterId)).compose { rows ->
             val row = rows.iterator().asSequence().firstOrNull()
                 ?: return@compose Future.failedFuture(IllegalArgumentException("encounter not found: $encounterId"))
             if (row.getString("encounter_type") != "ELDERLY_CARE")
@@ -136,20 +143,15 @@ class DietProfileService(
     ): Future<JsonObject> {
         val id = Ulid.generate()
         val now = OffsetDateTime.now()
-        val query = ctx.insertInto(t)
-            .set(cId, id)
-            .set(cPatientId, patientId)
-            .set(cEncounterId, encounterId)
-            .set(cMealType, mealType)
-            .set(cAllergies, JSONB.valueOf(allergies.encode()))
-            .set(cPortionPreference, portion.takeIf { !it.isNullOrBlank() })
-            .set(cRemark, body.getString("remark"))
-            .set(cStatus, "启用")
-            .set(cMetadata, body.containsKey("metadata").let { if (it) JSONB.valueOf(body.getJsonObject("metadata").encode()) else null })
-            .set(cCreatedAt, now)
-            .set(cUpdatedAt, now)
-
-        return execute(pool, query).compose { result ->
+        return pool.preparedQuery(INSERT_SQL).execute(
+            Tuple.of(
+                id, patientId, encounterId, mealType, allergies,
+                portion.takeIf { !it.isNullOrBlank() },
+                body.getString("remark"), "启用",
+                if (body.containsKey("metadata")) body.getJsonObject("metadata") else null,
+                now, now,
+            )
+        ).compose { result ->
             if (result.rowCount() == 0)
                 return@compose Future.failedFuture(IllegalStateException("insert returned no row"))
             get(id)
@@ -194,40 +196,27 @@ class DietProfileService(
         limit: Int = 50,
         offset: Int = 0,
     ): Future<JsonObject> {
-        val conditions = mutableListOf<org.jooq.Condition>()
-        patientId?.takeIf(String::isNotBlank)?.let { conditions.add(DSL.field(DSL.name("p", "patient_id")).eq(it)) }
-        encounterId?.takeIf(String::isNotBlank)?.let { conditions.add(DSL.field(DSL.name("p", "encounter_id")).eq(it)) }
-        status?.takeIf(String::isNotBlank)?.let { conditions.add(DSL.field(DSL.name("p", "status")).eq(it)) }
+        val where = mutableListOf<String>()
+        val args = mutableListOf<Any?>()
 
-        val e = encounters.`as`("e")
-        val p = t.`as`("p")
-        val pa = patients.`as`("pa")
-        // 054 A4b：`encounters` 必须 LEFT JOIN——儿童档案 `encounter_id IS NULL`（无入住），
-        // INNER JOIN 会把它们整行丢掉（upsert 后 get()/list() 查不到）。`patients` 保持 INNER
-        // （`patient_id` NOT NULL）。既有先例：libs/skills/.../SkillsService.kt:285。
-        val joined = p
-            .leftJoin(e).on(DSL.field(DSL.name("p", "encounter_id")).eq(DSL.field(DSL.name("e", "id"), String::class.java)))
-            .join(pa).on(DSL.field(DSL.name("p", "patient_id")).eq(DSL.field(DSL.name("pa", "id"), String::class.java)))
-        val countQuery = ctx.select(count().`as`("total")).from(joined).where(conditions)
-        val dataQuery = ctx.select(
-            DSL.field(DSL.name("p", "id")).`as`("id"),
-            DSL.field(DSL.name("p", "patient_id")).`as`("patient_id"),
-            DSL.field(DSL.name("pa", "name")).`as`("patient_name"),
-            DSL.field(DSL.name("p", "encounter_id")).`as`("encounter_id"),
-            DSL.field(DSL.name("p", "meal_type")).`as`("meal_type"),
-            DSL.field(DSL.name("p", "allergies")).`as`("allergies"),
-            DSL.field(DSL.name("p", "portion_preference")).`as`("portion_preference"),
-            DSL.field(DSL.name("p", "remark")).`as`("remark"),
-            DSL.field(DSL.name("p", "status")).`as`("status"),
-            DSL.field(DSL.name("p", "metadata")).`as`("metadata"),
-            DSL.field(DSL.name("p", "created_at")).`as`("created_at"),
-            DSL.field(DSL.name("p", "updated_at")).`as`("updated_at"),
-            DSL.field(DSL.name("e", "status"), String::class.java).`as`("encounter_status"),
-        ).from(joined).where(conditions).orderBy(cCreatedAt.desc()).limit(limit).offset(offset)
+        /** 追加一个绑定值并返回其占位符。 */
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
 
-        return execute(pool, countQuery).flatMap { countRows ->
+        patientId?.takeIf(String::isNotBlank)?.let { where.add("p.patient_id = ${bind(it)}") }
+        encounterId?.takeIf(String::isNotBlank)?.let { where.add("p.encounter_id = ${bind(it)}") }
+        status?.takeIf(String::isNotBlank)?.let { where.add("p.status = ${bind(it)}") }
+
+        val whereClause = if (where.isEmpty()) "" else " WHERE " + where.joinToString(" AND ")
+        val countSql = "SELECT count(*) AS total$JOINED_FROM$whereClause"
+        val countArgs = args.toList()
+        val dataSql =
+            "SELECT $JOINED_COLUMNS$JOINED_FROM$whereClause " +
+                "ORDER BY p.created_at DESC LIMIT ${bind(limit)} OFFSET ${bind(offset)}"
+        val dataArgs = args.toList()
+
+        return pool.preparedQuery(countSql).execute(Tuple.from(countArgs)).flatMap { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(pool, dataQuery).map { dataRows ->
+            pool.preparedQuery(dataSql).execute(Tuple.from(dataArgs)).map { dataRows ->
                 val records = JsonArray()
                 for (row in dataRows) records.add(toJson(row))
                 JsonObject().put("records", records)
@@ -236,64 +225,44 @@ class DietProfileService(
         }
     }
 
-    fun get(id: String): Future<JsonObject> {
-        val e = encounters.`as`("e")
-        val p = t.`as`("p")
-        val pa = patients.`as`("pa")
-        val pId = DSL.field(DSL.name("p", "id"))
-        val query = ctx.select(
-            pId.`as`("id"),
-            DSL.field(DSL.name("p", "patient_id")).`as`("patient_id"),
-            DSL.field(DSL.name("pa", "name")).`as`("patient_name"),
-            DSL.field(DSL.name("p", "encounter_id")).`as`("encounter_id"),
-            DSL.field(DSL.name("p", "meal_type")).`as`("meal_type"),
-            DSL.field(DSL.name("p", "allergies")).`as`("allergies"),
-            DSL.field(DSL.name("p", "portion_preference")).`as`("portion_preference"),
-            DSL.field(DSL.name("p", "remark")).`as`("remark"),
-            DSL.field(DSL.name("p", "status")).`as`("status"),
-            DSL.field(DSL.name("p", "metadata")).`as`("metadata"),
-            DSL.field(DSL.name("p", "created_at")).`as`("created_at"),
-            DSL.field(DSL.name("p", "updated_at")).`as`("updated_at"),
-            DSL.field(DSL.name("e", "status"), String::class.java).`as`("encounter_status"),
-        ).from(p
-            // 054 A4b：儿童档案 `encounter_id IS NULL` → 必须 LEFT JOIN，否则单条查询 404
-            .leftJoin(e).on(DSL.field(DSL.name("p", "encounter_id")).eq(DSL.field(DSL.name("e", "id"))))
-            .join(pa).on(DSL.field(DSL.name("p", "patient_id")).eq(DSL.field(DSL.name("pa", "id")))))
-            .where(pId.eq(id))
-        return execute(pool, query).compose { rows ->
-            val row = rows.iterator().asSequence().firstOrNull()
-            if (row == null)
-                Future.failedFuture(DiningNotFoundException("diet profile not found: $id"))
-            else Future.succeededFuture(toJson(row))
-        }
-    }
+    fun get(id: String): Future<JsonObject> =
+        pool.preparedQuery("SELECT $JOINED_COLUMNS$JOINED_FROM WHERE p.id = \$1")
+            .execute(Tuple.of(id))
+            .compose { rows ->
+                val row = rows.iterator().asSequence().firstOrNull()
+                if (row == null)
+                    Future.failedFuture(DiningNotFoundException("diet profile not found: $id"))
+                else Future.succeededFuture(toJson(row))
+            }
 
     fun update(id: String, body: JsonObject): Future<JsonObject> {
         return get(id).flatMap {
-            val now = OffsetDateTime.now()
-            var q = ctx.update(t).set(cUpdatedAt, now)
+            val sets = mutableListOf("updated_at = \$1")
+            val args = mutableListOf<Any?>(OffsetDateTime.now())
+
+            fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
 
             if (body.containsKey("meal_type")) {
                 val mealType = body.getString("meal_type")
                 if (mealType.isNullOrBlank() || mealType !in DiningConstants.MEAL_TYPES)
                     return@flatMap Future.failedFuture(IllegalArgumentException("invalid meal_type, must be one of: ${DiningConstants.MEAL_TYPES}"))
-                q = q.set(cMealType, mealType)
+                sets.add("meal_type = ${bind(mealType)}")
             }
             if (body.containsKey("allergies"))
-                q = q.set(cAllergies, JSONB.valueOf(allergiesOf(body).encode()))
+                sets.add("allergies = ${bind(allergiesOf(body))}")
             if (body.containsKey("portion_preference")) {
                 val portion = body.getString("portion_preference")
                 if (!portion.isNullOrBlank() && portion !in DiningConstants.PORTION_PREFERENCES)
                     return@flatMap Future.failedFuture(IllegalArgumentException("invalid portion_preference, must be one of: ${DiningConstants.PORTION_PREFERENCES}"))
-                q = q.set(cPortionPreference, portion)
+                sets.add("portion_preference = ${bind(portion)}")
             }
             if (body.containsKey("remark"))
-                q = q.set(cRemark, body.getString("remark"))
+                sets.add("remark = ${bind(body.getString("remark"))}")
             if (body.containsKey("metadata"))
-                q = q.set(cMetadata, JSONB.valueOf(body.getJsonObject("metadata").encode()))
+                sets.add("metadata = ${bind(body.getJsonObject("metadata"))}")
 
-            val updateQuery = q.where(cId.eq(id))
-            execute(pool, updateQuery).flatMap { get(id) }
+            val sql = "UPDATE dining.dining_diet_profiles SET ${sets.joinToString(", ")} WHERE id = ${bind(id)}"
+            pool.preparedQuery(sql).execute(Tuple.from(args)).flatMap { get(id) }
         }
     }
 
@@ -301,28 +270,23 @@ class DietProfileService(
         if (status.isBlank() || status !in DiningConstants.ENABLE_STATUSES)
             return Future.failedFuture(IllegalArgumentException("invalid status, must be one of: ${DiningConstants.ENABLE_STATUSES}"))
         return get(id).flatMap { existing ->
-            val now = OffsetDateTime.now()
-            val query = ctx.update(t)
-                .set(cStatus, status)
-                .set(cUpdatedAt, now)
-                .where(cId.eq(id))
-            execute(pool, query).compose { result ->
-                if (result.rowCount() == 0)
-                    return@compose Future.failedFuture(DiningNotFoundException("diet profile not found: $id"))
-                get(id)
-            }.recover { error ->
-                // 重新启用时命中部分唯一索引（同一长者已有启用档案）→ 409
-                if (isUniqueViolation(error, setOf("uq_dining_diet_profiles_active_patient")))
-                    Future.failedFuture(DiningConflictException("该长者已有启用的饮食档案"))
-                else Future.failedFuture(error)
-            }
+            pool.preparedQuery(STATUS_SQL).execute(Tuple.of(status, OffsetDateTime.now(), id))
+                .compose { result ->
+                    if (result.rowCount() == 0)
+                        return@compose Future.failedFuture(DiningNotFoundException("diet profile not found: $id"))
+                    get(id)
+                }.recover { error ->
+                    // 重新启用时命中部分唯一索引（同一长者已有启用档案）→ 409
+                    if (isUniqueViolation(error, setOf("uq_dining_diet_profiles_active_patient")))
+                        Future.failedFuture(DiningConflictException("该长者已有启用的饮食档案"))
+                    else Future.failedFuture(error)
+                }
         }
     }
 
     fun delete(id: String): Future<Void?> {
         return get(id).flatMap {
-            val query = ctx.deleteFrom(t).where(cId.eq(id))
-            execute(pool, query).map<Void?> { null }
+            pool.preparedQuery(DELETE_SQL).execute(Tuple.of(id)).map<Void?> { null }
         }
     }
 
@@ -339,16 +303,14 @@ class DietProfileService(
             throw IllegalArgumentException("allergies is required")
         val allergies = allergiesOf(body)
         return get(id).flatMap {
-            val now = OffsetDateTime.now()
-            val query = ctx.update(t)
-                .set(cAllergies, JSONB.valueOf(allergies.encode()))
-                .set(cUpdatedAt, now)
-                .where(cId.eq(id))
-            execute(pool, query).compose { result ->
-                if (result.rowCount() == 0)
-                    return@compose Future.failedFuture(DiningNotFoundException("diet profile not found: $id"))
-                get(id)
-            }
+            pool.preparedQuery(
+                "UPDATE dining.dining_diet_profiles SET allergies = \$1, updated_at = \$2 WHERE id = \$3"
+            ).execute(Tuple.of(allergies, OffsetDateTime.now(), id))
+                .compose { result ->
+                    if (result.rowCount() == 0)
+                        return@compose Future.failedFuture(DiningNotFoundException("diet profile not found: $id"))
+                    get(id)
+                }
         }
     }
 
@@ -376,7 +338,4 @@ class DietProfileService(
             else -> throw IllegalArgumentException("allergies 必须是字符串数组，或逗号分隔的字符串")
         }
     }
-
-    private fun execute(client: io.vertx.sqlclient.SqlClient, query: org.jooq.Query): Future<io.vertx.sqlclient.RowSet<Row>> =
-        client.preparedQuery(DatabaseConfig.sql(query)).execute(DatabaseConfig.tuple(query))
 }

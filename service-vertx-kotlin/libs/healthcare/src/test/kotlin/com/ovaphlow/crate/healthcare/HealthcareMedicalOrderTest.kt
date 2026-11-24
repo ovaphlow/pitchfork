@@ -889,10 +889,12 @@ class HealthcareMedicalOrderTest {
             stub.tuples.first { it.first.contains("update nursing.nursing_tasks") }.second.contains("CANCELLED"),
             "活动任务必须绑定 CANCELLED",
         )
-        assertTrue(periodUpdate.contains("set status = $"), "周期必须更新 status: $periodUpdate")
+        assertTrue(periodUpdate.contains("set status ="), "周期必须更新 status: $periodUpdate")
+        val periodTuple = stub.tuples.first { it.first.contains("update nursing.nursing_service_periods") }
         assertTrue(
-            stub.tuples.first { it.first.contains("update nursing.nursing_service_periods") }.second.contains("COMPLETED"),
-            "周期必须绑定 COMPLETED",
+            periodUpdate.contains("'completed'") ||
+                periodTuple.second.any { it is String && it.equals("COMPLETED", ignoreCase = true) },
+            "周期必须置为 COMPLETED: $periodUpdate / ${periodTuple.second}",
         )
         assertTrue(
             stub.queries.indexOf(orderUpdate) < stub.queries.indexOf(taskUpdate) &&

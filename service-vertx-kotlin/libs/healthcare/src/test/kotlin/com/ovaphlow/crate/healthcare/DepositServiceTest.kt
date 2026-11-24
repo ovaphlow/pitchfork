@@ -485,9 +485,9 @@ class DepositServiceTest {
         assertEquals("cashier-1", record.getString("operator"))
         assertNotNull(record.getString("created_at"))
 
-        val dataSql = stub.queries.first { it.contains("fetch next") }
+        val dataSql = stub.queries.first { it.contains("limit $") }
         assertTrue(dataSql.contains("offset $"), "台账必须分页 offset: $dataSql")
-        assertTrue(dataSql.contains("fetch next $"), "台账必须分页 limit: $dataSql")
+        assertTrue(dataSql.contains("limit $"), "台账必须分页 limit: $dataSql")
         assertTrue(dataSql.contains("order by"), "台账必须倒序: $dataSql")
         assertTrue(stub.queries.first { it.contains("count(*)") }.contains("encounter_id = $1"), "计数必须按 encounter 过滤")
     }

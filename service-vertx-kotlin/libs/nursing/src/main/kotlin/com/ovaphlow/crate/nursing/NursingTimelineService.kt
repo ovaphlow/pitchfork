@@ -1,17 +1,11 @@
 package com.ovaphlow.crate.nursing
 
-import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingIncidents.NURSING_INCIDENTS
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingShiftHandoverItems.NURSING_SHIFT_HANDOVER_ITEMS
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingShiftHandovers.NURSING_SHIFT_HANDOVERS
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
 import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
-import org.jooq.DSLContext
-import org.jooq.impl.DSL
-import org.jooq.impl.DSL.count
+import io.vertx.sqlclient.Tuple
 import org.slf4j.LoggerFactory
 import java.time.LocalDate
 import java.time.OffsetDateTime
@@ -21,10 +15,11 @@ import java.time.OffsetDateTime
  *
  * 将护理评估、计划、任务、执行和护理记录统一为时间线事件。
  * 所有写操作仍走其原始领域 API；本服务只做查询和标准化展示。
+ *
+ * 持久化一律原生参数化 SQL（`$1..$n` + `Tuple`），本文件无任何 jOOQ 引用。
  */
 class NursingTimelineService(
     private val pool: Pool,
-    private val ctx: DSLContext = DatabaseConfig.createDSL()
 ) {
     private val log = LoggerFactory.getLogger(NursingTimelineService::class.java)
 
@@ -35,6 +30,47 @@ class NursingTimelineService(
             "NURSING_INCIDENT", "SHIFT_HANDOVER",
         )
         private val businessZone = java.time.ZoneId.of("Asia/Shanghai")
+
+        private const val PERIOD_PATIENT_SQL =
+            "SELECT patient_id FROM nursing.nursing_service_periods WHERE id = \$1"
+
+        private const val ENCOUNTER_PATIENT_SQL =
+            "SELECT patient_id FROM healthcare.encounters WHERE id = \$1"
+
+        private const val ASSESSMENT_SELECT =
+            "SELECT id, assess_type, assess_date, assessor, total_score, result_level, created_at " +
+                "FROM nursing.nursing_assessments WHERE period_id = \$1"
+
+        private const val PLAN_SELECT =
+            "SELECT id, plan_name, status, created_by, created_at " +
+                "FROM nursing.nursing_plans WHERE period_id = \$1"
+
+        private const val TASK_SELECT =
+            "SELECT id, description, task_type, frequency_name, status, created_at " +
+                "FROM nursing.nursing_tasks WHERE period_id = \$1"
+
+        private const val EXECUTION_SELECT =
+            "SELECT e.id, e.task_id, e.planned_time, e.actual_time, e.executor, e.status, e.note, " +
+                "e.created_at, t.description AS task_description, t.task_type AS task_type " +
+                "FROM nursing.nursing_task_executions e " +
+                "JOIN nursing.nursing_tasks t ON t.id = e.task_id WHERE t.period_id = \$1"
+
+        private const val NURSING_RECORD_SELECT =
+            "SELECT id, title, content, physician, record_date, metadata, created_at, updated_at " +
+                "FROM healthcare.medical_records " +
+                "WHERE record_type = 'NURSING_RECORD' AND encounter_id = \$1 " +
+                "AND metadata ->> 'period_id' = \$2"
+
+        private const val INCIDENT_SELECT =
+            "SELECT id, incident_type, severity, status, occurred_at, description, reporter " +
+                "FROM nursing.nursing_incidents WHERE period_id = \$1 AND encounter_id = \$2"
+
+        private const val SHIFT_HANDOVER_SELECT =
+            "SELECT h.id, h.care_unit, h.business_date, h.shift, h.handover_by, " +
+                "h.handed_over_at, h.received_by, h.status " +
+                "FROM nursing.nursing_shift_handovers h " +
+                "JOIN nursing.nursing_shift_handover_items i ON i.handover_id = h.id " +
+                "WHERE i.encounter_id = \$1 AND i.period_id = \$2"
     }
 
     /**
@@ -125,186 +161,143 @@ class NursingTimelineService(
 
     /** 验证 period 和 encounter 属于同一患者 */
     private fun validateTimelineScope(periodId: String, encounterId: String): Future<Pair<Boolean, String?>> {
-        val pQuery = ctx.select(DSL.field("patient_id"))
-            .from(DSL.table(DSL.name("nursing", "nursing_service_periods")))
-            .where(DSL.field("id").eq(periodId))
-        val eQuery = ctx.select(DSL.field("patient_id"))
-            .from(DSL.table(DSL.name("healthcare", "encounters")))
-            .where(DSL.field("id").eq(encounterId))
+        return pool.preparedQuery(PERIOD_PATIENT_SQL).execute(Tuple.of(periodId)).compose { pRows ->
+            val pRow = pRows.iterator().asSequence().firstOrNull()
+            if (pRow == null) return@compose Future.failedFuture(
+                NotFoundException("nursing service period not found: $periodId")
+            )
+            val ppId = pRow.getString("patient_id")
 
-        return pool.preparedQuery(DatabaseConfig.sql(pQuery))
-            .execute(DatabaseConfig.tuple(pQuery))
-            .compose { pRows ->
-                val pRow = pRows.iterator().asSequence().firstOrNull()
-                if (pRow == null) return@compose Future.failedFuture(
-                    NotFoundException("nursing service period not found: $periodId")
-                )
-                val ppId = pRow.getString("patient_id")
-
-                pool.preparedQuery(DatabaseConfig.sql(eQuery))
-                    .execute(DatabaseConfig.tuple(eQuery))
-                    .map { eRows ->
-                        val eRow = eRows.iterator().asSequence().firstOrNull()
-                        if (eRow == null) throw NotFoundException("encounter not found: $encounterId")
-                        val epId = eRow.getString("patient_id")
-                        Pair(ppId == epId, ppId)
-                    }
-            }
+            pool.preparedQuery(ENCOUNTER_PATIENT_SQL).execute(Tuple.of(encounterId))
+                .map { eRows ->
+                    val eRow = eRows.iterator().asSequence().firstOrNull()
+                    if (eRow == null) throw NotFoundException("encounter not found: $encounterId")
+                    val epId = eRow.getString("patient_id")
+                    Pair(ppId == epId, ppId)
+                }
+        }
     }
 
     // ========================================================================
     //  数据加载 — 各类型事件
     // ========================================================================
 
+    /** 把已收集的过滤条件拼成 SQL 片段（空集合不产生任何片段）。 */
+    private fun dynamicWhere(where: List<String>): String =
+        if (where.isEmpty()) "" else " AND " + where.joinToString(" AND ")
+
     private fun loadAssessments(periodId: String, dateFrom: String?, dateTo: String?): Future<List<JsonObject>> {
-        val conditions = mutableListOf<org.jooq.Condition>()
-        conditions.add(DSL.field("period_id").eq(periodId))
-        dateFrom?.let { d -> try { conditions.add(DSL.field("assess_date").ge(LocalDate.parse(d))) } catch (_: Exception) {} }
-        dateTo?.let { d -> try { conditions.add(DSL.field("assess_date").le(LocalDate.parse(d))) } catch (_: Exception) {} }
+        val where = mutableListOf<String>()
+        val args = mutableListOf<Any?>(periodId)
 
-        val query = ctx.select(
-            DSL.field("id"),
-            DSL.field("assess_type"),
-            DSL.field("assess_date"),
-            DSL.field("assessor"),
-            DSL.field("total_score"),
-            DSL.field("result_level"),
-            DSL.field("created_at")
-        )
-            .from(DSL.table(DSL.name("nursing", "nursing_assessments")))
-            .where(conditions)
-            .orderBy(DSL.field("assess_date").desc(), DSL.field("created_at").desc())
+        /** 追加一个绑定值并返回其占位符。 */
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
 
-        return pool.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
-            .map { rows ->
-                rows.map { row -> mapAssessmentEvent(row) }
-            }
+        dateFrom?.let { d -> try { where.add("assess_date >= ${bind(LocalDate.parse(d))}") } catch (_: Exception) {} }
+        dateTo?.let { d -> try { where.add("assess_date <= ${bind(LocalDate.parse(d))}") } catch (_: Exception) {} }
+
+        val sql = ASSESSMENT_SELECT + dynamicWhere(where) +
+            " ORDER BY assess_date DESC, created_at DESC"
+
+        return pool.preparedQuery(sql).execute(Tuple.from(args))
+            .map { rows -> rows.map { row -> mapAssessmentEvent(row) } }
     }
 
     private fun loadPlans(periodId: String, dateFrom: String?, dateTo: String?): Future<List<JsonObject>> {
-        val conditions = mutableListOf<org.jooq.Condition>()
-        conditions.add(DSL.field("period_id").eq(periodId))
-        dateFrom?.let { d -> try { val ld = LocalDate.parse(d); conditions.add(DSL.field("created_at").ge(ld.atStartOfDay(java.time.ZoneOffset.UTC).toOffsetDateTime())) } catch (_: Exception) {} }
-        dateTo?.let { d -> try { val ld = LocalDate.parse(d); conditions.add(DSL.field("created_at").le(ld.plusDays(1).atStartOfDay(java.time.ZoneOffset.UTC).toOffsetDateTime())) } catch (_: Exception) {} }
+        val where = mutableListOf<String>()
+        val args = mutableListOf<Any?>(periodId)
 
-        val query = ctx.select(
-            DSL.field("id"),
-            DSL.field("plan_name"),
-            DSL.field("status"),
-            DSL.field("created_by"),
-            DSL.field("created_at")
-        )
-            .from(DSL.table(DSL.name("nursing", "nursing_plans")))
-            .where(conditions)
-            .orderBy(DSL.field("created_at").desc())
+        /** 追加一个绑定值并返回其占位符。 */
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
 
-        return pool.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+        dateFrom?.let { d ->
+            try {
+                val ld = LocalDate.parse(d)
+                where.add("created_at >= ${bind(ld.atStartOfDay(java.time.ZoneOffset.UTC).toOffsetDateTime())}")
+            } catch (_: Exception) {}
+        }
+        dateTo?.let { d ->
+            try {
+                val ld = LocalDate.parse(d)
+                where.add("created_at <= ${bind(ld.plusDays(1).atStartOfDay(java.time.ZoneOffset.UTC).toOffsetDateTime())}")
+            } catch (_: Exception) {}
+        }
+
+        val sql = PLAN_SELECT + dynamicWhere(where) + " ORDER BY created_at DESC"
+
+        return pool.preparedQuery(sql).execute(Tuple.from(args))
             .map { rows -> rows.map { row -> mapPlanEvent(row) } }
     }
 
     private fun loadTasks(periodId: String, dateFrom: String?, dateTo: String?): Future<List<JsonObject>> {
-        val conditions = mutableListOf<org.jooq.Condition>()
-        conditions.add(DSL.field("period_id").eq(periodId))
-        dateFrom?.let { d -> try { val ld = LocalDate.parse(d); conditions.add(DSL.field("created_at").ge(ld.atStartOfDay(java.time.ZoneOffset.UTC).toOffsetDateTime())) } catch (_: Exception) {} }
-        dateTo?.let { d -> try { val ld = LocalDate.parse(d); conditions.add(DSL.field("created_at").le(ld.plusDays(1).atStartOfDay(java.time.ZoneOffset.UTC).toOffsetDateTime())) } catch (_: Exception) {} }
+        val where = mutableListOf<String>()
+        val args = mutableListOf<Any?>(periodId)
 
-        val query = ctx.select(
-            DSL.field("id"),
-            DSL.field("description"),
-            DSL.field("task_type"),
-            DSL.field("frequency_name"),
-            DSL.field("status"),
-            DSL.field("created_at")
-        )
-            .from(DSL.table(DSL.name("nursing", "nursing_tasks")))
-            .where(conditions)
-            .orderBy(DSL.field("created_at").desc())
+        /** 追加一个绑定值并返回其占位符。 */
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
 
-        return pool.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+        dateFrom?.let { d ->
+            try {
+                val ld = LocalDate.parse(d)
+                where.add("created_at >= ${bind(ld.atStartOfDay(java.time.ZoneOffset.UTC).toOffsetDateTime())}")
+            } catch (_: Exception) {}
+        }
+        dateTo?.let { d ->
+            try {
+                val ld = LocalDate.parse(d)
+                where.add("created_at <= ${bind(ld.plusDays(1).atStartOfDay(java.time.ZoneOffset.UTC).toOffsetDateTime())}")
+            } catch (_: Exception) {}
+        }
+
+        val sql = TASK_SELECT + dynamicWhere(where) + " ORDER BY created_at DESC"
+
+        return pool.preparedQuery(sql).execute(Tuple.from(args))
             .map { rows -> rows.map { row -> mapTaskEvent(row) } }
     }
 
     private fun loadExecutionsByPeriod(periodId: String, dateFrom: String?, dateTo: String?): Future<List<JsonObject>> {
-        val dateConditions = mutableListOf<org.jooq.Condition>()
+        val where = mutableListOf<String>()
+        val args = mutableListOf<Any?>(periodId)
 
-        // 通过任务关联周期，限定该周期内的执行记录
-        val conditions = mutableListOf<org.jooq.Condition>()
-        conditions.add(DSL.field("t.period_id").eq(periodId))
+        /** 追加一个绑定值并返回其占位符。 */
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
 
         dateFrom?.let { d ->
             try {
                 val startOfDay = LocalDate.parse(d).atStartOfDay().atOffset(java.time.ZoneOffset.UTC)
-                conditions.add(DSL.field("e.planned_time").ge(startOfDay)
-                    .or(DSL.field("e.actual_time").ge(startOfDay)))
+                val placeholder = bind(startOfDay)
+                where.add("(e.planned_time >= $placeholder OR e.actual_time >= $placeholder)")
             } catch (_: Exception) {}
         }
         dateTo?.let { d ->
             try {
                 val endOfDay = LocalDate.parse(d).plusDays(1).atStartOfDay().atOffset(java.time.ZoneOffset.UTC)
-                conditions.add(DSL.field("e.planned_time").le(endOfDay)
-                    .or(DSL.field("e.actual_time").le(endOfDay)))
+                val placeholder = bind(endOfDay)
+                where.add("(e.planned_time <= $placeholder OR e.actual_time <= $placeholder)")
             } catch (_: Exception) {}
         }
 
-        val query = ctx.select(
-            DSL.field("e.id"),
-            DSL.field("e.task_id"),
-            DSL.field("e.planned_time"),
-            DSL.field("e.actual_time"),
-            DSL.field("e.executor"),
-            DSL.field("e.status"),
-            DSL.field("e.note"),
-            DSL.field("e.created_at"),
-            DSL.field("t.description").`as`("task_description"),
-            DSL.field("t.task_type").`as`("task_type")
-        )
-            .from(DSL.table(DSL.name("nursing", "nursing_task_executions")).`as`("e"))
-            .join(DSL.table(DSL.name("nursing", "nursing_tasks")).`as`("t"))
-            .on(DSL.field("e.task_id").eq(DSL.field("t.id")))
-            .where(conditions)
-            .orderBy(DSL.field("e.actual_time").desc().nullsLast(),
-                     DSL.field("e.planned_time").desc().nullsLast(),
-                     DSL.field("e.created_at").desc())
+        val sql = EXECUTION_SELECT + dynamicWhere(where) +
+            " ORDER BY e.actual_time DESC NULLS LAST, e.planned_time DESC NULLS LAST, e.created_at DESC"
 
-        return pool.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+        return pool.preparedQuery(sql).execute(Tuple.from(args))
             .map { rows -> rows.map { row -> mapExecutionEvent(row) } }
     }
 
     private fun loadNursingRecords(encounterId: String, periodId: String, dateFrom: String?, dateTo: String?): Future<List<JsonObject>> {
-        val conditions = mutableListOf<org.jooq.Condition>()
-        conditions.add(DSL.field("record_type").eq("NURSING_RECORD"))
-        conditions.add(DSL.field("encounter_id").eq(encounterId))
-        // 只返回属于该周期的记录
-        conditions.add(
-            DSL.field("{0} ->> {1}", String::class.java,
-                DSL.field("metadata", org.jooq.JSONB::class.java),
-                DSL.`val`("period_id")
-            ).eq(periodId)
-        )
+        val where = mutableListOf<String>()
+        val args = mutableListOf<Any?>(encounterId, periodId)
 
-        dateFrom?.let { d -> try { conditions.add(DSL.field("record_date").ge(LocalDate.parse(d))) } catch (_: Exception) {} }
-        dateTo?.let { d -> try { conditions.add(DSL.field("record_date").le(LocalDate.parse(d))) } catch (_: Exception) {} }
+        /** 追加一个绑定值并返回其占位符。 */
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
 
-        val query = ctx.select(
-            DSL.field("id"),
-            DSL.field("title"),
-            DSL.field("content"),
-            DSL.field("physician"),
-            DSL.field("record_date"),
-            DSL.field("metadata"),
-            DSL.field("created_at"),
-            DSL.field("updated_at")
-        )
-            .from(DSL.table(DSL.name("healthcare", "medical_records")))
-            .where(conditions)
-            .orderBy(DSL.field("record_date").desc(), DSL.field("created_at").desc())
+        dateFrom?.let { d -> try { where.add("record_date >= ${bind(LocalDate.parse(d))}") } catch (_: Exception) {} }
+        dateTo?.let { d -> try { where.add("record_date <= ${bind(LocalDate.parse(d))}") } catch (_: Exception) {} }
 
-        return pool.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+        val sql = NURSING_RECORD_SELECT + dynamicWhere(where) +
+            " ORDER BY record_date DESC, created_at DESC"
+
+        return pool.preparedQuery(sql).execute(Tuple.from(args))
             .map { rows -> rows.map { row -> mapNursingRecordEvent(row) } }
     }
 
@@ -442,71 +435,52 @@ class NursingTimelineService(
     // ========================================================================
 
     private fun loadIncidents(periodId: String, encounterId: String, dateFrom: String?, dateTo: String?): Future<List<JsonObject>> {
-        val conditions = mutableListOf<org.jooq.Condition>()
-        conditions.add(NURSING_INCIDENTS.PERIOD_ID.eq(periodId))
-        conditions.add(NURSING_INCIDENTS.ENCOUNTER_ID.eq(encounterId))
+        val where = mutableListOf<String>()
+        val args = mutableListOf<Any?>(periodId, encounterId)
+
+        /** 追加一个绑定值并返回其占位符。 */
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
+
         dateFrom?.let { d ->
             try {
-                conditions.add(NURSING_INCIDENTS.OCCURRED_AT.ge(LocalDate.parse(d).atStartOfDay(businessZone).toOffsetDateTime()))
+                where.add("occurred_at >= ${bind(LocalDate.parse(d).atStartOfDay(businessZone).toOffsetDateTime())}")
             } catch (_: Exception) {}
         }
         dateTo?.let { d ->
             try {
-                conditions.add(NURSING_INCIDENTS.OCCURRED_AT.lt(LocalDate.parse(d).plusDays(1).atStartOfDay(businessZone).toOffsetDateTime()))
+                where.add("occurred_at < ${bind(LocalDate.parse(d).plusDays(1).atStartOfDay(businessZone).toOffsetDateTime())}")
             } catch (_: Exception) {}
         }
 
-        val query = ctx.select(
-            NURSING_INCIDENTS.ID,
-            NURSING_INCIDENTS.INCIDENT_TYPE,
-            NURSING_INCIDENTS.SEVERITY,
-            NURSING_INCIDENTS.STATUS,
-            NURSING_INCIDENTS.OCCURRED_AT,
-            NURSING_INCIDENTS.DESCRIPTION,
-            NURSING_INCIDENTS.REPORTER,
-        )
-            .from(NURSING_INCIDENTS)
-            .where(conditions)
-            .orderBy(NURSING_INCIDENTS.OCCURRED_AT.desc(), NURSING_INCIDENTS.CREATED_AT.desc())
+        val sql = INCIDENT_SELECT + dynamicWhere(where) +
+            " ORDER BY occurred_at DESC, created_at DESC"
 
-        return pool.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+        return pool.preparedQuery(sql).execute(Tuple.from(args))
             .map { rows -> rows.map { row -> mapIncidentEvent(row) } }
     }
 
     private fun loadShiftHandovers(periodId: String, encounterId: String, dateFrom: String?, dateTo: String?): Future<List<JsonObject>> {
-        val conditions = mutableListOf<org.jooq.Condition>()
-        conditions.add(NURSING_SHIFT_HANDOVER_ITEMS.ENCOUNTER_ID.eq(encounterId))
-        conditions.add(NURSING_SHIFT_HANDOVER_ITEMS.PERIOD_ID.eq(periodId))
+        val where = mutableListOf<String>()
+        val args = mutableListOf<Any?>(encounterId, periodId)
+
+        /** 追加一个绑定值并返回其占位符。 */
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
+
         dateFrom?.let { d ->
             try {
-                conditions.add(NURSING_SHIFT_HANDOVERS.HANDED_OVER_AT.ge(LocalDate.parse(d).atStartOfDay(businessZone).toOffsetDateTime()))
+                where.add("h.handed_over_at >= ${bind(LocalDate.parse(d).atStartOfDay(businessZone).toOffsetDateTime())}")
             } catch (_: Exception) {}
         }
         dateTo?.let { d ->
             try {
-                conditions.add(NURSING_SHIFT_HANDOVERS.HANDED_OVER_AT.lt(LocalDate.parse(d).plusDays(1).atStartOfDay(businessZone).toOffsetDateTime()))
+                where.add("h.handed_over_at < ${bind(LocalDate.parse(d).plusDays(1).atStartOfDay(businessZone).toOffsetDateTime())}")
             } catch (_: Exception) {}
         }
 
-        val query = ctx.select(
-            NURSING_SHIFT_HANDOVERS.ID,
-            NURSING_SHIFT_HANDOVERS.CARE_UNIT,
-            NURSING_SHIFT_HANDOVERS.BUSINESS_DATE,
-            NURSING_SHIFT_HANDOVERS.SHIFT,
-            NURSING_SHIFT_HANDOVERS.HANDOVER_BY,
-            NURSING_SHIFT_HANDOVERS.HANDED_OVER_AT,
-            NURSING_SHIFT_HANDOVERS.RECEIVED_BY,
-            NURSING_SHIFT_HANDOVERS.STATUS,
-        )
-            .from(NURSING_SHIFT_HANDOVERS)
-            .join(NURSING_SHIFT_HANDOVER_ITEMS)
-            .on(NURSING_SHIFT_HANDOVERS.ID.eq(NURSING_SHIFT_HANDOVER_ITEMS.HANDOVER_ID))
-            .where(conditions)
-            .orderBy(NURSING_SHIFT_HANDOVERS.HANDED_OVER_AT.desc(), NURSING_SHIFT_HANDOVERS.CREATED_AT.desc())
+        val sql = SHIFT_HANDOVER_SELECT + dynamicWhere(where) +
+            " ORDER BY h.handed_over_at DESC, h.created_at DESC"
 
-        return pool.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+        return pool.preparedQuery(sql).execute(Tuple.from(args))
             .map { rows -> rows.map { row -> mapHandoverEvent(row) } }
     }
 

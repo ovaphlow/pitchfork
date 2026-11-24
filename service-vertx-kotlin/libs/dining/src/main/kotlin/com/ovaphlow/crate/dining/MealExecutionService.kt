@@ -1,17 +1,12 @@
 package com.ovaphlow.crate.dining
 
 import com.ovaphlow.crate.common.Ulid
-import com.ovaphlow.crate.database.DatabaseConfig
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
 import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
-import io.vertx.sqlclient.SqlClient
-import org.jooq.DSLContext
-import org.jooq.JSONB
-import org.jooq.impl.DSL
-import org.jooq.impl.DSL.count
+import io.vertx.sqlclient.Tuple
 import java.time.LocalDate
 import java.time.OffsetDateTime
 
@@ -19,25 +14,44 @@ import java.time.OffsetDateTime
  * 就餐执行登记（FR-5）：护理员按名单登记实际就餐状态（正常/部分/未就餐/拒食）。
  * 同一长者同一餐次（同一名单条目）幂等更新：重复登记覆盖状态、备注、
  * 登记人与登记时间，不产生重复记录。
+ *
+ * 持久化一律原生参数化 SQL（`$1..$n` + `Tuple`），无 jOOQ。
  */
 class MealExecutionService(
     private val pool: Pool,
-    private val ctx: DSLContext = DatabaseConfig.createDSL(),
 ) {
-    private val t = DSL.table(DSL.name("dining", "dining_meal_executions"))
-    private val cId = DSL.field("id", String::class.java)
-    private val cRosterItemId = DSL.field("roster_item_id", String::class.java)
-    private val cStatus = DSL.field("status", String::class.java)
-    private val cRemark = DSL.field("remark", String::class.java)
-    private val cRecordedBy = DSL.field("recorded_by", String::class.java)
-    private val cRecordedAt = DSL.field("recorded_at", OffsetDateTime::class.java)
-    private val cUpdatedAt = DSL.field("updated_at", OffsetDateTime::class.java)
-    private val cMetadata = DSL.field("metadata", JSONB::class.java)
-
-    private val rosterItems = DSL.table(DSL.name("dining", "dining_roster_items"))
-    private val rosters = DSL.table(DSL.name("dining", "dining_rosters"))
 
     companion object {
+        /** 单表查询列（`SELECT *` 的显式列清单，顺序与 [toJson] 一致）。 */
+        private const val EXECUTION_COLUMNS =
+            "id, roster_item_id, status, remark, recorded_by, recorded_at, metadata"
+
+        private const val ROSTER_ITEM_SQL =
+            "SELECT 1 FROM dining.dining_roster_items WHERE id = \$1"
+
+        private const val UPSERT_SQL =
+            "INSERT INTO dining.dining_meal_executions " +
+                "(id, roster_item_id, status, remark, recorded_by, recorded_at, updated_at, metadata) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8) " +
+                "ON CONFLICT (roster_item_id) DO UPDATE SET " +
+                "status = \$9, remark = \$10, recorded_by = \$11, recorded_at = \$12, updated_at = \$13 " +
+                "RETURNING id"
+
+        private const val LIST_COLUMNS =
+            "x.id AS id, x.roster_item_id AS roster_item_id, x.status AS status, x.remark AS remark, " +
+                "x.recorded_by AS recorded_by, x.recorded_at AS recorded_at, x.metadata AS metadata, " +
+                "r.menu_date AS menu_date, r.meal_time AS meal_time, i.patient_id AS patient_id, " +
+                "i.patient_name AS patient_name, i.meal_type AS meal_type, " +
+                "i.allergies AS allergies, i.adjust_type AS adjust_type"
+
+        private const val LIST_FROM =
+            " FROM dining.dining_meal_executions x " +
+                "JOIN dining.dining_roster_items i ON i.id = x.roster_item_id " +
+                "JOIN dining.dining_rosters r ON r.id = i.roster_id "
+
+        private const val LIST_ORDER =
+            " ORDER BY r.menu_date DESC, r.meal_time DESC, x.recorded_at DESC"
+
         fun toJson(row: Row): JsonObject = JsonObject()
             .put("id", row.getValue("id")?.toString())
             .put("roster_item_id", row.getValue("roster_item_id")?.toString())
@@ -70,32 +84,18 @@ class MealExecutionService(
         if (status.isNullOrBlank() || status !in DiningConstants.MEAL_STATUSES)
             return Future.failedFuture(IllegalArgumentException("invalid status, must be one of: ${DiningConstants.MEAL_STATUSES}"))
 
-        val itemQuery = ctx.selectOne().from(rosterItems).where(DSL.field("id").eq(rosterItemId))
-        return execute(pool, itemQuery).compose { rows ->
+        return pool.preparedQuery(ROSTER_ITEM_SQL).execute(Tuple.of(rosterItemId)).compose { rows ->
             if (rows.size() == 0)
                 return@compose Future.failedFuture(DiningNotFoundException("roster item not found: $rosterItemId"))
 
             val id = Ulid.generate()
             val now = OffsetDateTime.now()
-            val query = ctx.insertInto(t)
-                .set(cId, id)
-                .set(cRosterItemId, rosterItemId)
-                .set(cStatus, status)
-                .set(cRemark, remark)
-                .set(cRecordedBy, userId)
-                .set(cRecordedAt, now)
-                .set(cUpdatedAt, now)
-                .set(cMetadata, JSONB.valueOf("{}"))
-                .onConflict(cRosterItemId)
-                .doUpdate()
-                .set(cStatus, status)
-                .set(cRemark, remark)
-                .set(cRecordedBy, userId)
-                .set(cRecordedAt, now)
-                .set(cUpdatedAt, now)
-                .returning(cId)
-
-            execute(pool, query).compose { result ->
+            pool.preparedQuery(UPSERT_SQL).execute(
+                Tuple.of(
+                    id, rosterItemId, status, remark, userId, now, now, JsonObject(),
+                    status, remark, userId, now, now,
+                )
+            ).compose { result ->
                 val row = result.iterator().asSequence().firstOrNull()
                     ?: return@compose Future.failedFuture(IllegalStateException("execution upsert returned no row"))
                 getById(row.getString("id") ?: id)
@@ -111,51 +111,34 @@ class MealExecutionService(
         limit: Int = 50,
         offset: Int = 0,
     ): Future<JsonObject> {
-        val conditions = mutableListOf<org.jooq.Condition>()
-        date?.takeIf(String::isNotBlank)?.let { conditions.add(DSL.field(DSL.name("r", "menu_date")).eq(parseDate(it))) }
+        val where = mutableListOf<String>()
+        val args = mutableListOf<Any?>()
+
+        /** 追加一个绑定值并返回其占位符。 */
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
+
+        date?.takeIf(String::isNotBlank)?.let { where.add("r.menu_date = ${bind(parseDate(it))}") }
         mealTime?.takeIf(String::isNotBlank)?.let {
             if (it !in DiningConstants.MEAL_TIMES)
                 return Future.failedFuture(IllegalArgumentException("invalid meal_time, must be one of: ${DiningConstants.MEAL_TIMES}"))
-            conditions.add(DSL.field(DSL.name("r", "meal_time")).eq(it))
+            where.add("r.meal_time = ${bind(it)}")
         }
         status?.takeIf(String::isNotBlank)?.let {
             if (it !in DiningConstants.MEAL_STATUSES)
                 return Future.failedFuture(IllegalArgumentException("invalid status, must be one of: ${DiningConstants.MEAL_STATUSES}"))
-            conditions.add(DSL.field(DSL.name("x", "status")).eq(it))
+            where.add("x.status = ${bind(it)}")
         }
-        patientId?.takeIf(String::isNotBlank)?.let { conditions.add(DSL.field(DSL.name("i", "patient_id")).eq(it)) }
+        patientId?.takeIf(String::isNotBlank)?.let { where.add("i.patient_id = ${bind(it)}") }
 
-        val x = t.`as`("x")
-        val i = rosterItems.`as`("i")
-        val r = rosters.`as`("r")
+        val whereClause = if (where.isEmpty()) "" else " WHERE " + where.joinToString(" AND ")
+        val countSql = "SELECT count(*) AS total$LIST_FROM$whereClause"
+        val countArgs = args.toList()
+        val dataSql = "SELECT $LIST_COLUMNS$LIST_FROM$whereClause$LIST_ORDER LIMIT ${bind(limit)} OFFSET ${bind(offset)}"
+        val dataArgs = args.toList()
 
-        val base = x
-            .join(i).on(DSL.field(DSL.name("x", "roster_item_id")).eq(DSL.field(DSL.name("i", "id"))))
-            .join(r).on(DSL.field(DSL.name("i", "roster_id")).eq(DSL.field(DSL.name("r", "id"))))
-
-        val countQuery = ctx.select(count().`as`("total")).from(base).where(conditions)
-        val dataQuery = ctx.select(
-            DSL.field(DSL.name("x", "id")).`as`("id"),
-            DSL.field(DSL.name("x", "roster_item_id")).`as`("roster_item_id"),
-            DSL.field(DSL.name("x", "status")).`as`("status"),
-            DSL.field(DSL.name("x", "remark")).`as`("remark"),
-            DSL.field(DSL.name("x", "recorded_by")).`as`("recorded_by"),
-            DSL.field(DSL.name("x", "recorded_at")).`as`("recorded_at"),
-            DSL.field(DSL.name("x", "metadata")).`as`("metadata"),
-            DSL.field(DSL.name("r", "menu_date")).`as`("menu_date"),
-            DSL.field(DSL.name("r", "meal_time")).`as`("meal_time"),
-            DSL.field(DSL.name("i", "patient_id")).`as`("patient_id"),
-            DSL.field(DSL.name("i", "patient_name")).`as`("patient_name"),
-            DSL.field(DSL.name("i", "meal_type")).`as`("meal_type"),
-            DSL.field(DSL.name("i", "allergies")).`as`("allergies"),
-            DSL.field(DSL.name("i", "adjust_type")).`as`("adjust_type"),
-        ).from(base).where(conditions)
-            .orderBy(DSL.field(DSL.name("r", "menu_date")).desc(), DSL.field(DSL.name("r", "meal_time")).desc(), DSL.field(DSL.name("x", "recorded_at")).desc())
-            .limit(limit).offset(offset)
-
-        return execute(pool, countQuery).flatMap { countRows ->
+        return pool.preparedQuery(countSql).execute(Tuple.from(countArgs)).flatMap { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(pool, dataQuery).map { dataRows ->
+            pool.preparedQuery(dataSql).execute(Tuple.from(dataArgs)).map { dataRows ->
                 val records = JsonArray()
                 for (row in dataRows) records.add(toJson(row))
                 JsonObject().put("records", records)
@@ -164,15 +147,15 @@ class MealExecutionService(
         }
     }
 
-    private fun getById(id: String): Future<JsonObject> {
-        val query = ctx.selectFrom(t).where(cId.eq(id))
-        return execute(pool, query).compose { rows ->
-            val row = rows.iterator().asSequence().firstOrNull()
-            if (row == null)
-                Future.failedFuture(DiningNotFoundException("meal execution not found: $id"))
-            else Future.succeededFuture(toJson(row))
-        }
-    }
+    private fun getById(id: String): Future<JsonObject> =
+        pool.preparedQuery("SELECT $EXECUTION_COLUMNS FROM dining.dining_meal_executions WHERE id = \$1")
+            .execute(Tuple.of(id))
+            .compose { rows ->
+                val row = rows.iterator().asSequence().firstOrNull()
+                if (row == null)
+                    Future.failedFuture(DiningNotFoundException("meal execution not found: $id"))
+                else Future.succeededFuture(toJson(row))
+            }
 
     private fun parseDate(value: String): LocalDate =
         try {
@@ -180,7 +163,4 @@ class MealExecutionService(
         } catch (error: Exception) {
             throw IllegalArgumentException("date must be a valid ISO date (yyyy-MM-dd)")
         }
-
-    private fun execute(client: SqlClient, query: org.jooq.Query): Future<io.vertx.sqlclient.RowSet<Row>> =
-        client.preparedQuery(DatabaseConfig.sql(query)).execute(DatabaseConfig.tuple(query))
 }

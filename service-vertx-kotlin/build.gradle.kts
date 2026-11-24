@@ -1,6 +1,3 @@
-import org.gradle.api.GradleException
-import org.gradle.api.tasks.JavaExec
-
 plugins {
     alias(libs.plugins.kotlin.jvm) apply false
 }
@@ -39,25 +36,6 @@ subprojects {
     configure<JavaPluginExtension> {
         toolchain {
             languageVersion.set(JavaLanguageVersion.of(25))
-        }
-    }
-
-    tasks.withType<JavaExec>().matching { it.name == "generateJooq" }.configureEach {
-        doFirst {
-            val password = System.getenv("PITCHFORK_DB_PASSWORD")?.takeIf(String::isNotBlank)
-                ?: throw GradleException("PITCHFORK_DB_PASSWORD must be set before running generateJooq")
-            val template = project.file("jooq-config.xml")
-            val rendered = project.layout.buildDirectory.file("tmp/generateJooq/jooq-config.xml").get().asFile
-            val escapedPassword = password
-                .replace("&", "&amp;")
-                .replace("<", "&lt;")
-                .replace(">", "&gt;")
-                .replace("\"", "&quot;")
-                .replace("'", "&apos;")
-
-            rendered.parentFile.mkdirs()
-            rendered.writeText(template.readText().replace("__PITCHFORK_DB_PASSWORD__", escapedPassword))
-            setArgs(listOf(rendered.absolutePath))
         }
     }
 

@@ -1,13 +1,6 @@
 package com.ovaphlow.crate.healthcare
 
 import com.ovaphlow.crate.common.Ulid
-import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.database.gen.healthcare.tables.BillItems.BILL_ITEMS
-import com.ovaphlow.crate.database.gen.healthcare.tables.Bills.BILLS
-import com.ovaphlow.crate.database.gen.healthcare.tables.Encounters.ENCOUNTERS
-import com.ovaphlow.crate.database.gen.healthcare.tables.FeeItems.FEE_ITEMS
-import com.ovaphlow.crate.database.gen.healthcare.tables.Payments.PAYMENTS
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingAssessments.NURSING_ASSESSMENTS
 import com.ovaphlow.crate.nursing.ConflictException
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
@@ -16,8 +9,7 @@ import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.RowSet
 import io.vertx.sqlclient.SqlClient
-import org.jooq.Query
-import org.jooq.impl.DSL
+import io.vertx.sqlclient.Tuple
 import java.math.BigDecimal
 import java.time.LocalDate
 import java.time.OffsetDateTime
@@ -59,7 +51,6 @@ class DuplicateBillException(message: String) : Exception(message)
  */
 class BillService(
     private val pool: Pool,
-    private val ctx: org.jooq.DSLContext = DatabaseConfig.createDSL(),
 ) {
     companion object {
         /** 机构业务时区（取业务日与当前月的统一口径，与 HealthcareService/CheckupService 等一致）。 */
@@ -210,33 +201,56 @@ class BillService(
         value.atZoneSameInstant(businessZone).toLocalDate()
 
     // ========================================================================
-    //  V523 账单红冲列（未重跑 jOOQ codegen：按列名引用）
-    //  jOOQ 生成代码由 DB 反向生成；本车道无 DB 授权，故新列一律用 `DSL.field`
-    //  按名引用（与仓库既有的跨 schema 写法一致）。
+    //  原生 SQL 片段（列清单与谓词单一来源）
     //  注意两种拼法不能混：
     //   - SELECT 必须带表名限定（红字单自连接会引入同名列，裸列名会 ambiguous）；
     //   - INSERT 列清单 / UPDATE SET 子句必须用裸列名（PostgreSQL 不接受表名前缀）。
     // ========================================================================
 
-    /** 主表（bills）红冲列，仅用于 SELECT。 */
-    private val sReversalOf = DSL.field(DSL.name("bills", "reversal_of"), String::class.java)
-    private val sReversalReason = DSL.field(DSL.name("bills", "reversal_reason"), String::class.java)
-    private val sReversedBy = DSL.field(DSL.name("bills", "reversed_by"), String::class.java)
-    private val sReversedAt = DSL.field(DSL.name("bills", "reversed_at"), OffsetDateTime::class.java)
+    /** 账单头显式列清单（显式限定 `healthcare.bills.`）。 */
+    private val billColumns =
+        "healthcare.bills.id, healthcare.bills.encounter_id, healthcare.bills.period_start, " +
+            "healthcare.bills.period_end, healthcare.bills.status, healthcare.bills.total_amount, " +
+            "healthcare.bills.settled_at, healthcare.bills.outstanding_amount, " +
+            "healthcare.bills.write_off_reason, healthcare.bills.reversal_of, " +
+            "healthcare.bills.reversal_reason, healthcare.bills.reversed_by, " +
+            "healthcare.bills.reversed_at, healthcare.bills.created_at, healthcare.bills.updated_at"
 
-    /** 写入用裸列名（INSERT 列清单 / UPDATE SET 子句）。 */
-    private val wReversalOf = DSL.field(DSL.name("reversal_of"), String::class.java)
-    private val wReversalReason = DSL.field(DSL.name("reversal_reason"), String::class.java)
-    private val wReversedBy = DSL.field(DSL.name("reversed_by"), String::class.java)
-    private val wReversedAt = DSL.field(DSL.name("reversed_at"), OffsetDateTime::class.java)
+    /**
+     * 账单查询公共列 + 只读派生的 `reversal_bill_id`
+     * （LEFT JOIN 红字单：`healthcare.bills.reversal_of = healthcare.bills.id`）。详情与列表共用，避免两处字段不一致。
+     */
+    private val billSelectSql =
+        "SELECT $billColumns, red_bill.id AS reversal_bill_id FROM healthcare.bills " +
+            "LEFT OUTER JOIN healthcare.bills red_bill " +
+            "ON red_bill.reversal_of = healthcare.bills.id"
 
-    /** 红字单自连接：`reversal_bill_id` = 冲销本单的红字单（LEFT JOIN 只读派生）。 */
-    private val redBillAlias = DSL.table(DSL.name("healthcare", "bills")).`as`("red_bill")
-    private val sRedBillId = DSL.field(DSL.name("red_bill", "id"), String::class.java)
-    private val sRedBillReversalOf = DSL.field(DSL.name("red_bill", "reversal_of"), String::class.java)
+    /** 账单明细显式列清单（单表，无别名）。 */
+    private val billItemColumns =
+        "id, bill_id, source, item_code, item_name, unit_price, quantity, amount, remark, created_at, updated_at"
+
+    /** 入住周期显式列清单（单表，无别名）。 */
+    private val encounterColumns =
+        "id, patient_id, encounter_type, encounter_no, department, ward, admit_date, discharge_date, " +
+            "death_date, status, settled_at, created_at, updated_at"
 
     /** 「有效原单」谓词（与 V523 的部分唯一索引同口径）：未被红冲且非红字单。 */
-    private val effectiveOriginalFilter = sReversalOf.isNull.and(sReversedAt.isNull)
+    private val effectiveOriginalFilter =
+        "healthcare.bills.reversal_of IS NULL AND healthcare.bills.reversed_at IS NULL"
+
+    private val insertBillItemSql =
+        "INSERT INTO healthcare.bill_items " +
+            "(id, bill_id, source, item_code, item_name, unit_price, quantity, amount, created_at, " +
+            "updated_at, remark) VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11)"
+
+    private val insertBillSql =
+        "INSERT INTO healthcare.bills " +
+            "(id, encounter_id, period_start, period_end, status, total_amount, created_at, updated_at, " +
+            "reversal_of) VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9)"
+
+    private val markBillReversedSql =
+        "UPDATE healthcare.bills SET reversal_reason = \$1, reversed_by = \$2, reversed_at = \$3, " +
+            "updated_at = \$4 WHERE healthcare.bills.id = \$5"
 
     /**
      * 账期是否晚于机构时区当前月。
@@ -291,7 +305,11 @@ class BillService(
                 requireNoDuplicate(connection, encounterId, stayStart, stayEnd).compose {
                     computeAutoItems(connection, encounterId, stayStart, stayEnd).compose { autoItems ->
                         val total = BillingEngine.totalOf(autoItems.map { it.amount })
-                        execute(connection, insertBill(billId, encounterId, stayStart, stayEnd, total, now))
+                        execute(
+                            connection,
+                            insertBillSql,
+                            insertBill(billId, encounterId, stayStart, stayEnd, total, now),
+                        )
                             .compose {
                                 insertItems(connection, billId, autoItems, now)
                             }
@@ -467,19 +485,23 @@ class BillService(
                                 val itemName = item.getString("name")
                                 val itemCode = item.getString("id")
                                 val amount = BillingEngine.money(unitPrice, fields.quantity)
-                                var insert = ctx.insertInto(BILL_ITEMS)
-                                    .set(BILL_ITEMS.ID, id)
-                                    .set(BILL_ITEMS.BILL_ID, billId)
-                                    .set(BILL_ITEMS.SOURCE, BillingEngine.SOURCE_MANUAL)
-                                    .set(BILL_ITEMS.ITEM_CODE, itemCode)
-                                    .set(BILL_ITEMS.ITEM_NAME, itemName)
-                                    .set(BILL_ITEMS.UNIT_PRICE, unitPrice)
-                                    .set(BILL_ITEMS.QUANTITY, fields.quantity)
-                                    .set(BILL_ITEMS.AMOUNT, amount)
-                                    .set(BILL_ITEMS.CREATED_AT, now)
-                                    .set(BILL_ITEMS.UPDATED_AT, now)
-                                fields.remark?.let { insert = insert.set(BILL_ITEMS.REMARK, it) }
-                                execute(connection, insert).compose {
+                                execute(
+                                    connection,
+                                    insertBillItemSql,
+                                    Tuple.of(
+                                        id,
+                                        billId,
+                                        BillingEngine.SOURCE_MANUAL,
+                                        itemCode,
+                                        itemName,
+                                        unitPrice,
+                                        fields.quantity,
+                                        amount,
+                                        now,
+                                        now,
+                                        fields.remark,
+                                    ),
+                                ).compose {
                                     refreshTotal(connection, billId, now)
                                 }.compose {
                                     billDetail(connection, billId)
@@ -567,17 +589,24 @@ class BillService(
                     requireNoPayments(connection, billId).compose {
                         execute(
                             connection,
-                            insertReversalBill(
-                                redBillId = redBillId,
-                                originalId = billId,
-                                encounterId = bill.getString("encounter_id"),
-                                periodStart = bill.getLocalDate("period_start"),
-                                periodEnd = bill.getLocalDate("period_end"),
-                                total = BillingEngine.reversalTotal(total),
-                                now = now,
+                            insertBillSql,
+                            Tuple.of(
+                                redBillId,
+                                bill.getString("encounter_id"),
+                                bill.getLocalDate("period_start"),
+                                bill.getLocalDate("period_end"),
+                                BillingEngine.STATUS_PENDING,
+                                BillingEngine.reversalTotal(total),
+                                now,
+                                now,
+                                billId,
                             ),
                         ).compose {
-                            execute(connection, markBillReversed(billId, reason, operator, now))
+                            execute(
+                                connection,
+                                markBillReversedSql,
+                                Tuple.of(reason, operator, now, now, billId),
+                            )
                         }.compose {
                             billDetail(connection, redBillId)
                         }
@@ -599,46 +628,12 @@ class BillService(
         else -> null
     }
 
-    /** 红字单：金额取反、账期复制原单、状态 待缴费、`reversal_of` 指向原单。 */
-    private fun insertReversalBill(
-        redBillId: String,
-        originalId: String,
-        encounterId: String,
-        periodStart: LocalDate,
-        periodEnd: LocalDate,
-        total: BigDecimal,
-        now: OffsetDateTime,
-    ): Query =
-        ctx.insertInto(BILLS)
-            .set(BILLS.ID, redBillId)
-            .set(BILLS.ENCOUNTER_ID, encounterId)
-            .set(BILLS.PERIOD_START, periodStart)
-            .set(BILLS.PERIOD_END, periodEnd)
-            .set(BILLS.STATUS, BillingEngine.STATUS_PENDING)
-            .set(BILLS.TOTAL_AMOUNT, total)
-            .set(BILLS.CREATED_AT, now)
-            .set(BILLS.UPDATED_AT, now)
-            .set(wReversalOf, originalId)
-
-    /** 原单留痕：只写红冲三列 + updated_at（**不碰** total_amount/status）。 */
-    private fun markBillReversed(
-        billId: String,
-        reason: String,
-        operator: String,
-        now: OffsetDateTime,
-    ): Query =
-        ctx.update(BILLS)
-            .set(wReversalReason, reason)
-            .set(wReversedBy, operator)
-            .set(wReversedAt, now)
-            .set(BILLS.UPDATED_AT, now)
-            .where(BILLS.ID.eq(billId))
-
     /** 原单已存在缴费记录（已发生收款）→ 409，必须先退款/冲正（034 §2.5 第 6 条）。 */
     private fun requireNoPayments(client: SqlClient, billId: String): Future<Unit> =
         execute(
             client,
-            ctx.select(DSL.count().`as`("total")).from(PAYMENTS).where(PAYMENTS.BILL_ID.eq(billId)),
+            "SELECT count(*) AS total FROM healthcare.payments WHERE bill_id = \$1",
+            Tuple.of(billId),
         ).map { rows ->
             val total = rows.iterator().asSequence().firstOrNull()?.getLong("total") ?: 0L
             if (total > 0) {
@@ -704,24 +699,18 @@ class BillService(
      * （bills LEFT JOIN payments ... GROUP BY ...），按账期升序、同账期按 id 升序。
      */
     fun outstandingBills(client: SqlClient, encounterId: String): Future<List<BillOutstanding>> {
-        val paid = DSL.coalesce(DSL.sum(PAYMENTS.AMOUNT), BigDecimal.ZERO)
-        val query = ctx.select(
-            BILLS.ID,
-            BILLS.PERIOD_START,
-            BILLS.PERIOD_END,
-            BILLS.TOTAL_AMOUNT,
-            paid.`as`("paid_amount"),
-            BILLS.TOTAL_AMOUNT.subtract(paid).`as`("balance"),
-        ).from(BILLS)
-            .leftJoin(PAYMENTS).on(PAYMENTS.BILL_ID.eq(BILLS.ID))
-            .where(BILLS.ENCOUNTER_ID.eq(encounterId))
-            .and(BILLS.STATUS.eq(BillingEngine.STATUS_PENDING))
-            // 034：已红冲原单不是未结（否则收束/预览把已冲销金额算成欠费）；
-            // 红字单余额为负，靠下方 `signum() <= 0` 判定天然排除，不另加谓词。
-            .and(sReversedAt.isNull())
-            .groupBy(BILLS.ID, BILLS.PERIOD_START, BILLS.PERIOD_END, BILLS.TOTAL_AMOUNT)
-            .orderBy(BILLS.PERIOD_START.asc(), BILLS.ID.asc())
-        return execute(client, query).map { rows ->
+        val sql = "SELECT healthcare.bills.id, healthcare.bills.period_start, " +
+            "healthcare.bills.period_end, healthcare.bills.total_amount, " +
+            "coalesce(sum(healthcare.payments.amount), 0) AS paid_amount, " +
+            "healthcare.bills.total_amount - coalesce(sum(healthcare.payments.amount), 0) AS balance " +
+            "FROM healthcare.bills LEFT OUTER JOIN healthcare.payments " +
+            "ON healthcare.payments.bill_id = healthcare.bills.id " +
+            "WHERE healthcare.bills.encounter_id = \$1 AND healthcare.bills.status = \$2 " +
+            "AND healthcare.bills.reversed_at IS NULL " +
+            "GROUP BY healthcare.bills.id, healthcare.bills.period_start, " +
+            "healthcare.bills.period_end, healthcare.bills.total_amount " +
+            "ORDER BY healthcare.bills.period_start ASC, healthcare.bills.id ASC"
+        return execute(client, sql, Tuple.of(encounterId, BillingEngine.STATUS_PENDING)).map { rows ->
             rows.mapNotNull { row ->
                 val balance = row.getBigDecimal("balance")
                 if (balance == null || balance.signum() <= 0) {
@@ -757,17 +746,22 @@ class BillService(
                 val balance = row?.balance ?: BigDecimal.ZERO
                 val reason = if (row == null) null else writeOffReason
                 chain = chain.compose {
-                    execute(client, freezeBillQuery(billId, balance, reason, now)).map { Unit }
+                    execute(
+                        client,
+                        "UPDATE healthcare.bills SET status = \$1, settled_at = \$2, " +
+                            "outstanding_amount = \$3, updated_at = \$4, write_off_reason = \$5 " +
+                            "WHERE healthcare.bills.id = \$6",
+                        Tuple.of(BillingEngine.STATUS_SETTLED, now, balance, now, reason, billId),
+                    ).map { Unit }
                 }
             }
             chain
         }.compose {
             execute(
                 client,
-                ctx.update(ENCOUNTERS)
-                    .set(ENCOUNTERS.SETTLED_AT, now)
-                    .set(ENCOUNTERS.UPDATED_AT, now)
-                    .where(ENCOUNTERS.ID.eq(encounterId)),
+                "UPDATE healthcare.encounters SET settled_at = \$1, updated_at = \$2 " +
+                    "WHERE healthcare.encounters.id = \$3",
+                Tuple.of(now, now, encounterId),
             )
         }.compose {
             getEncounter(client, encounterId)
@@ -933,15 +927,8 @@ class BillService(
         val billId = Ulid.generate()
         return execute(
             client,
-            ctx.insertInto(BILLS)
-                .set(BILLS.ID, billId)
-                .set(BILLS.ENCOUNTER_ID, encounterId)
-                .set(BILLS.PERIOD_START, plan.start)
-                .set(BILLS.PERIOD_END, plan.end)
-                .set(BILLS.STATUS, BillingEngine.STATUS_PENDING)
-                .set(BILLS.TOTAL_AMOUNT, plan.total)
-                .set(BILLS.CREATED_AT, now)
-                .set(BILLS.UPDATED_AT, now),
+            insertBillSql,
+            insertBill(billId, encounterId, plan.start, plan.end, plan.total, now),
         ).compose {
             insertItems(client, billId, plan.items, now)
         }.map { billId }
@@ -967,41 +954,18 @@ class BillService(
     private fun billIdsOf(client: SqlClient, encounterId: String): Future<List<String>> =
         execute(
             client,
-            ctx.select(BILLS.ID).from(BILLS)
-                .where(BILLS.ENCOUNTER_ID.eq(encounterId))
-                .orderBy(BILLS.ID.asc()),
+            "SELECT healthcare.bills.id FROM healthcare.bills " +
+                "WHERE healthcare.bills.encounter_id = \$1 ORDER BY healthcare.bills.id ASC",
+            Tuple.of(encounterId),
         ).map { rows -> rows.map { row -> row.getString("id") } }
-
-    /**
-     * 单张账单冻结：状态 已结算 + settled_at = now + 未结快照；
-     * 未结行写减免原因，其余以 `cast(null as varchar)` 显式置 NULL。
-     */
-    private fun freezeBillQuery(
-        billId: String,
-        outstandingAmount: BigDecimal,
-        writeOffReason: String?,
-        now: OffsetDateTime,
-    ): Query {
-        var query = ctx.update(BILLS)
-            .set(BILLS.STATUS, BillingEngine.STATUS_SETTLED)
-            .set(BILLS.SETTLED_AT, now)
-            .set(BILLS.OUTSTANDING_AMOUNT, outstandingAmount)
-            .set(BILLS.UPDATED_AT, now)
-        query = if (writeOffReason == null) {
-            query.set(BILLS.WRITE_OFF_REASON, DSL.castNull(String::class.java))
-        } else {
-            query.set(BILLS.WRITE_OFF_REASON, writeOffReason)
-        }
-        return query.where(BILLS.ID.eq(billId))
-    }
 
     /** 已结算账期末日最大值（状态 已结清/已结算）：无则 null。 */
     private fun maxSettledPeriodEnd(client: SqlClient, encounterId: String): Future<LocalDate?> =
         execute(
             client,
-            ctx.select(DSL.max(BILLS.PERIOD_END).`as`("max_end")).from(BILLS)
-                .where(BILLS.ENCOUNTER_ID.eq(encounterId))
-                .and(BILLS.STATUS.`in`(BillingEngine.STATUS_PAID, BillingEngine.STATUS_SETTLED)),
+            "SELECT max(healthcare.bills.period_end) AS max_end FROM healthcare.bills " +
+                "WHERE healthcare.bills.encounter_id = \$1 AND healthcare.bills.status IN (\$2, \$3)",
+            Tuple.of(encounterId, BillingEngine.STATUS_PAID, BillingEngine.STATUS_SETTLED),
         ).map { rows -> rows.iterator().asSequence().firstOrNull()?.getLocalDate("max_end") }
 
     /** 与既有账单账期完全一致（唯一约束冲突判定）。 */
@@ -1013,10 +977,10 @@ class BillService(
     ): Future<Boolean> =
         execute(
             client,
-            ctx.select(DSL.count().`as`("total")).from(BILLS)
-                .where(BILLS.ENCOUNTER_ID.eq(encounterId))
-                .and(BILLS.PERIOD_START.eq(periodStart))
-                .and(BILLS.PERIOD_END.eq(periodEnd)),
+            "SELECT count(*) AS total FROM healthcare.bills " +
+                "WHERE healthcare.bills.encounter_id = \$1 AND healthcare.bills.period_start = \$2 " +
+                "AND healthcare.bills.period_end = \$3",
+            Tuple.of(encounterId, periodStart, periodEnd),
         ).map { rows ->
             val total = rows.iterator().asSequence().firstOrNull()?.getLong("total") ?: 0L
             total > 0
@@ -1024,7 +988,11 @@ class BillService(
 
     /** 结算后返回 encounter（含 settled_at 冻结标记）。 */
     private fun getEncounter(client: SqlClient, encounterId: String): Future<JsonObject> =
-        execute(client, ctx.selectFrom(ENCOUNTERS).where(ENCOUNTERS.ID.eq(encounterId))).compose { rows ->
+        execute(
+            client,
+            "SELECT $encounterColumns FROM healthcare.encounters WHERE id = \$1",
+            Tuple.of(encounterId),
+        ).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { row ->
                 Future.succeededFuture(
                     JsonObject()
@@ -1051,9 +1019,9 @@ class BillService(
 
     /** 账单详情（含明细）：不存在 404；含红冲字段与派生的 reversal_bill_id。 */
     fun getBill(billId: String): Future<JsonObject> =
-        execute(pool, selectBill(billId)).compose { rows ->
+        execute(pool, selectBill(billId), Tuple.of(billId)).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { billRow ->
-                execute(pool, selectItems(billId)).map { itemRows ->
+                execute(pool, selectItems, Tuple.of(billId)).map { itemRows ->
                     billJson(billRow, itemRows.map(::itemJson))
                 }
             } ?: Future.failedFuture(HealthcareNotFoundException("bill not found: $billId"))
@@ -1061,16 +1029,14 @@ class BillService(
 
     /** 按 encounter 查询账单列表（账期倒序分页），返回 {records, meta:{total}}。 */
     fun listBills(encounterId: String, limit: Int = 50, offset: Int = 0): Future<JsonObject> {
-        val countQuery = ctx.select(DSL.count().`as`("total")).from(BILLS)
-            .where(BILLS.ENCOUNTER_ID.eq(encounterId))
-        val dataQuery = selectBillsWithReversal()
-            .where(BILLS.ENCOUNTER_ID.eq(encounterId))
-            .orderBy(BILLS.PERIOD_START.desc(), BILLS.ID.desc())
-            .limit(limit)
-            .offset(offset)
-        return execute(pool, countQuery).compose { countRows ->
+        val countSql = "SELECT count(*) AS total FROM healthcare.bills " +
+            "WHERE healthcare.bills.encounter_id = \$1"
+        val dataSql = "$billSelectSql WHERE healthcare.bills.encounter_id = \$1 " +
+            "ORDER BY healthcare.bills.period_start DESC, healthcare.bills.id DESC " +
+            "OFFSET \$2 ROWS FETCH NEXT \$3 ROWS ONLY"
+        return execute(pool, countSql, Tuple.of(encounterId)).compose { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(pool, dataQuery).map { dataRows ->
+            execute(pool, dataSql, Tuple.of(encounterId, limit, offset)).map { dataRows ->
                 JsonObject()
                     .put("records", JsonArray(dataRows.map { row ->
                         billJson(row, emptyList())
@@ -1199,16 +1165,13 @@ class BillService(
 
     /**
      * 启用费用项目字典（一次查询）：[computeAutoItems] 取项与 precheck 槽位计数**共用**。
+     *
+     * 列清单与护理等级拉平口径取自 [FeeItemService.COLUMNS]（唯一来源）。
      */
-    private fun enabledFeeItemsQuery(): Query =
-        ctx.select(
-            FEE_ITEMS.ID,
-            FEE_ITEMS.CATEGORY,
-            FEE_ITEMS.NAME,
-            FEE_ITEMS.UNIT_PRICE,
-            FeeItemService.nursingLevelColumn,
-        ).from(FEE_ITEMS)
-            .where(FEE_ITEMS.STATUS.eq(FeeItemService.STATUS_ENABLED))
+    private fun enabledFeeItems(client: SqlClient): Future<RowSet<Row>> =
+        client.preparedQuery(
+            "SELECT ${FeeItemService.COLUMNS} FROM healthcare.fee_items WHERE status = \$1",
+        ).execute(Tuple.of(FeeItemService.STATUS_ENABLED))
 
     private fun feeItemRowOf(row: Row): FeeItemRow =
         FeeItemRow(
@@ -1302,7 +1265,7 @@ class BillService(
         stayStart: LocalDate,
         stayEnd: LocalDate,
     ): Future<PrecheckState> =
-        execute(client, enabledFeeItemsQuery()).compose { rows ->
+        enabledFeeItems(client).compose { rows ->
             val items = rows.map(::feeItemRowOf)
             deriveBillingSlots(client, encounterId, stayStart, stayEnd).map { derivation ->
                 val requirements = derivation.slots.map { slot ->
@@ -1320,7 +1283,7 @@ class BillService(
         stayStart: LocalDate,
         stayEnd: LocalDate,
     ): Future<List<AutoItem>> =
-        execute(connection, enabledFeeItemsQuery()).compose { rows ->
+        enabledFeeItems(connection).compose { rows ->
             val items = rows.map(::feeItemRowOf)
             // 取项基于同一份槽位推导结果；required = false 的槽位（账期内无就餐的伙食费）不参与计价
             deriveBillingSlots(connection, encounterId, stayStart, stayEnd).compose { derivation ->
@@ -1350,14 +1313,22 @@ class BillService(
 
     /** 事务内按 encounter 行锁读：不存在 404。 */
     private fun requireEncounter(client: SqlClient, encounterId: String): Future<Row> =
-        execute(client, ctx.selectFrom(ENCOUNTERS).where(ENCOUNTERS.ID.eq(encounterId)).forUpdate()).compose { rows ->
+        execute(
+            client,
+            "SELECT $encounterColumns FROM healthcare.encounters WHERE id = \$1 FOR UPDATE",
+            Tuple.of(encounterId),
+        ).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(it) }
                 ?: Future.failedFuture(HealthcareNotFoundException("encounter not found: $encounterId"))
         }
 
     /** 只读 encounter 读取（precheck 不加行锁，纯读）：不存在 404。 */
     private fun loadEncounter(client: SqlClient, encounterId: String): Future<Row> =
-        execute(client, ctx.selectFrom(ENCOUNTERS).where(ENCOUNTERS.ID.eq(encounterId))).compose { rows ->
+        execute(
+            client,
+            "SELECT $encounterColumns FROM healthcare.encounters WHERE id = \$1",
+            Tuple.of(encounterId),
+        ).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(it) }
                 ?: Future.failedFuture(HealthcareNotFoundException("encounter not found: $encounterId"))
         }
@@ -1395,11 +1366,10 @@ class BillService(
     ): Future<Boolean> =
         execute(
             client,
-            ctx.select(DSL.count().`as`("total")).from(BILLS)
-                .where(BILLS.ENCOUNTER_ID.eq(encounterId))
-                .and(BILLS.PERIOD_START.eq(periodStart))
-                .and(BILLS.PERIOD_END.eq(periodEnd))
-                .and(effectiveOriginalFilter),
+            "SELECT count(*) AS total FROM healthcare.bills WHERE healthcare.bills.encounter_id = \$1 " +
+                "AND healthcare.bills.period_start = \$2 AND healthcare.bills.period_end = \$3 " +
+                "AND $effectiveOriginalFilter",
+            Tuple.of(encounterId, periodStart, periodEnd),
         ).map { rows ->
             val total = rows.iterator().asSequence().firstOrNull()?.getLong("total") ?: 0L
             total > 0
@@ -1430,14 +1400,9 @@ class BillService(
         encounterId: String,
         periodEnd: LocalDate,
     ): Future<List<Triple<LocalDate, OffsetDateTime, String>>> {
-        val query = ctx.select(
-            NURSING_ASSESSMENTS.ASSESS_DATE,
-            NURSING_ASSESSMENTS.CREATED_AT,
-            NURSING_ASSESSMENTS.RESULT_LEVEL,
-        ).from(NURSING_ASSESSMENTS)
-            .where(NURSING_ASSESSMENTS.ENCOUNTER_ID.eq(encounterId))
-            .and(NURSING_ASSESSMENTS.ASSESS_DATE.le(periodEnd))
-        return execute(client, query).map { rows ->
+        val sql = "SELECT assess_date, created_at, result_level FROM nursing.nursing_assessments " +
+            "WHERE encounter_id = \$1 AND assess_date <= \$2"
+        return execute(client, sql, Tuple.of(encounterId, periodEnd)).map { rows ->
             rows.mapNotNull { row ->
                 val level = row.getString("result_level")?.trim()?.takeIf(String::isNotBlank) ?: return@mapNotNull null
                 val date = row.getLocalDate("assess_date") ?: return@mapNotNull null
@@ -1454,23 +1419,12 @@ class BillService(
         periodStart: LocalDate,
         periodEnd: LocalDate,
     ): Future<List<String>> {
-        val mealExecutions = DSL.table(DSL.name("dining", "dining_meal_executions")).`as`("dme")
-        val rosterItems = DSL.table(DSL.name("dining", "dining_roster_items")).`as`("dri")
-        val rosters = DSL.table(DSL.name("dining", "dining_rosters")).`as`("dr")
-        val cDmeStatus = DSL.field(DSL.name("dme", "status"), String::class.java)
-        val cDmeRosterItemId = DSL.field(DSL.name("dme", "roster_item_id"), String::class.java)
-        val cDriId = DSL.field(DSL.name("dri", "id"), String::class.java)
-        val cDriEncounterId = DSL.field(DSL.name("dri", "encounter_id"), String::class.java)
-        val cDriRosterId = DSL.field(DSL.name("dri", "roster_id"), String::class.java)
-        val cDrId = DSL.field(DSL.name("dr", "id"), String::class.java)
-        val cDrMenuDate = DSL.field(DSL.name("dr", "menu_date"), LocalDate::class.java)
-
-        val query = ctx.select(cDmeStatus).from(mealExecutions)
-            .join(rosterItems).on(cDmeRosterItemId.eq(cDriId))
-            .join(rosters).on(cDriRosterId.eq(cDrId))
-            .where(cDriEncounterId.eq(encounterId))
-            .and(cDrMenuDate.between(periodStart, periodEnd))
-        return execute(client, query).map { rows -> rows.map { row -> row.getString("status") ?: "" } }
+        val sql = "SELECT dme.status FROM dining.dining_meal_executions dme " +
+            "JOIN dining.dining_roster_items dri ON dme.roster_item_id = dri.id " +
+            "JOIN dining.dining_rosters dr ON dri.roster_id = dr.id " +
+            "WHERE dri.encounter_id = \$1 AND dr.menu_date BETWEEN \$2 AND \$3"
+        return execute(client, sql, Tuple.of(encounterId, periodStart, periodEnd))
+            .map { rows -> rows.map { row -> row.getString("status") ?: "" } }
     }
 
     private fun insertBill(
@@ -1480,52 +1434,55 @@ class BillService(
         periodEnd: LocalDate,
         total: BigDecimal,
         now: OffsetDateTime,
-    ): Query =
-        ctx.insertInto(BILLS)
-            .set(BILLS.ID, id)
-            .set(BILLS.ENCOUNTER_ID, encounterId)
-            .set(BILLS.PERIOD_START, periodStart)
-            .set(BILLS.PERIOD_END, periodEnd)
-            .set(BILLS.STATUS, BillingEngine.STATUS_PENDING)
-            .set(BILLS.TOTAL_AMOUNT, total)
-            .set(BILLS.CREATED_AT, now)
-            .set(BILLS.UPDATED_AT, now)
+    ): Tuple = Tuple.of(
+        id,
+        encounterId,
+        periodStart,
+        periodEnd,
+        BillingEngine.STATUS_PENDING,
+        total,
+        now,
+        now,
+        null,
+    )
 
     private fun insertItems(client: SqlClient, billId: String, items: List<AutoItem>, now: OffsetDateTime): Future<Unit> {
         var chain: Future<Unit> = Future.succeededFuture()
         for (item in items) {
             val id = Ulid.generate()
-            val query = ctx.insertInto(BILL_ITEMS)
-                .set(BILL_ITEMS.ID, id)
-                .set(BILL_ITEMS.BILL_ID, billId)
-                .set(BILL_ITEMS.SOURCE, BillingEngine.SOURCE_AUTO)
-                .set(BILL_ITEMS.ITEM_CODE, item.itemCode)
-                .set(BILL_ITEMS.ITEM_NAME, item.itemName)
-                .set(BILL_ITEMS.UNIT_PRICE, item.unitPrice)
-                .set(BILL_ITEMS.QUANTITY, item.quantity)
-                .set(BILL_ITEMS.AMOUNT, item.amount)
-                .set(BILL_ITEMS.CREATED_AT, now)
-                .set(BILL_ITEMS.UPDATED_AT, now)
-            chain = chain.compose { execute(client, query).map { Unit } }
+            val args = Tuple.of(
+                id,
+                billId,
+                BillingEngine.SOURCE_AUTO,
+                item.itemCode,
+                item.itemName,
+                item.unitPrice,
+                item.quantity,
+                item.amount,
+                now,
+                now,
+                null,
+            )
+            chain = chain.compose { execute(client, insertBillItemSql, args).map { Unit } }
         }
         return chain
     }
 
     /** 加项后按明细之和重算账单合计。 */
-    private fun refreshTotal(client: SqlClient, billId: String, now: OffsetDateTime): Future<Unit> {
-        val sumQuery = ctx.select(DSL.sum(BILL_ITEMS.AMOUNT).`as`("total")).from(BILL_ITEMS)
-            .where(BILL_ITEMS.BILL_ID.eq(billId))
-        return execute(client, sumQuery).compose { rows ->
+    private fun refreshTotal(client: SqlClient, billId: String, now: OffsetDateTime): Future<Unit> =
+        execute(
+            client,
+            "SELECT sum(amount) AS total FROM healthcare.bill_items WHERE bill_id = \$1",
+            Tuple.of(billId),
+        ).compose { rows ->
             val total = rows.iterator().next().getBigDecimal("total") ?: BigDecimal.ZERO
             execute(
                 client,
-                ctx.update(BILLS)
-                    .set(BILLS.TOTAL_AMOUNT, total)
-                    .set(BILLS.UPDATED_AT, now)
-                    .where(BILLS.ID.eq(billId)),
+                "UPDATE healthcare.bills SET total_amount = \$1, updated_at = \$2 " +
+                    "WHERE healthcare.bills.id = \$3",
+                Tuple.of(total, now, billId),
             ).map { Unit }
         }
-    }
 
     /**
      * 账单头行锁读（事务内串行化；加项与红冲共用，红冲靠它防并发重复红冲）：
@@ -1538,18 +1495,11 @@ class BillService(
     private fun requireBill(client: SqlClient, billId: String): Future<Row> =
         execute(
             client,
-            ctx.select(
-                BILLS.ID,
-                BILLS.ENCOUNTER_ID,
-                BILLS.PERIOD_START,
-                BILLS.PERIOD_END,
-                BILLS.STATUS,
-                BILLS.TOTAL_AMOUNT,
-                sReversalOf,
-                sReversedAt,
-            ).from(BILLS)
-                .where(BILLS.ID.eq(billId))
-                .forUpdate(),
+            "SELECT healthcare.bills.id, healthcare.bills.encounter_id, healthcare.bills.period_start, " +
+                "healthcare.bills.period_end, healthcare.bills.status, healthcare.bills.total_amount, " +
+                "healthcare.bills.reversal_of, healthcare.bills.reversed_at " +
+                "FROM healthcare.bills WHERE healthcare.bills.id = \$1 FOR UPDATE",
+            Tuple.of(billId),
         ).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(it) }
                 ?: Future.failedFuture(HealthcareNotFoundException("bill not found: $billId"))
@@ -1559,9 +1509,8 @@ class BillService(
     private fun requireEnabledItem(client: SqlClient, itemId: String): Future<Row> =
         execute(
             client,
-            ctx.select(FEE_ITEMS.ID, FEE_ITEMS.NAME, FEE_ITEMS.UNIT_PRICE, FEE_ITEMS.STATUS)
-                .from(FEE_ITEMS)
-                .where(FEE_ITEMS.ID.eq(itemId)),
+            "SELECT id, name, unit_price, status FROM healthcare.fee_items WHERE id = \$1",
+            Tuple.of(itemId),
         ).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { row ->
                 if (row.getString("status") != FeeItemService.STATUS_ENABLED) {
@@ -1573,62 +1522,28 @@ class BillService(
         }
 
     private fun billDetail(client: SqlClient, billId: String): Future<JsonObject> =
-        execute(client, selectBill(billId)).compose { rows ->
+        execute(client, selectBill(billId), Tuple.of(billId)).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { billRow ->
-                execute(client, selectItems(billId)).map { itemRows ->
+                execute(client, selectItems, Tuple.of(billId)).map { itemRows ->
                     billJson(billRow, itemRows.map(::itemJson))
                 }
             } ?: Future.failedFuture(HealthcareNotFoundException("bill not found: $billId"))
         }
 
     /**
-     * 账单查询公共列：账头全部列 + V523 红冲列 + 只读派生的 `reversal_bill_id`
-     * （LEFT JOIN 红字单：`red_bill.reversal_of = bills.id`）。
-     * 详情与列表共用同一份选择列表，避免两处字段不一致（契约：034 §4 字段名）。
+     * 账单查询（含只读派生的 `reversal_bill_id`）。
+     *
+     * 注意：PostgreSQL 的 `FOR UPDATE` 不能作用于外连接的 NULL 侧，
+     * 所以行锁读（[requireBill]）**不**用这份 LEFT JOIN 查询。
      */
-    private fun billSelectFields(): List<org.jooq.Field<*>> = listOf(
-        BILLS.ID,
-        BILLS.ENCOUNTER_ID,
-        BILLS.PERIOD_START,
-        BILLS.PERIOD_END,
-        BILLS.STATUS,
-        BILLS.SETTLED_AT,
-        BILLS.OUTSTANDING_AMOUNT,
-        BILLS.WRITE_OFF_REASON,
-        BILLS.TOTAL_AMOUNT,
-        BILLS.CREATED_AT,
-        BILLS.UPDATED_AT,
-        sReversalOf,
-        sReversalReason,
-        sReversedBy,
-        sReversedAt,
-        sRedBillId.`as`("reversal_bill_id"),
-    )
+    private fun selectBill(id: String): String =
+        "$billSelectSql WHERE healthcare.bills.id = \$1"
 
-    private fun selectBillsWithReversal(): org.jooq.SelectOnConditionStep<org.jooq.Record> =
-        ctx.select(billSelectFields())
-            .from(BILLS)
-            .leftJoin(redBillAlias).on(sRedBillReversalOf.eq(BILLS.ID))
+    /** 账单明细（按创建顺序读取：合计与展示）。 */
+    private val selectItems =
+        "SELECT $billItemColumns FROM healthcare.bill_items WHERE bill_id = \$1 " +
+            "ORDER BY created_at ASC, id ASC"
 
-    private fun selectBill(id: String): Query = selectBillsWithReversal().where(BILLS.ID.eq(id))
-
-    private fun selectItems(billId: String): Query =
-        ctx.select(
-            BILL_ITEMS.ID,
-            BILL_ITEMS.BILL_ID,
-            BILL_ITEMS.SOURCE,
-            BILL_ITEMS.ITEM_CODE,
-            BILL_ITEMS.ITEM_NAME,
-            BILL_ITEMS.UNIT_PRICE,
-            BILL_ITEMS.QUANTITY,
-            BILL_ITEMS.AMOUNT,
-            BILL_ITEMS.REMARK,
-            BILL_ITEMS.CREATED_AT,
-            BILL_ITEMS.UPDATED_AT,
-        ).from(BILL_ITEMS)
-            .where(BILL_ITEMS.BILL_ID.eq(billId))
-            .orderBy(BILL_ITEMS.CREATED_AT.asc(), BILL_ITEMS.ID.asc())
-
-    private fun execute(client: SqlClient, query: Query): Future<RowSet<Row>> =
-        client.preparedQuery(DatabaseConfig.sql(query)).execute(DatabaseConfig.tuple(query))
+    private fun execute(client: SqlClient, sql: String, args: Tuple): Future<RowSet<Row>> =
+        client.preparedQuery(sql).execute(args)
 }

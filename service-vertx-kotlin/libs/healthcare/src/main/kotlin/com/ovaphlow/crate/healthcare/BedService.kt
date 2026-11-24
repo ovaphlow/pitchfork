@@ -1,7 +1,6 @@
 package com.ovaphlow.crate.healthcare
 
 import com.ovaphlow.crate.common.Ulid
-import com.ovaphlow.crate.database.DatabaseConfig
 import com.ovaphlow.crate.nursing.ConflictException
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
@@ -11,15 +10,11 @@ import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.RowSet
 import io.vertx.sqlclient.SqlClient
-import org.jooq.Query
-import org.jooq.impl.DSL
+import io.vertx.sqlclient.Tuple
 import java.time.OffsetDateTime
 
 /**
  * 床位主数据服务（030 §4.5 W8）。
- *
- * 本表未生成 jOOQ 类：全部用 `DSL.table(DSL.name(...))` / `DSL.field(...)` 形态引用
- * （与 `BillService.loadMealStatuses` 的 dining 三表同一写法），本迁移不触发任何代码生成。
  *
  * 业务规则（服务端强制）：
  *  1. `department`/`ward` 必填、trim 后非空、≤50 字；`label`/`remark` 可选（`remark` ≤500 字）。
@@ -35,27 +30,12 @@ import java.time.OffsetDateTime
  *
  * 030 D4：床位只是入住表单的候选来源（前端 datalist），
  * `encounters.department/ward` 仍是占用事实来源，本服务不写入/不改写入住记录。
+ *
+ * 持久化一律原生参数化 SQL（`$1..$n` + `Tuple`），无 jOOQ。
  */
 class BedService(
     private val pool: Pool,
-    private val ctx: org.jooq.DSLContext = DatabaseConfig.createDSL(),
 ) {
-    // 未生成 jOOQ 类的表：schema 限定 + 未限定列名（单表查询，无歧义）
-    private val beds = DSL.table(DSL.name("healthcare", "beds"))
-    private val cId = DSL.field("id", String::class.java)
-    private val cDepartment = DSL.field("department", String::class.java)
-    private val cWard = DSL.field("ward", String::class.java)
-    private val cLabel = DSL.field("label", String::class.java)
-    private val cStatus = DSL.field("status", String::class.java)
-    private val cRemark = DSL.field("remark", String::class.java)
-    private val cMetadata = DSL.field("metadata", org.jooq.JSONB::class.java)
-    private val cCreatedAt = DSL.field("created_at", OffsetDateTime::class.java)
-    private val cUpdatedAt = DSL.field("updated_at", OffsetDateTime::class.java)
-
-    /** 占用事实来源：`healthcare.encounters`（029 起 department/ward 仍为自由文本）。 */
-    private val encounters = DSL.table(DSL.name("healthcare", "encounters"))
-    private val cEncounterType = DSL.field("encounter_type", String::class.java)
-
     companion object {
         const val STATUS_ENABLED = "启用"
         const val STATUS_DISABLED = "停用"
@@ -73,6 +53,32 @@ class BedService(
         private val createKeys = setOf("department", "ward", "label", "remark")
         private val updateKeys = setOf("department", "ward", "label", "remark")
         private val statusKeys = setOf("status")
+
+        private const val COLUMNS =
+            "id, department, ward, label, status, remark, created_at, updated_at"
+
+        private const val SELECT_BY_ID_SQL =
+            "SELECT $COLUMNS FROM healthcare.beds WHERE id = \$1"
+
+        private const val INSERT_SQL =
+            "INSERT INTO healthcare.beds " +
+                "(id, department, ward, status, created_at, updated_at, label, remark) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8)"
+
+        /** 全量更新（label/remark 缺失即置空，与 setNull 语义一致）；状态不在此改。 */
+        private const val UPDATE_SQL =
+            "UPDATE healthcare.beds SET department = \$2, ward = \$3, label = \$4, remark = \$5, " +
+                "updated_at = \$6 WHERE id = \$1"
+
+        private const val UPDATE_STATUS_SQL =
+            "UPDATE healthcare.beds SET status = \$2, updated_at = \$3 WHERE id = \$1"
+
+        private const val DELETE_SQL =
+            "DELETE FROM healthcare.beds WHERE id = \$1"
+
+        private const val OCCUPIED_SQL =
+            "SELECT count(*) AS total FROM healthcare.encounters " +
+                "WHERE encounter_type = \$1 AND status = \$2 AND department = \$3 AND ward = \$4"
 
         private fun recordJson(row: Row): JsonObject =
             JsonObject()
@@ -101,16 +107,21 @@ class BedService(
         val now = OffsetDateTime.now()
         return pool.withTransaction<JsonObject> { connection ->
             ensureIdentityAvailable(connection, fields.department, fields.ward, null).compose {
-                var query = ctx.insertInto(beds)
-                    .set(cId, id)
-                    .set(cDepartment, fields.department)
-                    .set(cWard, fields.ward)
-                    .set(cStatus, STATUS_ENABLED)
-                    .set(cCreatedAt, now)
-                    .set(cUpdatedAt, now)
-                fields.label?.let { query = query.set(cLabel, it) }
-                fields.remark?.let { query = query.set(cRemark, it) }
-                execute(connection, query).compose { updatedJson(connection, id) }
+                // 可选列缺省时不出现在列清单里（与既有 omit .set() 语义一致）
+                val columns = mutableListOf(
+                    "id", "department", "ward", "status", "created_at", "updated_at",
+                )
+                val args = mutableListOf<Any?>(
+                    id, fields.department, fields.ward, STATUS_ENABLED, now, now,
+                )
+                fields.label?.let { columns += "label"; args += it }
+                fields.remark?.let { columns += "remark"; args += it }
+                val placeholders = args.indices.joinToString(", ") { "\$${it + 1}" }
+                execute(
+                    connection,
+                    "INSERT INTO healthcare.beds (${columns.joinToString(", ")}) VALUES ($placeholders)",
+                    Tuple.from(args),
+                ).compose { updatedJson(connection, id) }
             }.recover { error -> recoverUniqueViolation(error, fields.department, fields.ward) }
         }
     }
@@ -127,29 +138,24 @@ class BedService(
         limit: Int,
         offset: Int,
     ): Future<JsonObject> {
-        val conditions = mutableListOf<org.jooq.Condition>()
-        department?.trim()?.takeIf(String::isNotBlank)?.let { conditions += cDepartment.eq(it) }
-        ward?.trim()?.takeIf(String::isNotBlank)?.let { conditions += cWard.eq(it) }
-        status?.trim()?.takeIf(String::isNotBlank)?.let { conditions += cStatus.eq(it) }
+        val conditions = mutableListOf<String>()
+        val filterArgs = mutableListOf<Any?>()
+        fun bindFilter(value: Any?): String = "\$${filterArgs.size + 1}".also { filterArgs.add(value) }
 
-        val countQuery = ctx.select(DSL.count().`as`("total")).from(beds).where(conditions)
-        val dataQuery = ctx.select(
-            cId,
-            cDepartment,
-            cWard,
-            cLabel,
-            cStatus,
-            cRemark,
-            cCreatedAt,
-            cUpdatedAt,
-        ).from(beds)
-            .where(conditions)
-            .orderBy(cCreatedAt.desc(), cId.desc())
-            .limit(limit)
-            .offset(offset)
-        return execute(pool, countQuery).compose { countRows ->
+        department?.trim()?.takeIf(String::isNotBlank)?.let { conditions += "department = ${bindFilter(it)}" }
+        ward?.trim()?.takeIf(String::isNotBlank)?.let { conditions += "ward = ${bindFilter(it)}" }
+        status?.trim()?.takeIf(String::isNotBlank)?.let { conditions += "status = ${bindFilter(it)}" }
+
+        val where = if (conditions.isEmpty()) "" else " WHERE ${conditions.joinToString(" AND ")}"
+        val from = " FROM healthcare.beds$where"
+        val countSql = "SELECT count(*) AS total$from"
+        val dataSql = "SELECT $COLUMNS$from ORDER BY created_at DESC, id DESC " +
+            "OFFSET \$${filterArgs.size + 1} ROWS FETCH NEXT \$${filterArgs.size + 2} ROWS ONLY"
+        val dataArgs = Tuple.from(filterArgs + listOf<Any?>(limit, offset))
+
+        return execute(pool, countSql, Tuple.from(filterArgs)).compose { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(pool, dataQuery).map { dataRows ->
+            execute(pool, dataSql, dataArgs).map { dataRows ->
                 JsonObject()
                     .put("records", JsonArray(dataRows.map(::recordJson)))
                     .put("meta", JsonObject().put("total", total))
@@ -159,7 +165,7 @@ class BedService(
 
     /** 单条查询：不存在 404。 */
     fun getBed(id: String): Future<JsonObject> =
-        execute(pool, selectById(id)).compose { rows ->
+        execute(pool, SELECT_BY_ID_SQL, Tuple.of(id)).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { row ->
                 Future.succeededFuture(recordJson(row))
             } ?: Future.failedFuture(HealthcareNotFoundException("bed not found: $id"))
@@ -186,15 +192,11 @@ class BedService(
                     Future.succeededFuture()
                 }
                 guard.compose {
-                    var query = ctx.update(beds)
-                        .set(cDepartment, fields.department)
-                        .set(cWard, fields.ward)
-                        .set(cUpdatedAt, now)
-                    if (fields.label != null) query = query.set(cLabel, fields.label)
-                    else query = query.setNull(cLabel)
-                    if (fields.remark != null) query = query.set(cRemark, fields.remark)
-                    else query = query.setNull(cRemark)
-                    execute(connection, query.where(cId.eq(id))).compose { updatedJson(connection, id) }
+                    execute(
+                        connection,
+                        UPDATE_SQL,
+                        Tuple.of(id, fields.department, fields.ward, fields.label, fields.remark, now),
+                    ).compose { updatedJson(connection, id) }
                 }.recover { error -> recoverUniqueViolation(error, fields.department, fields.ward) }
             }
         }
@@ -222,13 +224,8 @@ class BedService(
                     Future.succeededFuture()
                 }
                 guard.compose {
-                    execute(
-                        connection,
-                        ctx.update(beds)
-                            .set(cStatus, status)
-                            .set(cUpdatedAt, now)
-                            .where(cId.eq(id)),
-                    ).compose { updatedJson(connection, id) }
+                    execute(connection, UPDATE_STATUS_SQL, Tuple.of(id, status, now))
+                        .compose { updatedJson(connection, id) }
                 }.recover { error -> recoverUniqueViolation(error, department, ward) }
             }
         }
@@ -247,7 +244,7 @@ class BedService(
                     existing.getString("department"),
                     existing.getString("ward"),
                 ).compose {
-                    execute(connection, ctx.deleteFrom(beds).where(cId.eq(id))).compose { rows ->
+                    execute(connection, DELETE_SQL, Tuple.of(id)).compose { rows ->
                         if (rows.rowCount() == 1) {
                             Future.succeededFuture(JsonObject().put("id", id))
                         } else {
@@ -326,12 +323,14 @@ class BedService(
         ward: String,
         excludeId: String?,
     ): Future<Void> {
-        var condition = cDepartment.eq(department)
-            .and(cWard.eq(ward))
-            .and(cStatus.eq(STATUS_ENABLED))
-        if (excludeId != null) condition = condition.and(cId.ne(excludeId))
-        val query = ctx.select(DSL.count().`as`("total")).from(beds).where(condition)
-        return execute(client, query).compose { rows ->
+        val args = mutableListOf<Any?>(department, ward, STATUS_ENABLED)
+        var sql = "SELECT count(*) AS total FROM healthcare.beds " +
+            "WHERE department = \$1 AND ward = \$2 AND status = \$3"
+        if (excludeId != null) {
+            args.add(excludeId)
+            sql += " AND id <> \$4"
+        }
+        return execute(client, sql, Tuple.from(args)).compose { rows ->
             val total = rows.iterator().next().getLong("total") ?: 0L
             if (total > 0) {
                 Future.failedFuture(ConflictException("bed already exists: $department/$ward"))
@@ -348,12 +347,11 @@ class BedService(
     private fun ensureNotOccupied(client: SqlClient, department: String?, ward: String?): Future<Void> {
         val keyDepartment = department?.trim()?.takeIf(String::isNotBlank) ?: return Future.succeededFuture()
         val keyWard = ward?.trim()?.takeIf(String::isNotBlank) ?: return Future.succeededFuture()
-        val query = ctx.select(DSL.count().`as`("total")).from(encounters)
-            .where(cEncounterType.eq("ELDERLY_CARE"))
-            .and(cStatus.eq("ACTIVE"))
-            .and(cDepartment.eq(keyDepartment))
-            .and(cWard.eq(keyWard))
-        return execute(client, query).compose { rows ->
+        return execute(
+            client,
+            OCCUPIED_SQL,
+            Tuple.of("ELDERLY_CARE", "ACTIVE", keyDepartment, keyWard),
+        ).compose { rows ->
             val total = rows.iterator().next().getLong("total") ?: 0L
             if (total > 0) {
                 Future.failedFuture(ConflictException("bed is occupied by an active admission"))
@@ -377,31 +375,18 @@ class BedService(
 
     /** 更新/状态流转/删除前确认存在：不存在 404。 */
     private fun requireBed(client: SqlClient, id: String): Future<Row> =
-        execute(client, selectById(id)).compose { rows ->
+        execute(client, SELECT_BY_ID_SQL, Tuple.of(id)).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(it) }
                 ?: Future.failedFuture(HealthcareNotFoundException("bed not found: $id"))
         }
 
     private fun updatedJson(client: SqlClient, id: String): Future<JsonObject> =
-        execute(client, selectById(id)).compose { rows ->
+        execute(client, SELECT_BY_ID_SQL, Tuple.of(id)).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { row ->
                 Future.succeededFuture(recordJson(row))
             } ?: Future.failedFuture(HealthcareNotFoundException("bed not found: $id"))
         }
 
-    private fun selectById(id: String): Query =
-        ctx.select(
-            cId,
-            cDepartment,
-            cWard,
-            cLabel,
-            cStatus,
-            cRemark,
-            cCreatedAt,
-            cUpdatedAt,
-        ).from(beds)
-            .where(cId.eq(id))
-
-    private fun execute(client: SqlClient, query: Query): Future<RowSet<Row>> =
-        client.preparedQuery(DatabaseConfig.sql(query)).execute(DatabaseConfig.tuple(query))
+    private fun execute(client: SqlClient, sql: String, args: Tuple): Future<RowSet<Row>> =
+        client.preparedQuery(sql).execute(args)
 }

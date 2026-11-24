@@ -96,8 +96,8 @@ class ChronicDiseaseServiceTest {
                     sql.contains("select 1") && sql.contains("from healthcare.followup_plans") -> selectOnePlans
                     sql.contains("for update") && sql.contains("from healthcare.chronic_disease_registrations") -> lockRegistrations
                     // 档案主查询（含关联子查询）必须先于 followup_plans/records 独立查询
-                    sql.contains("from healthcare.chronic_disease_registrations") -> registrations
                     sql.contains("from healthcare.progress_notes") -> notes
+                    sql.contains("from healthcare.chronic_disease_registrations") -> registrations
                     sql.contains("from healthcare.followup_records") -> records
                     sql.contains("from healthcare.followup_plans") -> plans
                     sql.contains("from healthcare.encounters") -> encounters

@@ -1,16 +1,15 @@
 package com.ovaphlow.crate.nursing
 
 import com.ovaphlow.crate.common.Ulid
-import com.ovaphlow.crate.database.DatabaseConfig
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
+import io.vertx.pgclient.PgException
 import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.SqlClient
 import io.vertx.sqlclient.SqlConnection
-import org.jooq.DSLContext
-import org.jooq.impl.DSL
+import io.vertx.sqlclient.Tuple
 import java.math.BigDecimal
 import java.time.LocalDate
 import java.time.OffsetDateTime
@@ -31,10 +30,11 @@ import java.time.ZoneId
  * 锁顺序（与药房 011 保持一致，避免 AB-BA 死锁）：发药明细/发药单 → 医嘱 → 执行。
  * 药房发药确认锁定顺序为 发药单 → 医嘱；本服务先锁发药明细（含发药单）再锁医嘱，
  * 与药房方向一致；执行行只被护理侧流程锁定，不与药房/库存锁形成环。
+ *
+ * 持久化一律原生参数化 SQL（`$1..$n` + `Tuple`），本文件无任何 jOOQ 引用。
  */
 class MedicationAdministrationService(
     private val pool: Pool,
-    private val ctx: DSLContext = DatabaseConfig.createDSL(),
 ) {
     companion object {
         /** 机构业务时区（与 HealthcareService 等全仓口径一致） */
@@ -87,6 +87,101 @@ class MedicationAdministrationService(
                 throw IllegalArgumentException("$label exceeds precision of 6 decimals")
             }
         }
+
+        /** `nursing.medication_administrations` 与关联读列的显式清单。 */
+        private const val ADMINISTRATION_COLUMNS =
+            "ma.id AS id, ma.task_execution_id AS task_execution_id, " +
+                "ma.medical_order_id AS medical_order_id, ma.result AS result, " +
+                "ma.administered_quantity AS administered_quantity, ma.unit AS unit, " +
+                "ma.dispense_item_id AS dispense_item_id, ma.lot_id AS lot_id, " +
+                "ma.warehouse AS warehouse, ma.administered_by AS administered_by, " +
+                "ma.administered_at AS administered_at, ma.reason AS reason, " +
+                "ma.created_at AS created_at, ma.updated_at AS updated_at, " +
+                "e.planned_time AS planned_time, t.description AS task_description, " +
+                "mo.order_details AS order_details, mo.order_type AS order_type, " +
+                "pat.name AS patient_name, di.material_id AS material_id, " +
+                "mat.name AS material_name, lot.batch_no AS batch_no, " +
+                "d.dispense_no AS dispense_no"
+
+        /** 明细读路径 FROM（含周期/患者/医嘱/发药来源的全部 LEFT JOIN）。 */
+        private const val ADMINISTRATION_FROM =
+            " FROM nursing.medication_administrations AS ma" +
+                " JOIN nursing.nursing_task_executions AS e ON e.id = ma.task_execution_id" +
+                " JOIN nursing.nursing_tasks AS t ON t.id = e.task_id" +
+                " LEFT JOIN nursing.nursing_service_periods AS p ON p.id = t.period_id" +
+                " LEFT JOIN healthcare.patients AS pat ON pat.id = p.patient_id" +
+                " LEFT JOIN healthcare.medical_orders AS mo ON mo.id = t.order_item_id" +
+                " LEFT JOIN pharmacy.pharmacy_dispense_items AS di ON di.id = ma.dispense_item_id" +
+                " LEFT JOIN public.materials AS mat ON mat.id = di.material_id" +
+                " LEFT JOIN public.lots AS lot ON lot.id = di.lot_id" +
+                " LEFT JOIN pharmacy.pharmacy_dispenses AS d ON d.id = di.dispense_id"
+
+        /** 计数读路径 FROM（只保留过滤所需的连接）。 */
+        private const val ADMINISTRATION_COUNT_FROM =
+            " FROM nursing.medication_administrations AS ma" +
+                " JOIN nursing.nursing_task_executions AS e ON e.id = ma.task_execution_id" +
+                " JOIN nursing.nursing_tasks AS t ON t.id = e.task_id" +
+                " LEFT JOIN nursing.nursing_service_periods AS p ON p.id = t.period_id"
+
+        private const val ADMINISTRATION_BY_EXECUTION_SQL =
+            "SELECT $ADMINISTRATION_COLUMNS$ADMINISTRATION_FROM WHERE ma.task_execution_id = \$1"
+
+        private const val EXECUTION_SQL =
+            "SELECT e.id AS id, e.task_id AS task_id, e.status AS status " +
+                "FROM nursing.nursing_task_executions AS e WHERE e.id = \$1"
+
+        private const val EXECUTION_LOCKED_SQL = "$EXECUTION_SQL FOR UPDATE"
+
+        private const val TASK_SQL =
+            "SELECT t.id AS id, t.task_type AS task_type, t.order_item_id AS order_item_id, " +
+                "t.status AS status FROM nursing.nursing_tasks AS t WHERE t.id = \$1"
+
+        private const val ORDER_LOCKED_SQL =
+            "SELECT mo.id AS id, mo.order_type AS order_type, mo.status AS status, " +
+                "mo.nurse_checked_by AS nurse_checked_by, mo.nurse_checked_at AS nurse_checked_at, " +
+                "mo.order_details AS order_details " +
+                "FROM healthcare.medical_orders AS mo WHERE mo.id = \$1 FOR UPDATE"
+
+        /** 锁读发药明细 + 发药单：状态门禁、医嘱归属、实发数量 */
+        private const val DISPENSE_ITEM_LOCKED_SQL =
+            "SELECT di.id AS id, di.order_item_id AS order_item_id, di.lot_id AS lot_id, " +
+                "di.dispensed_quantity AS dispensed_quantity, d.status AS dispense_status, " +
+                "d.warehouse AS warehouse " +
+                "FROM pharmacy.pharmacy_dispense_items AS di " +
+                "JOIN pharmacy.pharmacy_dispenses AS d ON d.id = di.dispense_id " +
+                "WHERE di.id = \$1 FOR UPDATE OF di, d"
+
+        private const val ADMINISTERED_SUM_BY_ITEM_SQL =
+            "SELECT sum(ma.administered_quantity) AS administered_sum " +
+                "FROM nursing.medication_administrations AS ma " +
+                "WHERE ma.dispense_item_id = \$1 AND ma.result IN ('已服', '部分服')"
+
+        private const val EXECUTION_STATUS_UPDATE_SQL =
+            "UPDATE nursing.nursing_task_executions SET status = \$1, actual_time = \$2 WHERE id = \$3"
+
+        private const val ADMINISTERED_SUBQUERY =
+            "SELECT ma.dispense_item_id AS dispense_item_id, " +
+                "sum(ma.administered_quantity) AS administered_sum " +
+                "FROM nursing.medication_administrations AS ma " +
+                "WHERE ma.result IN ('已服', '部分服') AND ma.dispense_item_id IS NOT NULL " +
+                "GROUP BY ma.dispense_item_id"
+
+        private const val ADMINISTRATION_SOURCES_SQL =
+            "SELECT di.id AS id, di.dispense_id AS dispense_id, d.dispense_no AS dispense_no, " +
+                "d.dispensed_at AS dispensed_at, di.material_id AS material_id, " +
+                "mat.name AS material_name, di.lot_id AS lot_id, lot.batch_no AS batch_no, " +
+                "d.warehouse AS warehouse, mo.order_details ->> 'unit' AS unit, " +
+                "mo.order_details ->> 'dose_quantity' AS dose_quantity, " +
+                "di.dispensed_quantity AS dispensed_quantity, " +
+                "a.administered_sum AS administered_quantity " +
+                "FROM pharmacy.pharmacy_dispense_items AS di " +
+                "JOIN pharmacy.pharmacy_dispenses AS d ON d.id = di.dispense_id " +
+                "JOIN healthcare.medical_orders AS mo ON mo.id = di.order_item_id " +
+                "LEFT JOIN public.materials AS mat ON mat.id = di.material_id " +
+                "LEFT JOIN public.lots AS lot ON lot.id = di.lot_id " +
+                "LEFT JOIN ($ADMINISTERED_SUBQUERY) AS a ON a.dispense_item_id = di.id " +
+                "WHERE di.order_item_id = \$1 AND d.status = 'DISPENSED' " +
+                "ORDER BY d.dispensed_at DESC, di.id ASC"
 
         /**
          * 校验给药请求体并解析为受控输入；非法抛 [IllegalArgumentException]。
@@ -152,35 +247,6 @@ class MedicationAdministrationService(
         val administeredQuantity: BigDecimal?,
         val reason: String?,
     )
-
-    // ——— 表与字段引用（raw DSL，与 TaskExecutionService 同风格） ———
-
-    private val maTable = DSL.table(DSL.name("nursing", "medication_administrations"))
-    private val fMaId = DSL.field("ma.id", String::class.java)
-    private val fMaExecId = DSL.field("ma.task_execution_id", String::class.java)
-    private val fMaOrderId = DSL.field("ma.medical_order_id", String::class.java)
-    private val fMaDispenseItemId = DSL.field("ma.dispense_item_id", String::class.java)
-    private val fMaLotId = DSL.field("ma.lot_id", String::class.java)
-    private val fMaWarehouse = DSL.field("ma.warehouse", String::class.java)
-    private val fMaResult = DSL.field("ma.result", String::class.java)
-    private val fMaQuantity = DSL.field("ma.administered_quantity", BigDecimal::class.java)
-    private val fMaUnit = DSL.field("ma.unit", String::class.java)
-    private val fMaAdministeredBy = DSL.field("ma.administered_by", String::class.java)
-    private val fMaAdministeredAt = DSL.field("ma.administered_at", OffsetDateTime::class.java)
-    private val fMaReason = DSL.field("ma.reason", String::class.java)
-    private val fMaCreatedAt = DSL.field("ma.created_at", OffsetDateTime::class.java)
-    private val fMaUpdatedAt = DSL.field("ma.updated_at", OffsetDateTime::class.java)
-
-    private val execTable = DSL.table(DSL.name("nursing", "nursing_task_executions")).`as`("e")
-    private val execUpdateTable = DSL.table(DSL.name("nursing", "nursing_task_executions"))
-    private val taskTable = DSL.table(DSL.name("nursing", "nursing_tasks")).`as`("t")
-    private val periodTable = DSL.table(DSL.name("nursing", "nursing_service_periods")).`as`("p")
-    private val patientTable = DSL.table(DSL.name("healthcare", "patients")).`as`("pat")
-    private val orderTable = DSL.table(DSL.name("healthcare", "medical_orders")).`as`("mo")
-    private val dispenseTable = DSL.table(DSL.name("pharmacy", "pharmacy_dispenses")).`as`("d")
-    private val dispenseItemTable = DSL.table(DSL.name("pharmacy", "pharmacy_dispense_items")).`as`("di")
-    private val materialsTable = DSL.table(DSL.name("public", "materials")).`as`("mat")
-    private val lotsTable = DSL.table(DSL.name("public", "lots")).`as`("lot")
 
     // ========================================================================
     //  记录给药（事务：锁定执行 + 关联医嘱 + 发药明细，顺序校验与对账）
@@ -299,47 +365,35 @@ class MedicationAdministrationService(
         limit: Int = 50,
         offset: Int = 0,
     ): Future<JsonObject> {
-        val conditions = mutableListOf<org.jooq.Condition>()
-        encounterId?.takeIf(String::isNotBlank)?.let { conditions.add(DSL.field("p.encounter_id").eq(it)) }
-        medicalOrderId?.takeIf(String::isNotBlank)?.let { conditions.add(fMaOrderId.eq(it)) }
-        result?.takeIf(String::isNotBlank)?.let { conditions.add(fMaResult.eq(it)) }
+        val where = mutableListOf<String>()
+        val args = mutableListOf<Any?>()
+
+        /** 追加一个绑定值并返回其占位符。 */
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
+
+        encounterId?.takeIf(String::isNotBlank)?.let { where.add("p.encounter_id = ${bind(it)}") }
+        medicalOrderId?.takeIf(String::isNotBlank)?.let { where.add("ma.medical_order_id = ${bind(it)}") }
+        result?.takeIf(String::isNotBlank)?.let { where.add("ma.result = ${bind(it)}") }
         if (date != null) {
             val dayStart = date.atStartOfDay(businessZone).toOffsetDateTime()
             val dayEnd = date.plusDays(1).atStartOfDay(businessZone).toOffsetDateTime()
-            conditions.add(fMaAdministeredAt.ge(dayStart))
-            conditions.add(fMaAdministeredAt.lt(dayEnd))
+            where.add("ma.administered_at >= ${bind(dayStart)}")
+            where.add("ma.administered_at < ${bind(dayEnd)}")
         }
 
-        val baseFrom = administrationSelect()
-            .from(maTable.`as`("ma"))
-            .join(execTable).on(DSL.field("e.id").eq(fMaExecId))
-            .join(taskTable).on(DSL.field("t.id").eq(DSL.field("e.task_id")))
-            .leftJoin(periodTable).on(DSL.field("p.id").eq(DSL.field("t.period_id")))
-            .leftJoin(patientTable).on(DSL.field("pat.id").eq(DSL.field("p.patient_id")))
-            .leftJoin(orderTable).on(DSL.field("mo.id").eq(DSL.field("t.order_item_id")))
-            .leftJoin(dispenseItemTable).on(DSL.field("di.id").eq(fMaDispenseItemId))
-            .leftJoin(materialsTable).on(DSL.field("mat.id").eq(DSL.field("di.material_id")))
-            .leftJoin(lotsTable).on(DSL.field("lot.id").eq(DSL.field("di.lot_id")))
-            .leftJoin(dispenseTable).on(DSL.field("d.id").eq(DSL.field("di.dispense_id")))
-            .where(conditions)
+        val whereClause = if (where.isEmpty()) "" else " WHERE " + where.joinToString(" AND ")
+        val countSql = "SELECT count(*) AS total$ADMINISTRATION_COUNT_FROM$whereClause"
+        val countArgs = args.toList()
+        val dataSql =
+            "SELECT $ADMINISTRATION_COLUMNS$ADMINISTRATION_FROM$whereClause " +
+                "ORDER BY ma.administered_at DESC, ma.id DESC " +
+                "LIMIT ${bind(limit)} OFFSET ${bind(offset)}"
+        val dataArgs = args.toList()
 
-        val countQuery = ctx.select(DSL.count().`as`("total"))
-            .from(maTable.`as`("ma"))
-            .join(execTable).on(DSL.field("e.id").eq(fMaExecId))
-            .join(taskTable).on(DSL.field("t.id").eq(DSL.field("e.task_id")))
-            .leftJoin(periodTable).on(DSL.field("p.id").eq(DSL.field("t.period_id")))
-            .where(conditions)
-        val dataQuery = baseFrom
-            .orderBy(fMaAdministeredAt.desc(), fMaId.desc())
-            .limit(limit)
-            .offset(offset)
-
-        return pool.preparedQuery(DatabaseConfig.sql(countQuery))
-            .execute(DatabaseConfig.tuple(countQuery))
+        return pool.preparedQuery(countSql).execute(Tuple.from(countArgs))
             .flatMap { countRows ->
                 val total = countRows.iterator().next().getLong("total") ?: 0L
-                pool.preparedQuery(DatabaseConfig.sql(dataQuery))
-                    .execute(DatabaseConfig.tuple(dataQuery))
+                pool.preparedQuery(dataSql).execute(Tuple.from(dataArgs))
                     .map { dataRows ->
                         val records = JsonArray()
                         for (row in dataRows) records.add(administrationJson(row))
@@ -370,42 +424,7 @@ class MedicationAdministrationService(
                         JsonObject().put("records", JsonArray()).put("meta", JsonObject().put("total", 0)),
                     )
                 }
-                val administeredSub = ctx.select(
-                    fMaDispenseItemId,
-                    DSL.sum(fMaQuantity).`as`("administered_sum"),
-                )
-                    .from(maTable.`as`("ma"))
-                    .where(fMaResult.`in`(CONSUMING_RESULTS))
-                    .and(fMaDispenseItemId.isNotNull)
-                    .groupBy(fMaDispenseItemId)
-                val query = ctx.select(
-                    DSL.field("di.id").`as`("id"),
-                    DSL.field("di.dispense_id").`as`("dispense_id"),
-                    DSL.field("d.dispense_no").`as`("dispense_no"),
-                    DSL.field("d.dispensed_at").`as`("dispensed_at"),
-                    DSL.field("di.material_id").`as`("material_id"),
-                    DSL.field("mat.name").`as`("material_name"),
-                    DSL.field("di.lot_id").`as`("lot_id"),
-                    DSL.field("lot.batch_no").`as`("batch_no"),
-                    DSL.field("d.warehouse").`as`("warehouse"),
-                    DSL.field("mo.order_details ->> 'unit'").`as`("unit"),
-                    // 032 P4：每次数量（基础单位）随来源行返回，给药弹窗据此预填实际给药数量
-                    DSL.field("mo.order_details ->> 'dose_quantity'").`as`("dose_quantity"),
-                    DSL.field("di.dispensed_quantity").`as`("dispensed_quantity"),
-                    DSL.field("a.administered_sum").`as`("administered_quantity"),
-                )
-                    .from(dispenseItemTable)
-                    .join(dispenseTable).on(DSL.field("d.id").eq(DSL.field("di.dispense_id")))
-                    .join(orderTable).on(DSL.field("mo.id").eq(DSL.field("di.order_item_id")))
-                    .leftJoin(materialsTable).on(DSL.field("mat.id").eq(DSL.field("di.material_id")))
-                    .leftJoin(lotsTable).on(DSL.field("lot.id").eq(DSL.field("di.lot_id")))
-                    .leftJoin(DSL.table(administeredSub).`as`("a")).on(DSL.field("a.dispense_item_id").eq(DSL.field("di.id")))
-                    .where(DSL.field("di.order_item_id").eq(orderId))
-                    .and(DSL.field("d.status").eq("DISPENSED"))
-                    .orderBy(DSL.field("d.dispensed_at").desc(), DSL.field("di.id").asc())
-
-                pool.preparedQuery(DatabaseConfig.sql(query))
-                    .execute(DatabaseConfig.tuple(query))
+                pool.preparedQuery(ADMINISTRATION_SOURCES_SQL).execute(Tuple.of(orderId))
                     .map { rows ->
                         val records = JsonArray()
                         for (row in rows) {
@@ -452,43 +471,8 @@ class MedicationAdministrationService(
         val dispensedQuantity: BigDecimal,
     )
 
-    private fun administrationSelect() =
-        ctx.select(
-            fMaId,
-            fMaExecId,
-            fMaOrderId,
-            fMaResult,
-            fMaQuantity,
-            fMaUnit,
-            fMaDispenseItemId,
-            fMaLotId,
-            fMaWarehouse,
-            fMaAdministeredBy,
-            fMaAdministeredAt,
-            fMaReason,
-            fMaCreatedAt,
-            fMaUpdatedAt,
-            DSL.field("e.planned_time").`as`("planned_time"),
-            DSL.field("t.description").`as`("task_description"),
-            // 绑定医嘱的类型与结构化明细：任务描述是自由文本，给药/给药记录必须显示
-            // 这次给的是哪个药、多少剂量、什么途径。调用方的 FROM 必须 LEFT JOIN mo。
-            DSL.field("mo.order_details").`as`("order_details"),
-            DSL.field("mo.order_type").`as`("order_type"),
-            DSL.field("pat.name").`as`("patient_name"),
-            DSL.field("di.material_id").`as`("material_id"),
-            DSL.field("mat.name").`as`("material_name"),
-            DSL.field("lot.batch_no").`as`("batch_no"),
-            DSL.field("d.dispense_no").`as`("dispense_no"),
-        )
-
     private fun loadExecution(client: SqlClient, executionId: String): Future<JsonObject> {
-        val query = ctx.select(
-            DSL.field("e.id").`as`("id"),
-            DSL.field("e.task_id").`as`("task_id"),
-            DSL.field("e.status").`as`("status"),
-        ).from(execTable).where(DSL.field("e.id").eq(executionId))
-        return client.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+        return client.preparedQuery(EXECUTION_SQL).execute(Tuple.of(executionId))
             .compose { rows ->
                 if (rows.size() == 0) {
                     Future.failedFuture(NotFoundException("execution not found: $executionId"))
@@ -499,13 +483,7 @@ class MedicationAdministrationService(
     }
 
     private fun lockExecution(connection: SqlConnection, executionId: String): Future<JsonObject> {
-        val query = ctx.select(
-            DSL.field("e.id").`as`("id"),
-            DSL.field("e.task_id").`as`("task_id"),
-            DSL.field("e.status").`as`("status"),
-        ).from(execTable).where(DSL.field("e.id").eq(executionId)).forUpdate()
-        return connection.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+        return connection.preparedQuery(EXECUTION_LOCKED_SQL).execute(Tuple.of(executionId))
             .compose { rows ->
                 if (rows.size() == 0) {
                     Future.failedFuture(NotFoundException("execution not found: $executionId"))
@@ -516,14 +494,7 @@ class MedicationAdministrationService(
     }
 
     private fun loadTask(client: SqlClient, taskId: String): Future<JsonObject> {
-        val query = ctx.select(
-            DSL.field("t.id").`as`("id"),
-            DSL.field("t.task_type").`as`("task_type"),
-            DSL.field("t.order_item_id").`as`("order_item_id"),
-            DSL.field("t.status").`as`("status"),
-        ).from(taskTable).where(DSL.field("t.id").eq(taskId))
-        return client.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+        return client.preparedQuery(TASK_SQL).execute(Tuple.of(taskId))
             .compose { rows ->
                 if (rows.size() == 0) {
                     Future.failedFuture(NotFoundException("task not found: $taskId"))
@@ -534,16 +505,7 @@ class MedicationAdministrationService(
     }
 
     private fun lockMedicalOrder(connection: SqlConnection, orderId: String): Future<JsonObject> {
-        val query = ctx.select(
-            DSL.field("mo.id").`as`("id"),
-            DSL.field("mo.order_type").`as`("order_type"),
-            DSL.field("mo.status").`as`("status"),
-            DSL.field("mo.nurse_checked_by").`as`("nurse_checked_by"),
-            DSL.field("mo.nurse_checked_at").`as`("nurse_checked_at"),
-            DSL.field("mo.order_details").`as`("order_details"),
-        ).from(orderTable).where(DSL.field("mo.id").eq(orderId)).forUpdate()
-        return connection.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+        return connection.preparedQuery(ORDER_LOCKED_SQL).execute(Tuple.of(orderId))
             .compose { rows ->
                 if (rows.size() == 0) {
                     Future.failedFuture(NotFoundException("medical order not found: $orderId"))
@@ -559,21 +521,7 @@ class MedicationAdministrationService(
         dispenseItemId: String,
         orderId: String,
     ): Future<DispenseSource> {
-        val query = ctx.select(
-            DSL.field("di.id").`as`("id"),
-            DSL.field("di.order_item_id").`as`("order_item_id"),
-            DSL.field("di.lot_id").`as`("lot_id"),
-            DSL.field("di.dispensed_quantity").`as`("dispensed_quantity"),
-            DSL.field("d.status").`as`("dispense_status"),
-            DSL.field("d.warehouse").`as`("warehouse"),
-        )
-            .from(dispenseItemTable)
-            .join(dispenseTable).on(DSL.field("d.id").eq(DSL.field("di.dispense_id")))
-            .where(DSL.field("di.id").eq(dispenseItemId))
-            .forUpdate()
-            .of(DSL.field("di"), DSL.field("d"))
-        return connection.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+        return connection.preparedQuery(DISPENSE_ITEM_LOCKED_SQL).execute(Tuple.of(dispenseItemId))
             .compose { rows ->
                 if (rows.size() == 0) {
                     return@compose Future.failedFuture(NotFoundException("dispense item not found: $dispenseItemId"))
@@ -611,12 +559,8 @@ class MedicationAdministrationService(
         input: AdministrationInput,
         source: DispenseSource,
     ): Future<Void?> {
-        val sumQuery = ctx.select(DSL.sum(fMaQuantity).`as`("administered_sum"))
-            .from(maTable.`as`("ma"))
-            .where(fMaDispenseItemId.eq(input.dispenseItemId))
-            .and(fMaResult.`in`(CONSUMING_RESULTS))
-        return connection.preparedQuery(DatabaseConfig.sql(sumQuery))
-            .execute(DatabaseConfig.tuple(sumQuery))
+        return connection.preparedQuery(ADMINISTERED_SUM_BY_ITEM_SQL)
+            .execute(Tuple.of(input.dispenseItemId))
             .map { rows ->
                 val administered = decimalText(rows.iterator().next().getValue("administered_sum")) ?: BigDecimal.ZERO
                 val remaining = source.dispensedQuantity.subtract(administered)
@@ -641,26 +585,26 @@ class MedicationAdministrationService(
         now: OffsetDateTime,
     ): Future<Void?> {
         val id = Ulid.generate()
-        // maTable 无别名：插入列必须用非限定列名（select 里才用 `ma.*` 别名引用），
-        // 否则渲染成 `(ma.id, ...)`，PostgreSQL 报 `column "ma" does not exist`。
-        val insert = ctx.insertInto(maTable)
-            .set(DSL.field("id"), id)
-            .set(DSL.field("task_execution_id"), executionId)
-            .set(DSL.field("medical_order_id"), orderId)
-            .set(DSL.field("result"), input.result)
-            .set(DSL.field("administered_by"), userId)
-            .set(DSL.field("administered_at"), now)
-            .set(DSL.field("created_at"), now)
-            .set(DSL.field("updated_at"), now)
-        input.dispenseItemId?.let { insert.set(DSL.field("dispense_item_id"), it) }
-        source?.lotId?.let { insert.set(DSL.field("lot_id"), it) }
-        source?.warehouse?.let { insert.set(DSL.field("warehouse"), it) }
-        input.administeredQuantity?.let { insert.set(DSL.field("administered_quantity"), it) }
-        unit?.takeIf(String::isNotBlank)?.let { insert.set(DSL.field("unit"), it) }
-        input.reason?.let { insert.set(DSL.field("reason"), it) }
+        // 固定列 + 仅在提供时追加的可空列（原生参数化 SQL，占位符按入列顺序编号）。
+        val columns = mutableListOf(
+            "id", "task_execution_id", "medical_order_id", "result",
+            "administered_by", "administered_at", "created_at", "updated_at",
+        )
+        val values = mutableListOf<Any?>(
+            id, executionId, orderId, input.result, userId, now, now, now,
+        )
+        input.dispenseItemId?.let { columns.add("dispense_item_id"); values.add(it) }
+        source?.lotId?.let { columns.add("lot_id"); values.add(it) }
+        source?.warehouse?.let { columns.add("warehouse"); values.add(it) }
+        input.administeredQuantity?.let { columns.add("administered_quantity"); values.add(it) }
+        unit?.takeIf(String::isNotBlank)?.let { columns.add("unit"); values.add(it) }
+        input.reason?.let { columns.add("reason"); values.add(it) }
 
-        return connection.preparedQuery(DatabaseConfig.sql(insert))
-            .execute(DatabaseConfig.tuple(insert))
+        val sql =
+            "INSERT INTO nursing.medication_administrations (${columns.joinToString(", ")}) " +
+                "VALUES (${values.indices.joinToString(", ") { "\$${it + 1}" }})"
+
+        return connection.preparedQuery(sql).execute(Tuple.from(values))
             .recover { error ->
                 if (isUniqueViolation(error)) {
                     Future.failedFuture(
@@ -681,32 +625,13 @@ class MedicationAdministrationService(
     ): Future<Void?> {
         val target = targetStatusFor(result)
             ?: return Future.failedFuture(IllegalArgumentException("invalid result: $result"))
-        // PostgreSQL 不允许 SET 目标列带关系限定（`UPDATE ... AS e SET e.status`），
-        // 因此使用无别名表 + 非限定列名；actual_time 同语句写入。
-        val update = ctx.update(execUpdateTable)
-            .set(DSL.field("status"), target)
-            .set(DSL.field("actual_time"), now)
-            .where(DSL.field("id").eq(executionId))
-        return connection.preparedQuery(DatabaseConfig.sql(update))
-            .execute(DatabaseConfig.tuple(update))
+        return connection.preparedQuery(EXECUTION_STATUS_UPDATE_SQL)
+            .execute(Tuple.of(target, now, executionId))
             .map { null as Void? }
     }
 
     private fun readAdministration(client: SqlClient, executionId: String): Future<JsonObject> {
-        val query = administrationSelect()
-            .from(maTable.`as`("ma"))
-            .join(execTable).on(DSL.field("e.id").eq(fMaExecId))
-            .join(taskTable).on(DSL.field("t.id").eq(DSL.field("e.task_id")))
-            .leftJoin(periodTable).on(DSL.field("p.id").eq(DSL.field("t.period_id")))
-            .leftJoin(patientTable).on(DSL.field("pat.id").eq(DSL.field("p.patient_id")))
-            .leftJoin(orderTable).on(DSL.field("mo.id").eq(DSL.field("t.order_item_id")))
-            .leftJoin(dispenseItemTable).on(DSL.field("di.id").eq(fMaDispenseItemId))
-            .leftJoin(materialsTable).on(DSL.field("mat.id").eq(DSL.field("di.material_id")))
-            .leftJoin(lotsTable).on(DSL.field("lot.id").eq(DSL.field("di.lot_id")))
-            .leftJoin(dispenseTable).on(DSL.field("d.id").eq(DSL.field("di.dispense_id")))
-            .where(fMaExecId.eq(executionId))
-        return client.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+        return client.preparedQuery(ADMINISTRATION_BY_EXECUTION_SQL).execute(Tuple.of(executionId))
             .compose { rows ->
                 if (rows.size() == 0) {
                     Future.failedFuture(NotFoundException("administration not found for execution: $executionId"))
@@ -755,5 +680,5 @@ class MedicationAdministrationService(
         }
 
     private fun isUniqueViolation(error: Throwable): Boolean =
-        error is io.vertx.pgclient.PgException && error.sqlState == "23505"
+        error is PgException && error.sqlState == "23505"
 }

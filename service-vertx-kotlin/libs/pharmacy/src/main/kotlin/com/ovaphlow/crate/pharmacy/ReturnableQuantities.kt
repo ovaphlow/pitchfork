@@ -1,13 +1,8 @@
 package com.ovaphlow.crate.pharmacy
 
-import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyReturnItems.PHARMACY_RETURN_ITEMS
-import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyReturns.PHARMACY_RETURNS
 import io.vertx.core.Future
 import io.vertx.sqlclient.SqlClient
-import org.jooq.Condition
-import org.jooq.DSLContext
-import org.jooq.impl.DSL
+import io.vertx.sqlclient.Tuple
 import java.math.BigDecimal
 
 /**
@@ -18,7 +13,8 @@ import java.math.BigDecimal
  *
  * 「已给药」来自护理给药记录 `nursing.medication_administrations` 的实际给药量
  * （结果「已服 / 部分服」），按 `dispense_item_id` 与原发药明细关联；退药侧只读，
- * 不写护理数据、不改库存。所有查询必须复用调用方事务连接，自身不开启新事务。
+ * 不写护理数据、不改库存。所有查询必须复用调用方事务连接，自身不开启新事务；
+ * 一律原生参数化 SQL（`$1..$n` + `Tuple`），无 jOOQ。
  */
 internal object ReturnableQuantities {
 
@@ -58,31 +54,28 @@ internal object ReturnableQuantities {
     }
 
     /** 单条发药明细的累计已给药数量；无给药记录返回 0。 */
-    fun administeredQuantity(client: SqlClient, ctx: DSLContext, dispenseItemId: String): Future<BigDecimal> =
-        administeredQuantities(client, ctx, listOf(dispenseItemId))
+    fun administeredQuantity(client: SqlClient, dispenseItemId: String): Future<BigDecimal> =
+        administeredQuantities(client, listOf(dispenseItemId))
             .map { it[dispenseItemId] ?: BigDecimal.ZERO }
 
     /** 批量累计已给药数量；只返回存在给药记录的明细。 */
     fun administeredQuantities(
         client: SqlClient,
-        ctx: DSLContext,
         dispenseItemIds: List<String>,
     ): Future<Map<String, BigDecimal>> {
         if (dispenseItemIds.isEmpty()) return Future.succeededFuture(emptyMap())
-        val table = DSL.table(DSL.name("nursing", "medication_administrations")).`as`("ma")
-        val dispenseItemIdField = DSL.field("ma.dispense_item_id", String::class.java)
-        val administeredField = DSL.field("ma.administered_quantity", BigDecimal::class.java)
-        val resultField = DSL.field("ma.result", String::class.java)
-        val query = ctx.select(
-            dispenseItemIdField.`as`("dispense_item_id"),
-            DSL.sum(administeredField).`as`("administered_quantity"),
-        )
-            .from(table)
-            .where(dispenseItemIdField.`in`(dispenseItemIds))
-            .and(resultField.`in`(ADMINISTERED_RESULTS))
-            .groupBy(dispenseItemIdField)
-        return client.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+        val idPlaceholders = dispenseItemIds.indices.joinToString(", ") { "\$${it + 1}" }
+        val resultPlaceholders = ADMINISTERED_RESULTS.indices
+            .joinToString(", ") { "\$${dispenseItemIds.size + it + 1}" }
+        val sql =
+            "SELECT ma.dispense_item_id AS dispense_item_id, " +
+                "sum(ma.administered_quantity) AS administered_quantity " +
+                "FROM nursing.medication_administrations ma " +
+                "WHERE ma.dispense_item_id IN ($idPlaceholders) " +
+                "AND ma.result IN ($resultPlaceholders) " +
+                "GROUP BY ma.dispense_item_id"
+        val args = dispenseItemIds.toMutableList<Any>().apply { addAll(ADMINISTERED_RESULTS) }
+        return client.preparedQuery(sql).execute(Tuple.from(args))
             .map { rows ->
                 val quantities = mutableMapOf<String, BigDecimal>()
                 for (row in rows) {
@@ -96,11 +89,10 @@ internal object ReturnableQuantities {
     /** 单条发药明细的未取消退药数量（待确认 + 已确认）。 */
     fun reservedQuantity(
         client: SqlClient,
-        ctx: DSLContext,
         dispenseItemId: String,
         excludeReturnId: String? = null,
     ): Future<BigDecimal> =
-        reservedQuantities(client, ctx, listOf(dispenseItemId), excludeReturnId)
+        reservedQuantities(client, listOf(dispenseItemId), excludeReturnId)
             .map { it[dispenseItemId] ?: BigDecimal.ZERO }
 
     /**
@@ -111,24 +103,27 @@ internal object ReturnableQuantities {
      */
     fun reservedQuantities(
         client: SqlClient,
-        ctx: DSLContext,
         dispenseItemIds: List<String>,
         excludeReturnId: String? = null,
     ): Future<Map<String, BigDecimal>> {
         if (dispenseItemIds.isEmpty()) return Future.succeededFuture(emptyMap())
-        var condition: Condition = PHARMACY_RETURN_ITEMS.DISPENSE_ITEM_ID.`in`(dispenseItemIds)
-            .and(PHARMACY_RETURNS.STATUS.ne("CANCELLED"))
-        excludeReturnId?.let { condition = condition.and(PHARMACY_RETURNS.ID.ne(it)) }
-        val query = ctx.select(
-            PHARMACY_RETURN_ITEMS.DISPENSE_ITEM_ID.`as`("dispense_item_id"),
-            DSL.sum(PHARMACY_RETURN_ITEMS.QUANTITY).`as`("reserved_quantity"),
-        )
-            .from(PHARMACY_RETURN_ITEMS)
-            .join(PHARMACY_RETURNS).on(PHARMACY_RETURNS.ID.eq(PHARMACY_RETURN_ITEMS.RETURN_ID))
-            .where(condition)
-            .groupBy(PHARMACY_RETURN_ITEMS.DISPENSE_ITEM_ID)
-        return client.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+        val args = dispenseItemIds.toMutableList<Any?>()
+        val idPlaceholders = dispenseItemIds.indices.joinToString(", ") { "\$${it + 1}" }
+        args.add("CANCELLED")
+        val statusPlaceholder = "\$${args.size}"
+        var excludeClause = ""
+        if (excludeReturnId != null) {
+            args.add(excludeReturnId)
+            excludeClause = " AND r.id <> \$${args.size}"
+        }
+        val sql =
+            "SELECT ri.dispense_item_id AS dispense_item_id, sum(ri.quantity) AS reserved_quantity " +
+                "FROM pharmacy.pharmacy_return_items ri " +
+                "JOIN pharmacy.pharmacy_returns r ON r.id = ri.return_id " +
+                "WHERE ri.dispense_item_id IN ($idPlaceholders) AND r.status <> $statusPlaceholder" +
+                excludeClause +
+                " GROUP BY ri.dispense_item_id"
+        return client.preparedQuery(sql).execute(Tuple.from(args))
             .map { rows ->
                 val quantities = mutableMapOf<String, BigDecimal>()
                 for (row in rows) {

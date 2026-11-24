@@ -1,9 +1,6 @@
 package com.ovaphlow.crate.healthcare
 
 import com.ovaphlow.crate.common.Ulid
-import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.database.gen.healthcare.tables.DepositRecords.DEPOSIT_RECORDS
-import com.ovaphlow.crate.database.gen.healthcare.tables.Encounters.ENCOUNTERS
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
@@ -11,9 +8,7 @@ import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.RowSet
 import io.vertx.sqlclient.SqlClient
-import org.jooq.JSONB
-import org.jooq.Query
-import org.jooq.impl.DSL
+import io.vertx.sqlclient.Tuple
 import java.math.BigDecimal
 import java.math.RoundingMode
 import java.time.OffsetDateTime
@@ -36,10 +31,11 @@ import java.time.OffsetDateTime
  *  5. 台账按 encounter 倒序分页查询，返回 {records, meta:{total, balance}}；
  *     核销记录出现在同一台账（metadata 带 bill_id/payment_id/period_start/period_end）；
  *     空台账 records: [] 且 total: 0。
+ *
+ * 持久化一律原生参数化 SQL（`$1..$n` + `Tuple`），无 jOOQ。
  */
 class DepositService(
     private val pool: Pool,
-    private val ctx: org.jooq.DSLContext = DatabaseConfig.createDSL(),
 ) {
     companion object {
         const val TYPE_DEPOSIT = "登记"
@@ -53,6 +49,29 @@ class DepositService(
 
         /** 写白名单：operator/type/created_at/updated_at/id 由服务端管控 */
         private val createKeys = setOf("amount", "remark", "metadata")
+
+        private const val COLUMNS =
+            "id, encounter_id, type, amount, operator, remark, metadata, created_at, updated_at"
+
+        private const val COUNT_SQL =
+            "SELECT count(*) AS total FROM healthcare.deposit_records WHERE encounter_id = \$1"
+
+        private const val LEDGER_AMOUNTS_SQL =
+            "SELECT type, amount FROM healthcare.deposit_records WHERE encounter_id = \$1"
+
+        private const val LIST_SQL =
+            "SELECT $COLUMNS FROM healthcare.deposit_records WHERE encounter_id = \$1 " +
+                "ORDER BY created_at DESC, id DESC LIMIT \$2 OFFSET \$3"
+
+        /** 事务内按 encounter 行锁读（不校验收束状态：离院/去世仍可退押）。 */
+        private const val ENCOUNTER_LOCK_SQL =
+            "SELECT id FROM healthcare.encounters WHERE id = \$1 FOR UPDATE"
+
+        /** 台账记录写入：remark/metadata 可空，占位符位置固定以便按位置绑定。 */
+        private const val INSERT_SQL =
+            "INSERT INTO healthcare.deposit_records " +
+                "(id, encounter_id, type, amount, operator, created_at, updated_at, remark, metadata) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9)"
 
         /**
          * 余额计算（纯函数）：余额 = Σ登记 − Σ退押 − Σ核销。
@@ -78,16 +97,11 @@ class DepositService(
          * 不写任何行、可反复调用；供结算预览（`BillService.previewSettlement`）与
          * 核销上限（[DepositOffsetService]）共用，避免各处重复查询与重复计算余额。
          */
-        fun balance(client: SqlClient, encounterId: String): Future<BigDecimal> {
-            val query = DatabaseConfig.createDSL()
-                .select(DEPOSIT_RECORDS.TYPE, DEPOSIT_RECORDS.AMOUNT)
-                .from(DEPOSIT_RECORDS)
-                .where(DEPOSIT_RECORDS.ENCOUNTER_ID.eq(encounterId))
-            return client.preparedQuery(DatabaseConfig.sql(query)).execute(DatabaseConfig.tuple(query))
+        fun balance(client: SqlClient, encounterId: String): Future<BigDecimal> =
+            client.preparedQuery(LEDGER_AMOUNTS_SQL).execute(Tuple.of(encounterId))
                 .map { rows ->
                     balanceOf(rows.map { row -> row.getString("type") to row.getBigDecimal("amount") })
                 }
-        }
 
         private fun recordJson(row: Row): JsonObject =
             JsonObject()
@@ -117,7 +131,8 @@ class DepositService(
         val now = OffsetDateTime.now()
         return pool.withTransaction<JsonObject> { connection ->
             requireEncounter(connection, encounterId).compose {
-                execute(connection, insertQuery(id, encounterId, TYPE_DEPOSIT, fields, operator, now))
+                val (sql, args) = insertStatement(id, encounterId, TYPE_DEPOSIT, fields, operator, now)
+                execute(connection, sql, args)
                     .map { createdJson(id, encounterId, TYPE_DEPOSIT, fields, operator, now) }
             }
         }
@@ -151,7 +166,8 @@ class DepositService(
                             ),
                         )
                     } else {
-                        execute(connection, insertQuery(id, encounterId, TYPE_REFUND, fields, operator, now))
+                        val (sql, args) = insertStatement(id, encounterId, TYPE_REFUND, fields, operator, now)
+                        execute(connection, sql, args)
                             .map { createdJson(id, encounterId, TYPE_REFUND, fields, operator, now) }
                     }
                 }
@@ -168,28 +184,11 @@ class DepositService(
 
     /** 按 encounter 查询押金台账（登记+退押倒序分页），返回 {records, meta:{total, balance}}。 */
     fun listDeposits(encounterId: String, limit: Int = 50, offset: Int = 0): Future<JsonObject> {
-        val countQuery = ctx.select(DSL.count().`as`("total")).from(DEPOSIT_RECORDS)
-            .where(DEPOSIT_RECORDS.ENCOUNTER_ID.eq(encounterId))
-        val dataQuery = ctx.select(
-            DEPOSIT_RECORDS.ID,
-            DEPOSIT_RECORDS.ENCOUNTER_ID,
-            DEPOSIT_RECORDS.TYPE,
-            DEPOSIT_RECORDS.AMOUNT,
-            DEPOSIT_RECORDS.OPERATOR,
-            DEPOSIT_RECORDS.REMARK,
-            DEPOSIT_RECORDS.METADATA,
-            DEPOSIT_RECORDS.CREATED_AT,
-            DEPOSIT_RECORDS.UPDATED_AT,
-        ).from(DEPOSIT_RECORDS)
-            .where(DEPOSIT_RECORDS.ENCOUNTER_ID.eq(encounterId))
-            .orderBy(DEPOSIT_RECORDS.CREATED_AT.desc(), DEPOSIT_RECORDS.ID.desc())
-            .limit(limit)
-            .offset(offset)
-        return execute(pool, countQuery).compose { countRows ->
+        return execute(pool, COUNT_SQL, Tuple.of(encounterId)).compose { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
             ledgerRows(pool, encounterId).compose { rows ->
                 val balance = balanceOf(rows)
-                execute(pool, dataQuery).map { dataRows ->
+                execute(pool, LIST_SQL, Tuple.of(encounterId, limit, offset)).map { dataRows ->
                     JsonObject()
                         .put("records", JsonArray(dataRows.map(::recordJson)))
                         .put("meta", JsonObject().put("total", total).put("balance", balance))
@@ -246,43 +245,37 @@ class DepositService(
 
     /** 事务内按 encounter 行锁读：不存在 404；不校验收束状态（离院/去世仍可退押）。 */
     private fun requireEncounter(client: SqlClient, encounterId: String): Future<Row> =
-        execute(client, ctx.selectFrom(ENCOUNTERS).where(ENCOUNTERS.ID.eq(encounterId)).forUpdate()).compose { rows ->
+        execute(client, ENCOUNTER_LOCK_SQL, Tuple.of(encounterId)).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(it) }
                 ?: Future.failedFuture(HealthcareNotFoundException("encounter not found: $encounterId"))
         }
 
     /** 台账明细行（type/amount），余额由 [balanceOf] 纯函数计算。 */
-    private fun ledgerRows(client: SqlClient, encounterId: String): Future<List<Pair<String, BigDecimal>>> {
-        val query = ctx.select(DEPOSIT_RECORDS.TYPE, DEPOSIT_RECORDS.AMOUNT)
-            .from(DEPOSIT_RECORDS)
-            .where(DEPOSIT_RECORDS.ENCOUNTER_ID.eq(encounterId))
-        return execute(client, query).map { rows ->
+    private fun ledgerRows(client: SqlClient, encounterId: String): Future<List<Pair<String, BigDecimal>>> =
+        execute(client, LEDGER_AMOUNTS_SQL, Tuple.of(encounterId)).map { rows ->
             rows.map { row ->
                 row.getString("type") to row.getBigDecimal("amount")
             }
         }
-    }
 
-    private fun insertQuery(
+    private fun insertStatement(
         id: String,
         encounterId: String,
         type: String,
         fields: Fields,
         operator: String,
         now: OffsetDateTime,
-    ): Query {
-        var query = ctx.insertInto(DEPOSIT_RECORDS)
-            .set(DEPOSIT_RECORDS.ID, id)
-            .set(DEPOSIT_RECORDS.ENCOUNTER_ID, encounterId)
-            .set(DEPOSIT_RECORDS.TYPE, type)
-            .set(DEPOSIT_RECORDS.AMOUNT, fields.amount)
-            .set(DEPOSIT_RECORDS.OPERATOR, operator)
-            .set(DEPOSIT_RECORDS.CREATED_AT, now)
-            .set(DEPOSIT_RECORDS.UPDATED_AT, now)
-        fields.remark?.let { query = query.set(DEPOSIT_RECORDS.REMARK, it) }
-        fields.metadata?.let { query = query.set(DEPOSIT_RECORDS.METADATA, JSONB.valueOf(it.encode())) }
-        return query
-    }
+    ): Pair<String, Tuple> = INSERT_SQL to Tuple.of(
+        id,
+        encounterId,
+        type,
+        fields.amount,
+        operator,
+        now,
+        now,
+        fields.remark,
+        fields.metadata,
+    )
 
     private fun createdJson(
         id: String,
@@ -303,6 +296,6 @@ class DepositService(
             .put("created_at", now.toString())
             .put("updated_at", now.toString())
 
-    private fun execute(client: SqlClient, query: Query): Future<RowSet<Row>> =
-        client.preparedQuery(DatabaseConfig.sql(query)).execute(DatabaseConfig.tuple(query))
+    private fun execute(client: SqlClient, sql: String, args: Tuple): Future<RowSet<Row>> =
+        client.preparedQuery(sql).execute(args)
 }

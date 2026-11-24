@@ -1,18 +1,6 @@
 package com.ovaphlow.crate.healthcare
 
 import com.ovaphlow.crate.common.Ulid
-import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.database.gen.healthcare.tables.ChronicDiseaseRegistrations.CHRONIC_DISEASE_REGISTRATIONS
-import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalRecords
-import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalRecords.MEDICAL_RECORDS
-import com.ovaphlow.crate.database.gen.healthcare.tables.Diagnoses.DIAGNOSES
-import com.ovaphlow.crate.database.gen.healthcare.tables.Encounters.ENCOUNTERS
-import com.ovaphlow.crate.database.gen.healthcare.tables.Patients.PATIENTS
-import com.ovaphlow.crate.database.gen.healthcare.tables.ProgressNotes.PROGRESS_NOTES
-import com.ovaphlow.crate.database.gen.healthcare.tables.records.EncountersRecord
-import com.ovaphlow.crate.database.gen.healthcare.tables.records.MedicalRecordsRecord
-import com.ovaphlow.crate.database.gen.healthcare.tables.records.PatientsRecord
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingServicePeriods.NURSING_SERVICE_PERIODS
 import com.ovaphlow.crate.nursing.CarePlanRevisionService
 import com.ovaphlow.crate.nursing.ConflictException
 import com.ovaphlow.crate.nursing.ElderlyDischargeHandoverSnapshotService
@@ -30,14 +18,6 @@ import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.RowSet
 import io.vertx.sqlclient.SqlClient
 import io.vertx.sqlclient.Tuple
-import org.jooq.Condition
-import org.jooq.Field
-import org.jooq.InsertOnDuplicateSetMoreStep
-import org.jooq.InsertSetMoreStep
-import org.jooq.JSONB
-import org.jooq.Query
-import org.jooq.Record
-import org.jooq.impl.DSL
 import java.math.BigDecimal
 import java.time.LocalDate
 import java.time.OffsetDateTime
@@ -45,7 +25,6 @@ import java.time.ZoneId
 
 class HealthcareService(
     private val pool: Pool,
-    private val ctx: org.jooq.DSLContext = DatabaseConfig.createDSL(),
     /**
      * 025 药品目录端口：由 Aceso `Main.kt` 注入 `MaterialService` 适配器。
      * 为 null 时 `MEDICATION` 医嘱一律 fail-closed（503），不跳过目录校验。
@@ -67,39 +46,51 @@ class HealthcareService(
     private val depositOffsetService = DepositOffsetService()
 
     // ========================================================================
-    //  V524 离院/去世操作人留痕列（未重跑 jOOQ codegen：按列名引用）
-    //  jOOQ 生成代码由 DB 反向生成，无法在无 DB 授权的车道重跑；故新列一律用
-    //  `DSL.field` 按名引用（与 V523 账单红冲列的既有写法一致）。
+    //  原生 SQL 显式列清单（含 V524 留痕列与 V525 患者域标识）
     //  两种拼法不能混：
-    //   - SELECT 必须带表名限定（listEncounters 与 patients 联表，裸列名虽不歧义
-    //     但统一限定便于审计）；
+    //   - SELECT 必须带表名限定（listEncounters 与 patients 联表）；
     //   - UPDATE SET 子句必须用裸列名（PostgreSQL 不接受表名前缀）。
     // ========================================================================
 
-    /** SELECT 用的 encounters 留痕列（带表名限定）。 */
-    private val encounterAuditSelectFields: List<Field<*>> = listOf(
-        DSL.field(DSL.name("encounters", "discharged_by"), String::class.java),
-        DSL.field(DSL.name("encounters", "discharged_at"), OffsetDateTime::class.java),
-        DSL.field(DSL.name("encounters", "deceased_by"), String::class.java),
-        DSL.field(DSL.name("encounters", "deceased_at"), OffsetDateTime::class.java),
-    )
+    /** patients 显式列清单（表别名 `p`）。 */
+    private val patientColumns =
+        "healthcare.patients.id, healthcare.patients.name, healthcare.patients.gender, healthcare.patients.birth_date, healthcare.patients.id_card_no, healthcare.patients.phone, healthcare.patients.address, " +
+            "healthcare.patients.emergency_contact, healthcare.patients.medical_insurance, healthcare.patients.allergies, healthcare.patients.past_history, healthcare.patients.metadata, " +
+            "healthcare.patients.status, healthcare.patients.person_type, healthcare.patients.created_at, healthcare.patients.updated_at"
 
-    /** UPDATE SET 子句用的裸列名。 */
-    private val wDischargedBy = DSL.field(DSL.name("discharged_by"), String::class.java)
-    private val wDischargedAt = DSL.field(DSL.name("discharged_at"), OffsetDateTime::class.java)
-    private val wDeceasedBy = DSL.field(DSL.name("deceased_by"), String::class.java)
-    private val wDeceasedAt = DSL.field(DSL.name("deceased_at"), OffsetDateTime::class.java)
+    /** encounters 显式列清单（表别名 `e`，含 V517/V524/V525 新增列）。 */
+    private val encounterColumns =
+        "healthcare.encounters.id, healthcare.encounters.patient_id, healthcare.encounters.encounter_type, healthcare.encounters.encounter_no, healthcare.encounters.department, healthcare.encounters.ward, healthcare.encounters.admit_date, " +
+            "healthcare.encounters.discharge_date, healthcare.encounters.death_date, healthcare.encounters.death_cause, healthcare.encounters.admitting_diagnosis, " +
+            "healthcare.encounters.discharge_diagnosis, healthcare.encounters.attending_physician, healthcare.encounters.status, healthcare.encounters.settled_at, " +
+            "healthcare.encounters.discharged_by, healthcare.encounters.discharged_at, healthcare.encounters.deceased_by, healthcare.encounters.deceased_at, healthcare.encounters.metadata, " +
+            "healthcare.encounters.created_at, healthcare.encounters.updated_at"
 
-    // ========================================================================
-    //  V525 患者域标识（未重跑 jOOQ codegen：按列名引用）
-    //  与 V524 同一约定：SELECT 带表名限定，UPDATE SET 用裸列名。
-    // ========================================================================
+    /** progress_notes 显式列清单（单表，无别名）。 */
+    private val progressNoteColumns =
+        "id, encounter_id, note_type, content, physician, record_time, metadata, created_at"
 
-    /** patients.person_type（SELECT / INSERT 用带表名限定）。 */
-    private val patientsPersonType = DSL.field(DSL.name("patients", "person_type"), String::class.java)
+    /** diagnoses 显式列清单（单表，无别名）。 */
+    private val diagnosisColumns =
+        "id, encounter_id, diagnosis_type, icd_code, diagnosis_text, diagnosis_date, physician, " +
+            "is_major, metadata, created_at"
 
-    /** patients.person_type UPDATE SET 用的裸列名。 */
-    private val wPersonType = DSL.field(DSL.name("person_type"), String::class.java)
+    /** medical_records 显式列清单（单表，无别名）。 */
+    private val medicalRecordColumns =
+        "id, encounter_id, record_type, title, content, content_blocks, physician, record_date, " +
+            "metadata, created_at, updated_at"
+
+    /** 护理记录/离院交接摘要共用的文书插入语句（content 与 content_blocks 位置固定）。 */
+    private val INSERT_MEDICAL_RECORD_SQL =
+        "INSERT INTO healthcare.medical_records " +
+            "(id, encounter_id, record_type, title, content, content_blocks, physician, record_date, " +
+            "metadata, created_at, updated_at) " +
+            "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11)"
+
+    /** nursing.nursing_service_periods 显式列清单（单表，无别名）。 */
+    private val servicePeriodColumns =
+        "id, patient_id, service_type, start_date, end_date, coordinator, status, metadata, " +
+            "created_at, updated_at"
 
 
     companion object {
@@ -190,7 +181,8 @@ class HealthcareService(
         }
         // 响应统一走 getPatient，保证含 person_type。
         return pool.withTransaction<JsonObject> { connection ->
-            execute(connection, patientInsert(body, id, now, personType))
+            val (sql, args) = patientInsert(body, id, now, personType)
+            execute(connection, sql, args)
                 .compose { getPatient(connection, id) }
         }
     }
@@ -202,22 +194,21 @@ class HealthcareService(
         limit: Int,
         offset: Int,
     ): Future<JsonObject> {
-        val conditions = mutableListOf<Condition>()
-        name?.takeIf(String::isNotBlank)?.let { conditions += PATIENTS.NAME.containsIgnoreCase(it) }
-        status?.takeIf(String::isNotBlank)?.let { conditions += PATIENTS.STATUS.eq(it) }
-        personType?.takeIf(String::isNotBlank)?.let { conditions += patientsPersonType.eq(it) }
+        val args = mutableListOf<Any?>()
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
+        val conditions = mutableListOf<String>()
+        name?.takeIf(String::isNotBlank)?.let { conditions += "healthcare.patients.name ILIKE '%' || ${bind(it)} || '%'" }
+        status?.takeIf(String::isNotBlank)?.let { conditions += "healthcare.patients.status = ${bind(it)}" }
+        personType?.takeIf(String::isNotBlank)?.let { conditions += "healthcare.patients.person_type = ${bind(it)}" }
+        val where = if (conditions.isEmpty()) "" else " WHERE ${conditions.joinToString(" AND ")}"
 
-        val countQuery = ctx.select(DSL.count().`as`("total")).from(PATIENTS).where(conditions)
-        val dataQuery = ctx.select(PATIENTS.fields().toList() + patientsPersonType)
-            .from(PATIENTS)
-            .where(conditions)
-            .orderBy(PATIENTS.CREATED_AT.desc())
-            .limit(limit)
-            .offset(offset)
+        val countSql = "SELECT count(*) AS total FROM healthcare.patients$where"
+        val dataSql = "SELECT $patientColumns FROM healthcare.patients$where " +
+            "ORDER BY healthcare.patients.created_at DESC OFFSET \$${args.size + 1} ROWS FETCH NEXT \$${args.size + 2} ROWS ONLY"
 
-        return execute(pool, countQuery).compose { countRows ->
+        return execute(pool, countSql, Tuple.from(args)).compose { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(pool, dataQuery).map { rows ->
+            execute(pool, dataSql, Tuple.from(args + listOf<Any?>(offset, limit))).map { rows ->
                 val records = rows.iterator().asSequence().toList()
                 JsonObject()
                     .put("records", JsonArray(records.map { patientJson(it) }))
@@ -247,7 +238,8 @@ class HealthcareService(
             }
             val now = OffsetDateTime.now()
             pool.withTransaction<JsonObject> { connection ->
-                execute(connection, patientUpdate(body, id, now))
+                val (sql, args) = patientUpdate(body, id, now)
+                execute(connection, sql, args)
                     .compose { getPatient(connection, id) }
             }
         }
@@ -275,31 +267,30 @@ class HealthcareService(
         offset: Int,
         search: String? = null,
     ): Future<JsonObject> {
-        val conditions = mutableListOf<Condition>()
-        patientId?.takeIf(String::isNotBlank)?.let { conditions += ENCOUNTERS.PATIENT_ID.eq(it) }
-        encounterType?.takeIf(String::isNotBlank)?.let { conditions += ENCOUNTERS.ENCOUNTER_TYPE.eq(it) }
-        status?.takeIf(String::isNotBlank)?.let { conditions += ENCOUNTERS.STATUS.eq(it) }
+        val args = mutableListOf<Any?>()
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
+        val conditions = mutableListOf<String>()
+        patientId?.takeIf(String::isNotBlank)?.let { conditions += "healthcare.encounters.patient_id = ${bind(it)}" }
+        encounterType?.takeIf(String::isNotBlank)?.let { conditions += "healthcare.encounters.encounter_type = ${bind(it)}" }
+        status?.takeIf(String::isNotBlank)?.let { conditions += "healthcare.encounters.status = ${bind(it)}" }
         search?.takeIf(String::isNotBlank)?.let {
-            conditions += ENCOUNTERS.ENCOUNTER_NO.containsIgnoreCase(it)
-                .or(PATIENTS.NAME.containsIgnoreCase(it))
-                .or(PATIENTS.ID_CARD_NO.containsIgnoreCase(it))
+            val index = args.size + 1
+            args.add(it)
+            conditions += "(healthcare.encounters.encounter_no ILIKE '%' || \$$index || '%' " +
+                "OR healthcare.patients.name ILIKE '%' || \$$index || '%' " +
+                "OR healthcare.patients.id_card_no ILIKE '%' || \$$index || '%')"
         }
+        val wherePart = if (conditions.isEmpty()) "" else " WHERE ${conditions.joinToString(" AND ")}"
+        val from = " FROM healthcare.encounters JOIN healthcare.patients ON healthcare.patients.id = healthcare.encounters.patient_id"
 
-        val countQuery = ctx.select(DSL.count().`as`("total"))
-            .from(ENCOUNTERS)
-            .join(PATIENTS).on(ENCOUNTERS.PATIENT_ID.eq(PATIENTS.ID))
-            .where(conditions)
-        val dataQuery = ctx.select(ENCOUNTERS.fields().toList() + encounterAuditSelectFields)
-            .from(ENCOUNTERS)
-            .join(PATIENTS).on(ENCOUNTERS.PATIENT_ID.eq(PATIENTS.ID))
-            .where(conditions)
-            .orderBy(ENCOUNTERS.ADMIT_DATE.desc(), ENCOUNTERS.CREATED_AT.desc())
-            .limit(limit)
-            .offset(offset)
+        val countSql = "SELECT count(*) AS total$from$wherePart"
+        val dataSql = "SELECT $encounterColumns$from$wherePart " +
+            "ORDER BY healthcare.encounters.admit_date DESC, healthcare.encounters.created_at DESC " +
+            "OFFSET \$${args.size + 1} ROWS FETCH NEXT \$${args.size + 2} ROWS ONLY"
 
-        return execute(pool, countQuery).compose { countRows ->
+        return execute(pool, countSql, Tuple.from(args)).compose { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(pool, dataQuery).map { rows ->
+            execute(pool, dataSql, Tuple.from(args + listOf<Any?>(offset, limit))).map { rows ->
                 JsonObject()
                     .put("records", JsonArray(rows.map(::encounterJson)))
                     .put("meta", JsonObject().put("total", total))
@@ -322,37 +313,31 @@ class HealthcareService(
         offset: Int,
     ): Future<JsonObject> {
         val now = OffsetDateTime.now()
-        val conditions = mutableListOf<Condition>(
-            ENCOUNTERS.ENCOUNTER_TYPE.eq("ELDERLY_CARE"),
-            ENCOUNTERS.DISCHARGE_DATE.isNull.or(ENCOUNTERS.DISCHARGE_DATE.gt(now)),
+        val args = mutableListOf<Any?>("ELDERLY_CARE", now)
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
+        val conditions = mutableListOf(
+            "healthcare.encounters.encounter_type = \$1",
+            "(healthcare.encounters.discharge_date IS NULL OR healthcare.encounters.discharge_date > " +
+                "CAST(\$2 AS TIMESTAMPTZ))",
         )
-        department?.trim()?.takeIf(String::isNotBlank)?.let { conditions += ENCOUNTERS.DEPARTMENT.eq(it) }
-        ward?.trim()?.takeIf(String::isNotBlank)?.let { conditions += ENCOUNTERS.WARD.eq(it) }
+        department?.trim()?.takeIf(String::isNotBlank)?.let {
+            conditions += "healthcare.encounters.department = ${bind(it)}"
+        }
+        ward?.trim()?.takeIf(String::isNotBlank)?.let {
+            conditions += "healthcare.encounters.ward = ${bind(it)}"
+        }
+        val wherePart = " WHERE ${conditions.joinToString(" AND ")}"
 
-        val countQuery = ctx.select(DSL.count().`as`("total"))
-            .from(ENCOUNTERS)
-            .where(conditions)
-        val dataQuery = ctx.select(
-            ENCOUNTERS.ID.`as`("encounter_id"),
-            ENCOUNTERS.ENCOUNTER_NO,
-            ENCOUNTERS.PATIENT_ID,
-            PATIENTS.NAME.`as`("patient_name"),
-            ENCOUNTERS.DEPARTMENT,
-            ENCOUNTERS.WARD,
-            ENCOUNTERS.ADMIT_DATE,
-            ENCOUNTERS.DISCHARGE_DATE,
-            ENCOUNTERS.STATUS,
-        )
-            .from(ENCOUNTERS)
-            .join(PATIENTS).on(ENCOUNTERS.PATIENT_ID.eq(PATIENTS.ID))
-            .where(conditions)
-            .orderBy(ENCOUNTERS.DEPARTMENT.asc(), ENCOUNTERS.WARD.asc(), ENCOUNTERS.ADMIT_DATE.asc())
-            .limit(limit)
-            .offset(offset)
+        val countSql = "SELECT count(*) AS total FROM healthcare.encounters$wherePart"
+        val dataSql = "SELECT healthcare.encounters.id AS encounter_id, healthcare.encounters.encounter_no, healthcare.encounters.patient_id, " +
+            "healthcare.patients.name AS patient_name, healthcare.encounters.department, healthcare.encounters.ward, healthcare.encounters.admit_date, healthcare.encounters.discharge_date, healthcare.encounters.status " +
+            "FROM healthcare.encounters JOIN healthcare.patients ON healthcare.patients.id = healthcare.encounters.patient_id$wherePart " +
+            "ORDER BY healthcare.encounters.department ASC, healthcare.encounters.ward ASC, healthcare.encounters.admit_date ASC " +
+            "OFFSET \$${args.size + 1} ROWS FETCH NEXT \$${args.size + 2} ROWS ONLY"
 
-        return execute(pool, countQuery).compose { countRows ->
+        return execute(pool, countSql, Tuple.from(args)).compose { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(pool, dataQuery).map { rows ->
+            execute(pool, dataSql, Tuple.from(args + listOf<Any?>(offset, limit))).map { rows ->
                 JsonObject()
                     .put(
                         "records",
@@ -416,7 +401,10 @@ class HealthcareService(
                     }
 
                 slotCheck.compose { activeCheck() }
-                    .compose { execute(connection, encounterUpdate(body, id, now)) }
+                    .compose {
+                        val (sql, args) = encounterUpdate(body, id, now)
+                        execute(connection, sql, args)
+                    }
                     .compose { getEncounter(connection, id) }
             }
         }
@@ -455,14 +443,26 @@ class HealthcareService(
                     // 账单收尾统一由「结算收束」（settleEncounterBilling，显式三步）承担。
                     // V524：离院操作人留痕。operator 取认证中间件写入的 userId，客户端不得提交；
                     // *_at 用服务端 now，与可回填的业务日期 discharge_date 区分。
-                    var query = ctx.update(ENCOUNTERS)
-                        .set(ENCOUNTERS.DISCHARGE_DATE, dischargeDate)
-                        .set(ENCOUNTERS.DISCHARGE_DIAGNOSIS, body.getString("discharge_diagnosis"))
-                        .set(ENCOUNTERS.STATUS, "DISCHARGED")
-                        .set(wDischargedAt, now)
-                        .set(ENCOUNTERS.UPDATED_AT, now)
-                    if (!operator.isNullOrBlank()) query = query.set(wDischargedBy, operator)
-                    execute(connection, query.where(ENCOUNTERS.ID.eq(id))).compose { getEncounter(connection, id) }
+                    val args = mutableListOf<Any?>(
+                        dischargeDate,
+                        body.getString("discharge_diagnosis"),
+                        "DISCHARGED",
+                        now,
+                        now,
+                    )
+                    var sets = "discharge_date = \$1, discharge_diagnosis = \$2, status = \$3, " +
+                        "discharged_at = \$4, updated_at = \$5"
+                    if (!operator.isNullOrBlank()) {
+                        args.add(operator)
+                        sets += ", discharged_by = \$${args.size}"
+                    }
+                    args.add(id)
+                    execute(
+                        connection,
+                        "UPDATE healthcare.encounters SET $sets " +
+                            "WHERE healthcare.encounters.id = \$${args.size}",
+                        Tuple.from(args),
+                    ).compose { getEncounter(connection, id) }
                 }
             }
         }
@@ -509,21 +509,31 @@ class HealthcareService(
                         // **不再收束账单**（账单收尾统一由 settleEncounterBilling 承担）。
                         // V524：去世操作人留痕，口径同离院（*_at 为服务端确认时刻，
                         // death_date 为可回填的业务日期）。
-                        var query = ctx.update(ENCOUNTERS)
-                            .set(ENCOUNTERS.DEATH_DATE, deathDate)
-                            .set(ENCOUNTERS.STATUS, "DECEASED")
-                            .set(wDeceasedAt, now)
-                            .set(ENCOUNTERS.UPDATED_AT, now)
-                        if (deathCause != null) query = query.set(ENCOUNTERS.DEATH_CAUSE, deathCause)
-                        if (!operator.isNullOrBlank()) query = query.set(wDeceasedBy, operator)
-                        execute(connection, query.where(ENCOUNTERS.ID.eq(id)))
+                        val args = mutableListOf<Any?>(deathDate, "DECEASED", now, now)
+                        var sets = "death_date = \$1, status = \$2, deceased_at = \$3, updated_at = \$4"
+                        if (deathCause != null) {
+                            args.add(deathCause)
+                            sets += ", death_cause = \$${args.size}"
+                        }
+                        if (!operator.isNullOrBlank()) {
+                            args.add(operator)
+                            sets += ", deceased_by = \$${args.size}"
+                        }
+                        args.add(id)
+                        execute(
+                            connection,
+                            "UPDATE healthcare.encounters SET $sets " +
+                                "WHERE healthcare.encounters.id = \$${args.size}",
+                            Tuple.from(args),
+                        )
                     }
                     .compose {
-                        val patientQuery = ctx.update(PATIENTS)
-                            .set(PATIENTS.STATUS, "DECEASED")
-                            .set(PATIENTS.UPDATED_AT, now)
-                            .where(PATIENTS.ID.eq(patientId))
-                        execute(connection, patientQuery)
+                        execute(
+                            connection,
+                            "UPDATE healthcare.patients SET status = \$1, updated_at = \$2 " +
+                                "WHERE healthcare.patients.id = \$3",
+                            Tuple.of("DECEASED", now, patientId),
+                        )
                     }
                     .compose {
                         getEncounter(connection, id)
@@ -686,18 +696,22 @@ class HealthcareService(
                     Future.succeededFuture()
                 }
                 chronicCheck.compose {
-                    var insert = ctx.insertInto(PROGRESS_NOTES)
-                        .set(PROGRESS_NOTES.ID, id)
-                        .set(PROGRESS_NOTES.ENCOUNTER_ID, encounterId)
-                        .set(PROGRESS_NOTES.NOTE_TYPE, input.noteType)
-                        .set(PROGRESS_NOTES.CONTENT, input.content)
-                        .set(PROGRESS_NOTES.PHYSICIAN, input.physician)
-                        .set(PROGRESS_NOTES.RECORD_TIME, input.recordTime)
-                        .set(PROGRESS_NOTES.CREATED_AT, now)
-                    input.metadata?.let { metadata ->
-                        insert = insert.set(PROGRESS_NOTES.METADATA, JSONB.valueOf(metadata.encode()))
-                    }
-                    execute(connection, insert).map {
+                    execute(
+                        connection,
+                        "INSERT INTO healthcare.progress_notes " +
+                            "(id, encounter_id, note_type, content, physician, record_time, created_at, metadata) " +
+                            "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8)",
+                        Tuple.of(
+                            id,
+                            encounterId,
+                            input.noteType,
+                            input.content,
+                            input.physician,
+                            input.recordTime,
+                            now,
+                            input.metadata,
+                        ),
+                    ).map {
                         progressNoteResponse(id, encounterId, input, now)
                     }
                 }
@@ -714,9 +728,10 @@ class HealthcareService(
         limit: Int = 50,
         offset: Int = 0,
     ): Future<JsonObject> {
-        val conditions = mutableListOf<Condition>()
-        conditions.add(PROGRESS_NOTES.ENCOUNTER_ID.eq(encounterId))
-        noteType?.takeIf(String::isNotBlank)?.let { conditions.add(PROGRESS_NOTES.NOTE_TYPE.eq(it)) }
+        val args = mutableListOf<Any?>(encounterId)
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
+        val conditions = mutableListOf("encounter_id = \$1")
+        noteType?.takeIf(String::isNotBlank)?.let { conditions.add("note_type = ${bind(it)}") }
         val from = try {
             dateFrom?.takeIf(String::isNotBlank)?.let {
                 LocalDate.parse(it).atStartOfDay(businessZone).toOffsetDateTime()
@@ -731,19 +746,21 @@ class HealthcareService(
         } catch (_: RuntimeException) {
             return Future.failedFuture(IllegalArgumentException("invalid date_to"))
         }
-        from?.let { conditions.add(PROGRESS_NOTES.RECORD_TIME.ge(it)) }
-        to?.let { conditions.add(PROGRESS_NOTES.RECORD_TIME.lt(it)) }
+        from?.let {
+            conditions.add("healthcare.progress_notes.record_time >= CAST(${bind(it)} AS TIMESTAMPTZ)")
+        }
+        to?.let {
+            conditions.add("healthcare.progress_notes.record_time < CAST(${bind(it)} AS TIMESTAMPTZ)")
+        }
+        val wherePart = " WHERE ${conditions.joinToString(" AND ")}"
 
-        val countQuery = ctx.select(DSL.count().`as`("total")).from(PROGRESS_NOTES).where(conditions)
-        val dataQuery = ctx.selectFrom(PROGRESS_NOTES)
-            .where(conditions)
-            .orderBy(PROGRESS_NOTES.RECORD_TIME.desc(), PROGRESS_NOTES.CREATED_AT.desc())
-            .limit(limit)
-            .offset(offset)
+        val countSql = "SELECT count(*) AS total FROM healthcare.progress_notes$wherePart"
+        val dataSql = "SELECT $progressNoteColumns FROM healthcare.progress_notes$wherePart " +
+            "ORDER BY record_time DESC, created_at DESC OFFSET \$${args.size + 1} ROWS FETCH NEXT \$${args.size + 2} ROWS ONLY"
 
-        return execute(pool, countQuery).compose { countRows ->
+        return execute(pool, countSql, Tuple.from(args)).compose { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(pool, dataQuery).map { rows ->
+            execute(pool, dataSql, Tuple.from(args + listOf<Any?>(offset, limit))).map { rows ->
                 JsonObject()
                     .put("records", JsonArray(rows.map(::progressNoteJson)))
                     .put("meta", JsonObject().put("total", total))
@@ -752,14 +769,16 @@ class HealthcareService(
     }
 
     /** 病程记录详情：按 ID 读取，不校验入住状态（历史只读） */
-    fun getProgressNote(id: String): Future<JsonObject> {
-        val query = ctx.selectFrom(PROGRESS_NOTES).where(PROGRESS_NOTES.ID.eq(id))
-        return execute(pool, query).compose { rows ->
+    fun getProgressNote(id: String): Future<JsonObject> =
+        execute(
+            pool,
+            "SELECT $progressNoteColumns FROM healthcare.progress_notes WHERE id = \$1",
+            Tuple.of(id),
+        ).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { row ->
                 Future.succeededFuture(progressNoteJson(row))
             } ?: Future.failedFuture(HealthcareNotFoundException("progress note not found: $id"))
         }
-    }
 
     // ========================================================================
     //  诊断 (diagnoses)
@@ -782,19 +801,27 @@ class HealthcareService(
                 }
                 val id = Ulid.generate()
                 val now = OffsetDateTime.now()
-                var insert = ctx.insertInto(DIAGNOSES)
-                    .set(DIAGNOSES.ID, id)
-                    .set(DIAGNOSES.ENCOUNTER_ID, encounterId)
-                    .set(DIAGNOSES.DIAGNOSIS_TYPE, input.diagnosisType)
-                    .set(DIAGNOSES.DIAGNOSIS_TEXT, input.diagnosisText)
-                    .set(DIAGNOSES.DIAGNOSIS_DATE, input.diagnosisDate)
-                    .set(DIAGNOSES.PHYSICIAN, input.physician)
-                    .set(DIAGNOSES.CREATED_AT, now)
-                input.icdCode?.let { insert = insert.set(DIAGNOSES.ICD_CODE, it) }
-                // is_major 由 diagnosis_type 派生，不接受客户端取值
-                insert = insert.set(DIAGNOSES.IS_MAJOR, isMajorDiagnosis(input.diagnosisType))
-                input.remark?.let { insert = insert.set(DIAGNOSES.METADATA, JSONB.valueOf(JsonObject().put("remark", it).encode())) }
-                execute(connection, insert).map {
+                // is_major 由 diagnosis_type 派生，不接受客户端取值；remark 落 metadata
+                val metadata = input.remark?.let { JsonObject().put("remark", it) }
+                execute(
+                    connection,
+                    "INSERT INTO healthcare.diagnoses " +
+                        "(id, encounter_id, diagnosis_type, diagnosis_text, diagnosis_date, physician, " +
+                        "created_at, icd_code, is_major, metadata) " +
+                        "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10)",
+                    Tuple.of(
+                        id,
+                        encounterId,
+                        input.diagnosisType,
+                        input.diagnosisText,
+                        input.diagnosisDate,
+                        input.physician,
+                        now,
+                        input.icdCode,
+                        isMajorDiagnosis(input.diagnosisType),
+                        metadata,
+                    ),
+                ).map {
                     diagnosisResponse(id, encounterId, input, now)
                 }
             }
@@ -808,20 +835,19 @@ class HealthcareService(
         limit: Int = 50,
         offset: Int = 0,
     ): Future<JsonObject> {
-        val conditions = mutableListOf<Condition>()
-        conditions.add(DIAGNOSES.ENCOUNTER_ID.eq(encounterId))
-        diagnosisType?.takeIf(String::isNotBlank)?.let { conditions.add(DIAGNOSES.DIAGNOSIS_TYPE.eq(it)) }
+        val args = mutableListOf<Any?>(encounterId)
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
+        val conditions = mutableListOf("encounter_id = \$1")
+        diagnosisType?.takeIf(String::isNotBlank)?.let { conditions.add("diagnosis_type = ${bind(it)}") }
+        val wherePart = " WHERE ${conditions.joinToString(" AND ")}"
 
-        val countQuery = ctx.select(DSL.count().`as`("total")).from(DIAGNOSES).where(conditions)
-        val dataQuery = ctx.selectFrom(DIAGNOSES)
-            .where(conditions)
-            .orderBy(DIAGNOSES.DIAGNOSIS_DATE.desc(), DIAGNOSES.CREATED_AT.desc())
-            .limit(limit)
-            .offset(offset)
+        val countSql = "SELECT count(*) AS total FROM healthcare.diagnoses$wherePart"
+        val dataSql = "SELECT $diagnosisColumns FROM healthcare.diagnoses$wherePart " +
+            "ORDER BY diagnosis_date DESC, created_at DESC OFFSET \$${args.size + 1} ROWS FETCH NEXT \$${args.size + 2} ROWS ONLY"
 
-        return execute(pool, countQuery).compose { countRows ->
+        return execute(pool, countSql, Tuple.from(args)).compose { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(pool, dataQuery).map { rows ->
+            execute(pool, dataSql, Tuple.from(args + listOf<Any?>(offset, limit))).map { rows ->
                 JsonObject()
                     .put("records", JsonArray(rows.map(::diagnosisJson)))
                     .put("meta", JsonObject().put("total", total))
@@ -830,14 +856,16 @@ class HealthcareService(
     }
 
     /** 诊断详情：按 ID 读取，不校验入住状态（历史只读） */
-    fun getDiagnosis(id: String): Future<JsonObject> {
-        val query = ctx.selectFrom(DIAGNOSES).where(DIAGNOSES.ID.eq(id))
-        return execute(pool, query).compose { rows ->
+    fun getDiagnosis(id: String): Future<JsonObject> =
+        execute(
+            pool,
+            "SELECT $diagnosisColumns FROM healthcare.diagnoses WHERE id = \$1",
+            Tuple.of(id),
+        ).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { row ->
                 Future.succeededFuture(diagnosisJson(row))
             } ?: Future.failedFuture(HealthcareNotFoundException("diagnosis not found: $id"))
         }
-    }
 
     // ========================================================================
     //  复评与照护计划修订
@@ -1177,7 +1205,8 @@ class HealthcareService(
                 val patientBody = requireNotNull(patient)
                 val id = Ulid.generate()
                 val now = OffsetDateTime.now()
-                execute(connection, patientInsert(patientBody, id, now))
+                val (patientSql, patientArgs) = patientInsert(patientBody, id, now)
+                execute(connection, patientSql, patientArgs)
                     .map { patientResponse(patientBody, id, now) }
             }
 
@@ -1207,33 +1236,41 @@ class HealthcareService(
     }
 
     private fun lockEncounter(client: SqlClient, id: String): Future<JsonObject> =
-        execute(client, ctx.select(ENCOUNTERS.fields().toList() + encounterAuditSelectFields).from(ENCOUNTERS).where(ENCOUNTERS.ID.eq(id)).forUpdate()).compose { rows ->
+        execute(
+            client,
+            "SELECT $encounterColumns FROM healthcare.encounters WHERE healthcare.encounters.id = \$1 FOR UPDATE",
+            Tuple.of(id),
+        ).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(encounterJson(it)) }
                 ?: Future.failedFuture(HealthcareNotFoundException("encounter not found: $id"))
         }
 
     private fun getPatient(client: SqlClient, id: String): Future<JsonObject> =
-        execute(client, ctx.select(PATIENTS.fields().toList() + patientsPersonType).from(PATIENTS).where(PATIENTS.ID.eq(id))).compose { rows ->
+        execute(
+            client,
+            "SELECT $patientColumns FROM healthcare.patients WHERE healthcare.patients.id = \$1",
+            Tuple.of(id),
+        ).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { row ->
                 Future.succeededFuture(patientJson(row))
             } ?: Future.failedFuture(HealthcareNotFoundException("patient not found: $id"))
         }
 
     private fun getEncounter(client: SqlClient, id: String): Future<JsonObject> =
-        execute(client, ctx.select(ENCOUNTERS.fields().toList() + encounterAuditSelectFields).from(ENCOUNTERS).where(ENCOUNTERS.ID.eq(id))).compose { rows ->
+        execute(
+            client,
+            "SELECT $encounterColumns FROM healthcare.encounters WHERE healthcare.encounters.id = \$1",
+            Tuple.of(id),
+        ).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(encounterJson(it)) }
                 ?: Future.failedFuture(HealthcareNotFoundException("encounter not found: $id"))
         }
 
     private fun ensureNoActiveElderlyAdmission(client: SqlClient, patientId: String): Future<Void> {
-        val query = ctx.select(ENCOUNTERS.ENCOUNTER_NO)
-            .from(ENCOUNTERS)
-            .where(
-                ENCOUNTERS.PATIENT_ID.eq(patientId)
-                    .and(ENCOUNTERS.ENCOUNTER_TYPE.eq("ELDERLY_CARE"))
-                    .and(ENCOUNTERS.STATUS.eq("ACTIVE")),
-            )
-        return execute(client, query).compose { rows ->
+        val sql = "SELECT 1 AS hit, healthcare.encounters.encounter_no FROM healthcare.encounters " +
+            "WHERE healthcare.encounters.patient_id = \$1 " +
+            "AND healthcare.encounters.encounter_type = \$2 AND healthcare.encounters.status = \$3"
+        return execute(client, sql, Tuple.of(patientId, "ELDERLY_CARE", "ACTIVE")).compose { rows ->
             // 存在性以「是否命中行」判定；住院号只用于消息（无号时省略该段）
             val row = rows.iterator().asSequence().firstOrNull()
             if (row == null) {
@@ -1255,15 +1292,12 @@ class HealthcareService(
         patientId: String,
         excludeEncounterId: String,
     ): Future<Void> {
-        val query = ctx.select(ENCOUNTERS.ENCOUNTER_NO)
-            .from(ENCOUNTERS)
-            .where(
-                ENCOUNTERS.PATIENT_ID.eq(patientId)
-                    .and(ENCOUNTERS.ENCOUNTER_TYPE.eq("ELDERLY_CARE"))
-                    .and(ENCOUNTERS.STATUS.eq("ACTIVE"))
-                    .and(ENCOUNTERS.ID.ne(excludeEncounterId)),
-            )
-        return execute(client, query).compose { rows ->
+        val sql = "SELECT 1 AS hit, healthcare.encounters.encounter_no FROM healthcare.encounters " +
+            "WHERE healthcare.encounters.patient_id = \$1 " +
+            "AND healthcare.encounters.encounter_type = \$2 AND healthcare.encounters.status = \$3 " +
+            "AND healthcare.encounters.id <> \$4"
+        return execute(client, sql, Tuple.of(patientId, "ELDERLY_CARE", "ACTIVE", excludeEncounterId))
+            .compose { rows ->
             // 存在性以「是否命中行」判定；住院号只用于消息（无号时省略该段）
             val row = rows.iterator().asSequence().firstOrNull()
             if (row == null) {
@@ -1308,21 +1342,35 @@ class HealthcareService(
         val bedWard = ward?.trim()?.takeIf(String::isNotBlank)
         val bedKey = if (bedDepartment != null && bedWard != null) "bed:$bedDepartment/$bedWard" else null
 
-        var conflict = ENCOUNTERS.ENCOUNTER_TYPE.eq("ELDERLY_CARE")
-            .and(admissionOverlapCondition(admitDate, dischargeDate))
-        if (excludeEncounterId != null) conflict = conflict.and(ENCOUNTERS.ID.ne(excludeEncounterId))
+        /**
+         * 构造「另一条养老入住与本条重叠」的 WHERE 片段（`$1..` 按调用顺序编号）：
+         * 先追加半开区间重叠谓词与可选排除 id，调用方再补床位键或 patient_id。
+         */
+        fun conflictSql(args: MutableList<Any?>): String {
+            val parts = mutableListOf(
+                "healthcare.encounters.encounter_type = 'ELDERLY_CARE'",
+                admissionOverlapSql(admitDate, dischargeDate, args),
+            )
+            if (excludeEncounterId != null) {
+                parts += "healthcare.encounters.id <> \$${args.size + 1}"
+                args.add(excludeEncounterId)
+            }
+            return parts.joinToString(" AND ")
+        }
 
         // 冲突检查必须是惰性函数：Vert.x 的 execute() 会立即发起查询，若在取锁之前构建
         // Future，SELECT 就跑在锁外面，咨询锁将形同虚设（READ COMMITTED 下仍可写入重叠记录）。
         fun bedConflictCheck(): Future<Void> {
             if (bedKey == null) return Future.succeededFuture()
-            val query = ctx.select(ENCOUNTERS.ENCOUNTER_NO, ENCOUNTERS.DISCHARGE_DATE)
-                .from(ENCOUNTERS)
-                .where(
-                    conflict.and(ENCOUNTERS.DEPARTMENT.eq(bedDepartment))
-                        .and(ENCOUNTERS.WARD.eq(bedWard)),
-                )
-            return execute(client, query).compose { rows ->
+            val args = mutableListOf<Any?>()
+            var where = conflictSql(args)
+            where += " AND healthcare.encounters.department = \$${args.size + 1}"
+            args.add(bedDepartment)
+            where += " AND healthcare.encounters.ward = \$${args.size + 1}"
+            args.add(bedWard)
+            val sql = "SELECT healthcare.encounters.encounter_no, " +
+                "healthcare.encounters.discharge_date FROM healthcare.encounters WHERE $where"
+            return execute(client, sql, Tuple.from(args)).compose { rows ->
                 val row = rows.iterator().asSequence().firstOrNull()
                 if (row == null) {
                     Future.succeededFuture()
@@ -1339,10 +1387,13 @@ class HealthcareService(
         }
 
         fun patientConflictCheck(): Future<Void> {
-            val query = ctx.select(ENCOUNTERS.ENCOUNTER_NO, ENCOUNTERS.DISCHARGE_DATE)
-                .from(ENCOUNTERS)
-                .where(conflict.and(ENCOUNTERS.PATIENT_ID.eq(patientId)))
-            return execute(client, query).compose { rows ->
+            val args = mutableListOf<Any?>()
+            var where = conflictSql(args)
+            where += " AND healthcare.encounters.patient_id = \$${args.size + 1}"
+            args.add(patientId)
+            val sql = "SELECT healthcare.encounters.encounter_no, " +
+                "healthcare.encounters.discharge_date FROM healthcare.encounters WHERE $where"
+            return execute(client, sql, Tuple.from(args)).compose { rows ->
                 val row = rows.iterator().asSequence().firstOrNull()
                 if (row == null) {
                     Future.succeededFuture()
@@ -1367,18 +1418,23 @@ class HealthcareService(
         return locked.compose { bedConflictCheck() }.compose { patientConflictCheck() }
     }
 
-    /** 半开区间重叠谓词（jOOQ 表达，不用原生 SQL 拼接）。 */
-    private fun admissionOverlapCondition(
+    /** 半开区间重叠谓词（原生参数化 SQL 片段，占位符按 `args` 顺序编号）。 */
+    private fun admissionOverlapSql(
         admitDate: OffsetDateTime,
         dischargeDate: OffsetDateTime?,
-    ): Condition {
+        args: MutableList<Any?>,
+    ): String {
         // B：`O.discharge_date IS NULL OR O.discharge_date > S`，S = 本次入住开始，恒需判定
-        var condition = ENCOUNTERS.DISCHARGE_DATE.isNull.or(ENCOUNTERS.DISCHARGE_DATE.gt(admitDate))
+        var sql = "(healthcare.encounters.discharge_date IS NULL OR " +
+            "healthcare.encounters.discharge_date > CAST(\$${args.size + 1} AS TIMESTAMPTZ))"
+        args.add(admitDate)
         // A：`O.admit_date IS NULL OR O.admit_date < X`；X = 本次入住结束，为 null（未定离院）时恒真 → 不加过滤
         if (dischargeDate != null) {
-            condition = condition.and(ENCOUNTERS.ADMIT_DATE.isNull.or(ENCOUNTERS.ADMIT_DATE.lt(dischargeDate)))
+            sql += " AND (healthcare.encounters.admit_date IS NULL OR " +
+                "healthcare.encounters.admit_date < CAST(\$${args.size + 1} AS TIMESTAMPTZ))"
+            args.add(dischargeDate)
         }
-        return condition
+        return sql
     }
 
     private fun admissionUntil(dischargeDate: OffsetDateTime?): String =
@@ -1419,65 +1475,80 @@ class HealthcareService(
                 Future.succeededFuture()
             }
             slotCheck.compose {
-                execute(client, encounterInsert(body, id, patientId, attendingPhysician, forcedType, now))
+                val (encounterSql, encounterArgs) =
+                    encounterInsert(body, id, patientId, attendingPhysician, forcedType, now)
+                execute(client, encounterSql, encounterArgs)
                     .map { encounterResponse(body, id, patientId, attendingPhysician, forcedType, now) }
             }
         }
     }
 
-    private fun ensureEncounterNoAvailable(client: SqlClient, encounterNo: String): Future<Void> {
-        val query = ctx.selectOne()
-            .from(ENCOUNTERS)
-            .where(ENCOUNTERS.ENCOUNTER_NO.eq(encounterNo))
-        return execute(client, query).compose { rows ->
+    private fun ensureEncounterNoAvailable(client: SqlClient, encounterNo: String): Future<Void> =
+        execute(
+            client,
+            "SELECT 1 FROM healthcare.encounters " +
+                "WHERE healthcare.encounters.encounter_no = \$1",
+            Tuple.of(encounterNo),
+        ).compose { rows ->
             if (rows.size() == 0) Future.succeededFuture()
             else Future.failedFuture(IllegalArgumentException("encounter_no already exists"))
         }
-    }
 
     private fun patientInsert(
         body: JsonObject,
         id: String,
         now: OffsetDateTime,
         personType: String = PERSON_TYPE_DEFAULT,
-    ): InsertSetMoreStep<PatientsRecord> {
+    ): Pair<String, Tuple> {
         val name = requiredText(body, "name")
-        var query = ctx.insertInto(PATIENTS)
-            .set(PATIENTS.ID, id)
-            .set(PATIENTS.NAME, name)
-            .set(PATIENTS.GENDER, body.getString("gender", ""))
-            .set(PATIENTS.STATUS, "ACTIVE")
-            .set(patientsPersonType, personType)
-            .set(PATIENTS.CREATED_AT, now)
-            .set(PATIENTS.UPDATED_AT, now)
-        body.getString("birth_date")?.let { query = query.set(PATIENTS.BIRTH_DATE, localDate(it, "birth_date")) }
-        body.getString("id_card_no")?.let { query = query.set(PATIENTS.ID_CARD_NO, it) }
-        body.getString("phone")?.let { query = query.set(PATIENTS.PHONE, it) }
-        body.getString("address")?.let { query = query.set(PATIENTS.ADDRESS, it) }
-        jsonObject(body, "emergency_contact")?.let { query = query.set(PATIENTS.EMERGENCY_CONTACT, JSONB.valueOf(it.encode())) }
-        body.getString("medical_insurance")?.let { query = query.set(PATIENTS.MEDICAL_INSURANCE, it) }
-        jsonArray(body, "allergies")?.let { query = query.set(PATIENTS.ALLERGIES, JSONB.valueOf(it.encode())) }
-        body.getString("past_history")?.let { query = query.set(PATIENTS.PAST_HISTORY, it) }
-        jsonObject(body, "metadata")?.let { query = query.set(PATIENTS.METADATA, JSONB.valueOf(it.encode())) }
-        return query
+        val columns = mutableListOf("id", "name", "gender", "status", "person_type", "created_at", "updated_at")
+        val args = mutableListOf<Any?>(id, name, body.getString("gender", ""), "ACTIVE", personType, now, now)
+        fun add(column: String, value: Any?) {
+            columns += column
+            args += value
+        }
+        body.getString("birth_date")?.let { add("birth_date", localDate(it, "birth_date")) }
+        body.getString("id_card_no")?.let { add("id_card_no", it) }
+        body.getString("phone")?.let { add("phone", it) }
+        body.getString("address")?.let { add("address", it) }
+        jsonObject(body, "emergency_contact")?.let { add("emergency_contact", it) }
+        body.getString("medical_insurance")?.let { add("medical_insurance", it) }
+        jsonArray(body, "allergies")?.let { add("allergies", it) }
+        body.getString("past_history")?.let { add("past_history", it) }
+        jsonObject(body, "metadata")?.let { add("metadata", it) }
+        val placeholders = args.indices.joinToString(", ") { "\$${it + 1}" }
+        val sql = "INSERT INTO healthcare.patients (${columns.joinToString(", ")}) VALUES ($placeholders)"
+        return sql to Tuple.from(args)
     }
 
-    private fun patientUpdate(body: JsonObject, id: String, now: OffsetDateTime): Query {
-        var query = ctx.update(PATIENTS).set(PATIENTS.UPDATED_AT, now)
-        if (body.containsKey("name")) query = query.set(PATIENTS.NAME, requiredText(body, "name"))
-        if (body.containsKey("gender")) query = query.set(PATIENTS.GENDER, body.getString("gender", ""))
-        if (body.containsKey("birth_date")) query = query.set(PATIENTS.BIRTH_DATE, localDate(requiredText(body, "birth_date"), "birth_date"))
-        if (body.containsKey("id_card_no")) query = query.set(PATIENTS.ID_CARD_NO, body.getString("id_card_no"))
-        if (body.containsKey("phone")) query = query.set(PATIENTS.PHONE, body.getString("phone"))
-        if (body.containsKey("address")) query = query.set(PATIENTS.ADDRESS, body.getString("address"))
-        if (body.containsKey("emergency_contact")) query = query.set(PATIENTS.EMERGENCY_CONTACT, JSONB.valueOf(requireNotNull(jsonObject(body, "emergency_contact", true)).encode()))
-        if (body.containsKey("medical_insurance")) query = query.set(PATIENTS.MEDICAL_INSURANCE, body.getString("medical_insurance"))
-        if (body.containsKey("allergies")) query = query.set(PATIENTS.ALLERGIES, JSONB.valueOf(requireNotNull(jsonArray(body, "allergies", true)).encode()))
-        if (body.containsKey("past_history")) query = query.set(PATIENTS.PAST_HISTORY, body.getString("past_history"))
-        if (body.containsKey("metadata")) query = query.set(PATIENTS.METADATA, JSONB.valueOf(requireNotNull(jsonObject(body, "metadata", true)).encode()))
-        if (body.containsKey("status")) query = query.set(PATIENTS.STATUS, validStatus(body.getString("status"), patientStatuses, "patient status"))
-        if (body.containsKey("person_type")) query = query.set(wPersonType, personTypeFrom(body))
-        return query.where(PATIENTS.ID.eq(id))
+    private fun patientUpdate(body: JsonObject, id: String, now: OffsetDateTime): Pair<String, Tuple> {
+        val args = mutableListOf<Any?>(now)
+        val sets = mutableListOf("updated_at = \$1")
+        fun set(column: String, value: Any?) {
+            sets += "$column = \$${args.size + 1}"
+            args += value
+        }
+        if (body.containsKey("name")) set("name", requiredText(body, "name"))
+        if (body.containsKey("gender")) set("gender", body.getString("gender", ""))
+        if (body.containsKey("birth_date")) set("birth_date", localDate(requiredText(body, "birth_date"), "birth_date"))
+        if (body.containsKey("id_card_no")) set("id_card_no", body.getString("id_card_no"))
+        if (body.containsKey("phone")) set("phone", body.getString("phone"))
+        if (body.containsKey("address")) set("address", body.getString("address"))
+        if (body.containsKey("emergency_contact")) {
+            set("emergency_contact", requireNotNull(jsonObject(body, "emergency_contact", true)))
+        }
+        if (body.containsKey("medical_insurance")) set("medical_insurance", body.getString("medical_insurance"))
+        if (body.containsKey("allergies")) set("allergies", requireNotNull(jsonArray(body, "allergies", true)))
+        if (body.containsKey("past_history")) set("past_history", body.getString("past_history"))
+        if (body.containsKey("metadata")) set("metadata", requireNotNull(jsonObject(body, "metadata", true)))
+        if (body.containsKey("status")) {
+            set("status", validStatus(body.getString("status"), patientStatuses, "patient status"))
+        }
+        if (body.containsKey("person_type")) set("person_type", personTypeFrom(body))
+        args += id
+        val sql = "UPDATE healthcare.patients SET ${sets.joinToString(", ")} " +
+            "WHERE healthcare.patients.id = \$${args.size}"
+        return sql to Tuple.from(args)
     }
 
     private fun encounterInsert(
@@ -1487,37 +1558,51 @@ class HealthcareService(
         attendingPhysician: String,
         forcedType: String?,
         now: OffsetDateTime,
-    ): InsertSetMoreStep<EncountersRecord> {
+    ): Pair<String, Tuple> {
         val encounterType = forcedType ?: requiredText(body, "encounter_type")
         val encounterNo = requiredText(body, "encounter_no")
         val admitDate = offsetDateTime(requiredText(body, "admit_date"), "admit_date")
-        var query = ctx.insertInto(ENCOUNTERS)
-            .set(ENCOUNTERS.ID, id)
-            .set(ENCOUNTERS.PATIENT_ID, patientId)
-            .set(ENCOUNTERS.ENCOUNTER_TYPE, encounterType)
-            .set(ENCOUNTERS.ENCOUNTER_NO, encounterNo)
-            .set(ENCOUNTERS.ADMIT_DATE, admitDate)
-            .set(ENCOUNTERS.STATUS, "ACTIVE")
-            .set(ENCOUNTERS.CREATED_AT, now)
-            .set(ENCOUNTERS.UPDATED_AT, now)
-        body.getString("department")?.let { query = query.set(ENCOUNTERS.DEPARTMENT, it) }
-        body.getString("ward")?.let { query = query.set(ENCOUNTERS.WARD, it) }
-        body.getString("admitting_diagnosis")?.let { query = query.set(ENCOUNTERS.ADMITTING_DIAGNOSIS, it) }
+        val columns = mutableListOf(
+            "id", "patient_id", "encounter_type", "encounter_no", "admit_date", "status",
+            "created_at", "updated_at",
+        )
+        val args = mutableListOf<Any?>(
+            id, patientId, encounterType, encounterNo, admitDate, "ACTIVE", now, now,
+        )
+        fun add(column: String, value: Any?) {
+            columns += column
+            args += value
+        }
+        body.getString("department")?.let { add("department", it) }
+        body.getString("ward")?.let { add("ward", it) }
+        body.getString("admitting_diagnosis")?.let { add("admitting_diagnosis", it) }
         // 责任医生/照护师由服务端按当前操作人写入，忽略请求体中的同名取值
-        if (attendingPhysician.isNotBlank()) query = query.set(ENCOUNTERS.ATTENDING_PHYSICIAN, attendingPhysician)
-        jsonObject(body, "metadata")?.let { query = query.set(ENCOUNTERS.METADATA, JSONB.valueOf(it.encode())) }
-        return query
+        if (attendingPhysician.isNotBlank()) add("attending_physician", attendingPhysician)
+        jsonObject(body, "metadata")?.let { add("metadata", it) }
+        val placeholders = args.indices.joinToString(", ") { "\$${it + 1}" }
+        val sql = "INSERT INTO healthcare.encounters (${columns.joinToString(", ")}) VALUES ($placeholders)"
+        return sql to Tuple.from(args)
     }
 
-    private fun encounterUpdate(body: JsonObject, id: String, now: OffsetDateTime): Query {
-        var query = ctx.update(ENCOUNTERS).set(ENCOUNTERS.UPDATED_AT, now)
-        if (body.containsKey("department")) query = query.set(ENCOUNTERS.DEPARTMENT, body.getString("department"))
-        if (body.containsKey("ward")) query = query.set(ENCOUNTERS.WARD, body.getString("ward"))
-        if (body.containsKey("admitting_diagnosis")) query = query.set(ENCOUNTERS.ADMITTING_DIAGNOSIS, body.getString("admitting_diagnosis"))
+    private fun encounterUpdate(body: JsonObject, id: String, now: OffsetDateTime): Pair<String, Tuple> {
+        val args = mutableListOf<Any?>(now)
+        val sets = mutableListOf("updated_at = \$1")
+        fun set(column: String, value: Any?) {
+            sets += "$column = \$${args.size + 1}"
+            args += value
+        }
+        if (body.containsKey("department")) set("department", body.getString("department"))
+        if (body.containsKey("ward")) set("ward", body.getString("ward"))
+        if (body.containsKey("admitting_diagnosis")) set("admitting_diagnosis", body.getString("admitting_diagnosis"))
         // 责任医生/照护师不可修改：取值只来自创建时的操作人，这里不接收请求体
-        if (body.containsKey("metadata")) query = query.set(ENCOUNTERS.METADATA, JSONB.valueOf(requireNotNull(jsonObject(body, "metadata", true)).encode()))
-        if (body.containsKey("status")) query = query.set(ENCOUNTERS.STATUS, validStatus(body.getString("status"), encounterStatuses - "DISCHARGED", "encounter status"))
-        return query.where(ENCOUNTERS.ID.eq(id))
+        if (body.containsKey("metadata")) set("metadata", requireNotNull(jsonObject(body, "metadata", true)))
+        if (body.containsKey("status")) {
+            set("status", validStatus(body.getString("status"), encounterStatuses - "DISCHARGED", "encounter status"))
+        }
+        args += id
+        val sql = "UPDATE healthcare.encounters SET ${sets.joinToString(", ")} " +
+            "WHERE healthcare.encounters.id = \$${args.size}"
+        return sql to Tuple.from(args)
     }
 
     private fun patientResponse(body: JsonObject, id: String, now: OffsetDateTime): JsonObject =
@@ -1631,20 +1716,23 @@ class HealthcareService(
             if (taskId != null) meta.put("task_id", taskId)
 
             val id = Ulid.generate()
-            val insertQuery = ctx.insertInto(MedicalRecords.MEDICAL_RECORDS)
-                .set(MedicalRecords.MEDICAL_RECORDS.ID, id)
-                .set(MedicalRecords.MEDICAL_RECORDS.ENCOUNTER_ID, encounterId)
-                .set(MedicalRecords.MEDICAL_RECORDS.RECORD_TYPE, "NURSING_RECORD")
-                .set(MedicalRecords.MEDICAL_RECORDS.TITLE, title.take(100))
-                .set(MedicalRecords.MEDICAL_RECORDS.CONTENT, content)
-                .set(MedicalRecords.MEDICAL_RECORDS.CONTENT_BLOCKS, org.jooq.JSONB.valueOf("[]"))
-                .set(MedicalRecords.MEDICAL_RECORDS.PHYSICIAN, author)
-                .set(MedicalRecords.MEDICAL_RECORDS.RECORD_DATE, recordDate)
-                .set(MedicalRecords.MEDICAL_RECORDS.METADATA, org.jooq.JSONB.valueOf(meta.encode()))
-                .set(MedicalRecords.MEDICAL_RECORDS.CREATED_AT, now)
-                .set(MedicalRecords.MEDICAL_RECORDS.UPDATED_AT, now)
-
-            execute(pool, insertQuery).map {
+            execute(
+                pool,
+                INSERT_MEDICAL_RECORD_SQL,
+                Tuple.of(
+                    id,
+                    encounterId,
+                    "NURSING_RECORD",
+                    title.take(100),
+                    content,
+                    JsonArray(),
+                    author,
+                    recordDate,
+                    meta,
+                    now,
+                    now,
+                ),
+            ).map {
                 nursingRecordResponse(id, encounterId, periodId, recordKind, title, content, recordTime, recordDate, author, taskExecId, taskId, null, now)
             }.recover { err ->
                 // 唯一索引冲突 → 409
@@ -1667,34 +1755,34 @@ class HealthcareService(
         limit: Int,
         offset: Int,
     ): Future<JsonObject> {
-        val conditions = mutableListOf<org.jooq.Condition>()
-        conditions.add(MedicalRecords.MEDICAL_RECORDS.RECORD_TYPE.eq("NURSING_RECORD"))
-        encounterId?.takeIf(String::isNotBlank)?.let { conditions.add(MedicalRecords.MEDICAL_RECORDS.ENCOUNTER_ID.eq(it)) }
-
-        val metadataField = MedicalRecords.MEDICAL_RECORDS.METADATA
-        periodId?.takeIf(String::isNotBlank)?.let { pid ->
-            conditions.add(DSL.field("{0} ->> {1}", String::class.java, metadataField, DSL.`val`("period_id")).eq(pid))
-        }
+        val args = mutableListOf<Any?>()
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
+        val conditions = mutableListOf("record_type = ${bind("NURSING_RECORD")}")
+        encounterId?.takeIf(String::isNotBlank)?.let { conditions.add("encounter_id = ${bind(it)}") }
+        periodId?.takeIf(String::isNotBlank)?.let { conditions.add("metadata ->> 'period_id' = ${bind(it)}") }
         dateFrom?.takeIf(String::isNotBlank)?.let { d ->
-            try { conditions.add(MedicalRecords.MEDICAL_RECORDS.RECORD_DATE.ge(LocalDate.parse(d))) }
-            catch (_: Exception) { throw IllegalArgumentException("invalid date_from") }
+            try {
+                conditions.add("record_date >= ${bind(LocalDate.parse(d))}")
+            } catch (_: Exception) {
+                throw IllegalArgumentException("invalid date_from")
+            }
         }
         dateTo?.takeIf(String::isNotBlank)?.let { d ->
-            try { conditions.add(MedicalRecords.MEDICAL_RECORDS.RECORD_DATE.le(LocalDate.parse(d))) }
-            catch (_: Exception) { throw IllegalArgumentException("invalid date_to") }
+            try {
+                conditions.add("record_date <= ${bind(LocalDate.parse(d))}")
+            } catch (_: Exception) {
+                throw IllegalArgumentException("invalid date_to")
+            }
         }
+        val wherePart = " WHERE ${conditions.joinToString(" AND ")}"
 
-        val countQuery = ctx.select(DSL.count().`as`("total"))
-            .from(MedicalRecords.MEDICAL_RECORDS).where(conditions)
-        val dataQuery = ctx.selectFrom(MedicalRecords.MEDICAL_RECORDS)
-            .where(conditions)
-            .orderBy(MedicalRecords.MEDICAL_RECORDS.RECORD_DATE.desc(), MedicalRecords.MEDICAL_RECORDS.CREATED_AT.desc())
-            .limit(limit)
-            .offset(offset)
+        val countSql = "SELECT count(*) AS total FROM healthcare.medical_records$wherePart"
+        val dataSql = "SELECT $medicalRecordColumns FROM healthcare.medical_records$wherePart " +
+            "ORDER BY record_date DESC, created_at DESC OFFSET \$${args.size + 1} ROWS FETCH NEXT \$${args.size + 2} ROWS ONLY"
 
-        return execute(pool, countQuery).compose { countRows ->
+        return execute(pool, countSql, Tuple.from(args)).compose { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(pool, dataQuery).map { rows ->
+            execute(pool, dataSql, Tuple.from(args + listOf<Any?>(offset, limit))).map { rows ->
                 JsonObject()
                     .put("records", JsonArray(rows.map { nursingRecordFromRow(it) }))
                     .put("meta", JsonObject().put("total", total))
@@ -1703,19 +1791,20 @@ class HealthcareService(
     }
 
     /** 获取单条护理记录 */
-    fun getNursingRecord(id: String): Future<JsonObject> {
-        val query = ctx.selectFrom(MedicalRecords.MEDICAL_RECORDS)
-            .where(MedicalRecords.MEDICAL_RECORDS.ID.eq(id))
-            .and(MedicalRecords.MEDICAL_RECORDS.RECORD_TYPE.eq("NURSING_RECORD"))
-        return execute(pool, query).compose { rows ->
+    fun getNursingRecord(id: String): Future<JsonObject> =
+        execute(
+            pool,
+            "SELECT $medicalRecordColumns FROM healthcare.medical_records " +
+                "WHERE healthcare.medical_records.id = \$1 " +
+                "AND healthcare.medical_records.record_type = 'NURSING_RECORD'",
+            Tuple.of(id),
+        ).compose { rows ->
             val row = rows.iterator().asSequence().firstOrNull()
                 ?: return@compose Future.failedFuture(HealthcareNotFoundException("nursing record not found: $id"))
             // 检查更正记录
-            val correctionQuery = ctx.select(DSL.count().`as`("total"))
-                .from(MedicalRecords.MEDICAL_RECORDS)
-                .where(DSL.field("{0} ->> {1}", String::class.java, MedicalRecords.MEDICAL_RECORDS.METADATA, DSL.`val`("corrects_record_id")).eq(id))
-                .and(MedicalRecords.MEDICAL_RECORDS.RECORD_TYPE.eq("NURSING_RECORD"))
-            execute(pool, correctionQuery).map { correctionRows ->
+            val correctionSql = "SELECT count(*) AS total FROM healthcare.medical_records " +
+                "WHERE metadata ->> 'corrects_record_id' = \$1 AND record_type = 'NURSING_RECORD'"
+            execute(pool, correctionSql, Tuple.of(id)).map { correctionRows ->
                 val correctionCount = correctionRows.iterator().next().getLong("total") ?: 0L
                 val record = nursingRecordFromRow(row)
                 if (correctionCount > 0) {
@@ -1725,7 +1814,6 @@ class HealthcareService(
                 record
             }
         }
-    }
 
     /** 创建更正记录 */
     fun createNursingRecordCorrection(recordId: String, body: JsonObject): Future<JsonObject> {
@@ -1772,20 +1860,23 @@ class HealthcareService(
             val author = body.getString("author")?.trim()?.takeIf { it.isNotBlank() } ?: ""
             val correctionTitle = "更正：${originalTitle}"
 
-            val insertQuery = ctx.insertInto(MedicalRecords.MEDICAL_RECORDS)
-                .set(MedicalRecords.MEDICAL_RECORDS.ID, id)
-                .set(MedicalRecords.MEDICAL_RECORDS.ENCOUNTER_ID, encounterId ?: "")
-                .set(MedicalRecords.MEDICAL_RECORDS.RECORD_TYPE, "NURSING_RECORD")
-                .set(MedicalRecords.MEDICAL_RECORDS.TITLE, correctionTitle.take(100))
-                .set(MedicalRecords.MEDICAL_RECORDS.CONTENT, content)
-                .set(MedicalRecords.MEDICAL_RECORDS.CONTENT_BLOCKS, org.jooq.JSONB.valueOf("[]"))
-                .set(MedicalRecords.MEDICAL_RECORDS.PHYSICIAN, author)
-                .set(MedicalRecords.MEDICAL_RECORDS.RECORD_DATE, recordDate)
-                .set(MedicalRecords.MEDICAL_RECORDS.METADATA, org.jooq.JSONB.valueOf(meta.encode()))
-                .set(MedicalRecords.MEDICAL_RECORDS.CREATED_AT, now)
-                .set(MedicalRecords.MEDICAL_RECORDS.UPDATED_AT, now)
-
-            execute(pool, insertQuery).map {
+            execute(
+                pool,
+                INSERT_MEDICAL_RECORD_SQL,
+                Tuple.of(
+                    id,
+                    encounterId ?: "",
+                    "NURSING_RECORD",
+                    correctionTitle.take(100),
+                    content,
+                    JsonArray(),
+                    author,
+                    recordDate,
+                    meta,
+                    now,
+                    now,
+                ),
+            ).map {
                 nursingRecordResponse(id, encounterId ?: "", periodId ?: "", "CORRECTION", correctionTitle.take(100), content, recordTime, recordDate, author, taskExecId, taskId, recordId, now)
             }
         }
@@ -2017,23 +2108,13 @@ class HealthcareService(
      * 补齐 Nursing 侧执行/事件后冻结为交班事项。绝不产生任何写副作用。
      */
     private fun collectHandoverSnapshot(client: SqlClient, careUnit: String, businessDate: LocalDate): Future<JsonObject> {
-        val encounterQuery = ctx.select(
-            ENCOUNTERS.ID.`as`("encounter_id"),
-            ENCOUNTERS.PATIENT_ID,
-            ENCOUNTERS.ENCOUNTER_NO,
-            ENCOUNTERS.WARD,
-            PATIENTS.NAME.`as`("patient_name"),
-        )
-            .from(ENCOUNTERS)
-            .join(PATIENTS).on(ENCOUNTERS.PATIENT_ID.eq(PATIENTS.ID))
-            .where(
-                ENCOUNTERS.ENCOUNTER_TYPE.eq("ELDERLY_CARE")
-                    .and(ENCOUNTERS.STATUS.eq("ACTIVE"))
-                    .and(ENCOUNTERS.DEPARTMENT.eq(careUnit)),
-            )
-            .orderBy(ENCOUNTERS.ADMIT_DATE.asc(), ENCOUNTERS.ID.asc())
+        val encounterSql = "SELECT healthcare.encounters.id AS encounter_id, healthcare.encounters.patient_id, healthcare.encounters.encounter_no, healthcare.encounters.ward, " +
+            "healthcare.patients.name AS patient_name FROM healthcare.encounters " +
+            "JOIN healthcare.patients ON healthcare.patients.id = healthcare.encounters.patient_id " +
+            "WHERE healthcare.encounters.encounter_type = 'ELDERLY_CARE' AND healthcare.encounters.status = 'ACTIVE' AND healthcare.encounters.department = \$1 " +
+            "ORDER BY healthcare.encounters.admit_date ASC, healthcare.encounters.id ASC"
 
-        return execute(client, encounterQuery).compose { rows ->
+        return execute(client, encounterSql, Tuple.of(careUnit)).compose { rows ->
             val admissions = rows.map { row ->
                 JsonObject()
                     .put("encounter_id", row.getString("encounter_id"))
@@ -2048,12 +2129,16 @@ class HealthcareService(
                 )
             }
             val encounterIds = admissions.mapNotNull { it.getString("encounter_id") }
-            val periodQuery = ctx.selectFrom(NURSING_SERVICE_PERIODS)
-                .where(
-                    NURSING_SERVICE_PERIODS.ENCOUNTER_ID.`in`(encounterIds)
-                        .and(NURSING_SERVICE_PERIODS.STATUS.`in`(HANDOVER_PERIOD_OPEN_STATUSES)),
-                )
-            execute(client, periodQuery).compose { periodRows ->
+            val periodArgs = mutableListOf<Any?>()
+            periodArgs.addAll(encounterIds)
+            periodArgs.addAll(HANDOVER_PERIOD_OPEN_STATUSES)
+            val encounterPlaceholders = encounterIds.indices.joinToString(", ") { "\$${it + 1}" }
+            val statusPlaceholders = HANDOVER_PERIOD_OPEN_STATUSES.indices.joinToString(", ") {
+                "\$${encounterIds.size + it + 1}"
+            }
+            val periodSql = "SELECT $servicePeriodColumns FROM nursing.nursing_service_periods " +
+                "WHERE encounter_id IN ($encounterPlaceholders) AND status IN ($statusPlaceholders)"
+            execute(client, periodSql, Tuple.from(periodArgs)).compose { periodRows ->
                 val periodByEncounter = periodRows.associateBy { it.getString("encounter_id") }
                 val withPeriods = admissions.mapNotNull { enc ->
                     val period = periodByEncounter[enc.getString("encounter_id")] ?: return@mapNotNull null
@@ -2067,22 +2152,15 @@ class HealthcareService(
                         JsonObject().put("admissions", JsonArray(withPeriods)).put("records", JsonArray())
                     )
                 }
-                val periodIdField = DSL.field("{0} ->> {1}", String::class.java, MEDICAL_RECORDS.METADATA, DSL.inline("period_id"))
-                val recordsQuery = ctx.select(
-                    MEDICAL_RECORDS.ID,
-                    MEDICAL_RECORDS.TITLE,
-                    MEDICAL_RECORDS.CONTENT,
-                    MEDICAL_RECORDS.RECORD_DATE,
-                    MEDICAL_RECORDS.METADATA,
-                )
-                    .from(MEDICAL_RECORDS)
-                    .where(
-                        MEDICAL_RECORDS.RECORD_TYPE.eq("NURSING_RECORD")
-                            .and(MEDICAL_RECORDS.RECORD_DATE.eq(businessDate))
-                            .and(periodIdField.`in`(periodIds)),
-                    )
-                    .orderBy(MEDICAL_RECORDS.CREATED_AT.asc(), MEDICAL_RECORDS.ID.asc())
-                execute(client, recordsQuery).map { recordRows ->
+                val recordArgs = mutableListOf<Any?>(businessDate)
+                recordArgs.addAll(periodIds)
+                val periodPlaceholders = periodIds.indices.joinToString(", ") { "\$${it + 2}" }
+                val recordsSql = "SELECT id, title, content, record_date, metadata " +
+                    "FROM healthcare.medical_records " +
+                    "WHERE record_type = 'NURSING_RECORD' AND record_date = \$1 " +
+                    "AND (metadata ->> 'period_id') IN ($periodPlaceholders) " +
+                    "ORDER BY created_at ASC, id ASC"
+                execute(client, recordsSql, Tuple.from(recordArgs)).map { recordRows ->
                     val records = recordRows.map { row ->
                         val meta = row.getValue("metadata") as? JsonObject ?: JsonObject()
                         JsonObject()
@@ -2100,15 +2178,13 @@ class HealthcareService(
 
     /** 校验照护单元仍存在活动养老入住（读 healthcare.encounters，生成表类）。
      *  由 [ShiftHandoverService] 以连接绑定端口调用；无活动入住时交接单只读。 */
-    private fun ensureCareUnitActiveForHandover(client: SqlClient, careUnit: String): Future<Void> {
-        val query = ctx.selectOne()
-            .from(ENCOUNTERS)
-            .where(
-                ENCOUNTERS.ENCOUNTER_TYPE.eq("ELDERLY_CARE")
-                    .and(ENCOUNTERS.STATUS.eq("ACTIVE"))
-                    .and(ENCOUNTERS.DEPARTMENT.eq(careUnit)),
-            )
-        return execute(client, query).compose { rows ->
+    private fun ensureCareUnitActiveForHandover(client: SqlClient, careUnit: String): Future<Void> =
+        execute(
+            client,
+            "SELECT 1 FROM healthcare.encounters " +
+                "WHERE encounter_type = 'ELDERLY_CARE' AND status = 'ACTIVE' AND department = \$1",
+            Tuple.of(careUnit),
+        ).compose { rows ->
             if (rows.size() == 0) {
                 return@compose Future.failedFuture(
                     ConflictException("care unit has no active elderly admission; handover is read-only")
@@ -2116,7 +2192,6 @@ class HealthcareService(
             }
             Future.succeededFuture()
         }
-    }
 
     // ——— 017 私有校验 ———
 
@@ -2251,13 +2326,9 @@ class HealthcareService(
 
     /** 慢病病程校验：档案存在且属于该 encounter 的老人（跨档案/跨老人一律拒绝） */
     private fun ensureChronicRegistrationBelongs(client: SqlClient, chronicDiseaseId: String, patientId: String?): Future<Void> {
-        val query = ctx.selectOne()
-            .from(CHRONIC_DISEASE_REGISTRATIONS)
-            .where(
-                CHRONIC_DISEASE_REGISTRATIONS.ID.eq(chronicDiseaseId)
-                    .and(CHRONIC_DISEASE_REGISTRATIONS.PATIENT_ID.eq(patientId)),
-            )
-        return execute(client, query).compose { rows ->
+        val sql = "SELECT 1 FROM healthcare.chronic_disease_registrations " +
+            "WHERE id = \$1 AND patient_id = \$2"
+        return execute(client, sql, Tuple.of(chronicDiseaseId, patientId)).compose { rows ->
             if (rows.size() == 0) {
                 Future.failedFuture(
                     HealthcareNotFoundException("chronic disease registration not found for this patient"),
@@ -2452,18 +2523,15 @@ class HealthcareService(
 
     /** 验证 period_id 和 encounter_id 的 patient_id 一致性 */
     private fun validatePeriodEncounter(periodId: String, encounterId: String): Future<Pair<String?, String?>> {
-        val periodQuery = ctx.select(DSL.field("patient_id"))
-            .from(DSL.table(DSL.name("nursing", "nursing_service_periods")))
-            .where(DSL.field("id").eq(periodId))
-        val encounterQuery = ctx.select(ENCOUNTERS.PATIENT_ID)
-            .from(ENCOUNTERS)
-            .where(ENCOUNTERS.ID.eq(encounterId))
+        val periodSql = "SELECT patient_id FROM nursing.nursing_service_periods WHERE id = \$1"
+        val encounterSql = "SELECT healthcare.encounters.patient_id FROM healthcare.encounters " +
+            "WHERE healthcare.encounters.id = \$1"
 
-        return execute(pool, periodQuery).compose { periodRows ->
+        return execute(pool, periodSql, Tuple.of(periodId)).compose { periodRows ->
             val periodRow = periodRows.iterator().asSequence().firstOrNull()
                 ?: return@compose Future.failedFuture(HealthcareNotFoundException("nursing service period not found: $periodId"))
             val periodPatientId = periodRow.getString("patient_id")
-            execute(pool, encounterQuery).map { encounterRows ->
+            execute(pool, encounterSql, Tuple.of(encounterId)).map { encounterRows ->
                 val encounterRow = encounterRows.iterator().asSequence().firstOrNull()
                     ?: throw HealthcareNotFoundException("encounter not found: $encounterId")
                 val encounterPatientId = encounterRow.getString("patient_id")
@@ -2474,17 +2542,14 @@ class HealthcareService(
 
     /** 验证 task_execution_id 归属 */
     private fun validateTaskExecutionBelonging(taskExecId: String, periodId: String, encounterId: String): Future<String?> {
-        val query = ctx.select(
-            DSL.field("t.id"),
-            DSL.field("t.period_id"),
-            DSL.field("t.encounter_id")
-        )
-            .from(DSL.table(DSL.name("nursing", "nursing_task_executions")).`as`("e"))
-            .join(DSL.table(DSL.name("nursing", "nursing_tasks")).`as`("t"))
-            .on(DSL.field("e.task_id").eq(DSL.field("t.id")))
-            .where(DSL.field("e.id").eq(taskExecId))
+        val sql = "SELECT nursing.nursing_tasks.id, nursing.nursing_tasks.period_id, " +
+            "nursing.nursing_tasks.encounter_id " +
+            "FROM nursing.nursing_task_executions " +
+            "JOIN nursing.nursing_tasks " +
+            "ON nursing.nursing_tasks.id = nursing.nursing_task_executions.task_id " +
+            "WHERE nursing.nursing_task_executions.id = \$1"
 
-        return execute(pool, query).compose { rows ->
+        return execute(pool, sql, Tuple.of(taskExecId)).compose { rows ->
             val row = rows.iterator().asSequence().firstOrNull()
                 ?: return@compose Future.failedFuture(HealthcareNotFoundException("task execution not found: $taskExecId"))
             val taskId = row.getString("id")
@@ -2499,8 +2564,8 @@ class HealthcareService(
         }
     }
 
-    private fun execute(client: SqlClient, query: Query): Future<RowSet<Row>> =
-        client.preparedQuery(DatabaseConfig.sql(query)).execute(DatabaseConfig.tuple(query))
+    private fun execute(client: SqlClient, sql: String, args: Tuple): Future<RowSet<Row>> =
+        client.preparedQuery(sql).execute(args)
 
     private fun requiredText(body: JsonObject, key: String): String =
         body.getString(key)?.trim()?.takeIf(String::isNotBlank)
@@ -2690,19 +2755,13 @@ class HealthcareService(
         encounterId: String,
         periodId: String,
     ): Future<Row?> {
-        val metadataField = MedicalRecords.MEDICAL_RECORDS.METADATA
-        val query = ctx.selectFrom(MedicalRecords.MEDICAL_RECORDS)
-            .where(
-                MedicalRecords.MEDICAL_RECORDS.RECORD_TYPE.eq("DISCHARGE_SUMMARY")
-                    .and(MedicalRecords.MEDICAL_RECORDS.ENCOUNTER_ID.eq(encounterId))
-                    .and(DSL.field("{0} ->> {1}", String::class.java, metadataField, DSL.`val`("period_id")).eq(periodId))
-                    .and(
-                        DSL.field("{0} ->> {1}", String::class.java, metadataField, DSL.`val`("is_elderly_discharge_handover"))
-                            .eq("true")
-                    ),
-            )
-            .forUpdate()
-        return execute(client, query).map { rows ->
+        val sql = "SELECT $medicalRecordColumns FROM healthcare.medical_records " +
+            "WHERE healthcare.medical_records.record_type = \$1 " +
+            "AND healthcare.medical_records.encounter_id = \$2 " +
+            "AND (healthcare.medical_records.metadata ->> 'period_id') = \$3 " +
+            "AND (healthcare.medical_records.metadata ->> 'is_elderly_discharge_handover') = 'true' " +
+            "FOR UPDATE"
+        return execute(client, sql, Tuple.of("DISCHARGE_SUMMARY", encounterId, periodId)).map { rows ->
             rows.iterator().asSequence().firstOrNull()
         }
     }
@@ -2759,25 +2818,28 @@ class HealthcareService(
                             .put("source_counts", sourceCounts)
 
                         val id = Ulid.generate()
-                        var insert = ctx.insertInto(MedicalRecords.MEDICAL_RECORDS)
-                            .set(MedicalRecords.MEDICAL_RECORDS.ID, id)
-                            .set(MedicalRecords.MEDICAL_RECORDS.ENCOUNTER_ID, encounterId)
-                            .set(MedicalRecords.MEDICAL_RECORDS.RECORD_TYPE, "DISCHARGE_SUMMARY")
-                            .set(MedicalRecords.MEDICAL_RECORDS.TITLE, handoverTitleFor(encounter))
-                            .set(MedicalRecords.MEDICAL_RECORDS.CONTENT_BLOCKS, org.jooq.JSONB.valueOf(contentBlocks.encode()))
-                            .set(MedicalRecords.MEDICAL_RECORDS.PHYSICIAN, author)
-                            .set(MedicalRecords.MEDICAL_RECORDS.RECORD_DATE, recordDate)
-                            .set(MedicalRecords.MEDICAL_RECORDS.METADATA, org.jooq.JSONB.valueOf(meta.encode()))
-                            .set(MedicalRecords.MEDICAL_RECORDS.CREATED_AT, now)
-                            .set(MedicalRecords.MEDICAL_RECORDS.UPDATED_AT, now)
-                        if (handoverNote != null) {
-                            insert = insert.set(MedicalRecords.MEDICAL_RECORDS.CONTENT, handoverNote)
-                        }
-
-                        execute(client, insert).compose {
-                            val read = ctx.selectFrom(MedicalRecords.MEDICAL_RECORDS)
-                                .where(MedicalRecords.MEDICAL_RECORDS.ID.eq(id))
-                            execute(client, read).map { rows ->
+                        execute(
+                            client,
+                            INSERT_MEDICAL_RECORD_SQL,
+                            Tuple.of(
+                                id,
+                                encounterId,
+                                "DISCHARGE_SUMMARY",
+                                handoverTitleFor(encounter),
+                                handoverNote,
+                                contentBlocks,
+                                author,
+                                recordDate,
+                                meta,
+                                now,
+                                now,
+                            ),
+                        ).compose {
+                            execute(
+                                client,
+                                "SELECT $medicalRecordColumns FROM healthcare.medical_records WHERE id = \$1",
+                                Tuple.of(id),
+                            ).map { rows ->
                                 handoverFromRow(rows.iterator().next())
                             }
                         }
@@ -2787,18 +2849,9 @@ class HealthcareService(
     }
 
     private fun loadPatientHandoverData(client: SqlClient, patientId: String): Future<JsonObject> {
-        val query = ctx.select(
-            PATIENTS.ID,
-            PATIENTS.NAME,
-            PATIENTS.GENDER,
-            PATIENTS.BIRTH_DATE,
-            PATIENTS.EMERGENCY_CONTACT,
-            PATIENTS.ALLERGIES,
-            PATIENTS.PAST_HISTORY,
-        )
-            .from(PATIENTS)
-            .where(PATIENTS.ID.eq(patientId))
-        return execute(client, query).map { rows ->
+        val sql = "SELECT id, name, gender, birth_date, emergency_contact, allergies, past_history " +
+            "FROM healthcare.patients WHERE id = \$1"
+        return execute(client, sql, Tuple.of(patientId)).map { rows ->
             val row = rows.iterator().asSequence().firstOrNull()
                 ?: throw HealthcareNotFoundException("patient not found: $patientId")
             JsonObject()
@@ -2818,29 +2871,14 @@ class HealthcareService(
         encounterId: String,
         periodId: String,
     ): Future<List<JsonObject>> {
-        val metadataField = MedicalRecords.MEDICAL_RECORDS.METADATA
-        val recordTimeField = DSL.field("{0} ->> {1}", String::class.java, metadataField, DSL.inline("record_time"))
-        val query = ctx.select(
-            MedicalRecords.MEDICAL_RECORDS.ID,
-            MedicalRecords.MEDICAL_RECORDS.TITLE,
-            MedicalRecords.MEDICAL_RECORDS.CONTENT,
-            MedicalRecords.MEDICAL_RECORDS.PHYSICIAN,
-            MedicalRecords.MEDICAL_RECORDS.RECORD_DATE,
-            MedicalRecords.MEDICAL_RECORDS.METADATA,
-            MedicalRecords.MEDICAL_RECORDS.CREATED_AT,
-        )
-            .from(MedicalRecords.MEDICAL_RECORDS)
-            .where(
-                MedicalRecords.MEDICAL_RECORDS.RECORD_TYPE.eq("NURSING_RECORD")
-                    .and(MedicalRecords.MEDICAL_RECORDS.ENCOUNTER_ID.eq(encounterId))
-                    .and(DSL.field("{0} ->> {1}", String::class.java, metadataField, DSL.`val`("period_id")).eq(periodId)),
-            )
-            .orderBy(
-                recordTimeField.asc().nullsLast(),
-                MedicalRecords.MEDICAL_RECORDS.CREATED_AT.asc(),
-                MedicalRecords.MEDICAL_RECORDS.ID.asc(),
-            )
-        return execute(client, query).map { rows ->
+        val sql = "SELECT id, title, content, physician, record_date, metadata, created_at " +
+            "FROM healthcare.medical_records " +
+            "WHERE healthcare.medical_records.record_type = \$1 " +
+            "AND healthcare.medical_records.encounter_id = \$2 " +
+            "AND (healthcare.medical_records.metadata ->> 'period_id') = \$3 " +
+            "ORDER BY (healthcare.medical_records.metadata ->> 'record_time') ASC NULLS LAST, " +
+            "healthcare.medical_records.created_at ASC, healthcare.medical_records.id ASC"
+        return execute(client, sql, Tuple.of("NURSING_RECORD", encounterId, periodId)).map { rows ->
             rows.map { row ->
                 val meta = row.getValue("metadata") as? JsonObject ?: JsonObject()
                 JsonObject()

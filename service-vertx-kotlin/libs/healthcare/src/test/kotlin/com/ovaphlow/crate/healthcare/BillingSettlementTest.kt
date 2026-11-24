@@ -266,7 +266,7 @@ class BillingSettlementTest {
                     sql.contains("from healthcare.bills") && sql.contains("left outer join") &&
                         !sql.contains("red_bill") -> {
                         val scoped = bills
-                            .filter { it["encounter_id"] == values.getOrNull(2) && it["status"] == values.getOrNull(3) }
+                            .filter { it["encounter_id"] == values.getOrNull(0) && it["status"] == values.getOrNull(1) }
                             .mapNotNull { bill ->
                                 val paid = payments
                                     .filter { it["bill_id"] == bill["id"] }

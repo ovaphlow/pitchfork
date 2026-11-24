@@ -306,19 +306,29 @@ class OrderMaterialBatchBindingTest {
         assertEquals(0, result.getJsonArray("records").size(), "空列表必须返回 records: []")
         assertEquals(0L, result.getJsonObject("meta").getLong("total"))
         val dataSql = stub.queries.first { it.contains("fetch next") }
-        assertTrue(dataSql.contains("medical_orders.order_content like $"), "必须匹配医嘱正文: $dataSql")
         assertTrue(
-            dataSql.contains("order_details->>'drug_name'") && dataSql.contains("like $"),
+            dataSql.contains("medical_orders.order_content like '%' || $"),
+            "必须匹配医嘱正文: $dataSql",
+        )
+        assertTrue(
+            dataSql.contains("order_details->>'drug_name'") &&
+                dataSql.contains("like '%' || $"),
             "必须匹配药品名: $dataSql",
         )
-        assertTrue(dataSql.contains("healthcare.patients.name like $"), "必须匹配患者姓名: $dataSql")
         assertTrue(
-            dataSql.contains("healthcare.encounters.encounter_no like $"),
+            dataSql.contains("healthcare.patients.name like '%' || $"),
+            "必须匹配患者姓名: $dataSql",
+        )
+        assertTrue(
+            dataSql.contains("healthcare.encounters.encounter_no like '%' || $"),
             "必须匹配住院号: $dataSql",
         )
         val values = stub.tuples.first { it.first == dataSql }.second
         assertTrue(values.contains("enc-9"), "必须按 encounter_id 过滤: $values")
-        assertTrue(values.contains("% 张 %"), "search 必须原样绑定模糊模式: $values")
+        assertTrue(
+            values.contains(" 张 ") && !values.any { it is String && it.contains("%") },
+            "search 必须以绑定参数传入，不得拼接通配符: $values",
+        )
     }
 
     @Test

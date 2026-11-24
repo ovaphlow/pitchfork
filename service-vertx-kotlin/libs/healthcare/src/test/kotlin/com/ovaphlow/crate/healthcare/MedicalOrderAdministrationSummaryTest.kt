@@ -283,6 +283,12 @@ class MedicalOrderAdministrationSummaryTest {
         assertNull(second.getString("administered_quantity"), "拒服无给药数量")
         assertEquals("长者拒绝服药", second.getString("reason"))
         // 查询必须按 task 关联过滤，不串其他医嘱
-        assertTrue(stub.queries.any { it.contains("t.order_item_id = $") && it.contains("medication_administrations") })
+        assertTrue(
+            stub.queries.any {
+                it.contains("nursing.nursing_tasks.order_item_id = $") &&
+                    it.contains("medication_administrations")
+            },
+            "查询必须按 task 关联过滤: ${stub.queries}",
+        )
     }
 }

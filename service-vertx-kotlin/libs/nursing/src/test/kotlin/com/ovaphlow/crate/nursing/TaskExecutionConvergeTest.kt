@@ -1,6 +1,5 @@
 package com.ovaphlow.crate.nursing
 
-import com.ovaphlow.crate.database.DatabaseConfig
 import io.mockk.every
 import io.mockk.mockk
 import io.vertx.core.Future
@@ -248,7 +247,7 @@ class TaskExecutionConvergeTest {
             metadata = metadata,
         )
 
-    private fun service(): TaskExecutionService = TaskExecutionService(database.pool, DatabaseConfig.createDSL())
+    private fun service(): TaskExecutionService = TaskExecutionService(database.pool)
 
     private fun failureOf(future: Future<*>): Throwable {
         val failures = mutableListOf<Throwable>()

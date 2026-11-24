@@ -484,17 +484,21 @@ class ApiBodyHandlingTest {
             }
         }
 
+        /**
+         * 记录 SQL 时统一转小写：本仓已全部是原生 SQL，关键字大小写随书写风格变化
+         * （`INSERT INTO …` / `SELECT COUNT(*) …`），断言不应绑定大小写。
+         */
         private fun recordOn(client: io.vertx.sqlclient.SqlClient) {
             every { client.preparedQuery(any<String>()) } answers {
-                queries.add(firstArg<String>())
+                queries.add(firstArg<String>().lowercase())
                 preparedQuery
             }
             every { client.preparedQuery(any<String>(), any()) } answers {
-                queries.add(firstArg<String>())
+                queries.add(firstArg<String>().lowercase())
                 preparedQuery
             }
             every { client.query(any<String>()) } answers {
-                queries.add(firstArg<String>())
+                queries.add(firstArg<String>().lowercase())
                 preparedQuery
             }
         }

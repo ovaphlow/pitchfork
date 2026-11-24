@@ -1,40 +1,25 @@
 package com.ovaphlow.crate.nursing
 
 import com.ovaphlow.crate.common.Ulid
-import com.ovaphlow.crate.database.DatabaseConfig
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
-import io.vertx.pgclient.PgException
 import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.SqlClient
-import org.jooq.DSLContext
-import org.jooq.JSONB
-import org.jooq.impl.DSL
-import org.jooq.impl.DSL.count
+import io.vertx.sqlclient.Tuple
 import java.time.LocalDate
 import java.time.OffsetDateTime
 import java.time.ZoneId
 
+/**
+ * 护理服务周期服务。
+ *
+ * 持久化一律原生参数化 SQL（`$1..$n` + `Tuple`），本文件无任何 jOOQ 引用。
+ */
 class ServicePeriodService(
     private val pool: Pool,
-    private val ctx: DSLContext = DatabaseConfig.createDSL()
 ) {
-    private val t = DSL.table(DSL.name("nursing", "nursing_service_periods"))
-
-    private val cId = DSL.field("id", String::class.java)
-    private val cPatientId = DSL.field("patient_id", String::class.java)
-    private val cServiceType = DSL.field("service_type", String::class.java)
-    private val cStartDate = DSL.field("start_date", LocalDate::class.java)
-    private val cEndDate = DSL.field("end_date", LocalDate::class.java)
-    private val cCoordinator = DSL.field("coordinator", String::class.java)
-    private val cEncounterId = DSL.field("encounter_id", String::class.java)
-    private val cStatus = DSL.field("status", String::class.java)
-    private val cMetadata = DSL.field("metadata", JSONB::class.java)
-    private val cCreatedAt = DSL.field("created_at", OffsetDateTime::class.java)
-    private val cUpdatedAt = DSL.field("updated_at", OffsetDateTime::class.java)
-
     companion object {
         private val VALID_SERVICE_TYPES = setOf("HOME_CARE", "COMMUNITY_CARE", "HOSPICE")
         private val VALID_STATUS_TRANSITIONS = mapOf(
@@ -47,6 +32,47 @@ class ServicePeriodService(
         private val ELDERLY_CARE_OPEN_STATUSES = setOf("ACTIVE", "SUSPENDED")
 
         private val businessZone: ZoneId = ZoneId.of("Asia/Shanghai")
+
+        /** `nursing.nursing_service_periods` 显式列清单（与 [toJson] 读取的键一致）。 */
+        private const val PERIOD_COLUMNS =
+            "id, patient_id, service_type, start_date, end_date, coordinator, encounter_id, " +
+                "status, metadata, created_at, updated_at"
+
+        private const val PERIOD_BY_ID_SQL =
+            "SELECT $PERIOD_COLUMNS FROM nursing.nursing_service_periods WHERE id = \$1"
+
+        private const val PERIOD_BY_ENCOUNTER_SQL =
+            "SELECT $PERIOD_COLUMNS FROM nursing.nursing_service_periods WHERE encounter_id = \$1"
+
+        private const val PERIOD_BY_ENCOUNTER_LOCKED_SQL =
+            "SELECT $PERIOD_COLUMNS FROM nursing.nursing_service_periods " +
+                "WHERE encounter_id = \$1 FOR UPDATE"
+
+        private const val PERIOD_INSERT_SQL =
+            "INSERT INTO nursing.nursing_service_periods ($PERIOD_COLUMNS) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11)"
+
+        /** 养老入住补建：并发冲突由 `uq_nursing_service_periods_encounter_id` 兜底。 */
+        private const val ELDERLY_PERIOD_INSERT_SQL =
+            "INSERT INTO nursing.nursing_service_periods " +
+                "(id, patient_id, service_type, encounter_id, start_date, status, created_at, updated_at) " +
+                "VALUES (\$1, \$2, 'ELDERLY_CARE', \$3, \$4, 'ACTIVE', \$5, \$6) ON CONFLICT DO NOTHING"
+
+        private const val COMPLETE_PERIOD_SQL =
+            "UPDATE nursing.nursing_service_periods " +
+                "SET status = 'COMPLETED', end_date = \$2, updated_at = \$3 WHERE id = \$1"
+
+        private const val ENCOUNTER_SQL =
+            "SELECT id, patient_id, encounter_type, status, admit_date " +
+                "FROM healthcare.encounters WHERE id = \$1"
+
+        private const val ENCOUNTER_PATIENT_SQL =
+            "SELECT patient_id FROM healthcare.encounters WHERE id = \$1"
+
+        private const val IN_PROGRESS_EXECUTION_SQL =
+            "SELECT 1 AS found FROM nursing.nursing_task_executions e " +
+                "JOIN nursing.nursing_tasks tt ON tt.id = e.task_id " +
+                "WHERE tt.period_id = \$1 AND e.status = 'IN_PROGRESS'"
 
         /**
          * 从 TIMESTAMPTZ 取业务日（机构时区 [businessZone] 的本地日期）。
@@ -86,34 +112,33 @@ class ServicePeriodService(
         val id = Ulid.generate()
         val now = OffsetDateTime.now()
 
-        val query = ctx.insertInto(t)
-            .set(cId, id)
-            .set(cPatientId, patientId)
-            .set(cServiceType, serviceType)
-            .set(cStartDate, LocalDate.parse(body.getString("start_date")))
-            .set(cEndDate, body.getString("end_date")?.let { LocalDate.parse(it) })
-            .set(cCoordinator, body.getString("coordinator"))
-            .set(cStatus, "ACTIVE")
-            .set(cMetadata, body.containsKey("metadata")
-                .let { if (it) JSONB.valueOf(body.getJsonObject("metadata").encode()) else null })
-            .set(cCreatedAt, now)
-            .set(cUpdatedAt, now)
+        val tuple = Tuple.of(
+            id,
+            patientId,
+            serviceType,
+            LocalDate.parse(body.getString("start_date")),
+            body.getString("end_date")?.let { LocalDate.parse(it) },
+            body.getString("coordinator"),
+            null,
+            "ACTIVE",
+            if (body.containsKey("metadata")) body.getJsonObject("metadata") else null,
+            now,
+            now,
+        )
 
-        return pool.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
-            .map {
-                JsonObject()
-                    .put("id", id)
-                    .put("patient_id", patientId)
-                    .put("service_type", serviceType)
-                    .put("start_date", body.getString("start_date"))
-                    .put("end_date", body.getString("end_date"))
-                    .put("coordinator", body.getString("coordinator"))
-                    .put("status", "ACTIVE")
-                    .put("metadata", body.getJsonObject("metadata"))
-                    .put("created_at", now.toString())
-                    .put("updated_at", now.toString())
-            }
+        return pool.preparedQuery(PERIOD_INSERT_SQL).execute(tuple).map {
+            JsonObject()
+                .put("id", id)
+                .put("patient_id", patientId)
+                .put("service_type", serviceType)
+                .put("start_date", body.getString("start_date"))
+                .put("end_date", body.getString("end_date"))
+                .put("coordinator", body.getString("coordinator"))
+                .put("status", "ACTIVE")
+                .put("metadata", body.getJsonObject("metadata"))
+                .put("created_at", now.toString())
+                .put("updated_at", now.toString())
+        }
     }
 
     fun list(
@@ -124,61 +149,67 @@ class ServicePeriodService(
         limit: Int = 50,
         offset: Int = 0
     ): Future<JsonObject> {
-        val conditions = mutableListOf<org.jooq.Condition>()
-        patientId?.let { conditions.add(cPatientId.eq(it)) }
-        serviceType?.let { conditions.add(cServiceType.eq(it)) }
-        status?.let { conditions.add(cStatus.eq(it)) }
-        encounterId?.let { conditions.add(cEncounterId.eq(it)) }
+        val where = mutableListOf<String>()
+        val args = mutableListOf<Any?>()
 
-        val countQuery = ctx.select(count().`as`("total")).from(t).where(conditions)
-        val dataQuery = ctx.selectFrom(t)
-            .where(conditions)
-            .orderBy(cCreatedAt.desc())
-            .limit(limit)
-            .offset(offset)
+        /** 追加一个绑定值并返回其占位符。 */
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
 
-        return pool.preparedQuery(DatabaseConfig.sql(countQuery))
-            .execute(DatabaseConfig.tuple(countQuery))
-            .flatMap { countRows ->
-                val total = countRows.iterator().next().getLong("total") ?: 0L
-                pool.preparedQuery(DatabaseConfig.sql(dataQuery))
-                    .execute(DatabaseConfig.tuple(dataQuery))
-                    .map { dataRows ->
-                        val records = JsonArray()
-                        for (row in dataRows) records.add(toJson(row))
-                        JsonObject().put("records", records)
-                            .put("meta", JsonObject().put("total", total))
-                    }
+        patientId?.let { where.add("patient_id = ${bind(it)}") }
+        serviceType?.let { where.add("service_type = ${bind(it)}") }
+        status?.let { where.add("status = ${bind(it)}") }
+        encounterId?.let { where.add("encounter_id = ${bind(it)}") }
+
+        val whereClause = if (where.isEmpty()) "" else " WHERE " + where.joinToString(" AND ")
+        val countSql = "SELECT count(*) AS total FROM nursing.nursing_service_periods$whereClause"
+        val countArgs = args.toList()
+        val dataSql =
+            "SELECT $PERIOD_COLUMNS FROM nursing.nursing_service_periods$whereClause " +
+                "ORDER BY created_at DESC LIMIT ${bind(limit)} OFFSET ${bind(offset)}"
+        val dataArgs = args.toList()
+
+        return pool.preparedQuery(countSql).execute(Tuple.from(countArgs)).flatMap { countRows ->
+            val total = countRows.iterator().next().getLong("total") ?: 0L
+            pool.preparedQuery(dataSql).execute(Tuple.from(dataArgs)).map { dataRows ->
+                val records = JsonArray()
+                for (row in dataRows) records.add(toJson(row))
+                JsonObject().put("records", records)
+                    .put("meta", JsonObject().put("total", total))
             }
+        }
     }
 
     fun get(id: String): Future<JsonObject> {
-        val query = ctx.selectFrom(t).where(cId.eq(id))
-        return pool.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
-            .flatMap { rows ->
-                if (rows.size() == 0)
-                    Future.failedFuture(NotFoundException("service period not found: $id"))
-                else Future.succeededFuture(toJson(rows.iterator().next()))
-            }
+        return pool.preparedQuery(PERIOD_BY_ID_SQL).execute(Tuple.of(id)).flatMap { rows ->
+            if (rows.size() == 0)
+                Future.failedFuture(NotFoundException("service period not found: $id"))
+            else Future.succeededFuture(toJson(rows.iterator().next()))
+        }
     }
 
     fun update(id: String, body: JsonObject): Future<JsonObject> {
         return get(id).flatMap { _ ->
             val now = OffsetDateTime.now()
-            var q = ctx.update(t).set(cUpdatedAt, now)
+            val sets = mutableListOf<String>()
+            val args = mutableListOf<Any?>()
 
+            /** 追加一个绑定值并返回其占位符。 */
+            fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
+
+            sets.add("updated_at = ${bind(now)}")
             if (body.containsKey("coordinator"))
-                q = q.set(cCoordinator, body.getString("coordinator"))
+                sets.add("coordinator = ${bind(body.getString("coordinator"))}")
             if (body.containsKey("end_date"))
-                q = q.set(cEndDate, body.getString("end_date")?.let { LocalDate.parse(it) })
+                sets.add("end_date = ${bind(body.getString("end_date")?.let { LocalDate.parse(it) })}")
             if (body.containsKey("metadata"))
-                q = q.set(cMetadata, JSONB.valueOf(body.getJsonObject("metadata").encode()))
+                sets.add("metadata = ${bind(body.getJsonObject("metadata"))}")
 
-            val updateQuery = q.where(cId.eq(id))
+            val idPlaceholder = bind(id)
+            val updateSql =
+                "UPDATE nursing.nursing_service_periods SET ${sets.joinToString(", ")} " +
+                    "WHERE id = $idPlaceholder"
 
-            pool.preparedQuery(DatabaseConfig.sql(updateQuery))
-                .execute(DatabaseConfig.tuple(updateQuery))
+            pool.preparedQuery(updateSql).execute(Tuple.from(args))
                 .flatMap { get(id) }
         }
     }
@@ -196,13 +227,10 @@ class ServicePeriodService(
                 )
 
             val now = OffsetDateTime.now()
-            val updateQuery = ctx.update(t)
-                .set(cStatus, newStatus)
-                .set(cUpdatedAt, now)
-                .where(cId.eq(id))
+            val updateSql =
+                "UPDATE nursing.nursing_service_periods SET status = \$1, updated_at = \$2 WHERE id = \$3"
 
-            pool.preparedQuery(DatabaseConfig.sql(updateQuery))
-                .execute(DatabaseConfig.tuple(updateQuery))
+            pool.preparedQuery(updateSql).execute(Tuple.of(newStatus, now, id))
                 .flatMap { get(id) }
         }
     }
@@ -225,18 +253,8 @@ class ServicePeriodService(
         now: OffsetDateTime,
     ): Future<Pair<Boolean, JsonObject>> {
         val id = Ulid.generate()
-        val insertQuery = ctx.insertInto(t)
-            .set(cId, id)
-            .set(cPatientId, patientId)
-            .set(cServiceType, "ELDERLY_CARE")
-            .set(cEncounterId, encounterId)
-            .set(cStartDate, startDate)
-            .set(cStatus, "ACTIVE")
-            .set(cCreatedAt, now)
-            .set(cUpdatedAt, now)
-            .onConflictDoNothing()
-
-        return execute(client, insertQuery).compose { result ->
+        val tuple = Tuple.of(id, patientId, encounterId, startDate, now, now)
+        return client.preparedQuery(ELDERLY_PERIOD_INSERT_SQL).execute(tuple).compose { result ->
             if (result.rowCount() > 0) {
                 Future.succeededFuture(
                     Pair(true, periodJson(id, patientId, encounterId, startDate, null, "ACTIVE", now))
@@ -297,10 +315,7 @@ class ServicePeriodService(
                 )
 
             // 校验患者一致性：周期 patient_id 必须与 encounter 的 patient_id 一致
-            val encounterQuery = ctx.select(DSL.field("patient_id"))
-                .from(DSL.table(DSL.name("healthcare", "encounters")))
-                .where(DSL.field("id").eq(encounterId))
-            execute(client, encounterQuery).compose { encounterRows ->
+            client.preparedQuery(ENCOUNTER_PATIENT_SQL).execute(Tuple.of(encounterId)).compose { encounterRows ->
                 val encounterRow = encounterRows.iterator().asSequence().firstOrNull()
                 val encounterPatientId = encounterRow?.getValue("patient_id")?.toString()
                 if (encounterPatientId == null)
@@ -312,26 +327,14 @@ class ServicePeriodService(
                         ConflictException("patient_id mismatch between period and encounter")
                     )
 
-                val inProgressQuery = ctx.selectOne()
-                    .from(DSL.table(DSL.name("nursing", "nursing_task_executions")).`as`("e"))
-                    .join(DSL.table(DSL.name("nursing", "nursing_tasks")).`as`("tt"))
-                    .on(DSL.field("e.task_id").eq(DSL.field("tt.id")))
-                    .where(DSL.field("tt.period_id").eq(periodId))
-                    .and(DSL.field("e.status").eq("IN_PROGRESS"))
-
-                execute(client, inProgressQuery).compose { rows ->
+                client.preparedQuery(IN_PROGRESS_EXECUTION_SQL).execute(Tuple.of(periodId)).compose { rows ->
                     if (rows.size() > 0)
                         return@compose Future.failedFuture(
                             ConflictException("cannot discharge elderly admission while a task execution is in progress")
                         )
-                    val updateQuery = ctx.update(t)
-                        .set(cStatus, "COMPLETED")
-                        .set(cEndDate, endDate)
-                        .set(cUpdatedAt, now)
-                        .where(cId.eq(periodId))
-                    execute(client, updateQuery).compose {
-                        getById(client, periodId)
-                    }
+                    client.preparedQuery(COMPLETE_PERIOD_SQL)
+                        .execute(Tuple.of(periodId, endDate, now))
+                        .compose { getById(client, periodId) }
                 }
             }
         }
@@ -371,58 +374,43 @@ class ServicePeriodService(
     // ========================================================================
 
     private fun loadElderlyEncounter(encounterId: String): Future<JsonObject> {
-        val query = ctx.selectFrom(DSL.table(DSL.name("healthcare", "encounters")))
-            .where(DSL.field("id").eq(encounterId))
-        return pool.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
-            .compose { rows ->
-                val row = rows.iterator().asSequence().firstOrNull()
-                    ?: return@compose Future.failedFuture(IllegalArgumentException("encounter not found: $encounterId"))
-                val encounterType = row.getString("encounter_type")
-                if (encounterType != "ELDERLY_CARE")
-                    return@compose Future.failedFuture(IllegalArgumentException("encounter is not an elderly admission"))
-                if (row.getString("status") != "ACTIVE")
-                    return@compose Future.failedFuture(IllegalArgumentException("encounter is not active"))
-                Future.succeededFuture(JsonObject()
-                    .put("id", row.getString("id"))
-                    .put("patient_id", row.getString("patient_id"))
-                    .put("encounter_type", encounterType)
-                    .put("status", row.getString("status"))
-                    .put("admit_date", row.getOffsetDateTime("admit_date")?.toString()))
-            }
-    }
-
-    private fun getByEncounterId(client: SqlClient, encounterId: String): Future<JsonObject?> {
-        val query = ctx.selectFrom(t).where(cEncounterId.eq(encounterId))
-        return execute(client, query).map { rows ->
-            rows.iterator().asSequence().firstOrNull()?.let { toJson(it) }
+        return pool.preparedQuery(ENCOUNTER_SQL).execute(Tuple.of(encounterId)).compose { rows ->
+            val row = rows.iterator().asSequence().firstOrNull()
+                ?: return@compose Future.failedFuture(IllegalArgumentException("encounter not found: $encounterId"))
+            val encounterType = row.getString("encounter_type")
+            if (encounterType != "ELDERLY_CARE")
+                return@compose Future.failedFuture(IllegalArgumentException("encounter is not an elderly admission"))
+            if (row.getString("status") != "ACTIVE")
+                return@compose Future.failedFuture(IllegalArgumentException("encounter is not active"))
+            Future.succeededFuture(JsonObject()
+                .put("id", row.getString("id"))
+                .put("patient_id", row.getString("patient_id"))
+                .put("encounter_type", encounterType)
+                .put("status", row.getString("status"))
+                .put("admit_date", row.getOffsetDateTime("admit_date")?.toString()))
         }
     }
 
-    private fun lockAndGetByEncounterId(client: SqlClient, encounterId: String): Future<JsonObject> {
-        val query = ctx.selectFrom(t)
-            .where(cEncounterId.eq(encounterId))
-            .forUpdate()
-        return execute(client, query).compose { rows ->
+    private fun getByEncounterId(client: SqlClient, encounterId: String): Future<JsonObject?> =
+        client.preparedQuery(PERIOD_BY_ENCOUNTER_SQL).execute(Tuple.of(encounterId)).map { rows ->
+            rows.iterator().asSequence().firstOrNull()?.let { toJson(it) }
+        }
+
+    private fun lockAndGetByEncounterId(client: SqlClient, encounterId: String): Future<JsonObject> =
+        client.preparedQuery(PERIOD_BY_ENCOUNTER_LOCKED_SQL).execute(Tuple.of(encounterId)).compose { rows ->
             val row = rows.iterator().asSequence().firstOrNull()
             if (row == null)
                 Future.failedFuture(ConflictException("elderly admission has no bound nursing care period: $encounterId"))
             else Future.succeededFuture(toJson(row))
         }
-    }
 
-    private fun getById(client: SqlClient, id: String): Future<JsonObject> {
-        val query = ctx.selectFrom(t).where(cId.eq(id))
-        return execute(client, query).compose { rows ->
+    private fun getById(client: SqlClient, id: String): Future<JsonObject> =
+        client.preparedQuery(PERIOD_BY_ID_SQL).execute(Tuple.of(id)).compose { rows ->
             val row = rows.iterator().asSequence().firstOrNull()
             if (row == null)
                 Future.failedFuture(NotFoundException("service period not found: $id"))
             else Future.succeededFuture(toJson(row))
         }
-    }
-
-    private fun execute(client: SqlClient, query: org.jooq.Query): Future<io.vertx.sqlclient.RowSet<Row>> =
-        client.preparedQuery(DatabaseConfig.sql(query)).execute(DatabaseConfig.tuple(query))
 
     private fun periodJson(
         id: String,

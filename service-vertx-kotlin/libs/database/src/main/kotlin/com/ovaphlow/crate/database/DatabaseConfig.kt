@@ -5,13 +5,7 @@ import io.vertx.core.json.JsonObject
 import io.vertx.pgclient.PgConnectOptions
 import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.PoolOptions
-import io.vertx.sqlclient.Tuple
 import org.flywaydb.core.Flyway
-import org.jooq.DSLContext
-import org.jooq.JSONB
-import org.jooq.SQLDialect
-import org.jooq.conf.ParamType
-import org.jooq.impl.DSL
 import org.slf4j.LoggerFactory
 import javax.sql.DataSource
 
@@ -83,31 +77,5 @@ object DatabaseConfig {
         val pool = Pool.pool(vertx, connectOptions, poolOptions)
         log.info("PostgreSQL pool created: {}:{}/{}", connectOptions.host, connectOptions.port, connectOptions.database)
         return pool
-    }
-
-    fun createDSL(): DSLContext {
-        return DSL.using(SQLDialect.POSTGRES)
-    }
-
-    fun sql(query: org.jooq.Query): String {
-        return query.getSQL(ParamType.NAMED).replace(Regex(":(\\d+)")) { "\$${it.groupValues[1]}" }
-    }
-
-    fun tuple(query: org.jooq.Query): Tuple {
-        val t = Tuple.tuple()
-        query.getBindValues().forEach { v ->
-            when (v) {
-                is JSONB -> {
-                    val data = v.data()
-                    if (data.trimStart().startsWith("[")) {
-                        t.addValue(io.vertx.core.json.JsonArray(data))
-                    } else {
-                        t.addValue(io.vertx.core.json.JsonObject(data))
-                    }
-                }
-                else -> t.addValue(v)
-            }
-        }
-        return t
     }
 }

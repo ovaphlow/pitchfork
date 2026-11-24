@@ -1,41 +1,20 @@
 package com.ovaphlow.crate.nursing
 
 import com.ovaphlow.crate.common.Ulid
-import com.ovaphlow.crate.database.DatabaseConfig
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
 import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
-import org.jooq.DSLContext
-import org.jooq.JSONB
-import org.jooq.impl.DSL
-import org.jooq.impl.DSL.count
+import io.vertx.sqlclient.Tuple
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.OffsetDateTime
 
+/** 上门排班服务。持久化一律原生参数化 SQL（`$1..$n` + `Tuple`），无 jOOQ。 */
 class VisitScheduleService(
-    private val pool: Pool,
-    private val ctx: DSLContext = DatabaseConfig.createDSL()
+    private val pool: Pool
 ) {
-    private val t = DSL.table(DSL.name("nursing", "nursing_visit_schedules"))
-
-    private val cId = DSL.field("id", String::class.java)
-    private val cPeriodId = DSL.field("period_id", String::class.java)
-    private val cTaskExecutionId = DSL.field("task_execution_id", String::class.java)
-    private val cPlannedDate = DSL.field("planned_date", LocalDate::class.java)
-    private val cPlannedStart = DSL.field("planned_start", LocalTime::class.java)
-    private val cPlannedEnd = DSL.field("planned_end", LocalTime::class.java)
-    private val cCaregiver = DSL.field("caregiver", String::class.java)
-    private val cActualStart = DSL.field("actual_start", OffsetDateTime::class.java)
-    private val cActualEnd = DSL.field("actual_end", OffsetDateTime::class.java)
-    private val cTravelTime = DSL.field("travel_time", Int::class.java)
-    private val cStatus = DSL.field("status", String::class.java)
-    private val cMetadata = DSL.field("metadata", JSONB::class.java)
-    private val cCreatedAt = DSL.field("created_at", OffsetDateTime::class.java)
-    private val cUpdatedAt = DSL.field("updated_at", OffsetDateTime::class.java)
-
     companion object {
         private val VALID_STATUS_TRANSITIONS = mapOf(
             "SCHEDULED" to listOf("IN_PROGRESS", "CANCELLED"),
@@ -43,6 +22,17 @@ class VisitScheduleService(
             "COMPLETED" to emptyList(),
             "CANCELLED" to emptyList()
         )
+
+        private const val COLUMNS =
+            "id, period_id, task_execution_id, planned_date, planned_start, planned_end, caregiver, " +
+                "actual_start, actual_end, travel_time, status, metadata, created_at, updated_at"
+
+        private const val INSERT_SQL =
+            "INSERT INTO nursing.nursing_visit_schedules ($COLUMNS) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11, \$12, \$13, \$14)"
+
+        private const val SELECT_BY_ID_SQL =
+            "SELECT $COLUMNS FROM nursing.nursing_visit_schedules WHERE id = \$1"
 
         fun toJson(row: Row): JsonObject {
             return JsonObject()
@@ -75,23 +65,26 @@ class VisitScheduleService(
         val id = Ulid.generate()
         val now = OffsetDateTime.now()
 
-        val query = ctx.insertInto(t)
-            .set(cId, id)
-            .set(cPeriodId, periodId)
-            .set(cTaskExecutionId, body.getString("task_execution_id"))
-            .set(cPlannedDate, LocalDate.parse(plannedDate))
-            .set(cPlannedStart, body.getString("planned_start")?.let { LocalTime.parse(it) })
-            .set(cPlannedEnd, body.getString("planned_end")?.let { LocalTime.parse(it) })
-            .set(cCaregiver, body.getString("caregiver"))
-            .set(cTravelTime, body.getInteger("travel_time"))
-            .set(cStatus, "SCHEDULED")
-            .set(cMetadata, body.containsKey("metadata")
-                .let { if (it) JSONB.valueOf(body.getJsonObject("metadata").encode()) else null })
-            .set(cCreatedAt, now)
-            .set(cUpdatedAt, now)
+        val tuple = Tuple.of(
+            id,
+            periodId,
+            body.getString("task_execution_id"),
+            LocalDate.parse(plannedDate),
+            body.getString("planned_start")?.let { LocalTime.parse(it) },
+            body.getString("planned_end")?.let { LocalTime.parse(it) },
+            body.getString("caregiver"),
+            // actual_start / actual_end 建单时恒为空
+            null,
+            null,
+            body.getInteger("travel_time"),
+            "SCHEDULED",
+            if (body.containsKey("metadata")) body.getJsonObject("metadata") else null,
+            now,
+            now,
+        )
 
-        return pool.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+        return pool.preparedQuery(INSERT_SQL)
+            .execute(tuple)
             .map {
                 JsonObject()
                     .put("id", id)
@@ -118,39 +111,41 @@ class VisitScheduleService(
         limit: Int = 50,
         offset: Int = 0
     ): Future<JsonObject> {
-        val conditions = mutableListOf<org.jooq.Condition>()
-        periodId?.let { conditions.add(cPeriodId.eq(it)) }
-        caregiver?.let { conditions.add(cCaregiver.eq(it)) }
-        status?.let { conditions.add(cStatus.eq(it)) }
-        dateFrom?.let { conditions.add(cPlannedDate.ge(LocalDate.parse(it))) }
-        dateTo?.let { conditions.add(cPlannedDate.le(LocalDate.parse(it))) }
+        val where = mutableListOf<String>()
+        val args = mutableListOf<Any?>()
 
-        val countQuery = ctx.select(count().`as`("total")).from(t).where(conditions)
-        val dataQuery = ctx.selectFrom(t)
-            .where(conditions)
-            .orderBy(cPlannedDate.asc(), cPlannedStart.asc())
-            .limit(limit)
-            .offset(offset)
+        /** 追加一个绑定值并返回其占位符。 */
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
 
-        return pool.preparedQuery(DatabaseConfig.sql(countQuery))
-            .execute(DatabaseConfig.tuple(countQuery))
-            .flatMap { countRows ->
-                val total = countRows.iterator().next().getLong("total") ?: 0L
-                pool.preparedQuery(DatabaseConfig.sql(dataQuery))
-                    .execute(DatabaseConfig.tuple(dataQuery))
-                    .map { dataRows ->
-                        val records = JsonArray()
-                        for (row in dataRows) records.add(toJson(row))
-                        JsonObject().put("records", records)
-                            .put("meta", JsonObject().put("total", total))
-                    }
-            }
+        periodId?.let { where.add("period_id = ${bind(it)}") }
+        caregiver?.let { where.add("caregiver = ${bind(it)}") }
+        status?.let { where.add("status = ${bind(it)}") }
+        dateFrom?.let { where.add("planned_date >= ${bind(LocalDate.parse(it))}") }
+        dateTo?.let { where.add("planned_date <= ${bind(LocalDate.parse(it))}") }
+
+        val whereClause = if (where.isEmpty()) "" else " WHERE " + where.joinToString(" AND ")
+        val countSql = "SELECT count(*) AS total FROM nursing.nursing_visit_schedules$whereClause"
+        val countArgs = args.toList()
+        val dataSql =
+            "SELECT $COLUMNS FROM nursing.nursing_visit_schedules$whereClause " +
+                "ORDER BY planned_date ASC, planned_start ASC LIMIT ${bind(limit)} OFFSET ${bind(offset)}"
+        val dataArgs = args.toList()
+
+        return pool.preparedQuery(countSql).execute(Tuple.from(countArgs)).flatMap { countRows ->
+            val total = countRows.iterator().next().getLong("total") ?: 0L
+            pool.preparedQuery(dataSql).execute(Tuple.from(dataArgs))
+                .map { dataRows ->
+                    val records = JsonArray()
+                    for (row in dataRows) records.add(toJson(row))
+                    JsonObject().put("records", records)
+                        .put("meta", JsonObject().put("total", total))
+                }
+        }
     }
 
     fun get(id: String): Future<JsonObject> {
-        val query = ctx.selectFrom(t).where(cId.eq(id))
-        return pool.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+        return pool.preparedQuery(SELECT_BY_ID_SQL)
+            .execute(Tuple.of(id))
             .flatMap { rows ->
                 if (rows.size() == 0)
                     Future.failedFuture(NotFoundException("visit schedule not found: $id"))
@@ -172,24 +167,36 @@ class VisitScheduleService(
                 )
 
             val now = OffsetDateTime.now()
-            var q = ctx.update(t).set(cStatus, newStatus).set(cUpdatedAt, now)
+            val args = mutableListOf<Any?>()
+
+            /** 追加一个绑定值并返回其占位符。 */
+            fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
+
+            // 列 → 占位符；同一列重复赋值时后者覆盖（与原 jOOQ set 覆盖语义一致）。
+            val sets = linkedMapOf<String, String>()
+            sets["status"] = bind(newStatus)
+            sets["updated_at"] = bind(now)
 
             if (newStatus == "IN_PROGRESS" && !body.containsKey("actual_start"))
-                q = q.set(cActualStart, now)
+                sets["actual_start"] = bind(now)
             if (newStatus == "COMPLETED" && !body.containsKey("actual_end"))
-                q = q.set(cActualEnd, now)
+                sets["actual_end"] = bind(now)
 
             if (body.containsKey("actual_start"))
-                q = q.set(cActualStart, body.getString("actual_start")?.let { OffsetDateTime.parse(it) })
+                sets["actual_start"] = bind(body.getString("actual_start")?.let { OffsetDateTime.parse(it) })
             if (body.containsKey("actual_end"))
-                q = q.set(cActualEnd, body.getString("actual_end")?.let { OffsetDateTime.parse(it) })
+                sets["actual_end"] = bind(body.getString("actual_end")?.let { OffsetDateTime.parse(it) })
             if (body.containsKey("travel_time"))
-                q = q.set(cTravelTime, body.getInteger("travel_time"))
+                sets["travel_time"] = bind(body.getInteger("travel_time"))
 
-            val updateQuery = q.where(cId.eq(id))
+            val idPlaceholder = bind(id)
+            val updateSql =
+                "UPDATE nursing.nursing_visit_schedules " +
+                    "SET ${sets.entries.joinToString(", ") { "${it.key} = ${it.value}" }} " +
+                    "WHERE id = $idPlaceholder"
 
-            pool.preparedQuery(DatabaseConfig.sql(updateQuery))
-                .execute(DatabaseConfig.tuple(updateQuery))
+            pool.preparedQuery(updateSql)
+                .execute(Tuple.from(args))
                 .flatMap { get(id) }
         }
     }

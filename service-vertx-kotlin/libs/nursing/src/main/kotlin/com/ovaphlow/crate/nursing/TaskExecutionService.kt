@@ -1,18 +1,15 @@
 package com.ovaphlow.crate.nursing
 
 import com.ovaphlow.crate.common.Ulid
-import com.ovaphlow.crate.database.DatabaseConfig
 import com.ovaphlow.crate.inventories.InventoryConsumptionService
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
 import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
+import io.vertx.sqlclient.RowSet
 import io.vertx.sqlclient.SqlConnection
-import org.jooq.DSLContext
-import org.jooq.JSONB
-import org.jooq.impl.DSL
-import org.jooq.impl.DSL.count
+import io.vertx.sqlclient.Tuple
 import org.slf4j.LoggerFactory
 import java.math.BigDecimal
 import java.math.RoundingMode
@@ -31,66 +28,17 @@ private fun nursingDecimalText(value: Any?): String? = when (value) {
 private fun decimalNorm(value: Any?): String =
     value?.toString()?.toBigDecimalOrNull()?.stripTrailingZeros()?.toPlainString() ?: ""
 
+/**
+ * 护理任务执行服务。
+ *
+ * 持久化一律原生参数化 SQL（`$1..$n` + `Tuple`），本文件无任何 jOOQ 引用。
+ * `/today` 与 `/overdue` 共用同一份投影列与 FROM/JOIN（[EXECUTION_PROJECTION] /
+ * [EXECUTION_FROM]），两个入口禁止各自复制查询。
+ */
 class TaskExecutionService(
     private val pool: Pool,
-    private val ctx: DSLContext = DatabaseConfig.createDSL(),
 ) {
     private val log = LoggerFactory.getLogger(TaskExecutionService::class.java)
-
-    // ——— nursing_task_executions ———
-    private val t = DSL.table(DSL.name("nursing", "nursing_task_executions"))
-
-    private val cId = DSL.field("id", String::class.java)
-    private val cTaskId = DSL.field("task_id", String::class.java)
-    private val cPlannedTime = DSL.field("planned_time", OffsetDateTime::class.java)
-    private val cActualTime = DSL.field("actual_time", OffsetDateTime::class.java)
-    private val cExecutor = DSL.field("executor", String::class.java)
-    private val cStatus = DSL.field("status", String::class.java)
-    private val cStockOpDetailId = DSL.field("stock_operation_detail_id", String::class.java)
-    private val cQuantity = DSL.field("quantity", BigDecimal::class.java)
-    private val cNote = DSL.field("note", String::class.java)
-    private val cMetadata = DSL.field("metadata", JSONB::class.java)
-    private val cCreatedAt = DSL.field("created_at", OffsetDateTime::class.java)
-
-    // ——— nursing_task_execution_consumptions ———
-    private val consTable = DSL.table(DSL.name("nursing", "nursing_task_execution_consumptions"))
-    private val ccId = DSL.field("cc.id", String::class.java)
-    private val ccExecId = DSL.field("cc.task_execution_id", String::class.java)
-    private val ccDetailId = DSL.field("cc.stock_operation_detail_id", String::class.java)
-    private val ccStockId = DSL.field("cc.stock_id", String::class.java)
-    private val ccMaterialId = DSL.field("cc.material_id", String::class.java)
-    private val ccLotId = DSL.field("cc.lot_id", String::class.java)
-    private val ccWarehouse = DSL.field("cc.warehouse", String::class.java)
-    private val ccQuantity = DSL.field("cc.quantity", BigDecimal::class.java)
-    private val ccUnit = DSL.field("cc.unit", String::class.java)
-    private val ccUnitCost = DSL.field("cc.unit_cost", BigDecimal::class.java)
-    private val ccTotalCost = DSL.field("cc.total_cost", BigDecimal::class.java)
-    private val ccCreatedAt = DSL.field("cc.created_at", OffsetDateTime::class.java)
-
-    // ——— nursing_tasks ———
-    private val taskTable = DSL.table(DSL.name("nursing", "nursing_tasks"))
-    private val ctId = DSL.field("t_id", String::class.java)
-    private val ctPeriodId = DSL.field("t_period_id", String::class.java)
-    private val ctDescription = DSL.field("t_description", String::class.java)
-    private val ctTaskType = DSL.field("t_task_type", String::class.java)
-    private val ctFrequencyCode = DSL.field("t_frequency_code", String::class.java)
-    private val ctFrequencyName = DSL.field("t_frequency_name", String::class.java)
-    private val ctStartDate = DSL.field("t_start_date", LocalDate::class.java)
-    private val ctEndDate = DSL.field("t_end_date", LocalDate::class.java)
-    private val ctStatus = DSL.field("t_status", String::class.java)
-    private val ctMetadata = DSL.field("t_metadata", JSONB::class.java)
-
-    // ——— nursing_service_periods ———
-    private val periodTable = DSL.table(DSL.name("nursing", "nursing_service_periods"))
-    private val cpPatientId = DSL.field("p_patient_id", String::class.java)
-
-    // ——— healthcare.patients ———
-    private val patientTable = DSL.table(DSL.name("healthcare", "patients"))
-    private val cpatName = DSL.field("pat_name", String::class.java)
-
-    // ——— materials ———
-    private val materialsTable = DSL.table(DSL.name("public", "materials"))
-    private val matName = DSL.field("mat.name", String::class.java)
 
     /** 把结果行中的时间列（TIMESTAMPTZ / 文本）统一解析为 OffsetDateTime */
     private fun rowTimestamp(value: Any?): OffsetDateTime? = when (value) {
@@ -161,6 +109,179 @@ class TaskExecutionService(
         /** 逾期收口留痕原因（030 §4.3 冻结文案，不得改写） */
         const val CONVERGE_REASON = "逾期未执行，批量标记漏执行"
 
+        /** `nursing.nursing_task_executions` 显式列清单（与 [toJson] 读取的键一致）。 */
+        private const val EXECUTION_COLUMNS =
+            "id, task_id, planned_time, actual_time, executor, status, stock_operation_detail_id, " +
+                "quantity, note, metadata, created_at"
+
+        private const val EXECUTION_BY_ID_SQL =
+            "SELECT $EXECUTION_COLUMNS FROM nursing.nursing_task_executions WHERE id = \$1"
+
+        private const val EXECUTION_BY_ID_LOCKED_SQL =
+            "SELECT $EXECUTION_COLUMNS FROM nursing.nursing_task_executions WHERE id = \$1 FOR UPDATE"
+
+        private const val EXECUTION_INSERT_SQL =
+            "INSERT INTO nursing.nursing_task_executions " +
+                "(id, task_id, planned_time, actual_time, executor, status, note, metadata, created_at) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9)"
+
+        /** 排期生成：`(task_id, planned_time)` 唯一索引保证幂等（V401），冲突即跳过。 */
+        private const val PLANNED_EXECUTION_INSERT_SQL =
+            "INSERT INTO nursing.nursing_task_executions (id, task_id, planned_time, status, created_at) " +
+                "VALUES (\$1, \$2, \$3, 'PENDING', \$4) ON CONFLICT (task_id, planned_time) DO NOTHING"
+
+        /** 执行记录 → 任务类型（打卡权限门禁选码用），只读一列。 */
+        private const val TASK_TYPE_OF_SQL =
+            "SELECT t.task_type AS task_type FROM nursing.nursing_task_executions AS e " +
+                "JOIN nursing.nursing_tasks AS t ON t.id = e.task_id WHERE e.id = \$1"
+
+        private const val TASK_PERIOD_SQL =
+            "SELECT t.period_id AS t_period_id FROM nursing.nursing_tasks AS t WHERE t.id = \$1"
+
+        private const val PERIOD_PATIENT_SQL =
+            "SELECT p.patient_id AS p_patient_id FROM nursing.nursing_service_periods AS p WHERE p.id = \$1"
+
+        /** 耗材明细显式列清单（含 public.materials / public.lots 回显列）。 */
+        private const val CONSUMPTION_COLUMNS =
+            "cc.id AS id, cc.stock_operation_detail_id AS stock_operation_detail_id, " +
+                "cc.stock_id AS stock_id, cc.material_id AS material_id, " +
+                "mat.name AS material_name, cc.lot_id AS lot_id, lot.batch_no AS batch_no, " +
+                "cc.warehouse AS warehouse, cc.quantity AS quantity, cc.unit AS unit, " +
+                "cc.unit_cost AS unit_cost, cc.total_cost AS total_cost, cc.created_at AS created_at"
+
+        private const val CONSUMPTION_FROM =
+            " FROM nursing.nursing_task_execution_consumptions AS cc" +
+                " LEFT JOIN public.materials AS mat ON mat.id = cc.material_id" +
+                " LEFT JOIN public.lots AS lot ON lot.id = cc.lot_id"
+
+        private const val EXECUTION_CONSUMPTIONS_SQL =
+            "SELECT $CONSUMPTION_COLUMNS$CONSUMPTION_FROM WHERE cc.task_execution_id = \$1"
+
+        private const val EXECUTION_CONSUMPTIONS_ORDERED_SQL =
+            "SELECT $CONSUMPTION_COLUMNS$CONSUMPTION_FROM " +
+                "WHERE cc.task_execution_id = \$1 ORDER BY cc.created_at ASC"
+
+        private const val CONSUMPTION_SUMMARY_SQL =
+            "SELECT count(*) AS cnt, cc.warehouse AS warehouse, " +
+                "sum(cc.total_cost) AS total_cost " +
+                "FROM nursing.nursing_task_execution_consumptions AS cc " +
+                "WHERE cc.task_execution_id = \$1 GROUP BY cc.warehouse"
+
+        private const val CONSUMPTION_SUMMARY_BATCH_SQL =
+            "SELECT cc.task_execution_id AS task_execution_id, count(*) AS cnt, " +
+                "cc.warehouse AS warehouse, sum(cc.total_cost) AS total_cost " +
+                "FROM nursing.nursing_task_execution_consumptions AS cc " +
+                "WHERE cc.task_execution_id IN (%s) " +
+                "GROUP BY cc.task_execution_id, cc.warehouse"
+
+        /** 016 单一基础单位：一条执行耗材关联（快照数量/单位/成本同事务写入）。 */
+        private const val CONSUMPTION_INSERT_SQL =
+            "INSERT INTO nursing.nursing_task_execution_consumptions " +
+                "(id, task_execution_id, stock_operation_detail_id, stock_id, material_id, lot_id, " +
+                "warehouse, quantity, unit, unit_cost, total_cost, created_at) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11, \$12)"
+
+        /** 多条耗材时清空旧兼容字段。 */
+        private const val CLEAR_LEGACY_FIELDS_SQL =
+            "UPDATE nursing.nursing_task_executions " +
+                "SET stock_operation_detail_id = NULL, quantity = NULL WHERE id = \$1"
+
+        /** 仅有 1 条耗材时同步旧兼容字段。 */
+        private const val SYNC_LEGACY_FIELDS_SQL =
+            "UPDATE nursing.nursing_task_executions " +
+                "SET stock_operation_detail_id = \$2, quantity = \$3 WHERE id = \$1"
+
+        /**
+         * 执行记录列表的统一投影列：列名与 `toJson` 期望的键一一对应。
+         * `/today`、`/overdue` 必须共用，禁止各自复制一份查询。
+         */
+        private const val EXECUTION_PROJECTION =
+            "e.id AS id, e.task_id AS task_id, e.planned_time AS planned_time, " +
+                "e.actual_time AS actual_time, e.executor AS executor, e.status AS status, " +
+                "e.stock_operation_detail_id AS stock_operation_detail_id, " +
+                "e.quantity AS quantity, e.note AS note, e.metadata AS metadata, " +
+                "e.created_at AS created_at, t.description AS task_description, " +
+                "t.task_type AS task_type, t.frequency_name AS task_frequency_name, " +
+                "t.period_id AS task_period_id, p.patient_id AS patient_id, " +
+                "pat.name AS patient_name, mo.order_details AS order_details, " +
+                "mo.order_type AS order_type"
+
+        /**
+         * 执行记录查询的公共 FROM/JOIN：
+         * e = nursing.nursing_task_executions，t = nursing.nursing_tasks，
+         * p = nursing.nursing_service_periods，pat = healthcare.patients，
+         * mo = healthcare.medical_orders（经 t.order_item_id 绑定，未绑定医嘱时为 null）。
+         * `/today` 与 `/overdue` 的列表、计数与聚合全部复用，保证口径一致。
+         *
+         * mo 的 JOIN 落在 `medical_orders.id`（V500 已确认是 PRIMARY KEY）上，至多 1:1，
+         * 因此计数/聚合行数不变；共用同一 FROM 是本节既有约定（两个入口禁止各自复制查询）。
+         */
+        private const val EXECUTION_FROM =
+            " FROM nursing.nursing_task_executions AS e" +
+                " JOIN nursing.nursing_tasks AS t ON t.id = e.task_id" +
+                " LEFT JOIN nursing.nursing_service_periods AS p ON p.id = t.period_id" +
+                " LEFT JOIN healthcare.patients AS pat ON pat.id = p.patient_id" +
+                " LEFT JOIN healthcare.medical_orders AS mo ON t.order_item_id = mo.id"
+
+        /**
+         * §4.2 聚合：日期窗口内的各状态计数 + 全量逾期数，一条 SQL 取回（`count(*) FILTER (WHERE ...)`）。
+         *
+         * `$1` = 日期窗口下界，`$2` = 上界，`$3` = now；
+         * `status_totals` 落在日期窗口内，`overdue_total_all` 不带日期窗口。
+         */
+        private const val TODAY_META_SQL =
+            "SELECT" +
+                " count(*) FILTER (WHERE e.planned_time >= \$1 AND e.planned_time < \$2" +
+                " AND e.status = 'PENDING') AS status_pending," +
+                " count(*) FILTER (WHERE e.planned_time >= \$1 AND e.planned_time < \$2" +
+                " AND e.status = 'IN_PROGRESS') AS status_in_progress," +
+                " count(*) FILTER (WHERE e.planned_time >= \$1 AND e.planned_time < \$2" +
+                " AND e.status = 'COMPLETED') AS status_completed," +
+                " count(*) FILTER (WHERE e.planned_time >= \$1 AND e.planned_time < \$2" +
+                " AND e.status = 'SKIPPED') AS status_skipped," +
+                " count(*) FILTER (WHERE e.planned_time >= \$1 AND e.planned_time < \$2" +
+                " AND e.status = 'CANCELLED') AS status_cancelled," +
+                " count(*) FILTER (WHERE e.status IN ('PENDING', 'IN_PROGRESS')" +
+                " AND e.planned_time < \$3) AS overdue_total_all" +
+                EXECUTION_FROM
+
+        /** 逾期收口候选（多取 1 条仅用于判定 truncated）。 */
+        private const val CONVERGE_CANDIDATE_SQL =
+            "SELECT e.id AS id FROM nursing.nursing_task_executions AS e" +
+                " JOIN nursing.nursing_tasks AS t ON t.id = e.task_id" +
+                " LEFT JOIN nursing.nursing_service_periods AS p ON p.id = t.period_id" +
+                " WHERE e.status IN ('PENDING', 'IN_PROGRESS') AND e.planned_time < \$1"
+
+        /** 逾期收口：`metadata.convergence` 浅合并，不覆盖其它键；终态守卫保证幂等。 */
+        private const val CONVERGE_UPDATE_SQL =
+            "UPDATE nursing.nursing_task_executions SET status = \$1, " +
+                "metadata = COALESCE(metadata, '{}'::jsonb) || \$2::jsonb " +
+                "WHERE id = \$3 AND status IN ('PENDING', 'IN_PROGRESS')"
+
+        /**
+         * 执行统计聚合投影（全局汇总与按执行人分组逐字共用）。
+         *
+         * 045（2026-10-04 QA 口径修订）：应完成 = 已到计划时间 **或 已完成**
+         * （`$1` = now）；分子 completed_due_total 只认状态，不再受 planned_time 限制。
+         * 逾期定义不变：仍只认 PENDING/IN_PROGRESS 且已过计划时间。
+         */
+        private const val STATISTICS_AGGREGATES =
+            "count(*) AS scheduled_total," +
+                " count(*) FILTER (WHERE e.status = 'PENDING') AS pending_total," +
+                " count(*) FILTER (WHERE e.status = 'IN_PROGRESS') AS in_progress_total," +
+                " count(*) FILTER (WHERE e.status = 'COMPLETED') AS completed_total," +
+                " count(*) FILTER (WHERE e.status = 'SKIPPED') AS skipped_total," +
+                " count(*) FILTER (WHERE e.status = 'CANCELLED') AS cancelled_total," +
+                " count(*) FILTER (WHERE e.planned_time < \$1 OR e.status = 'COMPLETED')" +
+                " AS due_total," +
+                " count(*) FILTER (WHERE e.status = 'COMPLETED') AS completed_due_total," +
+                " count(*) FILTER (WHERE e.status IN ('PENDING', 'IN_PROGRESS')" +
+                " AND e.planned_time < \$1) AS overdue_total"
+
+        private const val STATISTICS_FROM =
+            " FROM nursing.nursing_task_executions AS e" +
+                " JOIN nursing.nursing_tasks AS t ON t.id = e.task_id"
+
         /**
          * 执行状态机（003 冻结）。
          *
@@ -180,6 +301,9 @@ class TaskExecutionService(
                 "CANCELLED" to emptyList(),
             )
 
+        /** 生成 `$1, $2, ...` 占位符串（[count] 个）。 */
+        private fun placeholders(count: Int): String = (1..count).joinToString(", ") { "\$$it" }
+
         /**
          * 计算单条执行记录的逾期派生字段。
          * 纯函数，不依赖任何外部状态。
@@ -190,15 +314,16 @@ class TaskExecutionService(
          * - 或为无周期归属的全院性康复活动（task_type = REHABILITATION 且 period_id 为空，
          *   机构服务项目不挂老人，如集体操课、文娱活动）。
          * 仅 REHABILITATION 允许无周期归属参与排期与今日看板，其它任务类型行为不变。
+         *
+         * 原生参数化 SQL 片段（枚举值为固定字面量，无绑定参数）：
+         * 调用方提供任务表与周期表的别名，避免两处口径漂移。
          */
         fun taskParticipationCondition(
-            taskPeriodId: org.jooq.Field<String?>,
-            taskType: org.jooq.Field<String?>,
-            periodStatus: org.jooq.Field<String?>,
-        ): org.jooq.Condition =
-            periodStatus.eq("ACTIVE").or(
-                taskPeriodId.isNull().and(taskType.eq("REHABILITATION")),
-            )
+            taskAlias: String = "t",
+            periodAlias: String = "p",
+        ): String =
+            "$periodAlias.status = 'ACTIVE'" +
+                " OR ($taskAlias.period_id IS NULL AND $taskAlias.task_type = 'REHABILITATION')"
 
         fun computeOverdueFields(
             status: String?,
@@ -323,38 +448,30 @@ class TaskExecutionService(
         val now = OffsetDateTime.now()
 
         // 客户端不再允许直接写 stock_operation_detail_id / quantity
-        val query =
-            ctx
-                .insertInto(t)
-                .set(cId, id)
-                .set(cTaskId, taskId)
-                .set(cPlannedTime, body.getString("planned_time")?.let { OffsetDateTime.parse(it) })
-                .set(cActualTime, body.getString("actual_time")?.let { OffsetDateTime.parse(it) })
-                .set(cExecutor, executor)
-                .set(cStatus, "PENDING")
-                .set(cNote, body.getString("note"))
-                .set(
-                    cMetadata,
-                    body
-                        .containsKey("metadata")
-                        .let { if (it) JSONB.valueOf(body.getJsonObject("metadata").encode()) else null },
-                ).set(cCreatedAt, now)
+        val tuple = Tuple.of(
+            id,
+            taskId,
+            body.getString("planned_time")?.let { OffsetDateTime.parse(it) },
+            body.getString("actual_time")?.let { OffsetDateTime.parse(it) },
+            executor,
+            "PENDING",
+            body.getString("note"),
+            if (body.containsKey("metadata")) body.getJsonObject("metadata") else null,
+            now,
+        )
 
-        return pool
-            .preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
-            .map {
-                JsonObject()
-                    .put("id", id)
-                    .put("task_id", taskId)
-                    .put("planned_time", body.getString("planned_time"))
-                    .put("actual_time", body.getString("actual_time"))
-                    .put("executor", executor)
-                    .put("status", "PENDING")
-                    .put("note", body.getString("note"))
-                    .put("metadata", body.getJsonObject("metadata"))
-                    .put("created_at", now.toString())
-            }
+        return pool.preparedQuery(EXECUTION_INSERT_SQL).execute(tuple).map {
+            JsonObject()
+                .put("id", id)
+                .put("task_id", taskId)
+                .put("planned_time", body.getString("planned_time"))
+                .put("actual_time", body.getString("actual_time"))
+                .put("executor", executor)
+                .put("status", "PENDING")
+                .put("note", body.getString("note"))
+                .put("metadata", body.getJsonObject("metadata"))
+                .put("created_at", now.toString())
+        }
     }
 
     fun list(
@@ -364,28 +481,28 @@ class TaskExecutionService(
         limit: Int = 50,
         offset: Int = 0,
     ): Future<JsonObject> {
-        val conditions = mutableListOf<org.jooq.Condition>()
-        taskId?.let { conditions.add(cTaskId.eq(it)) }
-        executor?.let { conditions.add(cExecutor.eq(it)) }
-        status?.let { conditions.add(cStatus.eq(it)) }
+        val where = mutableListOf<String>()
+        val args = mutableListOf<Any?>()
 
-        val countQuery = ctx.select(count().`as`("total")).from(t).where(conditions)
-        val dataQuery =
-            ctx
-                .selectFrom(t)
-                .where(conditions)
-                .orderBy(cCreatedAt.desc())
-                .limit(limit)
-                .offset(offset)
+        /** 追加一个绑定值并返回其占位符。 */
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
 
-        return pool
-            .preparedQuery(DatabaseConfig.sql(countQuery))
-            .execute(DatabaseConfig.tuple(countQuery))
+        taskId?.let { where.add("task_id = ${bind(it)}") }
+        executor?.let { where.add("executor = ${bind(it)}") }
+        status?.let { where.add("status = ${bind(it)}") }
+
+        val whereClause = if (where.isEmpty()) "" else " WHERE " + where.joinToString(" AND ")
+        val countSql = "SELECT count(*) AS total FROM nursing.nursing_task_executions$whereClause"
+        val countArgs = args.toList()
+        val dataSql =
+            "SELECT $EXECUTION_COLUMNS FROM nursing.nursing_task_executions$whereClause " +
+                "ORDER BY created_at DESC LIMIT ${bind(limit)} OFFSET ${bind(offset)}"
+        val dataArgs = args.toList()
+
+        return pool.preparedQuery(countSql).execute(Tuple.from(countArgs))
             .flatMap { countRows ->
                 val total = countRows.iterator().next().getLong("total") ?: 0L
-                pool
-                    .preparedQuery(DatabaseConfig.sql(dataQuery))
-                    .execute(DatabaseConfig.tuple(dataQuery))
+                pool.preparedQuery(dataSql).execute(Tuple.from(dataArgs))
                     .flatMap { dataRows ->
                         val records = JsonArray()
                         val execIds = mutableListOf<String>()
@@ -415,29 +532,13 @@ class TaskExecutionService(
      * 只读一列，不做任何权限判定；记录不存在或 join 不到任务时回 `null`，
      * 由调用方按最严的权限码处理（不借 403/404 差异泄露记录是否存在）。
      */
-    fun taskTypeOf(id: String): Future<String?> {
-        val execTable = DSL.table(DSL.name("nursing", "nursing_task_executions")).`as`("e")
-        val taskTableAlias = DSL.table(DSL.name("nursing", "nursing_tasks")).`as`("t")
-        val query =
-            ctx
-                .select(DSL.field("t.task_type", String::class.java).`as`("task_type"))
-                .from(execTable)
-                .join(taskTableAlias)
-                .on(DSL.field("e.task_id", String::class.java).eq(DSL.field("t.id", String::class.java)))
-                .where(DSL.field("e.id", String::class.java).eq(id))
-        return pool
-            .preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
-            .map { rows ->
-                if (rows.size() == 0) null else rows.iterator().next().getValue("task_type")?.toString()
-            }
-    }
+    fun taskTypeOf(id: String): Future<String?> =
+        pool.preparedQuery(TASK_TYPE_OF_SQL).execute(Tuple.of(id)).map { rows ->
+            if (rows.size() == 0) null else rows.iterator().next().getValue("task_type")?.toString()
+        }
 
-    fun get(id: String): Future<JsonObject> {
-        val query = ctx.selectFrom(t).where(cId.eq(id))
-        return pool
-            .preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+    fun get(id: String): Future<JsonObject> =
+        pool.preparedQuery(EXECUTION_BY_ID_SQL).execute(Tuple.of(id))
             .flatMap { rows ->
                 if (rows.size() == 0) {
                     Future.failedFuture(NotFoundException("execution not found: $id"))
@@ -449,7 +550,6 @@ class TaskExecutionService(
                     }
                 }
             }
-    }
 
     /**
      * 更新执行状态（打卡路径）。
@@ -477,30 +577,37 @@ class TaskExecutionService(
             }
 
             val now = OffsetDateTime.now()
-            var q = ctx.update(t).set(cStatus, newStatus)
+            val sets = mutableListOf<String>()
+            val args = mutableListOf<Any?>()
+
+            /** 追加一个绑定值并返回其占位符。 */
+            fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
+
+            sets.add("status = ${bind(newStatus)}")
 
             if (newStatus == "IN_PROGRESS" && existing.getString("actual_time") == null) {
-                q = q.set(cActualTime, now)
+                sets.add("actual_time = ${bind(now)}")
             }
             if (newStatus == "COMPLETED" && existing.getString("actual_time") == null) {
-                q = q.set(cActualTime, now)
+                sets.add("actual_time = ${bind(now)}")
             }
 
             // 支持保存备注/跳过/取消原因
             if (!note.isNullOrBlank()) {
-                q = q.set(cNote, note.trim())
+                sets.add("note = ${bind(note.trim())}")
             }
 
             // 执行人（登录 subject_id）：无耗材打卡路径此前不落库，F6 验收要求记录
             if (!executor.isNullOrBlank()) {
-                q = q.set(cExecutor, executor.trim())
+                sets.add("executor = ${bind(executor.trim())}")
             }
 
-            val updateQuery = q.where(cId.eq(id))
+            val idPlaceholder = bind(id)
+            val updateSql =
+                "UPDATE nursing.nursing_task_executions SET ${sets.joinToString(", ")} " +
+                    "WHERE id = $idPlaceholder"
 
-            pool
-                .preparedQuery(DatabaseConfig.sql(updateQuery))
-                .execute(DatabaseConfig.tuple(updateQuery))
+            pool.preparedQuery(updateSql).execute(Tuple.from(args))
                 .flatMap { get(id) }
         }
     }
@@ -511,27 +618,34 @@ class TaskExecutionService(
         executor: String?,
     ): Future<JsonObject> =
         get(id).flatMap { _ ->
-            var q = ctx.update(t).set(cExecutor, executor)
+            val sets = mutableListOf<String>()
+            val args = mutableListOf<Any?>()
+
+            /** 追加一个绑定值并返回其占位符。 */
+            fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
+
+            sets.add("executor = ${bind(executor)}")
 
             if (body.containsKey("actual_time")) {
-                q = q.set(cActualTime, body.getString("actual_time")?.let { OffsetDateTime.parse(it) })
+                sets.add("actual_time = ${bind(body.getString("actual_time")?.let { OffsetDateTime.parse(it) })}")
             }
             if (body.containsKey("planned_time")) {
-                q = q.set(cPlannedTime, body.getString("planned_time")?.let { OffsetDateTime.parse(it) })
+                sets.add("planned_time = ${bind(body.getString("planned_time")?.let { OffsetDateTime.parse(it) })}")
             }
             if (body.containsKey("note")) {
-                q = q.set(cNote, body.getString("note"))
+                sets.add("note = ${bind(body.getString("note"))}")
             }
             // 保护旧库存字段：拒绝外部直接写入
             if (body.containsKey("metadata")) {
-                q = q.set(cMetadata, JSONB.valueOf(body.getJsonObject("metadata").encode()))
+                sets.add("metadata = ${bind(body.getJsonObject("metadata"))}")
             }
 
-            val updateQuery = q.where(cId.eq(id))
+            val idPlaceholder = bind(id)
+            val updateSql =
+                "UPDATE nursing.nursing_task_executions SET ${sets.joinToString(", ")} " +
+                    "WHERE id = $idPlaceholder"
 
-            pool
-                .preparedQuery(DatabaseConfig.sql(updateQuery))
-                .execute(DatabaseConfig.tuple(updateQuery))
+            pool.preparedQuery(updateSql).execute(Tuple.from(args))
                 .flatMap { get(id) }
         }
 
@@ -565,10 +679,7 @@ class TaskExecutionService(
         val now = OffsetDateTime.now()
         return pool.withTransaction { connection ->
                 // 锁定执行记录
-                val lockExec = ctx.selectFrom(t).where(cId.eq(id)).forUpdate()
-                connection
-                    .preparedQuery(DatabaseConfig.sql(lockExec))
-                    .execute(DatabaseConfig.tuple(lockExec))
+                connection.preparedQuery(EXECUTION_BY_ID_LOCKED_SQL).execute(Tuple.of(id))
                     .compose { lockedRows ->
                         if (lockedRows.size() == 0) {
                             return@compose Future.failedFuture(NotFoundException("execution not found: $id"))
@@ -629,46 +740,20 @@ class TaskExecutionService(
                         }
 
                         // 查询任务和周期信息
-                        val taskInfo =
-                            ctx
-                                .select(DSL.field("t.period_id").`as`("t_period_id"))
-                                .from(taskTable.`as`("t"))
-                                .where(DSL.field("t.id").eq(taskId))
-                        connection
-                            .preparedQuery(DatabaseConfig.sql(taskInfo))
-                            .execute(DatabaseConfig.tuple(taskInfo))
+                        connection.preparedQuery(TASK_PERIOD_SQL).execute(Tuple.of(taskId))
                             .compose { taskRows ->
                                 val periodId =
-                                    if (taskRows.size() >
-                                        0
-                                    ) {
-                                        taskRows
-                                            .iterator()
-                                            .next()
-                                            .getValue("t_period_id")
-                                            ?.toString()
+                                    if (taskRows.size() > 0) {
+                                        taskRows.iterator().next().getValue("t_period_id")?.toString()
                                     } else {
                                         null
                                     }
 
-                                val periodQuery =
-                                    ctx
-                                        .select(DSL.field("p.patient_id").`as`("p_patient_id"))
-                                        .from(periodTable.`as`("p"))
-                                        .where(DSL.field("p.id").eq(periodId))
-                                connection
-                                    .preparedQuery(DatabaseConfig.sql(periodQuery))
-                                    .execute(DatabaseConfig.tuple(periodQuery))
+                                connection.preparedQuery(PERIOD_PATIENT_SQL).execute(Tuple.of(periodId))
                                     .compose { periodRows ->
                                         val patientId: String =
-                                            if (periodRows.size() >
-                                                0
-                                            ) {
-                                                periodRows
-                                                    .iterator()
-                                                    .next()
-                                                    .getValue("p_patient_id")
-                                                    ?.toString() ?: ""
+                                            if (periodRows.size() > 0) {
+                                                periodRows.iterator().next().getValue("p_patient_id")?.toString() ?: ""
                                             } else {
                                                 ""
                                             }
@@ -698,17 +783,20 @@ class TaskExecutionService(
                                                 insertConsumptions(connection, id, result, now)
                                                     .compose { syncLegacyFields(connection, id, result) }
                                                     .compose {
-                                                        val updateQ =
-                                                            ctx
-                                                                .update(t)
-                                                                .set(cStatus, "COMPLETED")
-                                                                .set(cActualTime, now)
-                                                                .let { q -> if (!note.isNullOrBlank()) q.set(cNote, note.trim()) else q }
-                                                                .where(cId.eq(id))
-
-                                                        connection
-                                                            .preparedQuery(DatabaseConfig.sql(updateQ))
-                                                            .execute(DatabaseConfig.tuple(updateQ))
+                                                        val sets = mutableListOf(
+                                                            "status = 'COMPLETED'",
+                                                            "actual_time = \$2",
+                                                        )
+                                                        val args = mutableListOf<Any?>(id, now)
+                                                        if (!note.isNullOrBlank()) {
+                                                            sets.add("note = \$3")
+                                                            args.add(note.trim())
+                                                        }
+                                                        val updateSql =
+                                                            "UPDATE nursing.nursing_task_executions " +
+                                                                "SET ${sets.joinToString(", ")} WHERE id = \$1"
+                                                        connection.preparedQuery(updateSql)
+                                                            .execute(Tuple.from(args))
                                                     }.compose { buildConsumptionResponse(connection, id, result, warehouse = "") }
                                             }
                                     }
@@ -721,11 +809,8 @@ class TaskExecutionService(
     private fun loadExistingExecutionWithConsumption(
         connection: SqlConnection,
         id: String,
-    ): Future<JsonObject> {
-        val readQuery = ctx.selectFrom(t).where(cId.eq(id))
-        return connection
-            .preparedQuery(DatabaseConfig.sql(readQuery))
-            .execute(DatabaseConfig.tuple(readQuery))
+    ): Future<JsonObject> =
+        connection.preparedQuery(EXECUTION_BY_ID_SQL).execute(Tuple.of(id))
             .compose { rows ->
                 if (rows.size() == 0) {
                     return@compose Future.failedFuture(NotFoundException("execution not found"))
@@ -733,31 +818,7 @@ class TaskExecutionService(
                 val record = toJson(rows.iterator().next())
 
                 // 加载耗材明细
-                val consQuery =
-                    ctx
-                        .select(
-                            DSL.field("cc.id").`as`("id"),
-                            DSL.field("cc.stock_operation_detail_id").`as`("stock_operation_detail_id"),
-                            DSL.field("cc.stock_id").`as`("stock_id"),
-                            DSL.field("cc.material_id").`as`("material_id"),
-                            DSL.field("mat.name").`as`("material_name"),
-                            DSL.field("cc.lot_id").`as`("lot_id"),
-                            DSL.field("lot.batch_no").`as`("batch_no"),
-                            DSL.field("cc.warehouse").`as`("warehouse"),
-                            DSL.field("cc.quantity").`as`("quantity"),
-                            DSL.field("cc.unit").`as`("unit"),
-                            DSL.field("cc.unit_cost").`as`("unit_cost"),
-                            DSL.field("cc.total_cost").`as`("total_cost"),
-                        ).from(DSL.table(DSL.name("nursing", "nursing_task_execution_consumptions")).`as`("cc"))
-                        .leftJoin(DSL.table(DSL.name("public", "materials")).`as`("mat"))
-                        .on(DSL.field("cc.material_id").eq(DSL.field("mat.id")))
-                        .leftJoin(DSL.table(DSL.name("public", "lots")).`as`("lot"))
-                        .on(DSL.field("cc.lot_id").eq(DSL.field("lot.id")))
-                        .where(DSL.field("cc.task_execution_id").eq(id))
-
-                connection
-                    .preparedQuery(DatabaseConfig.sql(consQuery))
-                    .execute(DatabaseConfig.tuple(consQuery))
+                connection.preparedQuery(EXECUTION_CONSUMPTIONS_SQL).execute(Tuple.of(id))
                     .map { consRows ->
                         val consumptions = JsonArray()
                         var totalCost = BigDecimal.ZERO
@@ -794,7 +855,6 @@ class TaskExecutionService(
                         record
                     }
             }
-    }
 
     /** 构建耗材完成响应 */
     private fun buildConsumptionResponse(
@@ -802,11 +862,8 @@ class TaskExecutionService(
         id: String,
         result: InventoryConsumptionService.ConsumptionResult,
         warehouse: String,
-    ): Future<JsonObject> {
-        val readQuery = ctx.selectFrom(t).where(cId.eq(id))
-        return connection
-            .preparedQuery(DatabaseConfig.sql(readQuery))
-            .execute(DatabaseConfig.tuple(readQuery))
+    ): Future<JsonObject> =
+        connection.preparedQuery(EXECUTION_BY_ID_SQL).execute(Tuple.of(id))
             .compose { rows ->
                 if (rows.size() == 0) {
                     return@compose Future.failedFuture(NotFoundException("execution not found after update"))
@@ -838,11 +895,10 @@ class TaskExecutionService(
                 record.put("consumptions", details)
                 Future.succeededFuture(record)
             }
-    }
 
     /** 插入护理执行耗材关联 */
     private fun insertConsumptions(
-        connection: io.vertx.sqlclient.SqlConnection,
+        connection: SqlConnection,
         executionId: String,
         result: InventoryConsumptionService.ConsumptionResult,
         now: OffsetDateTime,
@@ -853,27 +909,12 @@ class TaskExecutionService(
             }
 
             val dr = result.detailResults[index]
-            val consId = Ulid.generate()
+            val tuple = Tuple.of(
+                Ulid.generate(), executionId, dr.detailId, dr.stockId, dr.materialId, dr.lotId,
+                dr.warehouse, dr.quantity, dr.unit, dr.unitCost, dr.totalCost, now,
+            )
 
-            val insertQ =
-                ctx
-                    .insertInto(consTable)
-                    .set(DSL.field("id"), consId)
-                    .set(DSL.field("task_execution_id"), executionId)
-                    .set(DSL.field("stock_operation_detail_id"), dr.detailId)
-                    .set(DSL.field("stock_id"), dr.stockId)
-                    .set(DSL.field("material_id"), dr.materialId)
-                    .set(DSL.field("lot_id"), dr.lotId)
-                    .set(DSL.field("warehouse"), dr.warehouse)
-                    .set(DSL.field("quantity"), dr.quantity)
-                    .set(DSL.field("unit"), dr.unit)
-                    .set(DSL.field("unit_cost"), dr.unitCost)
-                    .set(DSL.field("total_cost"), dr.totalCost)
-                    .set(DSL.field("created_at"), now)
-
-            return connection
-                .preparedQuery(DatabaseConfig.sql(insertQ))
-                .execute(DatabaseConfig.tuple(insertQ))
+            return connection.preparedQuery(CONSUMPTION_INSERT_SQL).execute(tuple)
                 .compose { process(index + 1) }
         }
 
@@ -882,35 +923,19 @@ class TaskExecutionService(
 
     /** 仅有 1 条耗材时同步旧兼容字段 */
     private fun syncLegacyFields(
-        connection: io.vertx.sqlclient.SqlConnection,
+        connection: SqlConnection,
         executionId: String,
         result: InventoryConsumptionService.ConsumptionResult,
     ): Future<Void?> {
         if (result.detailResults.size != 1) {
             // 多条明细时清空旧字段
-            val clearQ =
-                ctx
-                    .update(t)
-                    .set(cStockOpDetailId, null as String?)
-                    .set(cQuantity, null as BigDecimal?)
-                    .where(cId.eq(executionId))
-            return connection
-                .preparedQuery(DatabaseConfig.sql(clearQ))
-                .execute(DatabaseConfig.tuple(clearQ))
+            return connection.preparedQuery(CLEAR_LEGACY_FIELDS_SQL).execute(Tuple.of(executionId))
                 .map { null as Void? }
         }
 
         val dr = result.detailResults.single()
-        val syncQ =
-            ctx
-                .update(t)
-                .set(cStockOpDetailId, dr.detailId)
-                .set(cQuantity, dr.quantity)
-                .where(cId.eq(executionId))
-
-        return connection
-            .preparedQuery(DatabaseConfig.sql(syncQ))
-            .execute(DatabaseConfig.tuple(syncQ))
+        return connection.preparedQuery(SYNC_LEGACY_FIELDS_SQL)
+            .execute(Tuple.of(executionId, dr.detailId, dr.quantity))
             .map { null as Void? }
     }
 
@@ -924,20 +949,8 @@ class TaskExecutionService(
             return Future.succeededFuture(emptyMap())
         }
 
-        val query =
-            ctx
-                .select(
-                    DSL.field("task_execution_id"),
-                    count().`as`("cnt"),
-                    DSL.field("warehouse"),
-                    DSL.sum(DSL.field("cc.total_cost", BigDecimal::class.java)).`as`("total_cost"),
-                ).from(consTable.`as`("cc"))
-                .where(DSL.field("cc.task_execution_id").`in`(executionIds))
-                .groupBy(DSL.field("cc.task_execution_id"), DSL.field("cc.warehouse"))
-
-        return pool
-            .preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+        val sql = CONSUMPTION_SUMMARY_BATCH_SQL.format(placeholders(executionIds.size))
+        return pool.preparedQuery(sql).execute(Tuple.from(executionIds))
             .map { rows ->
                 val result = mutableMapOf<String, JsonObject>()
                 for (row in rows) {
@@ -953,20 +966,8 @@ class TaskExecutionService(
     }
 
     /** 加载单条执行耗材摘要 */
-    fun loadSingleConsumptionSummary(executionId: String): Future<JsonObject?> {
-        val query =
-            ctx
-                .select(
-                    count().`as`("cnt"),
-                    DSL.field("warehouse"),
-                    DSL.sum(DSL.field("cc.total_cost", BigDecimal::class.java)).`as`("total_cost"),
-                ).from(consTable.`as`("cc"))
-                .where(DSL.field("cc.task_execution_id").eq(executionId))
-                .groupBy(DSL.field("cc.warehouse"))
-
-        return pool
-            .preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+    fun loadSingleConsumptionSummary(executionId: String): Future<JsonObject?> =
+        pool.preparedQuery(CONSUMPTION_SUMMARY_SQL).execute(Tuple.of(executionId))
             .map { rows ->
                 if (rows.size() == 0) {
                     null
@@ -978,37 +979,10 @@ class TaskExecutionService(
                         .put("total_cost", nursingDecimalText(row.getValue("total_cost")) ?: "0")
                 }
             }
-    }
 
     /** 查询执行耗材明细 */
-    fun listExecutionConsumptions(executionId: String): Future<JsonObject> {
-        val query =
-            ctx
-                .select(
-                    DSL.field("cc.id").`as`("id"),
-                    DSL.field("cc.stock_operation_detail_id").`as`("stock_operation_detail_id"),
-                    DSL.field("cc.stock_id").`as`("stock_id"),
-                    DSL.field("cc.material_id").`as`("material_id"),
-                    DSL.field("cc.lot_id").`as`("lot_id"),
-                    DSL.field("lot.batch_no").`as`("batch_no"),
-                    DSL.field("cc.warehouse").`as`("warehouse"),
-                    DSL.field("cc.quantity").`as`("quantity"),
-                    DSL.field("cc.unit").`as`("unit"),
-                    DSL.field("cc.created_at").`as`("created_at"),
-                    DSL.field("mat.name").`as`("material_name"),
-                    DSL.field("cc.unit_cost").`as`("unit_cost"),
-                    DSL.field("cc.total_cost").`as`("total_cost"),
-                ).from(consTable.`as`("cc"))
-                .leftJoin(materialsTable.`as`("mat"))
-                .on(DSL.field("cc.material_id").eq(DSL.field("mat.id")))
-                .leftJoin(DSL.table(DSL.name("public", "lots")).`as`("lot"))
-                .on(DSL.field("cc.lot_id").eq(DSL.field("lot.id")))
-                .where(DSL.field("cc.task_execution_id").eq(executionId))
-                .orderBy(DSL.field("cc.created_at").asc())
-
-        return pool
-            .preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+    fun listExecutionConsumptions(executionId: String): Future<JsonObject> =
+        pool.preparedQuery(EXECUTION_CONSUMPTIONS_ORDERED_SQL).execute(Tuple.of(executionId))
             .map { rows ->
                 val details = JsonArray()
                 for (row in rows) {
@@ -1031,7 +1005,6 @@ class TaskExecutionService(
                 }
                 JsonObject().put("records", details).put("meta", JsonObject().put("total", details.size().toLong()))
             }
-    }
 
     // ========================================================================
     //  执行实例幂等生成
@@ -1042,46 +1015,32 @@ class TaskExecutionService(
         dateTo: LocalDate,
         periodId: String?,
     ): Future<JsonObject> {
-        val taskConditions = mutableListOf<org.jooq.Condition>()
-        taskConditions.add(ctStatus.eq("ACTIVE"))
+        val where = mutableListOf<String>()
+        val args = mutableListOf<Any?>()
 
-        val taskQuery =
-            ctx
-                .select(
-                    DSL.field("t.id").`as`("t_id"),
-                    DSL.field("t.frequency_code").`as`("t_frequency_code"),
-                    DSL.field("t.start_date").`as`("t_start_date"),
-                    DSL.field("t.end_date").`as`("t_end_date"),
-                    DSL.field("t.metadata").`as`("t_metadata"),
-                    DSL.field("t.period_id").`as`("t_period_id"),
-                ).from(DSL.table(DSL.name("nursing", "nursing_tasks")).`as`("t"))
-                .leftJoin(DSL.table(DSL.name("nursing", "nursing_service_periods")).`as`("ps"))
-                .on(DSL.field("t.period_id").eq(DSL.field("ps.id")))
-                .where(DSL.field("t.status").eq("ACTIVE"))
-                .and(
-                    taskParticipationCondition(
-                        taskPeriodId = DSL.field("t.period_id", String::class.java),
-                        taskType = DSL.field("t.task_type", String::class.java),
-                        periodStatus = DSL.field("ps.status", String::class.java),
-                    ),
-                )
-                .let { q ->
-                    var qq = q
-                    if (periodId != null) qq = qq.and(DSL.field("t.period_id").eq(periodId))
-                    qq
-                }
+        /** 追加一个绑定值并返回其占位符。 */
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
 
-        return pool
-            .preparedQuery(DatabaseConfig.sql(taskQuery))
-            .execute(DatabaseConfig.tuple(taskQuery))
+        where.add("t.status = 'ACTIVE'")
+        where.add(taskParticipationCondition(taskAlias = "t", periodAlias = "ps"))
+        periodId?.let { where.add("t.period_id = ${bind(it)}") }
+
+        val taskSql =
+            "SELECT t.id AS t_id, t.frequency_code AS t_frequency_code, " +
+                "t.start_date AS t_start_date, t.end_date AS t_end_date, " +
+                "t.metadata AS t_metadata, t.period_id AS t_period_id " +
+                "FROM nursing.nursing_tasks AS t " +
+                "LEFT JOIN nursing.nursing_service_periods AS ps ON ps.id = t.period_id " +
+                "WHERE " + where.joinToString(" AND ")
+
+        return pool.preparedQuery(taskSql).execute(Tuple.from(args))
             .flatMap { taskRows ->
-                var generated = 0
-                var skipped = 0
                 val errors = JsonArray()
 
                 val now = OffsetDateTime.now()
 
-                val inserts = mutableListOf<org.jooq.Query>()
+                // 每条待生成执行：绑定参数（id, task_id, planned_time, created_at）
+                val inserts = mutableListOf<Tuple>()
 
                 for (taskRow in taskRows) {
                     val taskId = taskRow.getValue("t_id")?.toString() ?: continue
@@ -1124,19 +1083,7 @@ class TaskExecutionService(
                         }
                         val times = FrequencyCalculator.plannedTimesForDate(freqCode, startDate, date, metadata)
                         for (plannedTime in times) {
-                            val execId = Ulid.generate()
-                            val insertQuery =
-                                ctx
-                                    .insertInto(t)
-                                    .set(cId, execId)
-                                    .set(cTaskId, taskId)
-                                    .set(cPlannedTime, plannedTime)
-                                    .set(cStatus, "PENDING")
-                                    .set(cCreatedAt, now)
-                                    .onConflict(DSL.field("task_id"), DSL.field("planned_time"))
-                                    .doNothing()
-
-                            inserts.add(insertQuery)
+                            inserts.add(Tuple.of(Ulid.generate(), taskId, plannedTime, now))
                         }
                         date = date.plusDays(1)
                     }
@@ -1151,12 +1098,12 @@ class TaskExecutionService(
                     )
                 }
 
-                executeInsertsSequentially(inserts, 0, generated, skipped, errors)
+                executeInsertsSequentially(inserts, 0, 0, 0, errors)
             }
     }
 
     private fun executeInsertsSequentially(
-        inserts: List<org.jooq.Query>,
+        inserts: List<Tuple>,
         index: Int,
         generated: Int,
         skipped: Int,
@@ -1171,10 +1118,7 @@ class TaskExecutionService(
             )
         }
 
-        val query = inserts[index]
-        return pool
-            .preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+        return pool.preparedQuery(PLANNED_EXECUTION_INSERT_SQL).execute(inserts[index])
             .flatMap { result ->
                 val updated = result.rowCount()
                 val newGenerated = generated + updated
@@ -1192,71 +1136,16 @@ class TaskExecutionService(
     //  执行查询公共片段（`/today` 与 `/overdue` 共用投影列、from/join 与耗材摘要）
     // ========================================================================
 
-    /**
-     * 执行记录列表的统一投影列：列名与 `toJson` 期望的键一一对应。
-     * `/today`、`/overdue` 必须共用，禁止各自复制一份查询。
-     */
-    private fun executionProjectionColumns(): List<org.jooq.Field<*>> =
-        listOf(
-            DSL.field("e.id").`as`("id"),
-            DSL.field("e.task_id").`as`("task_id"),
-            DSL.field("e.planned_time").`as`("planned_time"),
-            DSL.field("e.actual_time").`as`("actual_time"),
-            DSL.field("e.executor").`as`("executor"),
-            DSL.field("e.status").`as`("status"),
-            DSL.field("e.stock_operation_detail_id").`as`("stock_operation_detail_id"),
-            DSL.field("e.quantity").`as`("quantity"),
-            DSL.field("e.note").`as`("note"),
-            DSL.field("e.metadata").`as`("metadata"),
-            DSL.field("e.created_at").`as`("created_at"),
-            DSL.field("t.description").`as`("task_description"),
-            DSL.field("t.task_type").`as`("task_type"),
-            DSL.field("t.frequency_name").`as`("task_frequency_name"),
-            DSL.field("t.period_id").`as`("task_period_id"),
-            DSL.field("p.patient_id").`as`("patient_id"),
-            DSL.field("pat.name").`as`("patient_name"),
-            // 绑定医嘱的结构化明细与类型（未绑定医嘱时为 null）。任务描述是医生手写的
-            // 自由文本，护士执行用药时必须在工作台上看到药品、剂量与途径。
-            DSL.field("mo.order_details").`as`("order_details"),
-            DSL.field("mo.order_type").`as`("order_type"),
-        )
-
-    /**
-     * 执行记录查询的公共 FROM/JOIN：
-     * e = nursing.nursing_task_executions，t = nursing.nursing_tasks，
-     * p = nursing.nursing_service_periods，pat = healthcare.patients，
-     * mo = healthcare.medical_orders（经 t.order_item_id 绑定，未绑定医嘱时为 null）。
-     * `/today` 与 `/overdue` 的列表、计数与聚合全部复用，保证口径一致。
-     *
-     * mo 的 JOIN 落在 `medical_orders.id`（V500 已确认是 PRIMARY KEY）上，至多 1:1，
-     * 因此计数/聚合行数不变；共用同一 FROM 是本节既有约定（两个入口禁止各自复制查询）。
-     */
-    private fun executionRowsQuery(
-        columns: List<org.jooq.Field<*>>,
-        conditions: List<org.jooq.Condition>,
-    ) = ctx
-        .select(columns)
-        .from(DSL.table(DSL.name("nursing", "nursing_task_executions")).`as`("e"))
-        .join(DSL.table(DSL.name("nursing", "nursing_tasks")).`as`("t"))
-        .on(DSL.field("e.task_id").eq(DSL.field("t.id")))
-        .leftJoin(DSL.table(DSL.name("nursing", "nursing_service_periods")).`as`("p"))
-        .on(DSL.field("t.period_id").eq(DSL.field("p.id")))
-        .leftJoin(DSL.table(DSL.name("healthcare", "patients")).`as`("pat"))
-        .on(DSL.field("p.patient_id").eq(DSL.field("pat.id")))
-        .leftJoin(DSL.table(DSL.name("healthcare", "medical_orders")).`as`("mo"))
-        .on(DSL.field("t.order_item_id").eq(DSL.field("mo.id")))
-        .where(conditions)
-
     /** 执行单条聚合/计数查询（聚合与计数恒返回一行） */
-    private fun fetchRow(query: org.jooq.Query): Future<Row> =
-        pool
-            .preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
-            .map { it.iterator().next() }
+    private fun fetchRow(
+        sql: String,
+        args: Tuple,
+    ): Future<Row> =
+        pool.preparedQuery(sql).execute(args).map { it.iterator().next() }
 
     /** 结果行 → 响应记录，并批量补齐耗材摘要（`/today` 与 `/overdue` 共用，避免 N+1） */
     private fun recordsWithConsumptionSummary(
-        rows: io.vertx.sqlclient.RowSet<Row>,
+        rows: RowSet<Row>,
         now: OffsetDateTime,
     ): Future<JsonArray> {
         val records = JsonArray()
@@ -1276,38 +1165,28 @@ class TaskExecutionService(
 
     /**
      * 任务参与条件 + 可选周期/执行人/任务类型：`/today` 与 `/overdue` 的公共基础范围（不含日期窗口）。
-     * 每次调用返回独立列表，避免调用方互相污染。
+     * 每次调用返回独立的 SQL 片段与绑定值，避免调用方互相污染。
      */
     private fun participationConditions(
         periodId: String?,
         executor: String?,
         taskType: String?,
-    ): MutableList<org.jooq.Condition> {
-        val conditions = mutableListOf<org.jooq.Condition>()
+        where: MutableList<String>,
+        bind: (Any?) -> String,
+    ) {
         // 只看活动服务期的执行；全院性康复活动（period_id 为空）同样参与。
         // 已收束周期的历史记录仍可由时间线/统计查询。
-        conditions.add(
-            taskParticipationCondition(
-                taskPeriodId = DSL.field("t.period_id", String::class.java),
-                taskType = DSL.field("t.task_type", String::class.java),
-                periodStatus = DSL.field("p.status", String::class.java),
-            ),
-        )
-        periodId?.let { conditions.add(DSL.field("t.period_id").eq(it)) }
-        executor?.let { conditions.add(DSL.field("e.executor").eq(it)) }
-        taskType?.let { conditions.add(DSL.field("t.task_type").eq(it)) }
-        return conditions
+        where.add(taskParticipationCondition(taskAlias = "t", periodAlias = "p"))
+        periodId?.let { where.add("t.period_id = ${bind(it)}") }
+        executor?.let { where.add("e.executor = ${bind(it)}") }
+        taskType?.let { where.add("t.task_type = ${bind(it)}") }
     }
 
     /** §3.1 逾期定义：status ∈ {PENDING, IN_PROGRESS} 且 planned_time < now（严格小于） */
-    private fun overdueDefinition(
-        plannedField: org.jooq.Field<OffsetDateTime>,
+    private fun overdueDefinitionSql(
         now: OffsetDateTime,
-    ): org.jooq.Condition =
-        DSL
-            .field("e.status", String::class.java)
-            .`in`("PENDING", "IN_PROGRESS")
-            .and(plannedField.lt(now))
+        bind: (Any?) -> String,
+    ): String = "e.status IN ('PENDING', 'IN_PROGRESS') AND e.planned_time < ${bind(now)}"
 
     // ========================================================================
     //  今日执行查询（带任务、长者摘要和耗材摘要）
@@ -1329,63 +1208,68 @@ class TaskExecutionService(
             val dayStart = date.atStartOfDay().atOffset(zone)
             val dayEnd = date.plusDays(1).atStartOfDay().atOffset(zone)
 
-            val plannedField = DSL.field("e.planned_time", OffsetDateTime::class.java)
-            val statusField = DSL.field("e.status", String::class.java)
-            val dateWindow = plannedField.ge(dayStart).and(plannedField.lt(dayEnd))
-
             // 既有 total 语义（003 已冻结）：日期 + 参与条件 + 周期/执行人/任务类型 + status/overdue 筛选
-            val conditions = participationConditions(periodId, executor, taskType)
-            conditions.add(plannedField.ge(dayStart))
-            conditions.add(plannedField.lt(dayEnd))
-            status?.let { conditions.add(statusField.eq(it)) }
+            val dataWhere = mutableListOf<String>()
+            val dataArgs = mutableListOf<Any?>()
+
+            /** 追加一个绑定值并返回其占位符。 */
+            fun bindData(value: Any?): String = "\$${dataArgs.size + 1}".also { dataArgs.add(value) }
+
+            participationConditions(periodId, executor, taskType, dataWhere, ::bindData)
+            dataWhere.add("e.planned_time >= ${bindData(dayStart)}")
+            dataWhere.add("e.planned_time < ${bindData(dayEnd)}")
+            status?.let { dataWhere.add("e.status = ${bindData(it)}") }
             // 逾期筛选条件：仅未完成且计划时间已过
             if (overdue == true) {
-                conditions.add(overdueDefinition(plannedField, now))
+                dataWhere.add(overdueDefinitionSql(now, ::bindData))
             }
 
             // 既有 overdue_total 语义（003 已冻结）：当天 + 参与条件 + 周期/执行人/任务类型范围内的逾期数，
             // 忽略 status 与 overdue 筛选
-            val overdueTotalConditions = participationConditions(periodId, executor, taskType)
-            overdueTotalConditions.add(plannedField.ge(dayStart))
-            overdueTotalConditions.add(plannedField.lt(dayEnd))
-            overdueTotalConditions.add(overdueDefinition(plannedField, now))
+            val overdueWhere = mutableListOf<String>()
+            val overdueArgs = mutableListOf<Any?>()
+
+            /** 追加一个绑定值并返回其占位符。 */
+            fun bindOverdue(value: Any?): String = "\$${overdueArgs.size + 1}".also { overdueArgs.add(value) }
+
+            participationConditions(periodId, executor, taskType, overdueWhere, ::bindOverdue)
+            overdueWhere.add("e.planned_time >= ${bindOverdue(dayStart)}")
+            overdueWhere.add("e.planned_time < ${bindOverdue(dayEnd)}")
+            overdueWhere.add(overdueDefinitionSql(now, ::bindOverdue))
 
             // §4.2 新增聚合，全部在 SQL 内完成（禁止拉全表内存计数、禁止 N+1）：
             // - status_totals：日期窗口 + 参与条件 + 周期/执行人/任务类型内各状态计数，忽略 status/overdue 筛选；
             // - overdue_total_all：忽略日期窗口，仅保留参与条件 + 周期/执行人/任务类型 + 逾期定义。
-            // 两者日期范围不同，因此以「无日期窗口的基础范围」为 FROM，用 count() FILTER (WHERE ...) 一次取回。
-            val metaColumns =
-                listOf<org.jooq.Field<*>>(
-                    count().filterWhere(dateWindow.and(statusField.eq("PENDING"))).`as`("status_pending"),
-                    count().filterWhere(dateWindow.and(statusField.eq("IN_PROGRESS"))).`as`("status_in_progress"),
-                    count().filterWhere(dateWindow.and(statusField.eq("COMPLETED"))).`as`("status_completed"),
-                    count().filterWhere(dateWindow.and(statusField.eq("SKIPPED"))).`as`("status_skipped"),
-                    count().filterWhere(dateWindow.and(statusField.eq("CANCELLED"))).`as`("status_cancelled"),
-                    count().filterWhere(overdueDefinition(plannedField, now)).`as`("overdue_total_all"),
-                )
+            // 两者日期范围不同，因此以「无日期窗口的基础范围」为 FROM，用 count(*) FILTER (WHERE ...) 一次取回。
+            val metaWhere = mutableListOf<String>()
+            val metaArgs = mutableListOf<Any?>()
 
-            val baseSelect = executionRowsQuery(executionProjectionColumns(), conditions)
-            val countQuery = executionRowsQuery(listOf(count().`as`("total")), conditions)
-            // overdue_total — 独立聚合，不受 status / overdue 筛选影响
-            val overdueTotalQuery = executionRowsQuery(listOf(count().`as`("overdue_total")), overdueTotalConditions)
-            val metaQuery = executionRowsQuery(metaColumns, participationConditions(periodId, executor, taskType))
+            /** 追加一个绑定值并返回其占位符（聚合投影已占用 $1..$3，WHERE 从 $4 起）。 */
+            fun bindMeta(value: Any?): String = "\$${metaArgs.size + 4}".also { metaArgs.add(value) }
 
-            val dataQuery =
-                baseSelect
-                    .orderBy(plannedField.asc())
-                    .limit(limit)
-                    .offset(offset)
+            participationConditions(periodId, executor, taskType, metaWhere, ::bindMeta)
+            val metaSql = TODAY_META_SQL + " WHERE " + metaWhere.joinToString(" AND ")
+            val metaTuple = Tuple.from(listOf<Any?>(dayStart, dayEnd, now) + metaArgs)
 
-            fetchRow(countQuery)
+            val countSql = "SELECT count(*) AS total$EXECUTION_FROM WHERE " +
+                dataWhere.joinToString(" AND ")
+            val countArgs = dataArgs.toList()
+            val overdueTotalSql = "SELECT count(*) AS overdue_total$EXECUTION_FROM WHERE " +
+                overdueWhere.joinToString(" AND ")
+            val dataSql =
+                "SELECT $EXECUTION_PROJECTION$EXECUTION_FROM WHERE " +
+                    dataWhere.joinToString(" AND ") +
+                    " ORDER BY e.planned_time ASC " +
+                    "LIMIT ${bindData(limit)} OFFSET ${bindData(offset)}"
+
+            fetchRow(countSql, Tuple.from(countArgs))
                 .compose { countRow ->
                     val total = countRow.getLong("total") ?: 0L
-                    fetchRow(metaQuery).map { metaRow -> Pair(total, metaRow) }
+                    fetchRow(metaSql, metaTuple).map { metaRow -> Pair(total, metaRow) }
                 }.compose { (total, metaRow) ->
-                    fetchRow(overdueTotalQuery).compose { overdueRow ->
+                    fetchRow(overdueTotalSql, Tuple.from(overdueArgs)).compose { overdueRow ->
                         val overdueTotal = overdueRow.getLong("overdue_total") ?: 0L
-                        pool
-                            .preparedQuery(DatabaseConfig.sql(dataQuery))
-                            .execute(DatabaseConfig.tuple(dataQuery))
+                        pool.preparedQuery(dataSql).execute(Tuple.from(dataArgs))
                             .compose { dataRows -> recordsWithConsumptionSummary(dataRows, now) }
                             .map { records ->
                                 JsonObject()
@@ -1433,23 +1317,27 @@ class TaskExecutionService(
         val now = OffsetDateTime.now()
         val (effectiveLimit, effectiveOffset) = normalizeOverduePaging(limit, offset)
 
-        val plannedField = DSL.field("e.planned_time", OffsetDateTime::class.java)
-        val conditions = participationConditions(periodId, executor, taskType)
-        conditions.add(overdueDefinition(plannedField, now))
+        val where = mutableListOf<String>()
+        val args = mutableListOf<Any?>()
 
-        val countQuery = executionRowsQuery(listOf(count().`as`("total")), conditions)
-        val dataQuery =
-            executionRowsQuery(executionProjectionColumns(), conditions)
-                .orderBy(plannedField.asc())
-                .limit(effectiveLimit)
-                .offset(effectiveOffset)
+        /** 追加一个绑定值并返回其占位符。 */
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
 
-        return fetchRow(countQuery)
+        participationConditions(periodId, executor, taskType, where, ::bind)
+        where.add(overdueDefinitionSql(now, ::bind))
+        val whereClause = " WHERE " + where.joinToString(" AND ")
+
+        val countSql = "SELECT count(*) AS total$EXECUTION_FROM$whereClause"
+        val countArgs = args.toList()
+        val dataSql =
+            "SELECT $EXECUTION_PROJECTION$EXECUTION_FROM$whereClause " +
+                "ORDER BY e.planned_time ASC LIMIT ${bind(effectiveLimit)} OFFSET ${bind(effectiveOffset)}"
+        val dataArgs = args.toList()
+
+        return fetchRow(countSql, Tuple.from(countArgs))
             .compose { countRow ->
                 val total = countRow.getLong("total") ?: 0L
-                pool
-                    .preparedQuery(DatabaseConfig.sql(dataQuery))
-                    .execute(DatabaseConfig.tuple(dataQuery))
+                pool.preparedQuery(dataSql).execute(Tuple.from(dataArgs))
                     .compose { dataRows -> recordsWithConsumptionSummary(dataRows, now) }
                     .map { records ->
                         JsonObject()
@@ -1502,43 +1390,28 @@ class TaskExecutionService(
 
         val now = OffsetDateTime.now()
         val threshold = now.minusMinutes(effectiveMinutes.toLong())
-        val convergencePatch =
-            JSONB.valueOf(
-                JsonObject().put("convergence", convergencePayload(effectiveMinutes, now)).encode(),
-            )
+        val convergencePatch = JsonObject().put("convergence", convergencePayload(effectiveMinutes, now))
 
-        val eStatus = DSL.field("e.status", String::class.java)
-        val ePlannedTime = DSL.field("e.planned_time", OffsetDateTime::class.java)
-        val conditions = mutableListOf<org.jooq.Condition>()
-        conditions.add(eStatus.`in`("PENDING", "IN_PROGRESS"))
-        conditions.add(ePlannedTime.lt(threshold))
+        val where = mutableListOf<String>()
+        val args = mutableListOf<Any?>()
+
+        /** 追加一个绑定值并返回其占位符。 */
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
+
+        where.add("e.planned_time < ${bind(threshold)}")
         encounterId?.takeIf { it.isNotBlank() }?.let { id ->
-            conditions.add(
-                DSL
-                    .field("p.encounter_id", String::class.java)
-                    .eq(id)
-                    .or(DSL.field("t.encounter_id", String::class.java).eq(id)),
-            )
+            val placeholder = bind(id)
+            where.add("(p.encounter_id = $placeholder OR t.encounter_id = $placeholder)")
         }
-        taskType?.takeIf { it.isNotBlank() }?.let { conditions.add(DSL.field("t.task_type", String::class.java).eq(it)) }
+        taskType?.takeIf { it.isNotBlank() }?.let { where.add("t.task_type = ${bind(it)}") }
 
         // 多取 1 条仅用于判定 truncated；该行不参与收敛
-        val candidateQuery =
-            ctx
-                .select(DSL.field("e.id").`as`("id"))
-                .from(DSL.table(DSL.name("nursing", "nursing_task_executions")).`as`("e"))
-                .join(DSL.table(DSL.name("nursing", "nursing_tasks")).`as`("t"))
-                .on(DSL.field("e.task_id").eq(DSL.field("t.id")))
-                .leftJoin(DSL.table(DSL.name("nursing", "nursing_service_periods")).`as`("p"))
-                .on(DSL.field("t.period_id").eq(DSL.field("p.id")))
-                .where(conditions)
-                .orderBy(ePlannedTime.asc(), DSL.field("e.id", String::class.java).asc())
-                .limit(effectiveLimit + 1)
+        val candidateSql =
+            CONVERGE_CANDIDATE_SQL + " AND " + where.joinToString(" AND ") +
+                " ORDER BY e.planned_time ASC, e.id ASC LIMIT ${bind(effectiveLimit + 1)}"
 
         return pool.withTransaction<JsonObject> { connection ->
-            connection
-                .preparedQuery(DatabaseConfig.sql(candidateQuery))
-                .execute(DatabaseConfig.tuple(candidateQuery))
+            connection.preparedQuery(candidateSql).execute(Tuple.from(args))
                 .compose { rows ->
                     val candidates = mutableListOf<String>()
                     for (row in rows) {
@@ -1566,7 +1439,7 @@ class TaskExecutionService(
         ids: List<String>,
         index: Int,
         convergedIds: MutableList<String>,
-        convergencePatch: JSONB,
+        convergencePatch: JsonObject,
         minOverdueMinutes: Int,
         truncated: Boolean,
     ): Future<JsonObject> {
@@ -1581,25 +1454,8 @@ class TaskExecutionService(
         }
 
         val id = ids[index]
-        val updateQuery =
-            ctx
-                .update(t)
-                .set(cStatus, "SKIPPED")
-                .set(
-                    cMetadata,
-                    DSL.field(
-                        "COALESCE({0}, '{}'::jsonb) || {1}",
-                        JSONB::class.java,
-                        cMetadata,
-                        // `val` 是 Kotlin 硬关键字：Java 静态方法需用反引号调用才能作为绑定参数
-                        DSL.`val`(convergencePatch),
-                    ),
-                ).where(cId.eq(id))
-                .and(cStatus.`in`("PENDING", "IN_PROGRESS"))
-
-        return connection
-            .preparedQuery(DatabaseConfig.sql(updateQuery))
-            .execute(DatabaseConfig.tuple(updateQuery))
+        return connection.preparedQuery(CONVERGE_UPDATE_SQL)
+            .execute(Tuple.of("SKIPPED", convergencePatch, id))
             .compose { result ->
                 if (result.rowCount() > 0) convergedIds.add(id)
                 convergeSequentially(
@@ -1632,96 +1488,52 @@ class TaskExecutionService(
         val rangeStart = dateFrom.atStartOfDay().atOffset(zone)
         val rangeEnd = dateTo.plusDays(1).atStartOfDay().atOffset(zone)
 
-        // 真实表别名：e = nursing_task_executions，t = nursing_tasks。
-        // 不得复用旧查询输出别名（cStatus/cTaskId/ctId/ctPeriodId 等），
-        // 这些不是本查询 FROM/JOIN 中的真实列，且 status 在执行表和任务表都存在。
-        val execTable = DSL.table(DSL.name("nursing", "nursing_task_executions")).`as`("e")
-        val taskTableAlias = DSL.table(DSL.name("nursing", "nursing_tasks")).`as`("t")
-        val eStatus = DSL.field("e.status", String::class.java)
-        val ePlannedTime = DSL.field("e.planned_time", OffsetDateTime::class.java)
-        val eExecutor = DSL.field("e.executor", String::class.java)
-        val eTaskId = DSL.field("e.task_id", String::class.java)
-        val tId = DSL.field("t.id", String::class.java)
-        val tPeriodId = DSL.field("t.period_id", String::class.java)
+        /**
+         * 统计查询的公共 WHERE：`prefix` 为已占用的绑定值（聚合投影把 `now` 放 $1）。
+         * 占位符按 `prefix.size + 1` 起编号，使同一份条件既能接在聚合投影之后，
+         * 也能单独用于没有聚合投影的分组计数子查询。
+         */
+        fun buildWhere(prefix: MutableList<Any?>): String {
+            val where = mutableListOf<String>()
+            val args = prefix
 
-        // 基础条件：只包含有 planned_time 的记录
-        val baseConditions = mutableListOf<org.jooq.Condition>()
-        baseConditions.add(ePlannedTime.ge(rangeStart))
-        baseConditions.add(ePlannedTime.lt(rangeEnd))
-        periodId?.let { baseConditions.add(tPeriodId.eq(it)) }
-        executor?.let { baseConditions.add(eExecutor.eq(it)) }
-        taskType?.let { baseConditions.add(DSL.field("t.task_type").eq(it)) }
+            /** 追加一个绑定值并返回其占位符。 */
+            fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
 
-        // 045（2026-10-04 QA 口径修订）：应完成 = 已到计划时间 **或 已完成**，全局与按执行人分组共用同一份定义。
-        //
-        // 旧口径只认 `planned_time < now`，把"提前完成"排除在分子与分母之外：康复师按排期提前打完卡，
-        // 却看到 已完成 0 / 计划完成率 0.00% / 执行人分组「暂无应完成任务」（2026-10-04 康复活动页实测）。
-        // 提前跳过/取消不进分母（与"逾期只认 PENDING/IN_PROGRESS"同源），仍只进各自计数。
-        val dueCondition = ePlannedTime.lt(now).or(eStatus.eq("COMPLETED"))
-        // 在"应完成"新口径下，已完成必然算应完成 → 分子就是范围内全部完成数（等于 completed_total）。
-        val completedDueCondition = eStatus.eq("COMPLETED")
+            where.add("e.planned_time >= ${bind(rangeStart)}")
+            where.add("e.planned_time < ${bind(rangeEnd)}")
+            periodId?.let { where.add("t.period_id = ${bind(it)}") }
+            executor?.let { where.add("e.executor = ${bind(it)}") }
+            taskType?.let { where.add("t.task_type = ${bind(it)}") }
+            return " WHERE " + where.joinToString(" AND ")
+        }
+
+        // 聚合查询：$1 恒为 now（应完成/逾期分界）；WHERE 绑定从 $2 起。
+        val statsArgs = mutableListOf<Any?>(now)
+        val whereClause = buildWhere(statsArgs)
+        val whereArgs = statsArgs.toList()
 
         // 全局汇总查询
-        val globalQuery =
-            ctx
-                .select(
-                    count().`as`("scheduled_total"),
-                    count().filterWhere(eStatus.eq("PENDING")).`as`("pending_total"),
-                    count().filterWhere(eStatus.eq("IN_PROGRESS")).`as`("in_progress_total"),
-                    count().filterWhere(eStatus.eq("COMPLETED")).`as`("completed_total"),
-                    count().filterWhere(eStatus.eq("SKIPPED")).`as`("skipped_total"),
-                    count().filterWhere(eStatus.eq("CANCELLED")).`as`("cancelled_total"),
-                    count().filterWhere(dueCondition).`as`("due_total"),
-                    count().filterWhere(completedDueCondition).`as`("completed_due_total"),
-                    count().filterWhere(eStatus.`in`("PENDING", "IN_PROGRESS").and(ePlannedTime.lt(now))).`as`("overdue_total"),
-                ).from(execTable)
-                .join(taskTableAlias)
-                .on(eTaskId.eq(tId))
-                .where(baseConditions)
+        val globalSql = "SELECT $STATISTICS_AGGREGATES$STATISTICS_FROM$whereClause"
 
         // 按执行人分组查询
-        val groupedQuery =
-            ctx
-                .select(
-                    DSL.field("e.executor").`as`("executor"),
-                    count().`as`("scheduled_total"),
-                    count().filterWhere(eStatus.eq("PENDING")).`as`("pending_total"),
-                    count().filterWhere(eStatus.eq("IN_PROGRESS")).`as`("in_progress_total"),
-                    count().filterWhere(eStatus.eq("COMPLETED")).`as`("completed_total"),
-                    count().filterWhere(eStatus.eq("SKIPPED")).`as`("skipped_total"),
-                    count().filterWhere(eStatus.eq("CANCELLED")).`as`("cancelled_total"),
-                    count().filterWhere(dueCondition).`as`("due_total"),
-                    count().filterWhere(completedDueCondition).`as`("completed_due_total"),
-                    count().filterWhere(eStatus.`in`("PENDING", "IN_PROGRESS").and(ePlannedTime.lt(now))).`as`("overdue_total"),
-                ).from(execTable)
-                .join(taskTableAlias)
-                .on(eTaskId.eq(tId))
-                .where(baseConditions)
-                .groupBy(DSL.field("e.executor"))
-                .orderBy(
-                    DSL.field("due_total").desc(),
-                    DSL.field("scheduled_total").desc(),
-                    DSL.field("e.executor").asc().nullsLast(),
-                ).limit(limit)
-                .offset(offset)
+        val groupedSql =
+            "SELECT e.executor AS executor, $STATISTICS_AGGREGATES$STATISTICS_FROM$whereClause " +
+                "GROUP BY e.executor " +
+                "ORDER BY due_total DESC, scheduled_total DESC, e.executor ASC NULLS LAST " +
+                "LIMIT \$${statsArgs.size + 1} OFFSET \$${statsArgs.size + 2}"
+        statsArgs.add(limit)
+        statsArgs.add(offset)
 
-        // 分组总数查询（不受 limit/offset 影响）
-        val groupCountQuery =
-            ctx
-                .select(count().`as`("total"))
-                .from(
-                    ctx
-                        .select(DSL.field("e.executor"))
-                        .from(execTable)
-                        .join(taskTableAlias)
-                        .on(eTaskId.eq(tId))
-                        .where(baseConditions)
-                        .groupBy(DSL.field("e.executor")),
-                )
+        // 分组总数查询（不受 limit/offset 影响；无聚合投影，占位符从 $1 起）
+        val countArgs = mutableListOf<Any?>()
+        val countWhereClause = buildWhere(countArgs)
+        val groupCountSql =
+            "SELECT count(*) AS total FROM (" +
+                "SELECT e.executor$STATISTICS_FROM$countWhereClause GROUP BY e.executor" +
+                ") AS grouped"
 
-        return pool
-            .preparedQuery(DatabaseConfig.sql(globalQuery))
-            .execute(DatabaseConfig.tuple(globalQuery))
+        return pool.preparedQuery(globalSql).execute(Tuple.from(whereArgs))
             .flatMap { globalRows ->
                 val global = globalRows.iterator().next()
                 val scheduledTotal = global.getLong("scheduled_total") ?: 0L
@@ -1734,15 +1546,11 @@ class TaskExecutionService(
                 val completedDueTotal = global.getLong("completed_due_total") ?: 0L
                 val overdueTotal = global.getLong("overdue_total") ?: 0L
 
-                pool
-                    .preparedQuery(DatabaseConfig.sql(groupCountQuery))
-                    .execute(DatabaseConfig.tuple(groupCountQuery))
+                pool.preparedQuery(groupCountSql).execute(Tuple.from(countArgs))
                     .flatMap { countRows ->
                         val groupTotal = countRows.iterator().next().getLong("total") ?: 0L
 
-                        pool
-                            .preparedQuery(DatabaseConfig.sql(groupedQuery))
-                            .execute(DatabaseConfig.tuple(groupedQuery))
+                        pool.preparedQuery(groupedSql).execute(Tuple.from(statsArgs))
                             .map { dataRows ->
                                 val records = JsonArray()
                                 for (row in dataRows) {

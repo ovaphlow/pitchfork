@@ -56,20 +56,35 @@ class ReturnInboundTest {
         every { iterator() } returns rowIterator(rows.iterator())
     }
 
-    private fun indexedRow(values: Map<Int, Any?>): Row = mockk {
-        every { getValue(any<Int>()) } answers { values[firstArg<Int>()] }
+    private fun namedRow(values: Map<String, Any?>): Row = mockk(relaxed = true) {
+        every { getValue(any<String>()) } answers { values[firstArg<String>()] }
     }
 
-    /** loadMaterial 行：status, base_unit, quantity_scale, batch_control */
+    /** loadMaterial 行：按列名台账（material_status/material_base_unit/...）。 */
     private fun materialRow(status: String = "ACTIVE", batchControl: Boolean = true): Row =
-        indexedRow(mapOf(0 to status, 1 to "片", 2 to 0, 3 to batchControl))
+        namedRow(
+            mapOf(
+                "material_status" to status,
+                "material_base_unit" to "片",
+                "material_quantity_scale" to 0,
+                "material_batch_control" to batchControl,
+            ),
+        )
 
     private fun lotRow(materialId: String = "material-1", expiry: LocalDate? = LocalDate.now().plusDays(30)): Row =
-        indexedRow(mapOf(0 to materialId, 1 to expiry))
+        namedRow(mapOf("lot_material_id" to materialId, "lot_expiry_date" to expiry))
 
-    /** loadStock 行：id, lot_id, quantity, locked_quantity, total_cost */
+    /** loadStock 行：按列名台账（stock_id/stock_lot_id/...）。 */
     private fun stockRow(quantity: BigDecimal = BigDecimal.TEN): Row =
-        indexedRow(mapOf(0 to "stock-1", 1 to "lot-1", 2 to quantity, 3 to BigDecimal.ZERO, 4 to BigDecimal.valueOf(50)))
+        namedRow(
+            mapOf(
+                "stock_id" to "stock-1",
+                "stock_lot_id" to "lot-1",
+                "stock_quantity" to quantity,
+                "stock_locked_quantity" to BigDecimal.ZERO,
+                "stock_total_cost" to BigDecimal.valueOf(50),
+            ),
+        )
 
     private fun command(
         quantity: BigDecimal = BigDecimal.ONE,

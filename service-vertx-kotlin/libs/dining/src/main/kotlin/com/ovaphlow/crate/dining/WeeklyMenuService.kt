@@ -1,18 +1,15 @@
 package com.ovaphlow.crate.dining
 
 import com.ovaphlow.crate.common.Ulid
-import com.ovaphlow.crate.database.DatabaseConfig
 import com.ovaphlow.crate.database.isUniqueViolation
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
 import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
+import io.vertx.sqlclient.RowSet
 import io.vertx.sqlclient.SqlClient
-import org.jooq.DSLContext
-import org.jooq.JSONB
-import org.jooq.impl.DSL
-import org.jooq.impl.DSL.count
+import io.vertx.sqlclient.Tuple
 import java.time.LocalDate
 import java.time.OffsetDateTime
 
@@ -21,35 +18,44 @@ import java.time.OffsetDateTime
  * - 每周最多一份启用菜谱（部分唯一索引），停用后可换版，历史数据不受影响；
  * - 菜品明细保存 dish_name 快照，菜品改名/停用不影响历史菜谱展示；
  * - 支持整周模板复制到另一周（copy）。
+ *
+ * 持久化一律原生参数化 SQL（`$1..$n` + `Tuple`），无 jOOQ。
  */
 class WeeklyMenuService(
     private val pool: Pool,
-    private val ctx: DSLContext = DatabaseConfig.createDSL(),
 ) {
-    private val t = DSL.table(DSL.name("dining", "dining_weekly_menus"))
-    private val cId = DSL.field("id", String::class.java)
-    private val cWeekStart = DSL.field("week_start", LocalDate::class.java)
-    private val cName = DSL.field("name", String::class.java)
-    private val cStatus = DSL.field("status", String::class.java)
-    private val cRemark = DSL.field("remark", String::class.java)
-    private val cMetadata = DSL.field("metadata", JSONB::class.java)
-    private val cCreatedAt = DSL.field("created_at", OffsetDateTime::class.java)
-    private val cUpdatedAt = DSL.field("updated_at", OffsetDateTime::class.java)
-
-    private val items = DSL.table(DSL.name("dining", "dining_weekly_menu_items"))
-    private val cMenuId = DSL.field("menu_id", String::class.java)
-    private val cDayOfWeek = DSL.field("day_of_week", Int::class.java)
-    private val cMealTime = DSL.field("meal_time", String::class.java)
-    private val cDishId = DSL.field("dish_id", String::class.java)
-    private val cDishName = DSL.field("dish_name", String::class.java)
-    private val cSortOrder = DSL.field("sort_order", Int::class.java)
-
-    private val dishes = DSL.table(DSL.name("dining", "dining_dishes"))
-    private val dId = DSL.field(DSL.name("dining", "dining_dishes", "id"), String::class.java)
-    private val dName = DSL.field(DSL.name("dining", "dining_dishes", "name"), String::class.java)
-    private val dStatus = DSL.field(DSL.name("dining", "dining_dishes", "status"), String::class.java)
 
     companion object {
+        private const val MENU_COLUMNS =
+            "id, week_start, name, status, remark, metadata, created_at, updated_at"
+
+        private const val ITEM_COLUMNS =
+            "id, menu_id, day_of_week, meal_time, dish_id, dish_name, sort_order, metadata, created_at"
+
+        private const val MENU_INSERT_SQL =
+            "INSERT INTO dining.dining_weekly_menus " +
+                "(id, week_start, name, status, remark, metadata, created_at, updated_at) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8)"
+
+        private const val MENU_STATUS_SQL =
+            "UPDATE dining.dining_weekly_menus SET status = \$1, updated_at = \$2 WHERE id = \$3"
+
+        private const val ACTIVE_WEEK_SQL =
+            "SELECT 1 FROM dining.dining_weekly_menus WHERE week_start = \$1 AND status = \$2"
+
+        private const val ITEM_INSERT_SQL =
+            "INSERT INTO dining.dining_weekly_menu_items " +
+                "(id, menu_id, day_of_week, meal_time, dish_id, dish_name, sort_order, metadata, created_at) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9)"
+
+        private const val ITEM_DELETE_SQL =
+            "DELETE FROM dining.dining_weekly_menu_items WHERE menu_id = \$1"
+
+        private const val ITEM_ORDER =
+            " ORDER BY day_of_week ASC, meal_time ASC, sort_order ASC, created_at ASC"
+
+        private const val ACTIVE_STATUS = "启用"
+
         fun toJson(row: Row): JsonObject = JsonObject()
             .put("id", row.getValue("id")?.toString())
             .put("week_start", row.getValue("week_start")?.toString())
@@ -70,17 +76,12 @@ class WeeklyMenuService(
 
         val id = Ulid.generate()
         val now = OffsetDateTime.now()
-        val query = ctx.insertInto(t)
-            .set(cId, id)
-            .set(cWeekStart, normalized)
-            .set(cName, body.getString("name"))
-            .set(cStatus, "启用")
-            .set(cRemark, body.getString("remark"))
-            .set(cMetadata, body.containsKey("metadata").let { if (it) JSONB.valueOf(body.getJsonObject("metadata").encode()) else null })
-            .set(cCreatedAt, now)
-            .set(cUpdatedAt, now)
-
-        return execute(pool, query).compose { result ->
+        return pool.preparedQuery(MENU_INSERT_SQL).execute(
+            Tuple.of(
+                id, normalized, body.getString("name"), ACTIVE_STATUS, body.getString("remark"),
+                body.getJsonObject("metadata"), now, now,
+            )
+        ).compose { result ->
             if (result.rowCount() == 0)
                 return@compose Future.failedFuture(IllegalStateException("insert returned no row"))
             get(id)
@@ -98,18 +99,26 @@ class WeeklyMenuService(
         limit: Int = 50,
         offset: Int = 0,
     ): Future<JsonObject> {
-        val conditions = mutableListOf<org.jooq.Condition>()
-        weekStart?.takeIf(String::isNotBlank)?.let { conditions.add(cWeekStart.eq(parseDate(it, "week_start"))) }
-        status?.takeIf(String::isNotBlank)?.let { conditions.add(cStatus.eq(it)) }
+        val where = mutableListOf<String>()
+        val args = mutableListOf<Any?>()
 
-        val countQuery = ctx.select(count().`as`("total")).from(t).where(conditions)
-        val dataQuery = ctx.selectFrom(t).where(conditions)
-            .orderBy(cWeekStart.desc(), cCreatedAt.desc())
-            .limit(limit).offset(offset)
+        /** 追加一个绑定值并返回其占位符。 */
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
 
-        return execute(pool, countQuery).flatMap { countRows ->
+        weekStart?.takeIf(String::isNotBlank)?.let { where.add("week_start = ${bind(parseDate(it, "week_start"))}") }
+        status?.takeIf(String::isNotBlank)?.let { where.add("status = ${bind(it)}") }
+
+        val whereClause = if (where.isEmpty()) "" else " WHERE " + where.joinToString(" AND ")
+        val countSql = "SELECT count(*) AS total FROM dining.dining_weekly_menus$whereClause"
+        val countArgs = args.toList()
+        val dataSql =
+            "SELECT $MENU_COLUMNS FROM dining.dining_weekly_menus$whereClause " +
+                "ORDER BY week_start DESC, created_at DESC LIMIT ${bind(limit)} OFFSET ${bind(offset)}"
+        val dataArgs = args.toList()
+
+        return pool.preparedQuery(countSql).execute(Tuple.from(countArgs)).flatMap { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(pool, dataQuery).compose { dataRows ->
+            pool.preparedQuery(dataSql).execute(Tuple.from(dataArgs)).compose { dataRows ->
                 val heads = dataRows.map { toJson(it) }
                 if (heads.isEmpty()) {
                     return@compose Future.succeededFuture(
@@ -130,21 +139,19 @@ class WeeklyMenuService(
 
     /** 列表页「菜品项」：按 menu_id 统计明细条数，避免列表接口带出全部明细。 */
     private fun countItems(menuIds: List<String>): Future<Map<String, Long>> {
-        val query = ctx.select(
-            cMenuId,
-            count().`as`("item_count"),
-        )
-            .from(items)
-            .where(cMenuId.`in`(menuIds))
-            .groupBy(cMenuId)
-        return execute(pool, query).map { rows ->
+        if (menuIds.isEmpty()) return Future.succeededFuture(emptyMap())
+        val placeholders = menuIds.indices.joinToString(", ") { "\$${it + 1}" }
+        val sql =
+            "SELECT menu_id, count(*) AS item_count FROM dining.dining_weekly_menu_items " +
+                "WHERE menu_id IN ($placeholders) GROUP BY menu_id"
+        return pool.preparedQuery(sql).execute(Tuple.from(menuIds)).map { rows ->
             rows.associate { it.getString("menu_id") to (it.getLong("item_count") ?: 0L) }
         }
     }
 
     fun get(id: String): Future<JsonObject> {
-        val menuQuery = ctx.selectFrom(t).where(cId.eq(id))
-        return execute(pool, menuQuery).compose { rows ->
+        val menuSql = "SELECT $MENU_COLUMNS FROM dining.dining_weekly_menus WHERE id = \$1"
+        return pool.preparedQuery(menuSql).execute(Tuple.of(id)).compose { rows ->
             val row = rows.iterator().asSequence().firstOrNull()
             if (row == null)
                 return@compose Future.failedFuture(DiningNotFoundException("weekly menu not found: $id"))
@@ -158,9 +165,9 @@ class WeeklyMenuService(
     fun getByDate(date: String): Future<JsonObject> {
         val d = parseDate(date, "date")
         val weekStart = DiningConstants.weekStartOf(d)
-        val query = ctx.selectFrom(t)
-            .where(cWeekStart.eq(weekStart).and(cStatus.eq("启用")))
-        return execute(pool, query).compose { rows ->
+        val sql =
+            "SELECT $MENU_COLUMNS FROM dining.dining_weekly_menus WHERE week_start = \$1 AND status = \$2"
+        return pool.preparedQuery(sql).execute(Tuple.of(weekStart, ACTIVE_STATUS)).compose { rows ->
             val row = rows.iterator().asSequence().firstOrNull()
             if (row == null)
                 return@compose Future.failedFuture(DiningNotFoundException("no active weekly menu for week of $d"))
@@ -172,16 +179,20 @@ class WeeklyMenuService(
 
     fun update(id: String, body: JsonObject): Future<JsonObject> {
         return get(id).flatMap {
-            val now = OffsetDateTime.now()
-            var q = ctx.update(t).set(cUpdatedAt, now)
+            val sets = mutableListOf("updated_at = \$1")
+            val args = mutableListOf<Any?>(OffsetDateTime.now())
+
+            fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
+
             if (body.containsKey("name"))
-                q = q.set(cName, body.getString("name"))
+                sets.add("name = ${bind(body.getString("name"))}")
             if (body.containsKey("remark"))
-                q = q.set(cRemark, body.getString("remark"))
+                sets.add("remark = ${bind(body.getString("remark"))}")
             if (body.containsKey("metadata"))
-                q = q.set(cMetadata, JSONB.valueOf(body.getJsonObject("metadata").encode()))
-            val updateQuery = q.where(cId.eq(id))
-            execute(pool, updateQuery).flatMap { get(id) }
+                sets.add("metadata = ${bind(body.getJsonObject("metadata"))}")
+            val sql =
+                "UPDATE dining.dining_weekly_menus SET ${sets.joinToString(", ")} WHERE id = ${bind(id)}"
+            pool.preparedQuery(sql).execute(Tuple.from(args)).flatMap { get(id) }
         }
     }
 
@@ -189,20 +200,16 @@ class WeeklyMenuService(
         if (status.isBlank() || status !in DiningConstants.ENABLE_STATUSES)
             return Future.failedFuture(IllegalArgumentException("invalid status, must be one of: ${DiningConstants.ENABLE_STATUSES}"))
         return get(id).flatMap {
-            val now = OffsetDateTime.now()
-            val query = ctx.update(t)
-                .set(cStatus, status)
-                .set(cUpdatedAt, now)
-                .where(cId.eq(id))
-            execute(pool, query).compose { result ->
-                if (result.rowCount() == 0)
-                    return@compose Future.failedFuture(DiningNotFoundException("weekly menu not found: $id"))
-                get(id)
-            }.recover { error ->
-                if (isUniqueViolation(error, setOf("uq_dining_weekly_menus_active_week")))
-                    Future.failedFuture(DiningConflictException("该周已存在启用的菜谱，请先停用旧版"))
-                else Future.failedFuture(error)
-            }
+            pool.preparedQuery(MENU_STATUS_SQL).execute(Tuple.of(status, OffsetDateTime.now(), id))
+                .compose { result ->
+                    if (result.rowCount() == 0)
+                        return@compose Future.failedFuture(DiningNotFoundException("weekly menu not found: $id"))
+                    get(id)
+                }.recover { error ->
+                    if (isUniqueViolation(error, setOf("uq_dining_weekly_menus_active_week")))
+                        Future.failedFuture(DiningConflictException("该周已存在启用的菜谱，请先停用旧版"))
+                    else Future.failedFuture(error)
+                }
         }
     }
 
@@ -228,13 +235,15 @@ class WeeklyMenuService(
 
             validateDishes(validated).compose { dishNamesById ->
                 pool.withTransaction<Void?> { conn ->
-                    val deleteQuery = ctx.deleteFrom(items).where(cMenuId.eq(id))
-                    execute(conn, deleteQuery).compose {
+                    conn.preparedQuery(ITEM_DELETE_SQL).execute(Tuple.of(id)).compose {
                         val now = OffsetDateTime.now()
-                        var inserts = Future.succeededFuture<io.vertx.sqlclient.RowSet<Row>>()
+                        var inserts = Future.succeededFuture<RowSet<Row>>()
                         for (item in validated) {
                             inserts = inserts.compose {
-                                execute(conn, item.toInsert(id, now, dishNamesById))
+                                insertItem(
+                                    conn, id, item.dayOfWeek, item.mealTime, item.dishId,
+                                    dishNamesById[item.dishId] ?: "", item.sortOrder, JsonObject(), now,
+                                )
                             }
                         }
                         inserts.map<Void?> { null }
@@ -249,10 +258,10 @@ class WeeklyMenuService(
      */
     private fun validateDishes(validated: List<ValidatedItem>): Future<Map<String, String>> {
         val dishIds = validated.map { it.dishId }.distinct()
-        val query = ctx.select(dId, dName, dStatus)
-            .from(dishes)
-            .where(dId.`in`(dishIds))
-        return execute(pool, query).map { rows ->
+        if (dishIds.isEmpty()) return Future.succeededFuture(emptyMap())
+        val placeholders = dishIds.indices.joinToString(", ") { "\$${it + 1}" }
+        val sql = "SELECT id, name, status FROM dining.dining_dishes WHERE id IN ($placeholders)"
+        return pool.preparedQuery(sql).execute(Tuple.from(dishIds)).map { rows ->
             val nameById = mutableMapOf<String, String>()
             val statusById = mutableMapOf<String, String>()
             for (row in rows) {
@@ -263,7 +272,7 @@ class WeeklyMenuService(
             val missing = dishIds.filter { it !in nameById }
             if (missing.isNotEmpty())
                 throw IllegalArgumentException("dish not found: ${missing.first()}")
-            val notEnabled = dishIds.filter { statusById[it] != "启用" }
+            val notEnabled = dishIds.filter { statusById[it] != ACTIVE_STATUS }
             if (notEnabled.isNotEmpty())
                 throw IllegalArgumentException("dish is not enabled: ${notEnabled.first()}")
             nameById
@@ -280,25 +289,20 @@ class WeeklyMenuService(
         val targetWeek = DiningConstants.weekStartOf(parseDate(weekStart, "week_start"))
 
         return get(id).flatMap { source ->
-            val existingQuery = ctx.selectOne().from(t)
-                .where(cWeekStart.eq(targetWeek).and(cStatus.eq("启用")))
-            execute(pool, existingQuery).compose { rows ->
+            pool.preparedQuery(ACTIVE_WEEK_SQL).execute(Tuple.of(targetWeek, ACTIVE_STATUS)).compose { rows ->
                 if (rows.size() > 0)
                     return@compose Future.failedFuture(DiningConflictException("目标周已存在启用的菜谱，请先停用旧版"))
 
                 val newId = Ulid.generate()
                 pool.withTransaction<Void?> { conn ->
                     val now = OffsetDateTime.now()
-                    val insertMenu = ctx.insertInto(t)
-                        .set(cId, newId)
-                        .set(cWeekStart, targetWeek)
-                        .set(cName, source.getString("name"))
-                        .set(cStatus, "启用")
-                        .set(cRemark, source.getString("remark"))
-                        .set(cMetadata, JSONB.valueOf(source.getJsonObject("metadata")?.encode() ?: "{}"))
-                        .set(cCreatedAt, now)
-                        .set(cUpdatedAt, now)
-                    execute(conn, insertMenu).compose {
+                    conn.preparedQuery(MENU_INSERT_SQL).execute(
+                        Tuple.of(
+                            newId, targetWeek, source.getString("name"), ACTIVE_STATUS,
+                            source.getString("remark"), source.getJsonObject("metadata") ?: JsonObject(),
+                            now, now,
+                        )
+                    ).compose {
                         copyItems(conn, id, newId, now).map<Void?> { null }
                     }
                 }.compose { get(newId) }
@@ -308,41 +312,56 @@ class WeeklyMenuService(
 
     /** 复制明细并重新快照菜品名称（不沿用源明细的旧快照）。 */
     private fun copyItems(conn: SqlClient, sourceMenuId: String, targetMenuId: String, now: OffsetDateTime): Future<Void?> {
-        val selectQuery = ctx.select(cId, cMenuId, cDayOfWeek, cMealTime, cDishId, cDishName, cSortOrder, cMetadata, cCreatedAt)
-            .from(items)
-            .where(cMenuId.eq(sourceMenuId))
-        return execute(conn, selectQuery).compose { rows ->
-            var chain = Future.succeededFuture<io.vertx.sqlclient.RowSet<Row>>()
+        val sql = "SELECT $ITEM_COLUMNS FROM dining.dining_weekly_menu_items WHERE menu_id = \$1$ITEM_ORDER"
+        return conn.preparedQuery(sql).execute(Tuple.of(sourceMenuId)).compose { rows ->
+            var chain = Future.succeededFuture<RowSet<Row>>()
             for (row in rows) {
-                val itemJson = itemJson(row)
+                val item = itemJson(row)
                 chain = chain.compose {
-                    insertCopiedItem(conn, targetMenuId, itemJson, now)
+                    insertCopiedItem(conn, targetMenuId, item, now)
                 }
             }
             chain.map<Void?> { null }
         }
     }
 
-    private fun insertCopiedItem(conn: SqlClient, menuId: String, item: JsonObject, now: OffsetDateTime): Future<io.vertx.sqlclient.RowSet<Row>> {
+    private fun insertCopiedItem(
+        conn: SqlClient,
+        menuId: String,
+        item: JsonObject,
+        now: OffsetDateTime,
+    ): Future<RowSet<Row>> {
         val dishId = item.getString("dish_id")
         // 重新读取菜品当前名称快照
-        val dishQuery = ctx.select(dName).from(dishes).where(dId.eq(dishId))
-        return execute(conn, dishQuery).compose { dishRows ->
-            val dishRow = dishRows.iterator().asSequence().firstOrNull()
-            val dishName = dishRow?.getString("name") ?: item.getString("dish_name")
-            val id = Ulid.generate()
-            val insertQuery = ctx.insertInto(items)
-                .set(cId, id)
-                .set(cMenuId, menuId)
-                .set(cDayOfWeek, item.getInteger("day_of_week"))
-                .set(cMealTime, item.getString("meal_time"))
-                .set(cDishId, dishId)
-                .set(cDishName, dishName)
-                .set(cSortOrder, item.getInteger("sort_order") ?: 0)
-                .set(cMetadata, JSONB.valueOf(item.getJsonObject("metadata")?.encode() ?: "{}"))
-                .set(DSL.field("created_at", OffsetDateTime::class.java), now)
-            execute(conn, insertQuery)
-        }
+        return conn.preparedQuery("SELECT name FROM dining.dining_dishes WHERE id = \$1")
+            .execute(Tuple.of(dishId))
+            .compose { dishRows ->
+                val dishRow = dishRows.iterator().asSequence().firstOrNull()
+                val dishName = dishRow?.getString("name") ?: item.getString("dish_name") ?: ""
+                insertItem(
+                    conn, menuId, item.getInteger("day_of_week"), item.getString("meal_time"),
+                    dishId, dishName, item.getInteger("sort_order") ?: 0,
+                    item.getJsonObject("metadata") ?: JsonObject(), now,
+                )
+            }
+    }
+
+    /** 在事务连接上写一条菜谱明细（`dish_name` 已由调用方快照好）。 */
+    private fun insertItem(
+        conn: SqlClient,
+        menuId: String,
+        dayOfWeek: Int?,
+        mealTime: String?,
+        dishId: String?,
+        dishName: String,
+        sortOrder: Int,
+        metadata: JsonObject,
+        now: OffsetDateTime,
+    ): Future<RowSet<Row>> {
+        val id = Ulid.generate()
+        return conn.preparedQuery(ITEM_INSERT_SQL).execute(
+            Tuple.of(id, menuId, dayOfWeek, mealTime, dishId, dishName, sortOrder, metadata, now)
+        )
     }
 
     // ========================================================================
@@ -362,33 +381,16 @@ class WeeklyMenuService(
         return ValidatedItem(day, mealTime, dishId, raw.getInteger("sort_order") ?: 0)
     }
 
-    private inner class ValidatedItem(
+    private class ValidatedItem(
         val dayOfWeek: Int,
         val mealTime: String,
         val dishId: String,
         val sortOrder: Int,
-    ) {
-        fun toInsert(menuId: String, now: OffsetDateTime, dishNamesById: Map<String, String>): org.jooq.Query {
-            val id = Ulid.generate()
-            return ctx.insertInto(items)
-                .set(cId, id)
-                .set(cMenuId, menuId)
-                .set(cDayOfWeek, dayOfWeek)
-                .set(cMealTime, mealTime)
-                .set(cDishId, dishId)
-                .set(cDishName, dishNamesById[dishId] ?: "")
-                .set(cSortOrder, sortOrder)
-                .set(cMetadata, JSONB.valueOf("{}"))
-                .set(DSL.field("created_at", OffsetDateTime::class.java), now)
-        }
-    }
+    )
 
-    private fun loadItems(menuId: String): Future<io.vertx.sqlclient.RowSet<Row>> {
-        val query = ctx.selectFrom(items)
-            .where(cMenuId.eq(menuId))
-            .orderBy(cDayOfWeek.asc(), cMealTime.asc(), cSortOrder.asc(), cCreatedAt.asc())
-        return execute(pool, query)
-    }
+    private fun loadItems(menuId: String): Future<RowSet<Row>> =
+        pool.preparedQuery("SELECT $ITEM_COLUMNS FROM dining.dining_weekly_menu_items WHERE menu_id = \$1$ITEM_ORDER")
+            .execute(Tuple.of(menuId))
 
     private fun itemJson(row: Row): JsonObject = JsonObject()
         .put("id", row.getValue("id")?.toString())
@@ -407,7 +409,4 @@ class WeeklyMenuService(
         } catch (error: Exception) {
             throw IllegalArgumentException("$field must be a valid ISO date (yyyy-MM-dd)")
         }
-
-    private fun execute(client: SqlClient, query: org.jooq.Query): Future<io.vertx.sqlclient.RowSet<Row>> =
-        client.preparedQuery(DatabaseConfig.sql(query)).execute(DatabaseConfig.tuple(query))
 }

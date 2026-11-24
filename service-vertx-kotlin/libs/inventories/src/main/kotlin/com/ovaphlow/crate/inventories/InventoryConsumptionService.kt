@@ -1,21 +1,11 @@
 package com.ovaphlow.crate.inventories
 
 import com.ovaphlow.crate.common.Ulid
-import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.database.gen.inventories.public_.tables.Lots
-import com.ovaphlow.crate.database.gen.inventories.public_.tables.Materials
-import com.ovaphlow.crate.database.gen.inventories.public_.tables.StockOperationDetails
-import com.ovaphlow.crate.database.gen.inventories.public_.tables.StockOperations
-import com.ovaphlow.crate.database.gen.inventories.public_.tables.Stocks
 import io.vertx.core.Future
 import io.vertx.core.json.JsonObject
 import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.SqlConnection
 import io.vertx.sqlclient.Tuple
-import org.jooq.DSLContext
-import org.jooq.JSONB
-import org.jooq.impl.DSL
-import org.slf4j.LoggerFactory
 import java.math.BigDecimal
 import java.math.RoundingMode
 import java.time.OffsetDateTime
@@ -23,11 +13,11 @@ import java.time.OffsetDateTime
 /**
  * 016 护理耗材消耗：客户端只提交 `stock_id + quantity`（基础数量），单位、成本和
  * 物资精度由服务端从库存行与物资档案读取并校验；与库存操作明细同事务写入。
+ *
+ * 持久化一律原生参数化 SQL（`$1..$n` + `Tuple`），无 jOOQ；所有语句都走调用方
+ * 传入的事务连接 [SqlConnection]，不在内部另起事务。
  */
-class InventoryConsumptionService(
-    private val ctx: DSLContext = DatabaseConfig.createDSL(),
-) {
-    private val log = LoggerFactory.getLogger(InventoryConsumptionService::class.java)
+class InventoryConsumptionService {
 
     data class ConsumptionItem(
         val stockId: String,
@@ -105,18 +95,11 @@ class InventoryConsumptionService(
                         val warehouse = validated[0].warehouse
 
                         metadata.put("warehouse", warehouse)
-                        val insertOp = ctx.insertInto(StockOperations.STOCK_OPERATIONS)
-                            .set(StockOperations.STOCK_OPERATIONS.ID, opId)
-                            .set(StockOperations.STOCK_OPERATIONS.ORDER_NO, orderNo)
-                            .set(StockOperations.STOCK_OPERATIONS.OPERATION_TYPE, "OUTBOUND")
-                            .set(StockOperations.STOCK_OPERATIONS.WAREHOUSE, warehouse)
-                            .set(StockOperations.STOCK_OPERATIONS.STATUS, "CONFIRMED")
-                            .set(StockOperations.STOCK_OPERATIONS.METADATA, JSONB.valueOf(metadata.encode()))
-                            .set(StockOperations.STOCK_OPERATIONS.CONFIRMED_AT, now)
-                            .set(StockOperations.STOCK_OPERATIONS.CREATED_AT, now)
-
-                        connection.preparedQuery(DatabaseConfig.sql(insertOp))
-                            .execute(DatabaseConfig.tuple(insertOp))
+                        connection.preparedQuery(INSERT_OPERATION_SQL).execute(
+                            Tuple.of(
+                                opId, orderNo, "OUTBOUND", warehouse, "CONFIRMED", metadata, now, now,
+                            )
+                        )
                             .compose { processConsumptionItems(connection, command, opId, validated, now) }
                             .map { detailResults ->
                                 ConsumptionResult(operationId = opId, orderNo = orderNo, detailResults = detailResults)
@@ -128,61 +111,28 @@ class InventoryConsumptionService(
     private fun findExistingOperation(
         connection: SqlConnection,
         taskExecutionId: String,
-    ): Future<ConsumptionResult?> {
-        val findQuery = ctx.select(
-            StockOperations.STOCK_OPERATIONS.ID.`as`("operation_id"),
-            StockOperations.STOCK_OPERATIONS.ORDER_NO.`as`("operation_order_no"),
-        )
-            .from(StockOperations.STOCK_OPERATIONS)
-            .where(StockOperations.STOCK_OPERATIONS.OPERATION_TYPE.eq("OUTBOUND"))
-            .and(StockOperations.STOCK_OPERATIONS.STATUS.eq("CONFIRMED"))
-            .and(DSL.field("metadata->>'source'").eq("NURSING_EXECUTION"))
-            .and(DSL.field("metadata->>'task_execution_id'").eq(taskExecutionId))
-
-        return connection.preparedQuery(DatabaseConfig.sql(findQuery))
-            .execute(DatabaseConfig.tuple(findQuery))
+    ): Future<ConsumptionResult?> =
+        connection.preparedQuery(FIND_OPERATION_SQL)
+            .execute(Tuple.of("OUTBOUND", "CONFIRMED", "NURSING_EXECUTION", taskExecutionId))
             .compose { opRows ->
                 if (opRows.size() == 0) return@compose Future.succeededFuture(null)
                 val opRow = opRows.iterator().next()
-                val opId = opRow.getValue(0)?.toString() ?: return@compose Future.succeededFuture(null)
+                val opId = opRow.getValue("operation_id")?.toString()
+                    ?: return@compose Future.succeededFuture(null)
 
-                val detail = StockOperationDetails.STOCK_OPERATION_DETAILS.`as`("detail")
-                val operation = StockOperations.STOCK_OPERATIONS.`as`("operation")
-                val stock = Stocks.STOCKS.`as`("stock")
-                val findDetails = ctx.select(
-                    detail.ID,
-                    detail.MATERIAL_ID,
-                    detail.LOT_ID,
-                    detail.QUANTITY,
-                    detail.UNIT,
-                    detail.UNIT_COST,
-                    detail.TOTAL_COST,
-                    stock.ID.`as`("stock_id"),
-                    operation.WAREHOUSE.`as`("warehouse"),
-                )
-                    .from(detail)
-                    .join(operation).on(detail.OPERATION_ID.eq(operation.ID))
-                    .leftJoin(stock).on(
-                        stock.WAREHOUSE.eq(operation.WAREHOUSE)
-                            .and(stock.MATERIAL_ID.eq(detail.MATERIAL_ID))
-                            .and(stock.LOT_ID.eq(detail.LOT_ID).or(stock.LOT_ID.isNull.and(detail.LOT_ID.isNull))),
-                    )
-                    .where(detail.OPERATION_ID.eq(opId))
-                connection.preparedQuery(DatabaseConfig.sql(findDetails))
-                    .execute(DatabaseConfig.tuple(findDetails))
+                connection.preparedQuery(FIND_DETAILS_SQL).execute(Tuple.of(opId))
                     .map { detailRows ->
                         val detailResults = mutableListOf<DetailResult>()
                         for (dr in detailRows) detailResults.add(rowToDetailResult(dr))
                         ConsumptionResult(
                             operationId = opId,
-                            orderNo = opRow.getValue(1)?.toString() ?: "",
+                            orderNo = opRow.getValue("operation_order_no")?.toString() ?: "",
                             detailResults = detailResults,
                         )
                     }
             }
-    }
 
-    /** 锁定并按基础数量校验库存：物资（FOR UPDATE）→ 库存行（FOR UPDATE）。 */
+    /** 锁定并按基础数量校验库存：库存预览 → 物资（FOR UPDATE）→ 批次 → 库存行（FOR UPDATE）。 */
     private fun validateAndLockStocks(
         connection: SqlConnection,
         command: NursingConsumptionCommand,
@@ -200,28 +150,17 @@ class InventoryConsumptionService(
             val stockId = sortedIds[index]
             val item = command.items.find { it.stockId == stockId }!!
 
-            val previewQuery = ctx.select(
-                Stocks.STOCKS.WAREHOUSE.`as`("stock_warehouse"),
-                Stocks.STOCKS.MATERIAL_ID.`as`("stock_material_id"),
-                Stocks.STOCKS.LOT_ID.`as`("stock_lot_id"),
-                Stocks.STOCKS.QUANTITY.`as`("stock_quantity"),
-                Stocks.STOCKS.TOTAL_COST.`as`("stock_total_cost"),
-            )
-                .from(Stocks.STOCKS)
-                .where(Stocks.STOCKS.ID.eq(stockId))
-
-            return connection.preparedQuery(DatabaseConfig.sql(previewQuery))
-                .execute(DatabaseConfig.tuple(previewQuery))
+            return connection.preparedQuery(STOCK_PREVIEW_SQL).execute(Tuple.of(stockId))
                 .compose { previewRows ->
                     if (previewRows.size() == 0)
                         return@compose Future.failedFuture(NotFoundException("stock not found: $stockId"))
 
                     val preview = previewRows.iterator().next()
-                    val warehouse = preview.getValue(0)?.toString() ?: ""
-                    val materialId = preview.getValue(1)?.toString() ?: ""
-                    val lotId = preview.getValue(2)?.toString()
-                    val previewQty = stockDecimalValue(preview.getValue(3))
-                    val previewCost = stockDecimalValue(preview.getValue(4))
+                    val warehouse = preview.getValue("stock_warehouse")?.toString() ?: ""
+                    val materialId = preview.getValue("stock_material_id")?.toString() ?: ""
+                    val lotId = preview.getValue("stock_lot_id")?.toString()
+                    val previewQty = stockDecimalValue(preview.getValue("stock_quantity"))
+                    val previewCost = stockDecimalValue(preview.getValue("stock_total_cost"))
 
                     if (validatedItems.isNotEmpty() && warehouse != validatedItems[0].warehouse) {
                         return@compose Future.failedFuture(
@@ -233,29 +172,19 @@ class InventoryConsumptionService(
                         previewCost.divide(previewQty, COST_DB_SCALE, RoundingMode.HALF_UP)
                     else BigDecimal.ZERO
 
-                    val materialQuery = ctx.select(
-                        Materials.MATERIALS.STATUS.`as`("material_status"),
-                        Materials.MATERIALS.BASE_UNIT.`as`("material_base_unit"),
-                        Materials.MATERIALS.QUANTITY_SCALE.`as`("material_quantity_scale"),
-                        Materials.MATERIALS.ENABLE_BATCH_CONTROL.`as`("material_batch_control"),
-                    )
-                        .from(Materials.MATERIALS)
-                        .where(Materials.MATERIALS.ID.eq(materialId))
-                        .forUpdate()
-                    connection.preparedQuery(DatabaseConfig.sql(materialQuery))
-                        .execute(DatabaseConfig.tuple(materialQuery))
+                    connection.preparedQuery(MATERIAL_LOCK_SQL).execute(Tuple.of(materialId))
                         .compose { matRows ->
                             if (matRows.size() == 0)
                                 return@compose Future.failedFuture(NotFoundException("material not found: $materialId"))
                             val matRow = matRows.iterator().next()
-                            val matStatus = matRow.getValue(0)?.toString() ?: ""
+                            val matStatus = matRow.getValue("material_status")?.toString() ?: ""
                             if (matStatus != "ACTIVE")
                                 return@compose Future.failedFuture(ConflictException("material $materialId is not ACTIVE"))
-                            val baseUnit = matRow.getValue(1)?.toString()
+                            val baseUnit = matRow.getValue("material_base_unit")?.toString()
                             if (baseUnit.isNullOrBlank())
                                 return@compose Future.failedFuture(ConflictException("material $materialId has no base unit"))
-                            val scale = (matRow.getValue(2) as? Number)?.toInt() ?: 0
-                            val batchControl = matRow.getValue(3) as? Boolean ?: false
+                            val scale = (matRow.getValue("material_quantity_scale") as? Number)?.toInt() ?: 0
+                            val batchControl = matRow.getValue("material_batch_control") as? Boolean ?: false
 
                             validateBaseQuantity(item.quantity, scale)
                             validateUnitCost(avgUnitCost)
@@ -263,23 +192,14 @@ class InventoryConsumptionService(
 
                             validateMaterialAndLot(connection, materialId, lotId, batchControl)
                                 .compose {
-                                    val lockQuery = ctx.select(
-                                        Stocks.STOCKS.QUANTITY.`as`("stock_quantity"),
-                                        Stocks.STOCKS.LOCKED_QUANTITY.`as`("stock_locked_quantity"),
-                                        Stocks.STOCKS.TOTAL_COST.`as`("stock_total_cost"),
-                                    )
-                                        .from(Stocks.STOCKS)
-                                        .where(Stocks.STOCKS.ID.eq(stockId))
-                                        .forUpdate()
-                                    connection.preparedQuery(DatabaseConfig.sql(lockQuery))
-                                        .execute(DatabaseConfig.tuple(lockQuery))
+                                    connection.preparedQuery(STOCK_LOCK_SQL).execute(Tuple.of(stockId))
                                 }
                                 .compose { stockRows ->
                                     if (stockRows.size() == 0)
                                         return@compose Future.failedFuture(NotFoundException("stock not found: $stockId"))
                                     val stockRow = stockRows.iterator().next()
-                                    val lockedQty = stockDecimalValue(stockRow.getValue(0))
-                                    val locked = stockDecimalValue(stockRow.getValue(1))
+                                    val lockedQty = stockDecimalValue(stockRow.getValue("stock_quantity"))
+                                    val locked = stockDecimalValue(stockRow.getValue("stock_locked_quantity"))
                                     val available = lockedQty.subtract(locked)
                                     if (available < item.quantity)
                                         return@compose Future.failedFuture(
@@ -296,7 +216,7 @@ class InventoryConsumptionService(
                                             unit = baseUnit,
                                             unitCost = avgUnitCost,
                                             originalQuantity = lockedQty,
-                                            originalTotalCost = stockDecimalValue(stockRow.getValue(2)),
+                                            originalTotalCost = stockDecimalValue(stockRow.getValue("stock_total_cost")),
                                         ),
                                     )
                                     process(index + 1)
@@ -327,21 +247,14 @@ class InventoryConsumptionService(
             return Future.failedFuture(ConflictException("material $materialId does not use batch control"))
         if (lotId == null) return Future.succeededFuture(null)
 
-        val checkLot = ctx.select(
-            Lots.LOTS.MATERIAL_ID.`as`("lot_material_id"),
-            Lots.LOTS.EXPIRY_DATE.`as`("lot_expiry_date"),
-        )
-            .from(Lots.LOTS)
-            .where(Lots.LOTS.ID.eq(lotId))
-        return connection.preparedQuery(DatabaseConfig.sql(checkLot))
-            .execute(DatabaseConfig.tuple(checkLot))
+        return connection.preparedQuery(LOT_SQL).execute(Tuple.of(lotId))
             .compose { lotRows ->
                 if (lotRows.size() == 0)
                     return@compose Future.failedFuture(ConflictException("lot $lotId not found"))
                 val lotRow = lotRows.iterator().next()
-                if (lotRow.getValue(0)?.toString() != materialId)
+                if (lotRow.getValue("lot_material_id")?.toString() != materialId)
                     return@compose Future.failedFuture(ConflictException("lot $lotId does not belong to material $materialId"))
-                val expiry = lotRow.getValue(1) as? java.time.LocalDate
+                val expiry = lotRow.getValue("lot_expiry_date") as? java.time.LocalDate
                 if (expiry != null && expiry.isBefore(java.time.LocalDate.now()))
                     return@compose Future.failedFuture(ConflictException("lot $lotId has expired on $expiry"))
                 Future.succeededFuture(null as Void?)
@@ -363,46 +276,32 @@ class InventoryConsumptionService(
             val detailId = Ulid.generate()
             val totalCost = totalCostOf(vi.quantity, vi.unitCost)
 
-            val insertDetail = ctx.insertInto(StockOperationDetails.STOCK_OPERATION_DETAILS)
-                .set(StockOperationDetails.STOCK_OPERATION_DETAILS.ID, detailId)
-                .set(StockOperationDetails.STOCK_OPERATION_DETAILS.OPERATION_ID, opId)
-                .set(StockOperationDetails.STOCK_OPERATION_DETAILS.MATERIAL_ID, vi.materialId)
-                .set(StockOperationDetails.STOCK_OPERATION_DETAILS.LOT_ID, vi.lotId)
-                .set(StockOperationDetails.STOCK_OPERATION_DETAILS.QUANTITY, vi.quantity)
-                .set(StockOperationDetails.STOCK_OPERATION_DETAILS.UNIT, vi.unit)
-                .set(StockOperationDetails.STOCK_OPERATION_DETAILS.UNIT_COST, vi.unitCost)
-                .set(StockOperationDetails.STOCK_OPERATION_DETAILS.TOTAL_COST, totalCost)
-                .set(StockOperationDetails.STOCK_OPERATION_DETAILS.CREATED_AT, now)
-
-            return connection.preparedQuery(DatabaseConfig.sql(insertDetail))
-                .execute(DatabaseConfig.tuple(insertDetail))
-                .compose {
-                    val newQty = vi.originalQuantity.subtract(vi.quantity)
-                    val newCost = vi.originalTotalCost.subtract(totalCost).max(BigDecimal.ZERO)
-                    val updateStock = ctx.update(Stocks.STOCKS)
-                        .set(Stocks.STOCKS.QUANTITY, newQty)
-                        .set(Stocks.STOCKS.TOTAL_COST, newCost)
-                        .set(Stocks.STOCKS.LAST_UPDATED, now)
-                        .where(Stocks.STOCKS.ID.eq(vi.stockId))
-                    connection.preparedQuery(DatabaseConfig.sql(updateStock))
-                        .execute(DatabaseConfig.tuple(updateStock))
-                        .map {
-                            detailResults.add(
-                                DetailResult(
-                                    detailId = detailId,
-                                    stockId = vi.stockId,
-                                    materialId = vi.materialId,
-                                    lotId = vi.lotId,
-                                    quantity = vi.quantity,
-                                    unit = vi.unit,
-                                    unitCost = vi.unitCost,
-                                    totalCost = totalCost,
-                                    warehouse = vi.warehouse,
-                                ),
-                            )
-                        }
-                }
-                .compose { process(index + 1) }
+            return connection.preparedQuery(INSERT_DETAIL_SQL).execute(
+                Tuple.of(
+                    detailId, opId, vi.materialId, vi.lotId, vi.quantity, vi.unit,
+                    vi.unitCost, totalCost, now,
+                )
+            ).compose {
+                val newQty = vi.originalQuantity.subtract(vi.quantity)
+                val newCost = vi.originalTotalCost.subtract(totalCost).max(BigDecimal.ZERO)
+                connection.preparedQuery(UPDATE_STOCK_SQL)
+                    .execute(Tuple.of(newQty, newCost, now, vi.stockId))
+                    .map {
+                        detailResults.add(
+                            DetailResult(
+                                detailId = detailId,
+                                stockId = vi.stockId,
+                                materialId = vi.materialId,
+                                lotId = vi.lotId,
+                                quantity = vi.quantity,
+                                unit = vi.unit,
+                                unitCost = vi.unitCost,
+                                totalCost = totalCost,
+                                warehouse = vi.warehouse,
+                            ),
+                        )
+                    }
+            }.compose { process(index + 1) }
         }
 
         return process(0)
@@ -425,7 +324,7 @@ class InventoryConsumptionService(
         taskExecutionId: String,
     ): Future<Void?> =
         connection
-            .preparedQuery("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .preparedQuery("SELECT pg_advisory_xact_lock(hashtextextended(\$1, 0))")
             .execute(Tuple.of(taskExecutionId))
             .map { null as Void? }
 
@@ -450,6 +349,52 @@ class InventoryConsumptionService(
     }
 
     companion object {
+        private const val INSERT_OPERATION_SQL =
+            "INSERT INTO stock_operations " +
+                "(id, order_no, operation_type, warehouse, status, metadata, confirmed_at, created_at) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8)"
+
+        private const val FIND_OPERATION_SQL =
+            "SELECT id AS operation_id, order_no AS operation_order_no FROM stock_operations " +
+                "WHERE operation_type = \$1 AND status = \$2 " +
+                "AND metadata->>'source' = \$3 AND metadata->>'task_execution_id' = \$4"
+
+        private const val FIND_DETAILS_SQL =
+            "SELECT detail.id AS id, detail.material_id AS material_id, detail.lot_id AS lot_id, " +
+                "detail.quantity AS quantity, detail.unit AS unit, detail.unit_cost AS unit_cost, " +
+                "detail.total_cost AS total_cost, stock.id AS stock_id, operation.warehouse AS warehouse " +
+                "FROM stock_operation_details detail " +
+                "JOIN stock_operations operation ON operation.id = detail.operation_id " +
+                "LEFT JOIN stocks stock ON stock.warehouse = operation.warehouse " +
+                "AND stock.material_id = detail.material_id " +
+                "AND (stock.lot_id = detail.lot_id OR (stock.lot_id IS NULL AND detail.lot_id IS NULL)) " +
+                "WHERE detail.operation_id = \$1"
+
+        private const val STOCK_PREVIEW_SQL =
+            "SELECT warehouse AS stock_warehouse, material_id AS stock_material_id, " +
+                "lot_id AS stock_lot_id, quantity AS stock_quantity, total_cost AS stock_total_cost " +
+                "FROM stocks WHERE id = \$1"
+
+        private const val MATERIAL_LOCK_SQL =
+            "SELECT status AS material_status, base_unit AS material_base_unit, " +
+                "quantity_scale AS material_quantity_scale, enable_batch_control AS material_batch_control " +
+                "FROM materials WHERE id = \$1 FOR UPDATE"
+
+        private const val LOT_SQL =
+            "SELECT material_id AS lot_material_id, expiry_date AS lot_expiry_date FROM lots WHERE id = \$1"
+
+        private const val STOCK_LOCK_SQL =
+            "SELECT quantity AS stock_quantity, locked_quantity AS stock_locked_quantity, " +
+                "total_cost AS stock_total_cost FROM stocks WHERE id = \$1 FOR UPDATE"
+
+        private const val INSERT_DETAIL_SQL =
+            "INSERT INTO stock_operation_details " +
+                "(id, operation_id, material_id, lot_id, quantity, unit, unit_cost, total_cost, created_at) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9)"
+
+        private const val UPDATE_STOCK_SQL =
+            "UPDATE stocks SET quantity = \$1, total_cost = \$2, last_updated = \$3 WHERE id = \$4"
+
         fun rowToDetailResult(row: Row): DetailResult =
             DetailResult(
                 detailId = row.getValue("id")?.toString() ?: "",

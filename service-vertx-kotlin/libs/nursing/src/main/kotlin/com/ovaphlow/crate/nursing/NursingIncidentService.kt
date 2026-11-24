@@ -1,20 +1,13 @@
 package com.ovaphlow.crate.nursing
 
 import com.ovaphlow.crate.common.Ulid
-import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingIncidentActions.NURSING_INCIDENT_ACTIONS
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingIncidents.NURSING_INCIDENTS
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingServicePeriods.NURSING_SERVICE_PERIODS
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
 import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
-import io.vertx.sqlclient.RowSet
 import io.vertx.sqlclient.SqlClient
-import org.jooq.DSLContext
-import org.jooq.Query
-import org.jooq.impl.DSL
+import io.vertx.sqlclient.Tuple
 import java.time.LocalDate
 import java.time.OffsetDateTime
 import java.time.ZoneId
@@ -28,10 +21,11 @@ import java.time.ZoneId
  * 不得被静默覆盖或删除（服务层不提供 UPDATE/DELETE 入口）。
  *
  * 只读列表/详情走 [pool]，不产生任何写副作用。
+ *
+ * 持久化一律原生参数化 SQL（`$1..$n` + `Tuple`），无 jOOQ。
  */
 class NursingIncidentService(
     private val pool: Pool,
-    private val ctx: DSLContext = DatabaseConfig.createDSL(),
 ) {
     companion object {
         val VALID_INCIDENT_TYPES = setOf("跌倒/坠床", "走失", "压疮", "误吸/噎食", "用药差错", "感染暴露", "其他")
@@ -41,6 +35,40 @@ class NursingIncidentService(
         val VALID_ACTION_TYPES = setOf("处置", "通知", "观察")
         private val PERIOD_OPEN_STATUSES = setOf("ACTIVE", "SUSPENDED")
         private val businessZone: ZoneId = ZoneId.of("Asia/Shanghai")
+
+        private const val INCIDENT_COLUMNS =
+            "id, encounter_id, period_id, incident_type, severity, status, occurred_at, " +
+                "description, reporter, created_at, updated_at"
+
+        private const val INCIDENT_FROM = " FROM nursing.nursing_incidents"
+
+        private const val ACTION_COLUMNS =
+            "id, incident_id, action_type, body, actor, occurred_at, " +
+                "notified_party, notification_result, created_at"
+
+        private const val ACTION_FROM = " FROM nursing.nursing_incident_actions"
+
+        private const val INCIDENT_INSERT_SQL =
+            "INSERT INTO nursing.nursing_incidents ($INCIDENT_COLUMNS) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11)"
+
+        private const val INCIDENT_BY_ID_SQL =
+            "SELECT $INCIDENT_COLUMNS$INCIDENT_FROM WHERE id = \$1"
+
+        private const val INCIDENT_BY_ID_AND_ENCOUNTER_SQL =
+            "SELECT $INCIDENT_COLUMNS$INCIDENT_FROM WHERE id = \$1 AND encounter_id = \$2"
+
+        private const val INCIDENT_LOCK_SQL =
+            "SELECT $INCIDENT_COLUMNS$INCIDENT_FROM WHERE id = \$1 AND encounter_id = \$2 FOR UPDATE"
+
+        private const val INCIDENT_STATUS_UPDATE_SQL =
+            "UPDATE nursing.nursing_incidents SET status = \$1, updated_at = \$2 WHERE id = \$3"
+
+        private const val ACTION_BY_INCIDENT_SQL =
+            "SELECT $ACTION_COLUMNS$ACTION_FROM WHERE incident_id = \$1 ORDER BY created_at ASC, id ASC"
+
+        private const val PERIOD_STATUS_SQL =
+            "SELECT status FROM nursing.nursing_service_periods WHERE id = \$1"
 
         fun businessDateOf(value: OffsetDateTime): LocalDate =
             value.atZoneSameInstant(businessZone).toLocalDate()
@@ -75,20 +103,21 @@ class NursingIncidentService(
     fun createIncident(client: SqlClient, input: IncidentCreateInput): Future<JsonObject> {
         val now = OffsetDateTime.now()
         val id = Ulid.generate()
-        val insert = ctx.insertInto(NURSING_INCIDENTS)
-            .set(NURSING_INCIDENTS.ID, id)
-            .set(NURSING_INCIDENTS.ENCOUNTER_ID, input.encounterId)
-            .set(NURSING_INCIDENTS.PERIOD_ID, input.periodId)
-            .set(NURSING_INCIDENTS.INCIDENT_TYPE, input.incidentType)
-            .set(NURSING_INCIDENTS.SEVERITY, input.severity)
-            .set(NURSING_INCIDENTS.STATUS, "已上报")
-            .set(NURSING_INCIDENTS.OCCURRED_AT, input.occurredAt)
-            .set(NURSING_INCIDENTS.DESCRIPTION, input.description)
-            .set(NURSING_INCIDENTS.REPORTER, input.reporter)
-            .set(NURSING_INCIDENTS.CREATED_AT, now)
-            .set(NURSING_INCIDENTS.UPDATED_AT, now)
+        val insertTuple = Tuple.of(
+            id,
+            input.encounterId,
+            input.periodId,
+            input.incidentType,
+            input.severity,
+            "已上报",
+            input.occurredAt,
+            input.description,
+            input.reporter,
+            now,
+            now,
+        )
 
-        return execute(client, insert).compose {
+        return client.preparedQuery(INCIDENT_INSERT_SQL).execute(insertTuple).compose {
             insertAction(
                 client,
                 ActionInput("上报", input.description, null, null),
@@ -103,13 +132,11 @@ class NursingIncidentService(
             } else {
                 insertAction(client, initial, incidentId = id, actor = input.reporter, occurredAt = OffsetDateTime.now())
                     .compose { _ ->
-                        val update = ctx.update(NURSING_INCIDENTS)
-                            .set(NURSING_INCIDENTS.STATUS, "处理中")
-                            .set(NURSING_INCIDENTS.UPDATED_AT, OffsetDateTime.now())
-                            .where(NURSING_INCIDENTS.ID.eq(id))
-                        execute(client, update).map {
-                            incidentJsonFromInput(input, id, "处理中", now)
-                        }
+                        client.preparedQuery(INCIDENT_STATUS_UPDATE_SQL)
+                            .execute(Tuple.of("处理中", OffsetDateTime.now(), id))
+                            .map {
+                                incidentJsonFromInput(input, id, "处理中", now)
+                            }
                     }
             }
         }
@@ -122,24 +149,20 @@ class NursingIncidentService(
      * 按状态/周期状态收束。
      */
     fun lockIncident(client: SqlClient, incidentId: String, encounterId: String): Future<JsonObject> {
-        val query = ctx.selectFrom(NURSING_INCIDENTS)
-            .where(
-                NURSING_INCIDENTS.ID.eq(incidentId)
-                    .and(NURSING_INCIDENTS.ENCOUNTER_ID.eq(encounterId)),
-            )
-            .forUpdate()
-        return execute(client, query).compose { rows ->
-            val row = rows.iterator().asSequence().firstOrNull()
-            if (row == null) {
-                return@compose Future.failedFuture(NotFoundException("nursing incident not found: $incidentId"))
+        return client.preparedQuery(INCIDENT_LOCK_SQL)
+            .execute(Tuple.of(incidentId, encounterId))
+            .compose { rows ->
+                val row = rows.iterator().asSequence().firstOrNull()
+                if (row == null) {
+                    return@compose Future.failedFuture(NotFoundException("nursing incident not found: $incidentId"))
+                }
+                val incident = incidentJsonFromRow(row)
+                if (incident.getString("encounter_id") != encounterId) {
+                    // 与 WHERE 双重归属过滤互为双重校验：跨入住访问按未找到处理
+                    return@compose Future.failedFuture(NotFoundException("nursing incident not found: $incidentId"))
+                }
+                Future.succeededFuture(incident)
             }
-            val incident = incidentJsonFromRow(row)
-            if (incident.getString("encounter_id") != encounterId) {
-                // 与 WHERE 双重归属过滤互为双重校验：跨入住访问按未找到处理
-                return@compose Future.failedFuture(NotFoundException("nursing incident not found: $incidentId"))
-            }
-            Future.succeededFuture(incident)
-        }
     }
 
     /**
@@ -159,15 +182,13 @@ class NursingIncidentService(
                 val now = OffsetDateTime.now()
                 insertAction(client, input, incidentId, actor, now).compose { action ->
                     val status = if (incident.getString("status") == "已上报") "处理中" else incident.getString("status")
-                    val update = ctx.update(NURSING_INCIDENTS)
-                        .set(NURSING_INCIDENTS.STATUS, status)
-                        .set(NURSING_INCIDENTS.UPDATED_AT, now)
-                        .where(NURSING_INCIDENTS.ID.eq(incidentId))
-                    execute(client, update).map {
-                        JsonObject()
-                            .put("incident", incident.copy().put("status", status).put("updated_at", now.toString()))
-                            .put("action", action)
-                    }
+                    client.preparedQuery(INCIDENT_STATUS_UPDATE_SQL)
+                        .execute(Tuple.of(status, now, incidentId))
+                        .map {
+                            JsonObject()
+                                .put("incident", incident.copy().put("status", status).put("updated_at", now.toString()))
+                                .put("action", action)
+                        }
                 }
             }
         }
@@ -188,15 +209,13 @@ class NursingIncidentService(
             }
             val now = OffsetDateTime.now()
             insertAction(client, ActionInput("关闭", closeNote, null, null), incidentId, actor, now).compose { action ->
-                val update = ctx.update(NURSING_INCIDENTS)
-                    .set(NURSING_INCIDENTS.STATUS, "已关闭")
-                    .set(NURSING_INCIDENTS.UPDATED_AT, now)
-                    .where(NURSING_INCIDENTS.ID.eq(incidentId))
-                execute(client, update).map {
-                    JsonObject()
-                        .put("incident", incident.copy().put("status", "已关闭").put("updated_at", now.toString()))
-                        .put("action", action)
-                }
+                client.preparedQuery(INCIDENT_STATUS_UPDATE_SQL)
+                    .execute(Tuple.of("已关闭", now, incidentId))
+                    .map {
+                        JsonObject()
+                            .put("incident", incident.copy().put("status", "已关闭").put("updated_at", now.toString()))
+                            .put("action", action)
+                    }
             }
         }
     }
@@ -214,22 +233,28 @@ class NursingIncidentService(
         limit: Int,
         offset: Int,
     ): Future<JsonObject> {
-        val conditions = mutableListOf<org.jooq.Condition>()
-        conditions.add(NURSING_INCIDENTS.ENCOUNTER_ID.eq(encounterId))
-        status?.takeIf(String::isNotBlank)?.let { conditions.add(NURSING_INCIDENTS.STATUS.eq(it)) }
-        dateFrom?.let { conditions.add(NURSING_INCIDENTS.OCCURRED_AT.ge(it.atStartOfDay(businessZone).toOffsetDateTime())) }
-        dateTo?.let { conditions.add(NURSING_INCIDENTS.OCCURRED_AT.lt(it.plusDays(1).atStartOfDay(businessZone).toOffsetDateTime())) }
+        val where = mutableListOf<String>()
+        val args = mutableListOf<Any?>()
 
-        val countQuery = ctx.select(DSL.count().`as`("total")).from(NURSING_INCIDENTS).where(conditions)
-        val dataQuery = ctx.selectFrom(NURSING_INCIDENTS)
-            .where(conditions)
-            .orderBy(NURSING_INCIDENTS.OCCURRED_AT.desc(), NURSING_INCIDENTS.CREATED_AT.desc())
-            .limit(limit)
-            .offset(offset)
+        /** 追加一个绑定值并返回其占位符。 */
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
 
-        return execute(pool, countQuery).compose { countRows ->
+        where.add("encounter_id = ${bind(encounterId)}")
+        status?.takeIf(String::isNotBlank)?.let { where.add("status = ${bind(it)}") }
+        dateFrom?.let { where.add("occurred_at >= ${bind(it.atStartOfDay(businessZone).toOffsetDateTime())}") }
+        dateTo?.let { where.add("occurred_at < ${bind(it.plusDays(1).atStartOfDay(businessZone).toOffsetDateTime())}") }
+
+        val whereClause = " WHERE " + where.joinToString(" AND ")
+        val countSql = "SELECT count(*) AS total$INCIDENT_FROM$whereClause"
+        val countArgs = args.toList()
+        val dataSql =
+            "SELECT $INCIDENT_COLUMNS$INCIDENT_FROM$whereClause " +
+                "ORDER BY occurred_at DESC, created_at DESC LIMIT ${bind(limit)} OFFSET ${bind(offset)}"
+        val dataArgs = args.toList()
+
+        return pool.preparedQuery(countSql).execute(Tuple.from(countArgs)).compose { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(pool, dataQuery).map { rows ->
+            pool.preparedQuery(dataSql).execute(Tuple.from(dataArgs)).map { rows ->
                 JsonObject()
                     .put("records", JsonArray(rows.map { incidentJsonFromRow(it) }))
                     .put("meta", JsonObject().put("total", total))
@@ -240,26 +265,20 @@ class NursingIncidentService(
     /** 事件详情：主事实 + 全部追加审计事实（只读，按时间升序）。
      *  事件必须精确归属于 [encounterId]，跨入住读取返回 404。 */
     fun getIncident(encounterId: String, id: String): Future<JsonObject> {
-        val incidentQuery = ctx.selectFrom(NURSING_INCIDENTS)
-            .where(
-                NURSING_INCIDENTS.ID.eq(id)
-                    .and(NURSING_INCIDENTS.ENCOUNTER_ID.eq(encounterId)),
-            )
-        return execute(pool, incidentQuery).compose { rows ->
-            val row = rows.iterator().asSequence().firstOrNull()
-                ?: return@compose Future.failedFuture(NotFoundException("nursing incident not found: $id"))
-            val incident = incidentJsonFromRow(row)
-            if (incident.getString("encounter_id") != encounterId) {
-                // 与 WHERE 双重归属过滤互为双重校验：跨入住读取按未找到处理
-                return@compose Future.failedFuture(NotFoundException("nursing incident not found: $id"))
+        return pool.preparedQuery(INCIDENT_BY_ID_AND_ENCOUNTER_SQL)
+            .execute(Tuple.of(id, encounterId))
+            .compose { rows ->
+                val row = rows.iterator().asSequence().firstOrNull()
+                    ?: return@compose Future.failedFuture(NotFoundException("nursing incident not found: $id"))
+                val incident = incidentJsonFromRow(row)
+                if (incident.getString("encounter_id") != encounterId) {
+                    // 与 WHERE 双重归属过滤互为双重校验：跨入住读取按未找到处理
+                    return@compose Future.failedFuture(NotFoundException("nursing incident not found: $id"))
+                }
+                pool.preparedQuery(ACTION_BY_INCIDENT_SQL).execute(Tuple.of(id)).map { actionRows ->
+                    incident.put("actions", JsonArray(actionRows.map { actionJsonFromRow(it) }))
+                }
             }
-            val actionsQuery = ctx.selectFrom(NURSING_INCIDENT_ACTIONS)
-                .where(NURSING_INCIDENT_ACTIONS.INCIDENT_ID.eq(id))
-                .orderBy(NURSING_INCIDENT_ACTIONS.CREATED_AT.asc(), NURSING_INCIDENT_ACTIONS.ID.asc())
-            execute(pool, actionsQuery).map { actionRows ->
-                incident.put("actions", JsonArray(actionRows.map { actionJsonFromRow(it) }))
-            }
-        }
     }
 
     // ========================================================================
@@ -268,10 +287,7 @@ class NursingIncidentService(
 
     /** 事件关联周期是否处于终态；终态时非关闭动作一律 409。 */
     private fun ensurePeriodNotTerminal(client: SqlClient, periodId: String): Future<Void> {
-        val query = ctx.select(NURSING_SERVICE_PERIODS.STATUS)
-            .from(NURSING_SERVICE_PERIODS)
-            .where(NURSING_SERVICE_PERIODS.ID.eq(periodId))
-        return execute(client, query).compose { rows ->
+        return client.preparedQuery(PERIOD_STATUS_SQL).execute(Tuple.of(periodId)).compose { rows ->
             val row = rows.iterator().asSequence().firstOrNull()
             val status = row?.getString("status")
             if (row == null || !isPeriodOpen(status)) {
@@ -291,18 +307,21 @@ class NursingIncidentService(
         occurredAt: OffsetDateTime,
     ): Future<JsonObject> {
         val id = Ulid.generate()
-        var insert = ctx.insertInto(NURSING_INCIDENT_ACTIONS)
-            .set(NURSING_INCIDENT_ACTIONS.ID, id)
-            .set(NURSING_INCIDENT_ACTIONS.INCIDENT_ID, incidentId)
-            .set(NURSING_INCIDENT_ACTIONS.ACTION_TYPE, input.actionType)
-            .set(NURSING_INCIDENT_ACTIONS.BODY, input.body)
-            .set(NURSING_INCIDENT_ACTIONS.ACTOR, actor)
-            .set(NURSING_INCIDENT_ACTIONS.OCCURRED_AT, occurredAt)
-            .set(NURSING_INCIDENT_ACTIONS.CREATED_AT, occurredAt)
-        input.notifiedParty?.let { insert = insert.set(NURSING_INCIDENT_ACTIONS.NOTIFIED_PARTY, it) }
-        input.notificationResult?.let { insert = insert.set(NURSING_INCIDENT_ACTIONS.NOTIFICATION_RESULT, it) }
+        val columns = mutableListOf(
+            "id", "incident_id", "action_type", "body", "actor", "occurred_at", "created_at",
+        )
+        val values = mutableListOf<Any?>(
+            id, incidentId, input.actionType, input.body, actor, occurredAt, occurredAt,
+        )
+        input.notifiedParty?.let { columns.add("notified_party"); values.add(it) }
+        input.notificationResult?.let { columns.add("notification_result"); values.add(it) }
 
-        return execute(client, insert).map {
+        val placeholders = values.indices.joinToString(", ") { "\$${it + 1}" }
+        val sql =
+            "INSERT INTO nursing.nursing_incident_actions (${columns.joinToString(", ")}) " +
+                "VALUES ($placeholders)"
+
+        return client.preparedQuery(sql).execute(Tuple.from(values)).map {
             JsonObject()
                 .put("id", id)
                 .put("incident_id", incidentId)
@@ -360,7 +379,4 @@ class NursingIncidentService(
             .put("notified_party", row.getString("notified_party"))
             .put("notification_result", row.getString("notification_result"))
             .put("created_at", row.getOffsetDateTime("created_at")?.toString())
-
-    private fun execute(client: SqlClient, query: Query): Future<RowSet<Row>> =
-        client.preparedQuery(DatabaseConfig.sql(query)).execute(DatabaseConfig.tuple(query))
 }

@@ -1,67 +1,71 @@
 package com.ovaphlow.crate.nursing
 
 import com.ovaphlow.crate.common.Ulid
-import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingPlanItems.NURSING_PLAN_ITEMS
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingPlans.NURSING_PLANS
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
 import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
-import io.vertx.sqlclient.RowSet
 import io.vertx.sqlclient.SqlClient
-import org.jooq.DSLContext
-import org.jooq.JSONB
-import org.jooq.impl.DSL
-import org.jooq.impl.DSL.count
+import io.vertx.sqlclient.Tuple
 import java.time.LocalDate
 import java.time.OffsetDateTime
 
+/**
+ * 护理照护计划服务。
+ *
+ * 持久化一律原生参数化 SQL（`$1..$n` + `Tuple`），本文件无任何 jOOQ 引用。
+ */
 class PlanService(
     private val pool: Pool,
-    private val ctx: DSLContext = DatabaseConfig.createDSL()
 ) {
-    private val t = DSL.table(DSL.name("nursing", "nursing_plans"))
-    private val ti = DSL.table(DSL.name("nursing", "nursing_plan_items"))
-
-    /** 前置校验只读：护理评估（`period_id` 或 `encounter_id` 任一命中即可） */
-    private val ta = DSL.table(DSL.name("nursing", "nursing_assessments"))
-    private val caPeriodId = DSL.field("period_id", String::class.java)
-    private val caEncounterId = DSL.field("encounter_id", String::class.java)
-
-    // plan columns
-    private val cId = DSL.field("id", String::class.java)
-    private val cPeriodId = DSL.field("period_id", String::class.java)
-    private val cEncounterId = DSL.field("encounter_id", String::class.java)
-    private val cPlanName = DSL.field("plan_name", String::class.java)
-    private val cGoals = DSL.field("goals", String::class.java)
-    private val cStatus = DSL.field("status", String::class.java)
-    private val cCreatedBy = DSL.field("created_by", String::class.java)
-    private val cStartDate = DSL.field("start_date", LocalDate::class.java)
-    private val cEndDate = DSL.field("end_date", LocalDate::class.java)
-    private val cMetadata = DSL.field("metadata", JSONB::class.java)
-    private val cCreatedAt = DSL.field("created_at", OffsetDateTime::class.java)
-    private val cUpdatedAt = DSL.field("updated_at", OffsetDateTime::class.java)
-
-    // plan item columns
-    private val ciId = DSL.field("id", String::class.java)
-    private val ciPlanId = DSL.field("plan_id", String::class.java)
-    private val ciAction = DSL.field("action", String::class.java)
-    private val ciFrequencyCode = DSL.field("frequency_code", String::class.java)
-    private val ciFrequencyName = DSL.field("frequency_name", String::class.java)
-    private val ciDurationDays = DSL.field("duration_days", Int::class.java)
-    private val ciRemark = DSL.field("remark", String::class.java)
-    private val ciItemStatus = DSL.field("status", String::class.java)
-    private val ciMetadata = DSL.field("metadata", JSONB::class.java)
-    private val ciCreatedAt = DSL.field("created_at", OffsetDateTime::class.java)
-
     companion object {
         private val VALID_STATUS_TRANSITIONS = mapOf(
             "ACTIVE" to listOf("COMPLETED", "DISCONTINUED"),
             "COMPLETED" to emptyList(),
             "DISCONTINUED" to emptyList()
         )
+
+        /** `nursing.nursing_plans` 显式列清单（与 [planToJson] 读取的键一致）。 */
+        internal const val PLAN_COLUMNS =
+            "id, period_id, encounter_id, plan_name, goals, status, created_by, " +
+                "start_date, end_date, metadata, created_at, updated_at"
+
+        /** `nursing.nursing_plan_items` 显式列清单（与 [itemToJson] 读取的键一致）。 */
+        internal const val ITEM_COLUMNS =
+            "id, plan_id, action, frequency_code, frequency_name, duration_days, " +
+                "remark, status, metadata, created_at"
+
+        private const val ACTIVE_PLAN_SQL =
+            "SELECT id FROM nursing.nursing_plans WHERE period_id = \$1 AND status = 'ACTIVE'"
+
+        private const val ASSESS_COUNT_BY_PERIOD_SQL =
+            "SELECT count(*) AS total FROM nursing.nursing_assessments WHERE period_id = \$1"
+
+        private const val ASSESS_COUNT_BY_PERIOD_OR_ENCOUNTER_SQL =
+            "SELECT count(*) AS total FROM nursing.nursing_assessments " +
+                "WHERE period_id = \$1 OR encounter_id = \$2"
+
+        private const val PLAN_BY_ID_SQL =
+            "SELECT $PLAN_COLUMNS FROM nursing.nursing_plans WHERE id = \$1"
+
+        private const val PLAN_ITEMS_SQL =
+            "SELECT $ITEM_COLUMNS FROM nursing.nursing_plan_items WHERE plan_id = \$1"
+
+        private const val LOCK_ACTIVE_PLAN_SQL =
+            "SELECT $PLAN_COLUMNS FROM nursing.nursing_plans " +
+                "WHERE period_id = \$1 AND status = 'ACTIVE' FOR UPDATE"
+
+        private const val LOCK_ACTIVE_ITEMS_SQL =
+            "SELECT $ITEM_COLUMNS FROM nursing.nursing_plan_items " +
+                "WHERE plan_id = \$1 AND status = 'ACTIVE' FOR UPDATE"
+
+        private const val TERMINATE_PLAN_SQL =
+            "UPDATE nursing.nursing_plans SET status = \$1, updated_at = \$2 WHERE id = \$3"
+
+        private const val TERMINATE_ITEMS_SQL =
+            "UPDATE nursing.nursing_plan_items SET status = \$1 " +
+                "WHERE plan_id = \$2 AND status = \$3"
 
         fun planToJson(row: Row): JsonObject {
             return JsonObject()
@@ -105,21 +109,15 @@ class PlanService(
         val encounterId = body.getString("encounter_id")?.takeIf { it.isNotBlank() }
 
         // 通用入口只允许初次计划：该 period 已有活动计划时必须走 Healthcare 复评修订接口
-        val activeCheckQuery = ctx.select(DSL.field("id"))
-            .from(t)
-            .where(cPeriodId.eq(periodId))
-            .and(cStatus.eq("ACTIVE"))
-        return pool.preparedQuery(DatabaseConfig.sql(activeCheckQuery))
-            .execute(DatabaseConfig.tuple(activeCheckQuery))
-            .compose { activeRows ->
-                if (activeRows.size() > 0) {
-                    return@compose Future.failedFuture(
-                        ConflictException("period already has an active plan; create a new plan version via care plan revision")
-                    )
-                }
-                requireAssessment(periodId, encounterId)
-                    .compose { doCreate(body, periodId, planName, createdBy) }
+        return pool.preparedQuery(ACTIVE_PLAN_SQL).execute(Tuple.of(periodId)).compose { activeRows ->
+            if (activeRows.size() > 0) {
+                return@compose Future.failedFuture(
+                    ConflictException("period already has an active plan; create a new plan version via care plan revision")
+                )
             }
+            requireAssessment(periodId, encounterId)
+                .compose { doCreate(body, periodId, planName, createdBy) }
+        }
     }
 
     /**
@@ -131,106 +129,106 @@ class PlanService(
      * 因此请求体提供了 `encounter_id` 时按 `period_id = ? OR encounter_id = ?` 计数。
      */
     private fun requireAssessment(periodId: String, encounterId: String?): Future<Void> {
-        val condition = if (encounterId != null) {
-            caPeriodId.eq(periodId).or(caEncounterId.eq(encounterId))
-        } else {
-            caPeriodId.eq(periodId)
-        }
-        val query = ctx.select(count().`as`("total")).from(ta).where(condition)
-        return pool.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
-            .compose { rows ->
-                val total = rows.iterator().next().getLong("total") ?: 0L
-                if (total <= 0L) {
-                    Future.failedFuture(
-                        ConflictException("照护计划必须先有护理评估：该服务周期/入住暂无任何评估记录")
-                    )
-                } else {
-                    Future.succeededFuture<Void>(null)
-                }
+        val sql = if (encounterId != null) ASSESS_COUNT_BY_PERIOD_OR_ENCOUNTER_SQL else ASSESS_COUNT_BY_PERIOD_SQL
+        val tuple = if (encounterId != null) Tuple.of(periodId, encounterId) else Tuple.of(periodId)
+        return pool.preparedQuery(sql).execute(tuple).compose { rows ->
+            val total = rows.iterator().next().getLong("total") ?: 0L
+            if (total <= 0L) {
+                Future.failedFuture(
+                    ConflictException("照护计划必须先有护理评估：该服务周期/入住暂无任何评估记录")
+                )
+            } else {
+                Future.succeededFuture<Void>(null)
             }
+        }
     }
 
     private fun doCreate(body: JsonObject, periodId: String, planName: String, createdBy: String?): Future<JsonObject> {
         val id = Ulid.generate()
         val now = OffsetDateTime.now()
 
-        val query = ctx.insertInto(t)
-            .set(cId, id)
-            .set(cPeriodId, periodId)
-            .set(cEncounterId, body.getString("encounter_id"))
-            .set(cPlanName, planName)
-            .set(cGoals, body.getString("goals"))
-            .set(cStatus, "ACTIVE")
-            .set(cCreatedBy, createdBy)
-            .set(cStartDate, body.getString("start_date")?.let { LocalDate.parse(it) })
-            .set(cEndDate, body.getString("end_date")?.let { LocalDate.parse(it) })
-            .set(cMetadata, body.containsKey("metadata")
-                .let { if (it) JSONB.valueOf(body.getJsonObject("metadata").encode()) else null })
-            .set(cCreatedAt, now)
-            .set(cUpdatedAt, now)
+        val columns = mutableListOf(
+            "id", "period_id", "encounter_id", "plan_name", "goals", "status",
+            "created_by", "start_date", "end_date", "created_at", "updated_at",
+        )
+        val values = mutableListOf<Any?>(
+            id, periodId, body.getString("encounter_id"), planName, body.getString("goals"),
+            "ACTIVE", createdBy,
+            body.getString("start_date")?.let { LocalDate.parse(it) },
+            body.getString("end_date")?.let { LocalDate.parse(it) },
+            now, now,
+        )
+        if (body.containsKey("metadata")) {
+            columns.add("metadata")
+            values.add(body.getJsonObject("metadata"))
+        }
+        val placeholders = values.indices.joinToString(", ") { "\$${it + 1}" }
+        val sql =
+            "INSERT INTO nursing.nursing_plans (${columns.joinToString(", ")}) VALUES ($placeholders)"
 
-        return pool.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
-            .flatMap { _ ->
-                val plan = JsonObject()
-                    .put("id", id)
-                    .put("period_id", periodId)
-                    .put("encounter_id", body.getString("encounter_id"))
-                    .put("plan_name", planName)
-                    .put("goals", body.getString("goals"))
-                    .put("status", "ACTIVE")
-                    .put("created_by", createdBy)
-                    .put("start_date", body.getString("start_date"))
-                    .put("end_date", body.getString("end_date"))
-                    .put("metadata", body.getJsonObject("metadata"))
-                    .put("created_at", now.toString())
-                    .put("updated_at", now.toString())
+        return pool.preparedQuery(sql).execute(Tuple.from(values)).flatMap { _ ->
+            val plan = JsonObject()
+                .put("id", id)
+                .put("period_id", periodId)
+                .put("encounter_id", body.getString("encounter_id"))
+                .put("plan_name", planName)
+                .put("goals", body.getString("goals"))
+                .put("status", "ACTIVE")
+                .put("created_by", createdBy)
+                .put("start_date", body.getString("start_date"))
+                .put("end_date", body.getString("end_date"))
+                .put("metadata", body.getJsonObject("metadata"))
+                .put("created_at", now.toString())
+                .put("updated_at", now.toString())
 
-                val itemsArray = body.getJsonArray("items")
-                if (itemsArray == null || itemsArray.isEmpty)
-                    return@flatMap Future.succeededFuture(plan)
+            val itemsArray = body.getJsonArray("items")
+            if (itemsArray == null || itemsArray.isEmpty)
+                return@flatMap Future.succeededFuture(plan)
 
-                val items = JsonArray()
-                fun insertItem(index: Int): Future<JsonObject> {
-                    if (index >= itemsArray.size()) {
-                        plan.put("items", items)
-                        return Future.succeededFuture(plan)
-                    }
-                    val itemObj = itemsArray.getJsonObject(index)
-                    val itemId = Ulid.generate()
-                    val itemInsert = ctx.insertInto(ti)
-                        .set(ciId, itemId)
-                        .set(ciPlanId, id)
-                        .set(ciAction, itemObj.getString("action"))
-                        .set(ciFrequencyCode, itemObj.getString("frequency_code"))
-                        .set(ciFrequencyName, itemObj.getString("frequency_name"))
-                        .set(ciDurationDays, itemObj.getInteger("duration_days"))
-                        .set(ciRemark, itemObj.getString("remark"))
-                        .set(ciItemStatus, "ACTIVE")
-                        .set(ciMetadata, itemObj.containsKey("metadata")
-                            .let { if (it) JSONB.valueOf(itemObj.getJsonObject("metadata").encode()) else null })
-                        .set(ciCreatedAt, now)
-
-                    return pool.preparedQuery(DatabaseConfig.sql(itemInsert))
-                        .execute(DatabaseConfig.tuple(itemInsert))
-                        .flatMap { _ ->
-                            items.add(JsonObject()
-                                .put("id", itemId)
-                                .put("plan_id", id)
-                                .put("action", itemObj.getString("action"))
-                                .put("frequency_code", itemObj.getString("frequency_code"))
-                                .put("frequency_name", itemObj.getString("frequency_name"))
-                                .put("duration_days", itemObj.getInteger("duration_days"))
-                                .put("remark", itemObj.getString("remark"))
-                                .put("status", "ACTIVE")
-                                .put("metadata", itemObj.getJsonObject("metadata"))
-                                .put("created_at", now.toString()))
-                            insertItem(index + 1)
-                        }
+            val items = JsonArray()
+            fun insertItem(index: Int): Future<JsonObject> {
+                if (index >= itemsArray.size()) {
+                    plan.put("items", items)
+                    return Future.succeededFuture(plan)
                 }
-                insertItem(0)
+                val itemObj = itemsArray.getJsonObject(index)
+                val itemId = Ulid.generate()
+                val itemColumns = mutableListOf(
+                    "id", "plan_id", "action", "frequency_code", "frequency_name",
+                    "duration_days", "remark", "status", "created_at",
+                )
+                val itemValues = mutableListOf<Any?>(
+                    itemId, id, itemObj.getString("action"),
+                    itemObj.getString("frequency_code"), itemObj.getString("frequency_name"),
+                    itemObj.getInteger("duration_days"), itemObj.getString("remark"),
+                    "ACTIVE", now,
+                )
+                if (itemObj.containsKey("metadata")) {
+                    itemColumns.add("metadata")
+                    itemValues.add(itemObj.getJsonObject("metadata"))
+                }
+                val itemPlaceholders = itemValues.indices.joinToString(", ") { "\$${it + 1}" }
+                val itemSql =
+                    "INSERT INTO nursing.nursing_plan_items (${itemColumns.joinToString(", ")}) " +
+                        "VALUES ($itemPlaceholders)"
+
+                return pool.preparedQuery(itemSql).execute(Tuple.from(itemValues)).flatMap { _ ->
+                    items.add(JsonObject()
+                        .put("id", itemId)
+                        .put("plan_id", id)
+                        .put("action", itemObj.getString("action"))
+                        .put("frequency_code", itemObj.getString("frequency_code"))
+                        .put("frequency_name", itemObj.getString("frequency_name"))
+                        .put("duration_days", itemObj.getInteger("duration_days"))
+                        .put("remark", itemObj.getString("remark"))
+                        .put("status", "ACTIVE")
+                        .put("metadata", itemObj.getJsonObject("metadata"))
+                        .put("created_at", now.toString()))
+                    insertItem(index + 1)
+                }
             }
+            insertItem(0)
+        }
     }
 
     fun list(
@@ -239,53 +237,48 @@ class PlanService(
         limit: Int = 50,
         offset: Int = 0
     ): Future<JsonObject> {
-        val conditions = mutableListOf<org.jooq.Condition>()
-        periodId?.let { conditions.add(cPeriodId.eq(it)) }
-        status?.let { conditions.add(cStatus.eq(it)) }
+        val where = mutableListOf<String>()
+        val args = mutableListOf<Any?>()
 
-        val countQuery = ctx.select(count().`as`("total")).from(t).where(conditions)
-        val dataQuery = ctx.selectFrom(t)
-            .where(conditions)
-            .orderBy(cCreatedAt.desc())
-            .limit(limit)
-            .offset(offset)
+        /** 追加一个绑定值并返回其占位符。 */
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
 
-        return pool.preparedQuery(DatabaseConfig.sql(countQuery))
-            .execute(DatabaseConfig.tuple(countQuery))
-            .flatMap { countRows ->
-                val total = countRows.iterator().next().getLong("total") ?: 0L
-                pool.preparedQuery(DatabaseConfig.sql(dataQuery))
-                    .execute(DatabaseConfig.tuple(dataQuery))
-                    .map { dataRows ->
-                        val records = JsonArray()
-                        for (row in dataRows) records.add(planToJson(row))
-                        JsonObject().put("records", records)
-                            .put("meta", JsonObject().put("total", total))
-                    }
+        periodId?.let { where.add("period_id = ${bind(it)}") }
+        status?.let { where.add("status = ${bind(it)}") }
+
+        val whereClause = if (where.isEmpty()) "" else " WHERE " + where.joinToString(" AND ")
+        val countSql = "SELECT count(*) AS total FROM nursing.nursing_plans$whereClause"
+        val countArgs = args.toList()
+        val dataSql =
+            "SELECT $PLAN_COLUMNS FROM nursing.nursing_plans$whereClause " +
+                "ORDER BY created_at DESC LIMIT ${bind(limit)} OFFSET ${bind(offset)}"
+        val dataArgs = args.toList()
+
+        return pool.preparedQuery(countSql).execute(Tuple.from(countArgs)).flatMap { countRows ->
+            val total = countRows.iterator().next().getLong("total") ?: 0L
+            pool.preparedQuery(dataSql).execute(Tuple.from(dataArgs)).map { dataRows ->
+                val records = JsonArray()
+                for (row in dataRows) records.add(planToJson(row))
+                JsonObject().put("records", records)
+                    .put("meta", JsonObject().put("total", total))
             }
+        }
     }
 
     fun get(id: String): Future<JsonObject> {
-        val query = ctx.selectFrom(t).where(cId.eq(id))
-        val itemsQuery = ctx.selectFrom(ti).where(ciPlanId.eq(id))
-
-        return pool.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
-            .flatMap { rows ->
-                if (rows.size() == 0)
-                    Future.failedFuture(NotFoundException("plan not found: $id"))
-                else {
-                    val plan = planToJson(rows.iterator().next())
-                    pool.preparedQuery(DatabaseConfig.sql(itemsQuery))
-                        .execute(DatabaseConfig.tuple(itemsQuery))
-                        .map { itemRows ->
-                            val items = JsonArray()
-                            for (row in itemRows) items.add(itemToJson(row))
-                            plan.put("items", items)
-                            plan
-                        }
+        return pool.preparedQuery(PLAN_BY_ID_SQL).execute(Tuple.of(id)).flatMap { rows ->
+            if (rows.size() == 0)
+                Future.failedFuture(NotFoundException("plan not found: $id"))
+            else {
+                val plan = planToJson(rows.iterator().next())
+                pool.preparedQuery(PLAN_ITEMS_SQL).execute(Tuple.of(id)).map { itemRows ->
+                    val items = JsonArray()
+                    for (row in itemRows) items.add(itemToJson(row))
+                    plan.put("items", items)
+                    plan
                 }
             }
+        }
     }
 
     fun updateStatus(id: String, newStatus: String): Future<JsonObject> {
@@ -301,13 +294,10 @@ class PlanService(
                 )
 
             val now = OffsetDateTime.now()
-            val updateQuery = ctx.update(t)
-                .set(cStatus, newStatus)
-                .set(cUpdatedAt, now)
-                .where(cId.eq(id))
+            val updateSql =
+                "UPDATE nursing.nursing_plans SET status = \$1, updated_at = \$2 WHERE id = \$3"
 
-            pool.preparedQuery(DatabaseConfig.sql(updateQuery))
-                .execute(DatabaseConfig.tuple(updateQuery))
+            pool.preparedQuery(updateSql).execute(Tuple.of(newStatus, now, id))
                 .flatMap { get(id) }
         }
     }
@@ -340,11 +330,7 @@ class PlanService(
      * 必须在调用方外层事务内执行。
      */
     fun lockActivePlan(client: SqlClient, periodId: String): Future<JsonObject> {
-        val query = ctx.selectFrom(NURSING_PLANS)
-            .where(NURSING_PLANS.PERIOD_ID.eq(periodId))
-            .and(NURSING_PLANS.STATUS.eq("ACTIVE"))
-            .forUpdate()
-        return execute(client, query).compose { rows ->
+        return client.preparedQuery(LOCK_ACTIVE_PLAN_SQL).execute(Tuple.of(periodId)).compose { rows ->
             val active = rows.map { planToJson(it) }
             when {
                 active.isEmpty() -> Future.failedFuture(
@@ -364,20 +350,22 @@ class PlanService(
     fun createPlanWithItems(client: SqlClient, input: PlanCreateInput): Future<JsonObject> {
         val planId = Ulid.generate()
         val now = OffsetDateTime.now()
-        var insertQuery = ctx.insertInto(NURSING_PLANS)
-            .set(NURSING_PLANS.ID, planId)
-            .set(NURSING_PLANS.PERIOD_ID, input.periodId)
-            .set(NURSING_PLANS.ENCOUNTER_ID, input.encounterId)
-            .set(NURSING_PLANS.PLAN_NAME, input.planName)
-            .set(NURSING_PLANS.STATUS, "ACTIVE")
-            .set(NURSING_PLANS.CREATED_AT, now)
-            .set(NURSING_PLANS.UPDATED_AT, now)
-        input.goals?.let { insertQuery = insertQuery.set(NURSING_PLANS.GOALS, it) }
-        input.createdBy?.let { insertQuery = insertQuery.set(NURSING_PLANS.CREATED_BY, it) }
-        input.startDate?.let { insertQuery = insertQuery.set(NURSING_PLANS.START_DATE, it) }
-        input.endDate?.let { insertQuery = insertQuery.set(NURSING_PLANS.END_DATE, it) }
+        val columns = mutableListOf(
+            "id", "period_id", "encounter_id", "plan_name", "status", "created_at", "updated_at",
+        )
+        val values = mutableListOf<Any?>(
+            planId, input.periodId, input.encounterId, input.planName, "ACTIVE", now, now,
+        )
+        input.goals?.let { columns.add("goals"); values.add(it) }
+        input.createdBy?.let { columns.add("created_by"); values.add(it) }
+        input.startDate?.let { columns.add("start_date"); values.add(it) }
+        input.endDate?.let { columns.add("end_date"); values.add(it) }
 
-        return execute(client, insertQuery).compose {
+        val placeholders = values.indices.joinToString(", ") { "\$${it + 1}" }
+        val sql =
+            "INSERT INTO nursing.nursing_plans (${columns.joinToString(", ")}) VALUES ($placeholders)"
+
+        return client.preparedQuery(sql).execute(Tuple.from(values)).compose {
             insertPlanItems(client, planId, input.items, now)
         }.map { created ->
             val plan = JsonObject()
@@ -403,24 +391,17 @@ class PlanService(
      */
     fun terminatePlan(client: SqlClient, planId: String): Future<Void> {
         val now = OffsetDateTime.now()
-        val planUpdate = ctx.update(NURSING_PLANS)
-            .set(NURSING_PLANS.STATUS, "DISCONTINUED")
-            .set(NURSING_PLANS.UPDATED_AT, now)
-            .where(NURSING_PLANS.ID.eq(planId))
-        val itemUpdate = ctx.update(NURSING_PLAN_ITEMS)
-            .set(NURSING_PLAN_ITEMS.STATUS, "DISCONTINUED")
-            .where(NURSING_PLAN_ITEMS.PLAN_ID.eq(planId))
-            .and(NURSING_PLAN_ITEMS.STATUS.eq("ACTIVE"))
-        return execute(client, planUpdate).compose { execute(client, itemUpdate).map<Void> { null } }
+        return client.preparedQuery(TERMINATE_PLAN_SQL)
+            .execute(Tuple.of("DISCONTINUED", now, planId)).compose {
+                client.preparedQuery(TERMINATE_ITEMS_SQL)
+                    .execute(Tuple.of("DISCONTINUED", planId, "ACTIVE"))
+                    .map<Void> { null }
+            }
     }
 
     /** 锁定旧计划的全部活动措施，返回措施列表。必须在调用方外层事务内执行。 */
     fun lockActivePlanItems(client: SqlClient, planId: String): Future<List<JsonObject>> {
-        val query = ctx.selectFrom(NURSING_PLAN_ITEMS)
-            .where(NURSING_PLAN_ITEMS.PLAN_ID.eq(planId))
-            .and(NURSING_PLAN_ITEMS.STATUS.eq("ACTIVE"))
-            .forUpdate()
-        return execute(client, query).map { rows ->
+        return client.preparedQuery(LOCK_ACTIVE_ITEMS_SQL).execute(Tuple.of(planId)).map { rows ->
             val items = mutableListOf<JsonObject>()
             for (row in rows) items.add(itemToJson(row))
             items
@@ -437,18 +418,19 @@ class PlanService(
             if (index >= items.size) return Future.succeededFuture(acc)
             val item = items[index]
             val itemId = Ulid.generate()
-            var insert = ctx.insertInto(NURSING_PLAN_ITEMS)
-                .set(NURSING_PLAN_ITEMS.ID, itemId)
-                .set(NURSING_PLAN_ITEMS.PLAN_ID, planId)
-                .set(NURSING_PLAN_ITEMS.ACTION, item.action)
-                .set(NURSING_PLAN_ITEMS.STATUS, "ACTIVE")
-                .set(NURSING_PLAN_ITEMS.CREATED_AT, now)
-            item.frequencyCode?.let { insert = insert.set(NURSING_PLAN_ITEMS.FREQUENCY_CODE, it) }
-            item.frequencyName?.let { insert = insert.set(NURSING_PLAN_ITEMS.FREQUENCY_NAME, it) }
-            item.durationDays?.let { insert = insert.set(NURSING_PLAN_ITEMS.DURATION_DAYS, it) }
-            item.remark?.let { insert = insert.set(NURSING_PLAN_ITEMS.REMARK, it) }
+            val columns = mutableListOf("id", "plan_id", "action", "status", "created_at")
+            val values = mutableListOf<Any?>(itemId, planId, item.action, "ACTIVE", now)
+            item.frequencyCode?.let { columns.add("frequency_code"); values.add(it) }
+            item.frequencyName?.let { columns.add("frequency_name"); values.add(it) }
+            item.durationDays?.let { columns.add("duration_days"); values.add(it) }
+            item.remark?.let { columns.add("remark"); values.add(it) }
 
-            return execute(client, insert).compose {
+            val placeholders = values.indices.joinToString(", ") { "\$${it + 1}" }
+            val sql =
+                "INSERT INTO nursing.nursing_plan_items (${columns.joinToString(", ")}) " +
+                    "VALUES ($placeholders)"
+
+            return client.preparedQuery(sql).execute(Tuple.from(values)).compose {
                 val updated = ArrayList<JsonObject>(acc.size + 1)
                 updated.addAll(acc)
                 updated.add(itemJson(itemId, planId, item, now))
@@ -470,7 +452,4 @@ class PlanService(
             .put("status", "ACTIVE")
             .put("metadata", null)
             .put("created_at", now.toString())
-
-    private fun execute(client: SqlClient, query: org.jooq.Query): Future<RowSet<Row>> =
-        client.preparedQuery(DatabaseConfig.sql(query)).execute(DatabaseConfig.tuple(query))
 }

@@ -1,8 +1,6 @@
 package com.ovaphlow.crate.healthcare
 
 import com.ovaphlow.crate.common.Ulid
-import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.database.gen.healthcare.tables.FeeItems.FEE_ITEMS
 import com.ovaphlow.crate.nursing.ConflictException
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
@@ -11,10 +9,7 @@ import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.RowSet
 import io.vertx.sqlclient.SqlClient
-import org.jooq.Field
-import org.jooq.JSONB
-import org.jooq.Query
-import org.jooq.impl.DSL
+import io.vertx.sqlclient.Tuple
 import java.math.BigDecimal
 import java.time.OffsetDateTime
 
@@ -37,10 +32,11 @@ import java.time.OffsetDateTime
  *     `metadata.nursing_level` 是服务端字段（客户端经 metadata 写入一律被剥离/覆盖）。
  *     同一护理等级至多一条**启用**项：服务端事务内检查 + DB 部分唯一索引
  *     `uq_fee_items_nursing_level_enabled` 兜底，违反一律 409。
+ *
+ * 持久化一律原生参数化 SQL（`$1..$n` + `Tuple`），无 jOOQ。
  */
 class FeeItemService(
     private val pool: Pool,
-    private val ctx: org.jooq.DSLContext = DatabaseConfig.createDSL(),
 ) {
     companion object {
         /** 分类中文枚举（DB CHECK 与应用层白名单保持一致） */
@@ -69,9 +65,14 @@ class FeeItemService(
         private fun nursingLevelEnumMessage(): String =
             "nursing_level must be one of: ${nursingLevels.joinToString(", ")}"
 
-        /** 护理等级列表达式：`metadata ->> 'nursing_level'`（别名供 Row 按名读取）。 */
-        val nursingLevelColumn: Field<String> =
-            DSL.field("{0} ->> 'nursing_level'", String::class.java, FEE_ITEMS.METADATA).`as`(METADATA_NURSING_LEVEL)
+        /**
+         * 显式列清单：护理等级列 `metadata ->> 'nursing_level'`（别名供 Row 按名读取）。
+         *
+         * 供本服务与 `BillService.enabledFeeItemsQuery` 共用，保证取项与计数同口径。
+         */
+        const val COLUMNS =
+            "id, category, name, unit_price, status, remark, metadata, " +
+                "metadata ->> 'nursing_level' AS nursing_level, created_at, updated_at"
 
         /** NUMERIC(12,2) 上限：10 位整数 + 2 位小数 */
         val maxUnitPrice = BigDecimal("9999999999.99")
@@ -80,6 +81,36 @@ class FeeItemService(
         private val createKeys = setOf("category", "name", "unit_price", "remark", "metadata", METADATA_NURSING_LEVEL)
         private val updateKeys = setOf("category", "name", "unit_price", "remark", "metadata", METADATA_NURSING_LEVEL)
         private val statusKeys = setOf("status")
+
+        private const val SELECT_BY_ID_SQL =
+            "SELECT $COLUMNS FROM healthcare.fee_items WHERE id = \$1"
+
+        /** 创建写库语句（ID/状态/时间戳由服务端管控）。 */
+        private const val INSERT_SQL =
+            "INSERT INTO healthcare.fee_items " +
+                "(id, category, name, unit_price, status, created_at, updated_at, remark, metadata) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9)"
+
+        /** 全量更新（remark/metadata 缺失即置空，与 setNull 语义一致）；状态不在此改。 */
+        private const val UPDATE_SQL =
+            "UPDATE healthcare.fee_items SET category = \$2, name = \$3, unit_price = \$4, " +
+                "remark = \$5, metadata = \$6, updated_at = \$7 WHERE id = \$1"
+
+        private const val UPDATE_STATUS_SQL =
+            "UPDATE healthcare.fee_items SET status = \$2, updated_at = \$3 WHERE id = \$1"
+
+        private const val DELETE_SQL =
+            "DELETE FROM healthcare.fee_items WHERE id = \$1"
+
+        /** 更新/状态流转前确认存在（含分类/状态/等级，供同等级唯一性检查复用）。 */
+        private const val REQUIRE_ITEM_SQL =
+            "SELECT id, category, status, metadata ->> 'nursing_level' AS nursing_level " +
+                "FROM healthcare.fee_items WHERE id = \$1"
+
+        /** 全部启用护理费项（id + 等级），供同等级唯一性检查（与 V520 部分唯一索引同口径）。 */
+        private const val ENABLED_NURSING_ITEMS_SQL =
+            "SELECT id, metadata ->> 'nursing_level' AS nursing_level FROM healthcare.fee_items " +
+                "WHERE category = \$1 AND status = \$2"
 
         private fun recordJson(row: Row): JsonObject =
             JsonObject()
@@ -114,7 +145,23 @@ class FeeItemService(
         val now = OffsetDateTime.now()
         return pool.withTransaction<JsonObject> { connection ->
             requireLevelAvailable(connection, fields.category, fields.nursingLevel, excludeId = null)
-                .compose { execute(connection, insertItemQuery(id, fields, now)) }
+                .compose {
+                    execute(
+                        connection,
+                        INSERT_SQL,
+                        Tuple.of(
+                            id,
+                            fields.category,
+                            fields.name,
+                            fields.unitPrice,
+                            STATUS_ENABLED,
+                            now,
+                            now,
+                            fields.remark,
+                            fields.metadata,
+                        ),
+                    )
+                }
                 .map {
                     JsonObject()
                         .put("id", id)
@@ -143,30 +190,23 @@ class FeeItemService(
         limit: Int = 50,
         offset: Int = 0,
     ): Future<JsonObject> {
-        val conditions = mutableListOf<org.jooq.Condition>()
-        category?.takeIf(String::isNotBlank)?.let { conditions += FEE_ITEMS.CATEGORY.eq(it) }
-        status?.takeIf(String::isNotBlank)?.let { conditions += FEE_ITEMS.STATUS.eq(it) }
+        val conditions = mutableListOf<String>()
+        val filterArgs = mutableListOf<Any?>()
+        fun bindFilter(value: Any?): String = "\$${filterArgs.size + 1}".also { filterArgs.add(value) }
 
-        val countQuery = ctx.select(DSL.count().`as`("total")).from(FEE_ITEMS).where(conditions)
-        val dataQuery = ctx.select(
-            FEE_ITEMS.ID,
-            FEE_ITEMS.CATEGORY,
-            FEE_ITEMS.NAME,
-            FEE_ITEMS.UNIT_PRICE,
-            FEE_ITEMS.STATUS,
-            FEE_ITEMS.REMARK,
-            FEE_ITEMS.METADATA,
-            nursingLevelColumn,
-            FEE_ITEMS.CREATED_AT,
-            FEE_ITEMS.UPDATED_AT,
-        ).from(FEE_ITEMS)
-            .where(conditions)
-            .orderBy(FEE_ITEMS.CREATED_AT.desc(), FEE_ITEMS.ID.desc())
-            .limit(limit)
-            .offset(offset)
-        return execute(pool, countQuery).compose { countRows ->
+        category?.takeIf(String::isNotBlank)?.let { conditions += "category = ${bindFilter(it)}" }
+        status?.takeIf(String::isNotBlank)?.let { conditions += "status = ${bindFilter(it)}" }
+
+        val where = if (conditions.isEmpty()) "" else " WHERE ${conditions.joinToString(" AND ")}"
+        val from = " FROM healthcare.fee_items$where"
+        val countSql = "SELECT count(*) AS total$from"
+        val dataSql = "SELECT $COLUMNS$from ORDER BY created_at DESC, id DESC " +
+            "OFFSET \$${filterArgs.size + 1} ROWS FETCH NEXT \$${filterArgs.size + 2} ROWS ONLY"
+        val dataArgs = Tuple.from(filterArgs + listOf<Any?>(limit, offset))
+
+        return execute(pool, countSql, Tuple.from(filterArgs)).compose { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(pool, dataQuery).map { dataRows ->
+            execute(pool, dataSql, dataArgs).map { dataRows ->
                 JsonObject()
                     .put("records", JsonArray(dataRows.map(::recordJson)))
                     .put("meta", JsonObject().put("total", total))
@@ -176,7 +216,7 @@ class FeeItemService(
 
     /** 单条查询：不存在 404。 */
     fun getItem(id: String): Future<JsonObject> =
-        execute(pool, selectById(id)).compose { rows ->
+        execute(pool, SELECT_BY_ID_SQL, Tuple.of(id)).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { row ->
                 Future.succeededFuture(recordJson(row))
             } ?: Future.failedFuture(HealthcareNotFoundException("fee item not found: $id"))
@@ -205,16 +245,19 @@ class FeeItemService(
                     Future.succeededFuture()
                 }
                 guard.compose {
-                    var query = ctx.update(FEE_ITEMS)
-                        .set(FEE_ITEMS.CATEGORY, fields.category)
-                        .set(FEE_ITEMS.NAME, fields.name)
-                        .set(FEE_ITEMS.UNIT_PRICE, fields.unitPrice)
-                        .set(FEE_ITEMS.UPDATED_AT, now)
-                    if (fields.remark != null) query = query.set(FEE_ITEMS.REMARK, fields.remark)
-                    else query = query.setNull(FEE_ITEMS.REMARK)
-                    if (fields.metadata != null) query = query.set(FEE_ITEMS.METADATA, JSONB.valueOf(fields.metadata.encode()))
-                    else query = query.setNull(FEE_ITEMS.METADATA)
-                    execute(connection, query.where(FEE_ITEMS.ID.eq(id))).compose { updatedJson(connection, id) }
+                    execute(
+                        connection,
+                        UPDATE_SQL,
+                        Tuple.of(
+                            id,
+                            fields.category,
+                            fields.name,
+                            fields.unitPrice,
+                            fields.remark,
+                            fields.metadata,
+                            now,
+                        ),
+                    ).compose { updatedJson(connection, id) }
                 }.recover { error -> recoverUniqueViolation(error, fields.category, fields.nursingLevel) }
             }
         }
@@ -226,7 +269,7 @@ class FeeItemService(
 
     /** 删除字典条目：不存在 404。 */
     fun deleteItem(id: String): Future<JsonObject> =
-        execute(pool, ctx.deleteFrom(FEE_ITEMS).where(FEE_ITEMS.ID.eq(id))).compose { rows ->
+        execute(pool, DELETE_SQL, Tuple.of(id)).compose { rows ->
             if (rows.rowCount() == 1) {
                 Future.succeededFuture(JsonObject().put("id", id))
             } else {
@@ -255,13 +298,8 @@ class FeeItemService(
                     Future.succeededFuture()
                 }
                 guard.compose {
-                    execute(
-                        connection,
-                        ctx.update(FEE_ITEMS)
-                            .set(FEE_ITEMS.STATUS, status)
-                            .set(FEE_ITEMS.UPDATED_AT, now)
-                            .where(FEE_ITEMS.ID.eq(id)),
-                    ).compose { updatedJson(connection, id) }
+                    execute(connection, UPDATE_STATUS_SQL, Tuple.of(id, status, now))
+                        .compose { updatedJson(connection, id) }
                 }.recover { error ->
                     recoverUniqueViolation(error, existing.getString("category") ?: "", level)
                 }
@@ -399,29 +437,9 @@ class FeeItemService(
         }
     }
 
-    /** 创建写库语句（ID/状态/时间戳由服务端管控）。 */
-    private fun insertItemQuery(id: String, fields: Fields, now: OffsetDateTime): Query {
-        var query = ctx.insertInto(FEE_ITEMS)
-            .set(FEE_ITEMS.ID, id)
-            .set(FEE_ITEMS.CATEGORY, fields.category)
-            .set(FEE_ITEMS.NAME, fields.name)
-            .set(FEE_ITEMS.UNIT_PRICE, fields.unitPrice)
-            .set(FEE_ITEMS.STATUS, STATUS_ENABLED)
-            .set(FEE_ITEMS.CREATED_AT, now)
-            .set(FEE_ITEMS.UPDATED_AT, now)
-        fields.remark?.let { query = query.set(FEE_ITEMS.REMARK, it) }
-        fields.metadata?.let { query = query.set(FEE_ITEMS.METADATA, JSONB.valueOf(it.encode())) }
-        return query
-    }
-
-    /** 更新/状态流转前确认存在：不存在 404（含分类/状态/等级，供同等级唯一性检查复用）。 */
+    /** 更新/状态流转前确认存在：不存在 404。 */
     private fun requireItem(client: SqlClient, id: String): Future<Row> =
-        execute(
-            client,
-            ctx.select(FEE_ITEMS.ID, FEE_ITEMS.CATEGORY, FEE_ITEMS.STATUS, nursingLevelColumn)
-                .from(FEE_ITEMS)
-                .where(FEE_ITEMS.ID.eq(id)),
-        ).compose { rows ->
+        execute(client, REQUIRE_ITEM_SQL, Tuple.of(id)).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(it) }
                 ?: Future.failedFuture(HealthcareNotFoundException("fee item not found: $id"))
         }
@@ -438,7 +456,11 @@ class FeeItemService(
         excludeId: String?,
     ): Future<Unit> {
         if (category != CATEGORY_NURSING || level == null) return Future.succeededFuture()
-        return execute(client, enabledNursingItemsQuery()).map { rows ->
+        return execute(
+            client,
+            ENABLED_NURSING_ITEMS_SQL,
+            Tuple.of(CATEGORY_NURSING, STATUS_ENABLED),
+        ).map { rows ->
             val conflict = rows.iterator().asSequence().any { row ->
                 row.getString(METADATA_NURSING_LEVEL) == level && row.getString("id") != excludeId
             }
@@ -448,13 +470,6 @@ class FeeItemService(
             Unit
         }
     }
-
-    /** 全部启用护理费项（id + 等级），供同等级唯一性检查（与 V520 部分唯一索引同口径）。 */
-    private fun enabledNursingItemsQuery(): Query =
-        ctx.select(FEE_ITEMS.ID, nursingLevelColumn)
-            .from(FEE_ITEMS)
-            .where(FEE_ITEMS.CATEGORY.eq(CATEGORY_NURSING))
-            .and(FEE_ITEMS.STATUS.eq(STATUS_ENABLED))
 
     /**
      * 唯一索引兜底（并发竞态）：23505 / `uq_fee_items_*` → 409；
@@ -475,27 +490,12 @@ class FeeItemService(
     }
 
     private fun updatedJson(client: SqlClient, id: String): Future<JsonObject> =
-        execute(client, selectById(id)).compose { rows ->
+        execute(client, SELECT_BY_ID_SQL, Tuple.of(id)).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { row ->
                 Future.succeededFuture(recordJson(row))
             } ?: Future.failedFuture(HealthcareNotFoundException("fee item not found: $id"))
         }
 
-    private fun selectById(id: String): Query =
-        ctx.select(
-            FEE_ITEMS.ID,
-            FEE_ITEMS.CATEGORY,
-            FEE_ITEMS.NAME,
-            FEE_ITEMS.UNIT_PRICE,
-            FEE_ITEMS.STATUS,
-            FEE_ITEMS.REMARK,
-            FEE_ITEMS.METADATA,
-            nursingLevelColumn,
-            FEE_ITEMS.CREATED_AT,
-            FEE_ITEMS.UPDATED_AT,
-        ).from(FEE_ITEMS)
-            .where(FEE_ITEMS.ID.eq(id))
-
-    private fun execute(client: SqlClient, query: Query): Future<RowSet<Row>> =
-        client.preparedQuery(DatabaseConfig.sql(query)).execute(DatabaseConfig.tuple(query))
+    private fun execute(client: SqlClient, sql: String, args: Tuple): Future<RowSet<Row>> =
+        client.preparedQuery(sql).execute(args)
 }

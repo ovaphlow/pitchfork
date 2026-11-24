@@ -1,11 +1,6 @@
 package com.ovaphlow.crate.healthcare
 
 import com.ovaphlow.crate.common.Ulid
-import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.database.gen.healthcare.tables.Encounters.ENCOUNTERS
-import com.ovaphlow.crate.database.gen.healthcare.tables.FollowupPlans.FOLLOWUP_PLANS
-import com.ovaphlow.crate.database.gen.healthcare.tables.FollowupRecords.FOLLOWUP_RECORDS
-import com.ovaphlow.crate.database.gen.healthcare.tables.Patients.PATIENTS
 import com.ovaphlow.crate.nursing.ConflictException
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
@@ -14,10 +9,7 @@ import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.RowSet
 import io.vertx.sqlclient.SqlClient
-import org.jooq.Condition
-import org.jooq.JSONB
-import org.jooq.Query
-import org.jooq.impl.DSL
+import io.vertx.sqlclient.Tuple
 import java.time.LocalDate
 import java.time.OffsetDateTime
 import java.time.ZoneId
@@ -37,10 +29,11 @@ import java.time.ZoneId
  *     「已逾期」由查询时计算（待随访 且 planned_date < 今天），不落库。
  *  6. 无计划的临时随访允许直接新增记录（plan_id 为空）。
  *  7. 「记录随访同时完成计划」单事务；同一计划并发只能完成一次。
+ *
+ * 持久化一律原生参数化 SQL（`$1..$n` + `Tuple`），无 jOOQ。
  */
 class FollowupService(
     private val pool: Pool,
-    private val ctx: org.jooq.DSLContext = DatabaseConfig.createDSL(),
     private val chronicDiseaseService: ChronicDiseaseService? = null,
 ) {
     companion object {
@@ -58,6 +51,10 @@ class FollowupService(
         private val followupResults = setOf("正常", "异常", "需复访", "需转诊")
         private val planStatuses = setOf("待随访", "已完成", "已取消")
 
+        private const val STATUS_PENDING = "待随访"
+        private const val STATUS_COMPLETED = "已完成"
+        private const val STATUS_CANCELLED = "已取消"
+
         /** 随访计划写接口白名单：assignee/status/created_at 等一律由服务端管控 */
         private val planWriteKeys = setOf(
             "patient_id", "encounter_id", "followup_type", "planned_date",
@@ -74,13 +71,66 @@ class FollowupService(
         /** 计划状态流转白名单：record 为内联随访记录（patient/encounter 取自计划） */
         private val statusWriteKeys = setOf("status", "record_id", "record", "cancel_reason")
 
+        private const val PLAN_COLUMNS =
+            "healthcare.followup_plans.id, healthcare.followup_plans.patient_id, healthcare.followup_plans.encounter_id, healthcare.followup_plans.followup_type, healthcare.followup_plans.planned_date, healthcare.followup_plans.planned_way, " +
+                "healthcare.followup_plans.assignee, healthcare.followup_plans.status, healthcare.followup_plans.completed_at, healthcare.followup_plans.cancel_reason, healthcare.followup_plans.remark, healthcare.followup_plans.metadata, " +
+                "healthcare.followup_plans.created_at, healthcare.followup_plans.updated_at"
+
+        private const val RECORD_COLUMNS =
+            "healthcare.followup_records.id, healthcare.followup_records.plan_id, healthcare.followup_records.patient_id, healthcare.followup_records.encounter_id, healthcare.followup_records.followup_type, healthcare.followup_records.followup_way, " +
+                "healthcare.followup_records.followup_date, healthcare.followup_records.contact_object, healthcare.followup_records.condition_summary, healthcare.followup_records.vitals, healthcare.followup_records.guidance, " +
+                "healthcare.followup_records.result, healthcare.followup_records.next_followup_date, healthcare.followup_records.operator, healthcare.followup_records.metadata, healthcare.followup_records.created_at, healthcare.followup_records.updated_at"
+
+        /** 计划基础查询：挂患者名与住院号（列表/详情/时间线共用）。 */
+        private const val PLAN_BASE_SQL =
+            "SELECT $PLAN_COLUMNS, healthcare.patients.name AS patient_name, healthcare.encounters.encounter_no AS encounter_no " +
+                "FROM healthcare.followup_plans " +
+                "JOIN healthcare.patients ON healthcare.patients.id = healthcare.followup_plans.patient_id " +
+                "JOIN healthcare.encounters ON healthcare.encounters.id = healthcare.followup_plans.encounter_id"
+
+        /** 记录基础查询：挂患者名与住院号（列表/详情/时间线共用）。 */
+        private const val RECORD_BASE_SQL =
+            "SELECT $RECORD_COLUMNS, healthcare.patients.name AS patient_name, healthcare.encounters.encounter_no AS encounter_no " +
+                "FROM healthcare.followup_records " +
+                "JOIN healthcare.patients ON healthcare.patients.id = healthcare.followup_records.patient_id " +
+                "JOIN healthcare.encounters ON healthcare.encounters.id = healthcare.followup_records.encounter_id"
+
+        private const val INSERT_PLAN_SQL =
+            "INSERT INTO healthcare.followup_plans " +
+                "(id, patient_id, encounter_id, followup_type, planned_date, planned_way, assignee, " +
+                "status, created_at, updated_at, remark, metadata) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11, \$12)"
+
+        private const val INSERT_RECORD_SQL =
+            "INSERT INTO healthcare.followup_records " +
+                "(id, patient_id, encounter_id, followup_type, followup_way, followup_date, result, " +
+                "operator, created_at, updated_at, plan_id, contact_object, condition_summary, guidance, " +
+                "next_followup_date, vitals, metadata) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11, \$12, \$13, \$14, " +
+                "\$15, \$16, \$17)"
+
+        /** 完成计划（条件更新保证幂等：只有 待随访 能转 已完成）。 */
+        private const val COMPLETE_PLAN_SQL =
+            "UPDATE healthcare.followup_plans SET status = \$2, completed_at = \$3, updated_at = \$4 " +
+                "WHERE id = \$1 AND status = \$5"
+
+        /** 取消计划（同样的条件更新守卫）。 */
+        private const val CANCEL_PLAN_SQL =
+            "UPDATE healthcare.followup_plans SET status = \$2, cancel_reason = \$3, updated_at = \$4 " +
+                "WHERE id = \$1 AND status = \$5"
+
+        /** 引用既有记录完成计划：只允许关联尚未挂计划的记录。 */
+        private const val LINK_RECORD_SQL =
+            "UPDATE healthcare.followup_records SET plan_id = \$2, updated_at = \$3 " +
+                "WHERE id = \$1 AND plan_id IS NULL"
+
         private fun today(): LocalDate = LocalDate.now(businessZone)
 
         private fun planJson(row: Row): JsonObject {
             val plannedDate = row.getLocalDate("planned_date")
             val status = row.getString("status")
             val computedStatus =
-                if (status == "待随访" && plannedDate != null && plannedDate.isBefore(today())) "已逾期" else status
+                if (status == STATUS_PENDING && plannedDate != null && plannedDate.isBefore(today())) "已逾期" else status
             return JsonObject()
                 .put("id", row.getString("id"))
                 .put("patient_id", row.getString("patient_id"))
@@ -165,8 +215,13 @@ class FollowupService(
                             IllegalArgumentException("planned_date must not be earlier than the admission start date"),
                         )
                     }
-                    execute(connection, planInsert(body, id, patientId, encounterId, followupType, plannedDate, plannedWay, assignee, now))
-                        .map { planCreatedJson(id, body, patient.getString("name"), plannedWay, assignee, now) }
+                    execute(
+                        connection,
+                        INSERT_PLAN_SQL,
+                        planInsertArgs(
+                            body, id, patientId, encounterId, followupType, plannedDate, plannedWay, assignee, now,
+                        ),
+                    ).map { planCreatedJson(id, body, patient.getString("name"), plannedWay, assignee, now) }
                 }
             }
         }
@@ -218,14 +273,17 @@ class FollowupService(
                         IllegalArgumentException("planned_date must not be earlier than the admission start date"),
                     )
                 }
-                execute(client, planInsert(body, id, patientId, encounterId, "慢病随访", plannedDate, "门诊", assignee, now))
-                    .compose { getPlanVia(client, id) }
+                execute(
+                    client,
+                    INSERT_PLAN_SQL,
+                    planInsertArgs(body, id, patientId, encounterId, "慢病随访", plannedDate, "门诊", assignee, now),
+                ).compose { getPlanVia(client, id) }
             }
         }
     }
 
     private fun getPlanVia(client: SqlClient, id: String): Future<JsonObject> =
-        execute(client, planDetailQuery(id)).compose { rows ->
+        execute(client, "$PLAN_BASE_SQL WHERE healthcare.followup_plans.id = \$1", Tuple.of(id)).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(planJson(it)) }
                 ?: Future.failedFuture(HealthcareNotFoundException("followup plan not found: $id"))
         }
@@ -240,36 +298,44 @@ class FollowupService(
         limit: Int,
         offset: Int,
     ): Future<JsonObject> {
-        val conditions = try {
-            mutableListOf<Condition>().also { conditions ->
-                status?.takeIf(String::isNotBlank)?.let {
-                    if (it == "已逾期") {
-                        throw IllegalArgumentException("status 已逾期 is computed, use overdue=true")
-                    }
-                    conditions += FOLLOWUP_PLANS.STATUS.eq(validValue(it, planStatuses, "status"))
+        val args = mutableListOf<Any?>()
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
+        val filters = mutableListOf<String>()
+        try {
+            status?.takeIf(String::isNotBlank)?.let {
+                if (it == "已逾期") {
+                    throw IllegalArgumentException("status 已逾期 is computed, use overdue=true")
                 }
-                followupType?.takeIf(String::isNotBlank)?.let { conditions += FOLLOWUP_PLANS.FOLLOWUP_TYPE.eq(it) }
-                patientId?.takeIf(String::isNotBlank)?.let { conditions += FOLLOWUP_PLANS.PATIENT_ID.eq(it) }
-                dateFrom?.takeIf(String::isNotBlank)?.let { conditions += FOLLOWUP_PLANS.PLANNED_DATE.ge(localDate(it, "date_from")) }
-                dateTo?.takeIf(String::isNotBlank)?.let { conditions += FOLLOWUP_PLANS.PLANNED_DATE.le(localDate(it, "date_to")) }
-                if (overdue == "true") {
-                    conditions += FOLLOWUP_PLANS.STATUS.eq("待随访").and(FOLLOWUP_PLANS.PLANNED_DATE.lt(today()))
-                }
+                filters += "healthcare.followup_plans.status = ${bind(validValue(it, planStatuses, "status"))}"
+            }
+            followupType?.takeIf(String::isNotBlank)?.let { filters += "healthcare.followup_plans.followup_type = ${bind(it)}" }
+            patientId?.takeIf(String::isNotBlank)?.let { filters += "healthcare.followup_plans.patient_id = ${bind(it)}" }
+            dateFrom?.takeIf(String::isNotBlank)?.let {
+                filters += "healthcare.followup_plans.planned_date >= " +
+                    "CAST(${bind(localDate(it, "date_from"))} AS DATE)"
+            }
+            dateTo?.takeIf(String::isNotBlank)?.let {
+                filters += "healthcare.followup_plans.planned_date <= " +
+                    "CAST(${bind(localDate(it, "date_to"))} AS DATE)"
+            }
+            if (overdue == "true") {
+                val statusPlaceholder = bind(STATUS_PENDING)
+                val datePlaceholder = bind(today())
+                filters += "healthcare.followup_plans.status = $statusPlaceholder " +
+                    "AND healthcare.followup_plans.planned_date < CAST($datePlaceholder AS DATE)"
             }
         } catch (error: IllegalArgumentException) {
             return Future.failedFuture(error)
         }
 
-        val countQuery = ctx.select(DSL.count().`as`("total")).from(FOLLOWUP_PLANS).where(conditions)
-        val dataQuery = planBaseQuery()
-            .where(conditions)
-            .orderBy(FOLLOWUP_PLANS.PLANNED_DATE.desc(), FOLLOWUP_PLANS.CREATED_AT.desc())
-            .limit(limit)
-            .offset(offset)
+        val where = if (filters.isEmpty()) "" else " WHERE ${filters.joinToString(" AND ")}"
+        val countSql = "SELECT count(*) AS total FROM ($PLAN_BASE_SQL$where) plans"
+        val dataSql = "$PLAN_BASE_SQL$where ORDER BY healthcare.followup_plans.planned_date DESC, healthcare.followup_plans.created_at DESC " +
+            "OFFSET \$${args.size + 1} ROWS FETCH NEXT \$${args.size + 2} ROWS ONLY"
 
-        return execute(pool, countQuery).compose { countRows ->
+        return execute(pool, countSql, Tuple.from(args)).compose { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(pool, dataQuery).map { rows ->
+            execute(pool, dataSql, Tuple.from(args + listOf<Any?>(offset, limit))).map { rows ->
                 JsonObject()
                     .put("records", JsonArray(rows.map(::planJson)))
                     .put("meta", JsonObject().put("total", total))
@@ -283,19 +349,21 @@ class FollowupService(
         val monthStart = todayDate.withDayOfMonth(1).atStartOfDay(businessZone).toOffsetDateTime()
         val nextMonthStart = todayDate.withDayOfMonth(1).plusMonths(1).atStartOfDay(businessZone).toOffsetDateTime()
 
-        fun count(condition: Condition): Future<Long> {
-            val query = ctx.select(DSL.count().`as`("total")).from(FOLLOWUP_PLANS).where(condition)
-            return execute(pool, query).map { rows ->
-                rows.iterator().next().getLong("total") ?: 0L
-            }
-        }
+        fun count(sql: String, args: Tuple): Future<Long> =
+            execute(pool, sql, args).map { rows -> rows.iterator().next().getLong("total") ?: 0L }
 
-        val todayPending = count(FOLLOWUP_PLANS.STATUS.eq("待随访").and(FOLLOWUP_PLANS.PLANNED_DATE.eq(todayDate)))
-        val overdue = count(FOLLOWUP_PLANS.STATUS.eq("待随访").and(FOLLOWUP_PLANS.PLANNED_DATE.lt(todayDate)))
+        val todayPending = count(
+            "SELECT count(*) AS total FROM healthcare.followup_plans WHERE status = \$1 AND planned_date = \$2",
+            Tuple.of(STATUS_PENDING, todayDate),
+        )
+        val overdue = count(
+            "SELECT count(*) AS total FROM healthcare.followup_plans WHERE status = \$1 AND planned_date < \$2",
+            Tuple.of(STATUS_PENDING, todayDate),
+        )
         val monthCompleted = count(
-            FOLLOWUP_PLANS.STATUS.eq("已完成")
-                .and(FOLLOWUP_PLANS.COMPLETED_AT.ge(monthStart))
-                .and(FOLLOWUP_PLANS.COMPLETED_AT.lt(nextMonthStart)),
+            "SELECT count(*) AS total FROM healthcare.followup_plans " +
+                "WHERE status = \$1 AND completed_at >= \$2 AND completed_at < \$3",
+            Tuple.of(STATUS_COMPLETED, monthStart, nextMonthStart),
         )
         return todayPending.compose { tp ->
             overdue.compose { od ->
@@ -361,11 +429,14 @@ class FollowupService(
         return pool.withTransaction<JsonObject> { connection ->
             getPlanRow(connection, id).compose { plan ->
                 when (status) {
-                    "已取消" -> execute(connection, cancelPlanUpdate(id, requireNotNull(cancelReason), now))
-                        .compose { rows ->
-                            if (rows.rowCount() == 1) getPlanVia(connection, id)
-                            else Future.failedFuture(ConflictException("followup plan is not 待随访, cannot be cancelled"))
-                        }
+                    "已取消" -> execute(
+                        connection,
+                        CANCEL_PLAN_SQL,
+                        Tuple.of(id, STATUS_CANCELLED, requireNotNull(cancelReason), now, STATUS_PENDING),
+                    ).compose { rows ->
+                        if (rows.rowCount() == 1) getPlanVia(connection, id)
+                        else Future.failedFuture(ConflictException("followup plan is not 待随访, cannot be cancelled"))
+                    }
                     else -> completePlanWithRecord(connection, plan, recordId, inlineRecord, operator, now)
                 }
             }
@@ -392,7 +463,7 @@ class FollowupService(
             // 无计划的临时随访
             return pool.withTransaction<JsonObject> { connection ->
                 validatePatientEncounter(connection, validated.patientId, validated.encounterId).compose {
-                    execute(connection, recordInsert(body, id, validated, operator, now))
+                    execute(connection, INSERT_RECORD_SQL, recordInsertArgs(body, id, validated, operator, now))
                         .map { recordCreatedJson(id, body, validated, operator, now) }
                 }
             }
@@ -407,8 +478,12 @@ class FollowupService(
                         IllegalArgumentException("record patient/encounter must match the followup plan"),
                     )
                 }
-                execute(connection, recordInsert(body, id, validated, operator, now)).compose {
-                    execute(connection, completePlanUpdate(planId, validated.followupDate, now))
+                execute(connection, INSERT_RECORD_SQL, recordInsertArgs(body, id, validated, operator, now)).compose {
+                    execute(
+                        connection,
+                        COMPLETE_PLAN_SQL,
+                        Tuple.of(planId, STATUS_COMPLETED, validated.followupDate, now, STATUS_PENDING),
+                    )
                 }.compose { rows ->
                     if (rows.rowCount() == 1) {
                         // 慢病随访完成联动：滚动生成下一轮计划（同事务，失败回滚）
@@ -428,7 +503,7 @@ class FollowupService(
     fun getRecord(id: String): Future<JsonObject> = getRecordVia(pool, id)
 
     private fun getRecordVia(client: SqlClient, id: String): Future<JsonObject> =
-        execute(client, recordDetailQuery(id)).compose { rows ->
+        execute(client, "$RECORD_BASE_SQL WHERE healthcare.followup_records.id = \$1", Tuple.of(id)).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(recordJson(it)) }
                 ?: Future.failedFuture(HealthcareNotFoundException("followup record not found: $id"))
         }
@@ -443,33 +518,34 @@ class FollowupService(
         limit: Int,
         offset: Int,
     ): Future<JsonObject> {
-        val conditions = try {
-            mutableListOf<Condition>().also { conditions ->
-                patientId?.takeIf(String::isNotBlank)?.let { conditions += FOLLOWUP_RECORDS.PATIENT_ID.eq(it) }
-                encounterId?.takeIf(String::isNotBlank)?.let { conditions += FOLLOWUP_RECORDS.ENCOUNTER_ID.eq(it) }
-                followupType?.takeIf(String::isNotBlank)?.let { conditions += FOLLOWUP_RECORDS.FOLLOWUP_TYPE.eq(it) }
-                result?.takeIf(String::isNotBlank)?.let { conditions += FOLLOWUP_RECORDS.RESULT.eq(validValue(it, followupResults, "result")) }
-                dateFrom?.takeIf(String::isNotBlank)?.let {
-                    conditions += FOLLOWUP_RECORDS.FOLLOWUP_DATE.ge(offsetDateTime(it, "date_from"))
-                }
-                dateTo?.takeIf(String::isNotBlank)?.let {
-                    conditions += FOLLOWUP_RECORDS.FOLLOWUP_DATE.le(offsetDateTime(it, "date_to"))
-                }
+        val args = mutableListOf<Any?>()
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
+        val filters = mutableListOf<String>()
+        try {
+            patientId?.takeIf(String::isNotBlank)?.let { filters += "healthcare.followup_records.patient_id = ${bind(it)}" }
+            encounterId?.takeIf(String::isNotBlank)?.let { filters += "healthcare.followup_records.encounter_id = ${bind(it)}" }
+            followupType?.takeIf(String::isNotBlank)?.let { filters += "healthcare.followup_records.followup_type = ${bind(it)}" }
+            result?.takeIf(String::isNotBlank)?.let {
+                filters += "healthcare.followup_records.result = ${bind(validValue(it, followupResults, "result"))}"
+            }
+            dateFrom?.takeIf(String::isNotBlank)?.let {
+                filters += "healthcare.followup_records.followup_date >= ${bind(offsetDateTime(it, "date_from"))}"
+            }
+            dateTo?.takeIf(String::isNotBlank)?.let {
+                filters += "healthcare.followup_records.followup_date <= ${bind(offsetDateTime(it, "date_to"))}"
             }
         } catch (error: IllegalArgumentException) {
             return Future.failedFuture(error)
         }
 
-        val countQuery = ctx.select(DSL.count().`as`("total")).from(FOLLOWUP_RECORDS).where(conditions)
-        val dataQuery = recordBaseQuery()
-            .where(conditions)
-            .orderBy(FOLLOWUP_RECORDS.FOLLOWUP_DATE.desc(), FOLLOWUP_RECORDS.CREATED_AT.desc())
-            .limit(limit)
-            .offset(offset)
+        val where = if (filters.isEmpty()) "" else " WHERE ${filters.joinToString(" AND ")}"
+        val countSql = "SELECT count(*) AS total FROM ($RECORD_BASE_SQL$where) records"
+        val dataSql = "$RECORD_BASE_SQL$where ORDER BY healthcare.followup_records.followup_date DESC, healthcare.followup_records.created_at DESC " +
+            "OFFSET \$${args.size + 1} ROWS FETCH NEXT \$${args.size + 2} ROWS ONLY"
 
-        return execute(pool, countQuery).compose { countRows ->
+        return execute(pool, countSql, Tuple.from(args)).compose { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(pool, dataQuery).map { rows ->
+            execute(pool, dataSql, Tuple.from(args + listOf<Any?>(offset, limit))).map { rows ->
                 JsonObject()
                     .put("records", JsonArray(rows.map(::recordJson)))
                     .put("meta", JsonObject().put("total", total))
@@ -479,18 +555,20 @@ class FollowupService(
 
     /** 老人随访历史时间线：计划 + 记录，各按时间倒序（详情页用） */
     fun listPatientFollowups(patientId: String): Future<JsonObject> =
-        execute(pool, ctx.selectOne().from(PATIENTS).where(PATIENTS.ID.eq(patientId))).compose { rows ->
+        execute(
+            pool,
+            "SELECT 1 FROM healthcare.patients WHERE healthcare.patients.id = \$1",
+            Tuple.of(patientId),
+        ).compose { rows ->
             if (rows.size() == 0) {
                 Future.failedFuture(HealthcareNotFoundException("patient not found: $patientId"))
             } else {
-                val plansQuery = planBaseQuery()
-                    .where(FOLLOWUP_PLANS.PATIENT_ID.eq(patientId))
-                    .orderBy(FOLLOWUP_PLANS.PLANNED_DATE.desc(), FOLLOWUP_PLANS.CREATED_AT.desc())
-                val recordsQuery = recordBaseQuery()
-                    .where(FOLLOWUP_RECORDS.PATIENT_ID.eq(patientId))
-                    .orderBy(FOLLOWUP_RECORDS.FOLLOWUP_DATE.desc(), FOLLOWUP_RECORDS.CREATED_AT.desc())
-                execute(pool, plansQuery).compose { planRows ->
-                    execute(pool, recordsQuery).map { recordRows ->
+                val plansSql = "$PLAN_BASE_SQL WHERE healthcare.followup_plans.patient_id = \$1 " +
+                    "ORDER BY healthcare.followup_plans.planned_date DESC, healthcare.followup_plans.created_at DESC"
+                val recordsSql = "$RECORD_BASE_SQL WHERE healthcare.followup_records.patient_id = \$1 " +
+                    "ORDER BY healthcare.followup_records.followup_date DESC, healthcare.followup_records.created_at DESC"
+                execute(pool, plansSql, Tuple.of(patientId)).compose { planRows ->
+                    execute(pool, recordsSql, Tuple.of(patientId)).map { recordRows ->
                         JsonObject()
                             .put("plans", JsonArray(planRows.map(::planJson)))
                             .put("records", JsonArray(recordRows.map(::recordJson)))
@@ -500,30 +578,10 @@ class FollowupService(
         }
 
     // ========================================================================
-    //  查询构造
+    //  写入语句参数
     // ========================================================================
 
-    private fun planBaseQuery() = ctx.select(
-        FOLLOWUP_PLANS.fields().toList() +
-            listOf(PATIENTS.NAME.`as`("patient_name"), ENCOUNTERS.ENCOUNTER_NO.`as`("encounter_no")),
-    )
-        .from(FOLLOWUP_PLANS)
-        .join(PATIENTS).on(FOLLOWUP_PLANS.PATIENT_ID.eq(PATIENTS.ID))
-        .join(ENCOUNTERS).on(FOLLOWUP_PLANS.ENCOUNTER_ID.eq(ENCOUNTERS.ID))
-
-    private fun planDetailQuery(id: String) = planBaseQuery().where(FOLLOWUP_PLANS.ID.eq(id))
-
-    private fun recordBaseQuery() = ctx.select(
-        FOLLOWUP_RECORDS.fields().toList() +
-            listOf(PATIENTS.NAME.`as`("patient_name"), ENCOUNTERS.ENCOUNTER_NO.`as`("encounter_no")),
-    )
-        .from(FOLLOWUP_RECORDS)
-        .join(PATIENTS).on(FOLLOWUP_RECORDS.PATIENT_ID.eq(PATIENTS.ID))
-        .join(ENCOUNTERS).on(FOLLOWUP_RECORDS.ENCOUNTER_ID.eq(ENCOUNTERS.ID))
-
-    private fun recordDetailQuery(id: String) = recordBaseQuery().where(FOLLOWUP_RECORDS.ID.eq(id))
-
-    private fun planInsert(
+    private fun planInsertArgs(
         body: JsonObject,
         id: String,
         patientId: String,
@@ -533,42 +591,46 @@ class FollowupService(
         plannedWay: String,
         assignee: String,
         now: OffsetDateTime,
-    ): Query {
-        var query = ctx.insertInto(FOLLOWUP_PLANS)
-            .set(FOLLOWUP_PLANS.ID, id)
-            .set(FOLLOWUP_PLANS.PATIENT_ID, patientId)
-            .set(FOLLOWUP_PLANS.ENCOUNTER_ID, encounterId)
-            .set(FOLLOWUP_PLANS.FOLLOWUP_TYPE, followupType)
-            .set(FOLLOWUP_PLANS.PLANNED_DATE, plannedDate)
-            .set(FOLLOWUP_PLANS.PLANNED_WAY, plannedWay)
-            .set(FOLLOWUP_PLANS.ASSIGNEE, assignee)
-            .set(FOLLOWUP_PLANS.STATUS, "待随访")
-            .set(FOLLOWUP_PLANS.CREATED_AT, now)
-            .set(FOLLOWUP_PLANS.UPDATED_AT, now)
-        body.getString("remark")?.let { query = query.set(FOLLOWUP_PLANS.REMARK, it) }
-        jsonObject(body, "metadata")?.let { query = query.set(FOLLOWUP_PLANS.METADATA, JSONB.valueOf(it.encode())) }
-        return query
-    }
+    ): Tuple = Tuple.of(
+        id,
+        patientId,
+        encounterId,
+        followupType,
+        plannedDate,
+        plannedWay,
+        assignee,
+        STATUS_PENDING,
+        now,
+        now,
+        body.getString("remark"),
+        jsonObject(body, "metadata"),
+    )
 
-    private fun completePlanUpdate(planId: String, completedAt: OffsetDateTime, now: OffsetDateTime): Query =
-        ctx.update(FOLLOWUP_PLANS)
-            .set(FOLLOWUP_PLANS.STATUS, "已完成")
-            .set(FOLLOWUP_PLANS.COMPLETED_AT, completedAt)
-            .set(FOLLOWUP_PLANS.UPDATED_AT, now)
-            .where(FOLLOWUP_PLANS.ID.eq(planId).and(FOLLOWUP_PLANS.STATUS.eq("待随访")))
-
-    private fun cancelPlanUpdate(id: String, reason: String, now: OffsetDateTime): Query =
-        ctx.update(FOLLOWUP_PLANS)
-            .set(FOLLOWUP_PLANS.STATUS, "已取消")
-            .set(FOLLOWUP_PLANS.CANCEL_REASON, reason)
-            .set(FOLLOWUP_PLANS.UPDATED_AT, now)
-            .where(FOLLOWUP_PLANS.ID.eq(id).and(FOLLOWUP_PLANS.STATUS.eq("待随访")))
-
-    private fun linkRecordToPlan(recordId: String, planId: String, now: OffsetDateTime): Query =
-        ctx.update(FOLLOWUP_RECORDS)
-            .set(FOLLOWUP_RECORDS.PLAN_ID, planId)
-            .set(FOLLOWUP_RECORDS.UPDATED_AT, now)
-            .where(FOLLOWUP_RECORDS.ID.eq(recordId).and(FOLLOWUP_RECORDS.PLAN_ID.isNull))
+    private fun recordInsertArgs(
+        body: JsonObject,
+        id: String,
+        fields: RecordFields,
+        operator: String,
+        now: OffsetDateTime,
+    ): Tuple = Tuple.of(
+        id,
+        fields.patientId,
+        fields.encounterId,
+        fields.followupType,
+        fields.followupWay,
+        fields.followupDate,
+        fields.result,
+        operator,
+        now,
+        now,
+        fields.planId,
+        fields.contactObject,
+        fields.conditionSummary,
+        fields.guidance,
+        fields.nextFollowupDate,
+        jsonObject(body, "vitals"),
+        jsonObject(body, "metadata"),
+    )
 
     /** 已完成：内联随访记录或引用既有记录，与计划同事务完成 */
     private fun completePlanWithRecord(
@@ -597,13 +659,23 @@ class FollowupService(
                         IllegalArgumentException("record already belongs to another followup plan"),
                     )
                 }
-                execute(connection, linkRecordToPlan(recordId, planId, now)).compose { linkRows ->
+                execute(connection, LINK_RECORD_SQL, Tuple.of(recordId, planId, now)).compose { linkRows ->
                     if (linkRows.rowCount() != 1) {
                         return@compose Future.failedFuture(
                             ConflictException("record already belongs to another followup plan"),
                         )
                     }
-                    execute(connection, completePlanUpdate(planId, record.getOffsetDateTime("followup_date"), now))
+                    execute(
+                        connection,
+                        COMPLETE_PLAN_SQL,
+                        Tuple.of(
+                            planId,
+                            STATUS_COMPLETED,
+                            record.getOffsetDateTime("followup_date"),
+                            now,
+                            STATUS_PENDING,
+                        ),
+                    )
                         .compose { rows ->
                             if (rows.rowCount() == 1) {
                                 // 慢病随访完成联动：滚动生成下一轮计划（同事务，失败回滚）
@@ -636,9 +708,13 @@ class FollowupService(
         } catch (error: IllegalArgumentException) {
             return Future.failedFuture(error)
         }
-        return execute(connection, recordInsert(mergedBody, recordIdNew, validated, operator, now))
+        return execute(connection, INSERT_RECORD_SQL, recordInsertArgs(mergedBody, recordIdNew, validated, operator, now))
             .compose {
-                execute(connection, completePlanUpdate(planId, validated.followupDate, now))
+                execute(
+                    connection,
+                    COMPLETE_PLAN_SQL,
+                    Tuple.of(planId, STATUS_COMPLETED, validated.followupDate, now, STATUS_PENDING),
+                )
             }
             .compose { rows ->
                 if (rows.rowCount() == 1) {
@@ -651,34 +727,6 @@ class FollowupService(
                 }
             }
             .compose { getPlanVia(connection, planId) }
-    }
-
-    private fun recordInsert(
-        body: JsonObject,
-        id: String,
-        fields: RecordFields,
-        operator: String,
-        now: OffsetDateTime,
-    ): Query {
-        var query = ctx.insertInto(FOLLOWUP_RECORDS)
-            .set(FOLLOWUP_RECORDS.ID, id)
-            .set(FOLLOWUP_RECORDS.PATIENT_ID, fields.patientId)
-            .set(FOLLOWUP_RECORDS.ENCOUNTER_ID, fields.encounterId)
-            .set(FOLLOWUP_RECORDS.FOLLOWUP_TYPE, fields.followupType)
-            .set(FOLLOWUP_RECORDS.FOLLOWUP_WAY, fields.followupWay)
-            .set(FOLLOWUP_RECORDS.FOLLOWUP_DATE, fields.followupDate)
-            .set(FOLLOWUP_RECORDS.RESULT, fields.result)
-            .set(FOLLOWUP_RECORDS.OPERATOR, operator)
-            .set(FOLLOWUP_RECORDS.CREATED_AT, now)
-            .set(FOLLOWUP_RECORDS.UPDATED_AT, now)
-        fields.planId?.let { query = query.set(FOLLOWUP_RECORDS.PLAN_ID, it) }
-        fields.contactObject?.let { query = query.set(FOLLOWUP_RECORDS.CONTACT_OBJECT, it) }
-        fields.conditionSummary?.let { query = query.set(FOLLOWUP_RECORDS.CONDITION_SUMMARY, it) }
-        fields.guidance?.let { query = query.set(FOLLOWUP_RECORDS.GUIDANCE, it) }
-        fields.nextFollowupDate?.let { query = query.set(FOLLOWUP_RECORDS.NEXT_FOLLOWUP_DATE, it) }
-        jsonObject(body, "vitals")?.let { query = query.set(FOLLOWUP_RECORDS.VITALS, JSONB.valueOf(it.encode())) }
-        jsonObject(body, "metadata")?.let { query = query.set(FOLLOWUP_RECORDS.METADATA, JSONB.valueOf(it.encode())) }
-        return query
     }
 
     // ========================================================================
@@ -786,7 +834,11 @@ class FollowupService(
         }
 
     private fun getPatient(client: SqlClient, id: String): Future<JsonObject> =
-        execute(client, ctx.selectFrom(PATIENTS).where(PATIENTS.ID.eq(id))).compose { rows ->
+        execute(
+            client,
+            "SELECT id, name, status FROM healthcare.patients WHERE id = \$1",
+            Tuple.of(id),
+        ).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { row ->
                 Future.succeededFuture(
                     JsonObject()
@@ -798,19 +850,34 @@ class FollowupService(
         }
 
     private fun getEncounterRow(client: SqlClient, id: String): Future<Row> =
-        execute(client, ctx.selectFrom(ENCOUNTERS).where(ENCOUNTERS.ID.eq(id))).compose { rows ->
+        execute(
+            client,
+            "SELECT id, patient_id, encounter_type, status, admit_date " +
+                "FROM healthcare.encounters WHERE healthcare.encounters.id = \$1",
+            Tuple.of(id),
+        ).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(it) }
                 ?: Future.failedFuture(HealthcareNotFoundException("encounter not found: $id"))
         }
 
+    /** 计划行（不含患者名/住院号）：完成/取消/新增记录前读取计划归属。 */
     private fun getPlanRow(client: SqlClient, id: String): Future<Row> =
-        execute(client, ctx.selectFrom(FOLLOWUP_PLANS).where(FOLLOWUP_PLANS.ID.eq(id))).compose { rows ->
+        execute(
+            client,
+            "SELECT $PLAN_COLUMNS FROM healthcare.followup_plans WHERE healthcare.followup_plans.id = \$1",
+            Tuple.of(id),
+        ).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(it) }
                 ?: Future.failedFuture(HealthcareNotFoundException("followup plan not found: $id"))
         }
 
+    /** 记录行（不含患者名/住院号）：引用既有记录完成计划前读取归属。 */
     private fun getRecordRow(client: SqlClient, id: String): Future<Row> =
-        execute(client, ctx.selectFrom(FOLLOWUP_RECORDS).where(FOLLOWUP_RECORDS.ID.eq(id))).compose { rows ->
+        execute(
+            client,
+            "SELECT $RECORD_COLUMNS FROM healthcare.followup_records WHERE healthcare.followup_records.id = \$1",
+            Tuple.of(id),
+        ).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(it) }
                 ?: Future.failedFuture(HealthcareNotFoundException("followup record not found: $id"))
         }
@@ -836,7 +903,7 @@ class FollowupService(
             .put("planned_date", body.getString("planned_date"))
             .put("planned_way", plannedWay)
             .put("assignee", assignee)
-            .put("status", "待随访")
+            .put("status", STATUS_PENDING)
             .put("completed_at", null as String?)
             .put("cancel_reason", null as String?)
             .put("remark", body.getString("remark"))
@@ -876,8 +943,8 @@ class FollowupService(
     //  通用辅助
     // ========================================================================
 
-    private fun execute(client: SqlClient, query: Query): Future<RowSet<Row>> =
-        client.preparedQuery(DatabaseConfig.sql(query)).execute(DatabaseConfig.tuple(query))
+    private fun execute(client: SqlClient, sql: String, args: Tuple): Future<RowSet<Row>> =
+        client.preparedQuery(sql).execute(args)
 
     private fun requiredText(body: JsonObject, key: String): String =
         body.getString(key)?.trim()?.takeIf(String::isNotBlank)

@@ -1,11 +1,6 @@
 package com.ovaphlow.crate.pharmacy
 
 import com.ovaphlow.crate.common.Ulid
-import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyPurchaseOrderItems
-import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyPurchaseOrders
-import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyPurchaseReceiptItems
-import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyPurchaseReceipts
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
@@ -15,8 +10,7 @@ import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.RowSet
 import io.vertx.sqlclient.SqlClient
 import io.vertx.sqlclient.SqlConnection
-import org.jooq.DSLContext
-import org.jooq.impl.DSL.count
+import io.vertx.sqlclient.Tuple
 import java.math.BigDecimal
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
@@ -37,67 +31,7 @@ import java.time.OffsetDateTime
 class PurchaseOrderService(
     private val pool: Pool,
     private val inventoryPort: InventoryPurchaseReceiptPort,
-    private val ctx: DSLContext = DatabaseConfig.createDSL(),
 ) {
-    private val o = PharmacyPurchaseOrders.PHARMACY_PURCHASE_ORDERS
-    private val oi = PharmacyPurchaseOrderItems.PHARMACY_PURCHASE_ORDER_ITEMS
-    private val pr = PharmacyPurchaseReceipts.PHARMACY_PURCHASE_RECEIPTS
-    private val pri = PharmacyPurchaseReceiptItems.PHARMACY_PURCHASE_RECEIPT_ITEMS
-
-    private fun headerSelect() = ctx.select(
-        o.ID.`as`("id"),
-        o.PURCHASE_ORDER_NO.`as`("purchase_order_no"),
-        o.WAREHOUSE.`as`("warehouse"),
-        o.SUPPLIER_NAME.`as`("supplier_name"),
-        o.STATUS.`as`("status"),
-        o.REQUESTER_ID.`as`("requester_id"),
-        o.APPROVED_BY.`as`("approved_by"),
-        o.APPROVED_AT.`as`("approved_at"),
-        o.CANCELLED_BY.`as`("cancelled_by"),
-        o.CANCELLED_AT.`as`("cancelled_at"),
-        o.CANCEL_REASON.`as`("cancel_reason"),
-        o.CLOSED_BY.`as`("closed_by"),
-        o.CLOSED_AT.`as`("closed_at"),
-        o.CLOSE_REASON.`as`("close_reason"),
-        o.CREATED_AT.`as`("created_at"),
-        o.UPDATED_AT.`as`("updated_at"),
-    )
-        .from(o)
-
-    private fun orderItemSelect() = ctx.select(
-        oi.ID.`as`("id"),
-        oi.PURCHASE_ORDER_ID.`as`("purchase_order_id"),
-        oi.MATERIAL_ID.`as`("material_id"),
-        oi.ORDERED_QUANTITY.`as`("ordered_quantity"),
-        oi.RECEIVED_QUANTITY.`as`("received_quantity"),
-    )
-        .from(oi)
-
-    private fun receiptSelect() = ctx.select(
-        pr.ID.`as`("id"),
-        pr.RECEIPT_NO.`as`("receipt_no"),
-        pr.PURCHASE_ORDER_ID.`as`("purchase_order_id"),
-        pr.WAREHOUSE.`as`("warehouse"),
-        pr.SUPPLIER_NAME.`as`("supplier_name"),
-        pr.RECEIVED_BY.`as`("received_by"),
-        pr.RECEIVED_AT.`as`("received_at"),
-        pr.STOCK_OPERATION_ID.`as`("stock_operation_id"),
-        pr.CREATED_AT.`as`("created_at"),
-    )
-        .from(pr)
-
-    private fun receiptItemSelect() = ctx.select(
-        pri.ID.`as`("id"),
-        pri.RECEIPT_ID.`as`("receipt_id"),
-        pri.PURCHASE_ORDER_ITEM_ID.`as`("purchase_order_item_id"),
-        pri.MATERIAL_ID.`as`("material_id"),
-        pri.LOT_ID.`as`("lot_id"),
-        pri.RECEIVED_QUANTITY.`as`("received_quantity"),
-        pri.UNIT_COST.`as`("unit_cost"),
-        pri.TOTAL_COST.`as`("total_cost"),
-        pri.STOCK_OPERATION_DETAIL_ID.`as`("stock_operation_detail_id"),
-    )
-        .from(pri)
 
     /** 创建成功结果：`replayed` 为 true 表示 Idempotency-Key 命中并返回原订单（200）。 */
     data class CreateResult(val id: String, val replayed: Boolean, val order: JsonObject)
@@ -121,7 +55,7 @@ class PurchaseOrderService(
             findOrderByIdempotencyKey(conn, key)
                 .compose { existing: Row? ->
                     if (existing != null) {
-                        val storedFingerprint = existing.getValue(1)?.toString()
+                        val storedFingerprint = existing.getValue("fingerprint")?.toString()
                         if (storedFingerprint != fingerprint) {
                             Future.failedFuture(
                                 ConflictException("idempotency key already used with a different request"),
@@ -147,13 +81,13 @@ class PurchaseOrderService(
                                 ConflictException("idempotency key raced during concurrent create"),
                             )
                         } else {
-                            val storedFingerprint = existing.getValue(1)?.toString()
+                            val storedFingerprint = existing.getValue("fingerprint")?.toString()
                             if (storedFingerprint != fingerprint) {
                                 Future.failedFuture(
                                     ConflictException("idempotency key already used with a different request"),
                                 )
                             } else {
-                                loadOrderDetail(pool, existing.getValue(0)?.toString() ?: "")
+                                loadOrderDetail(pool, existing.getValue("id")?.toString() ?: "")
                                     .map { detail: JsonObject ->
                                         CreateResult(id = detail.getString("id") ?: "", replayed = true, order = detail)
                                     }
@@ -180,19 +114,12 @@ class PurchaseOrderService(
 
         return inventoryPort.validatePurchaseMaterials(conn, materialIds)
             .compose { _: Void? ->
-                val insertHeader = ctx.insertInto(o)
-                    .set(o.ID, orderId)
-                    .set(o.PURCHASE_ORDER_NO, orderNo)
-                    .set(o.WAREHOUSE, body.getString("warehouse"))
-                    .set(o.SUPPLIER_NAME, body.getString("supplier_name"))
-                    .set(o.STATUS, "DRAFT")
-                    .set(o.REQUESTER_ID, userId)
-                    .set(o.IDEMPOTENCY_KEY, idempotencyKey)
-                    .set(o.REQUEST_FINGERPRINT, fingerprint)
-                    .set(o.CREATED_AT, now)
-                    .set(o.UPDATED_AT, now)
-                conn.preparedQuery(DatabaseConfig.sql(insertHeader))
-                    .execute(DatabaseConfig.tuple(insertHeader))
+                conn.preparedQuery(INSERT_ORDER_SQL).execute(
+                    Tuple.of(
+                        orderId, orderNo, body.getString("warehouse"), body.getString("supplier_name"),
+                        "DRAFT", userId, idempotencyKey, fingerprint, now, now,
+                    )
+                )
             }
             .compose { _: RowSet<Row> -> insertOrderItems(conn, orderId, body.getJsonArray("items"), now) }
             .compose { _: Void? -> loadOrderDetail(conn, orderId) }
@@ -214,23 +141,15 @@ class PurchaseOrderService(
                         val materialIds = body.getJsonArray("items").map { (it as JsonObject).getString("material_id") }
                         inventoryPort.validatePurchaseMaterials(conn, materialIds)
                             .compose { _: Void? ->
-                                val deleteItems = ctx.deleteFrom(oi)
-                                    .where(oi.PURCHASE_ORDER_ID.eq(id))
-                                conn.preparedQuery(DatabaseConfig.sql(deleteItems))
-                                    .execute(DatabaseConfig.tuple(deleteItems))
+                                conn.preparedQuery(DELETE_ORDER_ITEMS_SQL).execute(Tuple.of(id))
                             }
                             .compose { _: RowSet<Row> ->
                                 insertOrderItems(conn, id, body.getJsonArray("items"), OffsetDateTime.now())
                             }
                             .compose { _: Void? ->
-                                val now = OffsetDateTime.now()
-                                val updateHeader = ctx.update(o)
-                                    .set(o.WAREHOUSE, body.getString("warehouse"))
-                                    .set(o.SUPPLIER_NAME, body.getString("supplier_name"))
-                                    .set(o.UPDATED_AT, now)
-                                    .where(o.ID.eq(id))
-                                conn.preparedQuery(DatabaseConfig.sql(updateHeader))
-                                    .execute(DatabaseConfig.tuple(updateHeader))
+                                conn.preparedQuery(UPDATE_DRAFT_SQL).execute(
+                                    Tuple.of(body.getString("warehouse"), body.getString("supplier_name"), OffsetDateTime.now(), id)
+                                )
                             }
                             .compose { _: RowSet<Row> -> loadOrderDetail(conn, id) }
                     }
@@ -243,14 +162,12 @@ class PurchaseOrderService(
             if (index >= items.size()) return Future.succeededFuture(null)
             val item = items.getJsonObject(index)
             val itemId = Ulid.generate()
-            val insertItem = ctx.insertInto(oi)
-                .set(oi.ID, itemId)
-                .set(oi.PURCHASE_ORDER_ID, orderId)
-                .set(oi.MATERIAL_ID, item.getString("material_id"))
-                .set(oi.ORDERED_QUANTITY, toBigDecimal(item.getValue("ordered_quantity")))
-                .set(oi.RECEIVED_QUANTITY, BigDecimal.ZERO)
-            return conn.preparedQuery(DatabaseConfig.sql(insertItem))
-                .execute(DatabaseConfig.tuple(insertItem))
+            return conn.preparedQuery(INSERT_ORDER_ITEM_SQL).execute(
+                Tuple.of(
+                    itemId, orderId, item.getString("material_id"),
+                    toBigDecimal(item.getValue("ordered_quantity")), BigDecimal.ZERO,
+                )
+            )
                 .compose { _: RowSet<Row> -> insertOne(index + 1) }
         }
         return insertOne(0)
@@ -283,14 +200,8 @@ class PurchaseOrderService(
     private fun doApprove(conn: SqlConnection, header: Row, userId: String): Future<JsonObject> {
         val orderId = header.getString("id") ?: return Future.failedFuture(IllegalArgumentException("id required"))
         val now = OffsetDateTime.now()
-        val updateHeader = ctx.update(o)
-            .set(o.STATUS, "APPROVED")
-            .set(o.APPROVED_BY, userId)
-            .set(o.APPROVED_AT, now)
-            .set(o.UPDATED_AT, now)
-            .where(o.ID.eq(orderId))
-        return conn.preparedQuery(DatabaseConfig.sql(updateHeader))
-            .execute(DatabaseConfig.tuple(updateHeader))
+        return conn.preparedQuery(APPROVE_SQL)
+            .execute(Tuple.of("APPROVED", userId, now, now, orderId))
             .compose { _: RowSet<Row> -> loadOrderDetail(conn, orderId) }
     }
 
@@ -323,15 +234,8 @@ class PurchaseOrderService(
     private fun writeCancelled(conn: SqlConnection, header: Row, reason: String?, userId: String): Future<JsonObject> {
         val orderId = header.getString("id") ?: return Future.failedFuture(IllegalArgumentException("id required"))
         val now = OffsetDateTime.now()
-        val update = ctx.update(o)
-            .set(o.STATUS, "CANCELLED")
-            .set(o.CANCELLED_BY, userId)
-            .set(o.CANCELLED_AT, now)
-            .set(o.CANCEL_REASON, reason)
-            .set(o.UPDATED_AT, now)
-            .where(o.ID.eq(orderId))
-        return conn.preparedQuery(DatabaseConfig.sql(update))
-            .execute(DatabaseConfig.tuple(update))
+        return conn.preparedQuery(CANCEL_SQL)
+            .execute(Tuple.of("CANCELLED", userId, now, reason, now, orderId))
             .compose { _: RowSet<Row> -> loadOrderDetail(conn, orderId) }
     }
 
@@ -355,15 +259,9 @@ class PurchaseOrderService(
                                     )
                                 } else {
                                     val now = OffsetDateTime.now()
-                                    val update = ctx.update(o)
-                                        .set(o.STATUS, "CLOSED")
-                                        .set(o.CLOSED_BY, userId)
-                                        .set(o.CLOSED_AT, now)
-                                        .set(o.CLOSE_REASON, body.getString("reason"))
-                                        .set(o.UPDATED_AT, now)
-                                        .where(o.ID.eq(orderIdOf(header)))
-                                    conn.preparedQuery(DatabaseConfig.sql(update))
-                                        .execute(DatabaseConfig.tuple(update))
+                                    conn.preparedQuery(CLOSE_SQL).execute(
+                                        Tuple.of("CLOSED", userId, now, body.getString("reason"), now, orderIdOf(header))
+                                    )
                                         .compose { _: RowSet<Row> -> loadOrderDetail(conn, orderIdOf(header)) }
                                 }
                             }
@@ -390,13 +288,13 @@ class PurchaseOrderService(
             findReceiptByIdempotencyKey(conn, key)
                 .compose { existing: Row? ->
                     if (existing != null) {
-                        val storedFingerprint = existing.getValue(1)?.toString()
+                        val storedFingerprint = existing.getValue("fingerprint")?.toString()
                         if (storedFingerprint != fingerprint) {
                             Future.failedFuture(
                                 ConflictException("idempotency key already used with a different request"),
                             )
                         } else {
-                            loadReceiptDetail(conn, existing.getValue(0)?.toString() ?: "")
+                            loadReceiptDetail(conn, existing.getValue("id")?.toString() ?: "")
                                 .compose { payload: JsonObject ->
                                     loadOrderDetail(conn, id).map { order: JsonObject ->
                                         payload.put("order", order)
@@ -419,13 +317,13 @@ class PurchaseOrderService(
                                 ConflictException("idempotency key raced during concurrent receive"),
                             )
                         } else {
-                            val storedFingerprint = existing.getValue(1)?.toString()
+                            val storedFingerprint = existing.getValue("fingerprint")?.toString()
                             if (storedFingerprint != fingerprint) {
                                 Future.failedFuture(
                                     ConflictException("idempotency key already used with a different request"),
                                 )
                             } else {
-                                loadReceiptDetail(pool, existing.getValue(0)?.toString() ?: "")
+                                loadReceiptDetail(pool, existing.getValue("id")?.toString() ?: "")
                                     .compose { payload: JsonObject ->
                                         loadOrderDetail(pool, id).map { order: JsonObject ->
                                             payload.put("order", order)
@@ -524,20 +422,13 @@ class PurchaseOrderService(
 
         return inventoryPort.confirmPurchaseReceipt(conn, command)
             .compose { result: PurchaseReceiptResult ->
-                val insertReceipt = ctx.insertInto(pr)
-                    .set(pr.ID, receiptId)
-                    .set(pr.RECEIPT_NO, receiptNo)
-                    .set(pr.PURCHASE_ORDER_ID, orderId)
-                    .set(pr.WAREHOUSE, header.getString("warehouse"))
-                    .set(pr.SUPPLIER_NAME, header.getString("supplier_name"))
-                    .set(pr.RECEIVED_BY, userId)
-                    .set(pr.RECEIVED_AT, now)
-                    .set(pr.STOCK_OPERATION_ID, result.stockOperationId)
-                    .set(pr.IDEMPOTENCY_KEY, idempotencyKey)
-                    .set(pr.REQUEST_FINGERPRINT, fingerprint)
-                    .set(pr.CREATED_AT, now)
-                conn.preparedQuery(DatabaseConfig.sql(insertReceipt))
-                    .execute(DatabaseConfig.tuple(insertReceipt))
+                conn.preparedQuery(INSERT_RECEIPT_SQL).execute(
+                    Tuple.of(
+                        receiptId, receiptNo, orderId, header.getString("warehouse"),
+                        header.getString("supplier_name"), userId, now, result.stockOperationId,
+                        idempotencyKey, fingerprint, now,
+                    )
+                )
                     .compose { _: RowSet<Row> ->
                         insertReceiptItems(conn, receiptId, result, body.getJsonArray("items"), byItemId)
                     }
@@ -550,12 +441,9 @@ class PurchaseOrderService(
                             received.add(add).compareTo(ordered) >= 0
                         }
                         val status = if (fullyReceived) "RECEIVED" else "PARTIALLY_RECEIVED"
-                        val updateHeader = ctx.update(o)
-                            .set(o.STATUS, status)
-                            .set(o.UPDATED_AT, OffsetDateTime.now())
-                            .where(o.ID.eq(orderId))
-                        conn.preparedQuery(DatabaseConfig.sql(updateHeader))
-                            .execute(DatabaseConfig.tuple(updateHeader))
+                        conn.preparedQuery(UPDATE_STATUS_SQL).execute(
+                            Tuple.of(status, OffsetDateTime.now(), orderId)
+                        )
                     }
                     .compose { _: RowSet<Row> ->
                         loadReceiptDetail(conn, receiptId)
@@ -597,18 +485,12 @@ class PurchaseOrderService(
                 )
             }
             val entry = unused.removeAt(idx)
-            val insertDetail = ctx.insertInto(pri)
-                .set(pri.ID, entry.receiptItemId)
-                .set(pri.RECEIPT_ID, receiptId)
-                .set(pri.PURCHASE_ORDER_ITEM_ID, itemId)
-                .set(pri.MATERIAL_ID, materialId)
-                .set(pri.LOT_ID, entry.lotId)
-                .set(pri.RECEIVED_QUANTITY, quantity)
-                .set(pri.UNIT_COST, unitCost)
-                .set(pri.TOTAL_COST, unitCost.multiply(quantity))
-                .set(pri.STOCK_OPERATION_DETAIL_ID, entry.stockOperationDetailId)
-            return conn.preparedQuery(DatabaseConfig.sql(insertDetail))
-                .execute(DatabaseConfig.tuple(insertDetail))
+            return conn.preparedQuery(INSERT_RECEIPT_ITEM_SQL).execute(
+                Tuple.of(
+                    entry.receiptItemId, receiptId, itemId, materialId, entry.lotId,
+                    quantity, unitCost, unitCost.multiply(quantity), entry.stockOperationDetailId,
+                )
+            )
                 .compose { _: RowSet<Row> -> insertOne(index + 1) }
         }
         return insertOne(0)
@@ -622,12 +504,7 @@ class PurchaseOrderService(
         fun updateAll(entries: List<Pair<String, BigDecimal>>, index: Int): Future<Void?> {
             if (index >= entries.size) return Future.succeededFuture(null)
             val (itemId, add) = entries[index]
-            val update = ctx.update(oi)
-                .set(oi.RECEIVED_QUANTITY, oi.RECEIVED_QUANTITY.add(add))
-                .where(oi.ID.eq(itemId))
-                .and(oi.PURCHASE_ORDER_ID.eq(orderId))
-            return conn.preparedQuery(DatabaseConfig.sql(update))
-                .execute(DatabaseConfig.tuple(update))
+            return conn.preparedQuery(ACCUMULATE_RECEIVED_SQL).execute(Tuple.of(add, itemId, orderId))
                 .compose { _: RowSet<Row> -> updateAll(entries, index + 1) }
         }
         return updateAll(accumulation.entries.map { it.key to it.value }, 0)
@@ -644,37 +521,30 @@ class PurchaseOrderService(
         limit: Int = 50,
         offset: Int = 0,
     ): Future<JsonObject> {
-        val conditions = mutableListOf<org.jooq.Condition>()
-        warehouse?.let { conditions.add(o.WAREHOUSE.eq(it)) }
-        supplierName?.let { conditions.add(o.SUPPLIER_NAME.eq(it)) }
-        status?.let { conditions.add(o.STATUS.eq(it)) }
+        val where = mutableListOf<String>()
+        val args = mutableListOf<Any?>()
 
-        val countQuery = ctx.select(count().`as`("total")).from(o).where(conditions)
-        val dataQuery = ctx.select(
-            o.ID.`as`("id"),
-            o.PURCHASE_ORDER_NO.`as`("purchase_order_no"),
-            o.WAREHOUSE.`as`("warehouse"),
-            o.SUPPLIER_NAME.`as`("supplier_name"),
-            o.STATUS.`as`("status"),
-            o.REQUESTER_ID.`as`("requester_id"),
-            o.CREATED_AT.`as`("created_at"),
-            o.APPROVED_AT.`as`("approved_at"),
-            o.CANCELLED_AT.`as`("cancelled_at"),
-            o.CLOSED_AT.`as`("closed_at"),
-            o.UPDATED_AT.`as`("updated_at"),
-        )
-            .from(o)
-            .where(conditions)
-            .orderBy(o.CREATED_AT.desc())
-            .limit(limit)
-            .offset(offset)
+        /** 追加一个绑定值并返回其占位符。 */
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
 
-        return pool.preparedQuery(DatabaseConfig.sql(countQuery))
-            .execute(DatabaseConfig.tuple(countQuery))
+        warehouse?.let { where.add("warehouse = ${bind(it)}") }
+        supplierName?.let { where.add("supplier_name = ${bind(it)}") }
+        status?.let { where.add("status = ${bind(it)}") }
+
+        val whereClause = if (where.isEmpty()) "" else " WHERE " + where.joinToString(" AND ")
+        val countSql = "SELECT count(*) AS total FROM pharmacy.pharmacy_purchase_orders$whereClause"
+        val countArgs = args.toList()
+        val dataSql =
+            "SELECT $LIST_COLUMNS FROM pharmacy.pharmacy_purchase_orders$whereClause " +
+                "ORDER BY created_at DESC LIMIT ${bind(limit)} OFFSET ${bind(offset)}"
+        val dataArgs = args.toList()
+
+        return pool.preparedQuery(countSql)
+            .execute(Tuple.from(countArgs))
             .compose { countRows: RowSet<Row> ->
                 val total = countRows.iterator().next().getValue("total")?.toString()?.toLong() ?: 0L
-                pool.preparedQuery(DatabaseConfig.sql(dataQuery))
-                    .execute(DatabaseConfig.tuple(dataQuery))
+                pool.preparedQuery(dataSql)
+                    .execute(Tuple.from(dataArgs))
                     .compose { dataRows: RowSet<Row> ->
                         val orderIds = dataRows.map { it.getValue("id")?.toString() }.filterNotNull()
                         loadItemSummaries(pool, orderIds).map { summaries: Map<String, JsonArray> ->
@@ -705,18 +575,13 @@ class PurchaseOrderService(
 
     private fun loadItemSummaries(client: SqlClient, orderIds: List<String>): Future<Map<String, JsonArray>> {
         if (orderIds.isEmpty()) return Future.succeededFuture(emptyMap())
-        val query = ctx.select(
-            oi.PURCHASE_ORDER_ID.`as`("purchase_order_id"),
-            oi.ID.`as`("id"),
-            oi.MATERIAL_ID.`as`("material_id"),
-            oi.ORDERED_QUANTITY.`as`("ordered_quantity"),
-            oi.RECEIVED_QUANTITY.`as`("received_quantity"),
-        )
-            .from(oi)
-            .where(oi.PURCHASE_ORDER_ID.`in`(orderIds))
-            .orderBy(oi.ID)
-        return client.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+        val placeholders = orderIds.indices.joinToString(", ") { "\$${it + 1}" }
+        val sql =
+            "SELECT purchase_order_id, id, material_id, ordered_quantity, received_quantity " +
+                "FROM pharmacy.pharmacy_purchase_order_items " +
+                "WHERE purchase_order_id IN ($placeholders) ORDER BY id"
+        return client.preparedQuery(sql)
+            .execute(Tuple.from(orderIds))
             .map { rows: RowSet<Row> ->
                 val byOrder = mutableMapOf<String, JsonArray>()
                 for (row in rows) {
@@ -746,24 +611,21 @@ class PurchaseOrderService(
     // ========================================================================
 
     private fun loadOrderDetail(client: SqlClient, id: String): Future<JsonObject> {
-        val headerQuery = headerSelect().where(o.ID.eq(id))
-        return client.preparedQuery(DatabaseConfig.sql(headerQuery))
-            .execute(DatabaseConfig.tuple(headerQuery))
+        return client.preparedQuery("$ORDER_HEADER_SELECT WHERE id = \$1")
+            .execute(Tuple.of(id))
             .compose { rows: RowSet<Row> ->
                 if (rows.size() == 0) {
                     Future.failedFuture(NotFoundException("purchase order not found: $id"))
                 } else {
                     val header = orderHeaderToJson(rows.iterator().next())
-                    val orderItemQuery = orderItemSelect().where(oi.PURCHASE_ORDER_ID.eq(id)).orderBy(oi.ID)
-                    client.preparedQuery(DatabaseConfig.sql(orderItemQuery))
-                        .execute(DatabaseConfig.tuple(orderItemQuery))
+                    client.preparedQuery("$ORDER_ITEM_SELECT WHERE purchase_order_id = \$1 ORDER BY id")
+                        .execute(Tuple.of(id))
                         .compose { itemRows: RowSet<Row> ->
                             val items = JsonArray()
                             for (row in itemRows) items.add(orderItemToJson(row))
                             header.put("items", items)
-                            val receiptQuery = receiptSelect().where(pr.PURCHASE_ORDER_ID.eq(id)).orderBy(pr.RECEIVED_AT)
-                            client.preparedQuery(DatabaseConfig.sql(receiptQuery))
-                                .execute(DatabaseConfig.tuple(receiptQuery))
+                            client.preparedQuery("$RECEIPT_SELECT WHERE purchase_order_id = \$1 ORDER BY received_at")
+                                .execute(Tuple.of(id))
                                 .map { receiptRows: RowSet<Row> ->
                                     val receipts = JsonArray()
                                     for (row in receiptRows) {
@@ -785,17 +647,15 @@ class PurchaseOrderService(
     }
 
     private fun loadReceiptDetail(client: SqlClient, id: String): Future<JsonObject> {
-        val receiptQuery = receiptSelect().where(pr.ID.eq(id))
-        return client.preparedQuery(DatabaseConfig.sql(receiptQuery))
-            .execute(DatabaseConfig.tuple(receiptQuery))
+        return client.preparedQuery("$RECEIPT_SELECT WHERE id = \$1")
+            .execute(Tuple.of(id))
             .compose { rows: RowSet<Row> ->
                 if (rows.size() == 0) {
                     Future.failedFuture(NotFoundException("purchase receipt not found: $id"))
                 } else {
                     val header = receiptToJson(rows.iterator().next())
-                    val receiptItemQuery = receiptItemSelect().where(pri.RECEIPT_ID.eq(id)).orderBy(pri.ID)
-                    client.preparedQuery(DatabaseConfig.sql(receiptItemQuery))
-                        .execute(DatabaseConfig.tuple(receiptItemQuery))
+                    client.preparedQuery("$RECEIPT_ITEM_SELECT WHERE receipt_id = \$1 ORDER BY id")
+                        .execute(Tuple.of(id))
                         .map { itemRows: RowSet<Row> ->
                             val items = JsonArray()
                             for (row in itemRows) items.add(receiptItemToJson(row))
@@ -807,42 +667,23 @@ class PurchaseOrderService(
 
     private fun findOrderByIdempotencyKey(client: SqlClient, key: String): Future<Row?> =
         client.preparedQuery(
-            DatabaseConfig.sql(
-                ctx.select(o.ID.`as`("id"), o.REQUEST_FINGERPRINT.`as`("fingerprint"))
-                    .from(o)
-                    .where(o.IDEMPOTENCY_KEY.eq(key)),
-            ),
+            "SELECT id AS id, request_fingerprint AS fingerprint " +
+                "FROM pharmacy.pharmacy_purchase_orders WHERE idempotency_key = \$1"
         )
-            .execute(
-                DatabaseConfig.tuple(
-                    ctx.select(o.ID.`as`("id"), o.REQUEST_FINGERPRINT.`as`("fingerprint"))
-                        .from(o)
-                        .where(o.IDEMPOTENCY_KEY.eq(key)),
-                ),
-            )
+            .execute(Tuple.of(key))
             .map { rows: RowSet<Row> -> if (rows.size() > 0) rows.iterator().next() else null }
 
     private fun findReceiptByIdempotencyKey(client: SqlClient, key: String): Future<Row?> =
         client.preparedQuery(
-            DatabaseConfig.sql(
-                ctx.select(pr.ID.`as`("id"), pr.REQUEST_FINGERPRINT.`as`("fingerprint"))
-                    .from(pr)
-                    .where(pr.IDEMPOTENCY_KEY.eq(key)),
-            ),
+            "SELECT id AS id, request_fingerprint AS fingerprint " +
+                "FROM pharmacy.pharmacy_purchase_receipts WHERE idempotency_key = \$1"
         )
-            .execute(
-                DatabaseConfig.tuple(
-                    ctx.select(pr.ID.`as`("id"), pr.REQUEST_FINGERPRINT.`as`("fingerprint"))
-                        .from(pr)
-                        .where(pr.IDEMPOTENCY_KEY.eq(key)),
-                ),
-            )
+            .execute(Tuple.of(key))
             .map { rows: RowSet<Row> -> if (rows.size() > 0) rows.iterator().next() else null }
 
-    private fun lockHeader(client: SqlClient, id: String): Future<Row> {
-        val lockHeaderQuery = headerSelect().where(o.ID.eq(id)).forUpdate()
-        return client.preparedQuery(DatabaseConfig.sql(lockHeaderQuery))
-            .execute(DatabaseConfig.tuple(lockHeaderQuery))
+    private fun lockHeader(client: SqlClient, id: String): Future<Row> =
+        client.preparedQuery("$ORDER_HEADER_SELECT WHERE id = \$1 FOR UPDATE")
+            .execute(Tuple.of(id))
             .compose { rows: RowSet<Row> ->
                 if (rows.size() == 0) {
                     Future.failedFuture(NotFoundException("purchase order not found: $id"))
@@ -850,12 +691,10 @@ class PurchaseOrderService(
                     Future.succeededFuture(rows.iterator().next())
                 }
             }
-    }
 
     private fun lockOrderItems(client: SqlClient, orderId: String): Future<List<Row>> {
-        val lockOrderItemsQuery = orderItemSelect().where(oi.PURCHASE_ORDER_ID.eq(orderId)).orderBy(oi.ID).forUpdate()
-        return client.preparedQuery(DatabaseConfig.sql(lockOrderItemsQuery))
-            .execute(DatabaseConfig.tuple(lockOrderItemsQuery))
+        return client.preparedQuery("$ORDER_ITEM_SELECT WHERE purchase_order_id = \$1 ORDER BY id FOR UPDATE")
+            .execute(Tuple.of(orderId))
             .map { rows: RowSet<Row> -> rows.map { it } }
     }
 
@@ -864,6 +703,89 @@ class PurchaseOrderService(
     // ========================================================================
 
     companion object {
+        private const val ORDER_HEADER_COLUMNS =
+            "id, purchase_order_no, warehouse, supplier_name, status, requester_id, approved_by, " +
+                "approved_at, cancelled_by, cancelled_at, cancel_reason, closed_by, closed_at, " +
+                "close_reason, created_at, updated_at"
+
+        private const val ORDER_ITEM_COLUMNS =
+            "id, purchase_order_id, material_id, ordered_quantity, received_quantity"
+
+        private const val RECEIPT_COLUMNS =
+            "id, receipt_no, purchase_order_id, warehouse, supplier_name, received_by, received_at, " +
+                "stock_operation_id, created_at"
+
+        private const val RECEIPT_ITEM_COLUMNS =
+            "id, receipt_id, purchase_order_item_id, material_id, lot_id, received_quantity, " +
+                "unit_cost, total_cost, stock_operation_detail_id"
+
+        private const val LIST_COLUMNS =
+            "id, purchase_order_no, warehouse, supplier_name, status, requester_id, created_at, " +
+                "approved_at, cancelled_at, closed_at, updated_at"
+
+        private const val ORDER_HEADER_SELECT =
+            "SELECT $ORDER_HEADER_COLUMNS FROM pharmacy.pharmacy_purchase_orders"
+
+        private const val ORDER_ITEM_SELECT =
+            "SELECT $ORDER_ITEM_COLUMNS FROM pharmacy.pharmacy_purchase_order_items"
+
+        private const val RECEIPT_SELECT =
+            "SELECT $RECEIPT_COLUMNS FROM pharmacy.pharmacy_purchase_receipts"
+
+        private const val RECEIPT_ITEM_SELECT =
+            "SELECT $RECEIPT_ITEM_COLUMNS FROM pharmacy.pharmacy_purchase_receipt_items"
+
+        private const val INSERT_ORDER_SQL =
+            "INSERT INTO pharmacy.pharmacy_purchase_orders " +
+                "(id, purchase_order_no, warehouse, supplier_name, status, requester_id, " +
+                "idempotency_key, request_fingerprint, created_at, updated_at) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10)"
+
+        private const val INSERT_ORDER_ITEM_SQL =
+            "INSERT INTO pharmacy.pharmacy_purchase_order_items " +
+                "(id, purchase_order_id, material_id, ordered_quantity, received_quantity) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5)"
+
+        private const val DELETE_ORDER_ITEMS_SQL =
+            "DELETE FROM pharmacy.pharmacy_purchase_order_items WHERE purchase_order_id = \$1"
+
+        private const val UPDATE_DRAFT_SQL =
+            "UPDATE pharmacy.pharmacy_purchase_orders " +
+                "SET warehouse = \$1, supplier_name = \$2, updated_at = \$3 WHERE id = \$4"
+
+        private const val APPROVE_SQL =
+            "UPDATE pharmacy.pharmacy_purchase_orders " +
+                "SET status = \$1, approved_by = \$2, approved_at = \$3, updated_at = \$4 WHERE id = \$5"
+
+        private const val CANCEL_SQL =
+            "UPDATE pharmacy.pharmacy_purchase_orders " +
+                "SET status = \$1, cancelled_by = \$2, cancelled_at = \$3, cancel_reason = \$4, " +
+                "updated_at = \$5 WHERE id = \$6"
+
+        private const val CLOSE_SQL =
+            "UPDATE pharmacy.pharmacy_purchase_orders " +
+                "SET status = \$1, closed_by = \$2, closed_at = \$3, close_reason = \$4, " +
+                "updated_at = \$5 WHERE id = \$6"
+
+        private const val UPDATE_STATUS_SQL =
+            "UPDATE pharmacy.pharmacy_purchase_orders SET status = \$1, updated_at = \$2 WHERE id = \$3"
+
+        private const val INSERT_RECEIPT_SQL =
+            "INSERT INTO pharmacy.pharmacy_purchase_receipts " +
+                "(id, receipt_no, purchase_order_id, warehouse, supplier_name, received_by, " +
+                "received_at, stock_operation_id, idempotency_key, request_fingerprint, created_at) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11)"
+
+        private const val INSERT_RECEIPT_ITEM_SQL =
+            "INSERT INTO pharmacy.pharmacy_purchase_receipt_items " +
+                "(id, receipt_id, purchase_order_item_id, material_id, lot_id, received_quantity, " +
+                "unit_cost, total_cost, stock_operation_detail_id) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9)"
+
+        private const val ACCUMULATE_RECEIVED_SQL =
+            "UPDATE pharmacy.pharmacy_purchase_order_items " +
+                "SET received_quantity = received_quantity + \$1 WHERE id = \$2 AND purchase_order_id = \$3"
+
         fun orderHeaderToJson(row: Row): JsonObject =
             JsonObject()
                 .put("id", row.getValue("id")?.toString())

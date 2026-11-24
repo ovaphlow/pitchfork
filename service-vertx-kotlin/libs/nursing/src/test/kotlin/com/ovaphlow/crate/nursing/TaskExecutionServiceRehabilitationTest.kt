@@ -1,7 +1,5 @@
 package com.ovaphlow.crate.nursing
 
-import com.ovaphlow.crate.database.DatabaseConfig
-import org.jooq.impl.DSL
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -33,53 +31,31 @@ class TaskExecutionServiceRehabilitationTest {
     }
 
     // ========================================================================
-    //  排期生成 / 今日看板 — 任务参与条件（纯 SQL 渲染验证）
+    //  排期生成 / 今日看板 — 任务参与条件（原生 SQL 片段验证）
     // ========================================================================
 
-    private fun render(condition: org.jooq.Condition): String {
-        val query = DSL.selectFrom(DSL.table(DSL.name("nursing", "nursing_tasks")).`as`("t")).where(condition)
-        return DatabaseConfig.sql(query)
-    }
-
     private fun participation(
-        taskPeriodId: String = "t.period_id",
-        taskType: String = "t.task_type",
-        periodStatus: String = "ps.status",
-    ): String = render(
+        taskAlias: String = "t",
+        periodAlias: String = "ps",
+    ): String =
         TaskExecutionService.taskParticipationCondition(
-            taskPeriodId = DSL.field(taskPeriodId, String::class.java),
-            taskType = DSL.field(taskType, String::class.java),
-            periodStatus = DSL.field(periodStatus, String::class.java),
-        ),
-    )
-
-    /** 参与条件的绑定值（参数化 SQL，按出现顺序） */
-    private fun participationBindValues(
-        taskPeriodId: String = "t.period_id",
-        taskType: String = "t.task_type",
-        periodStatus: String = "ps.status",
-    ): List<Any?> {
-        val query = DSL.selectFrom(DSL.table(DSL.name("nursing", "nursing_tasks")).`as`("t")).where(
-            TaskExecutionService.taskParticipationCondition(
-                taskPeriodId = DSL.field(taskPeriodId, String::class.java),
-                taskType = DSL.field(taskType, String::class.java),
-                periodStatus = DSL.field(periodStatus, String::class.java),
-            ),
+            taskAlias = taskAlias,
+            periodAlias = periodAlias,
         )
-        return query.getBindValues()
-    }
 
     @Test
     fun `归属活跃周期的任务参与排期生成与今日看板`() {
         val sql = participation()
         assertTrue(sql.contains("ps.status = "), "活跃周期条件缺失: $sql")
-        assertEquals(listOf("ACTIVE", "REHABILITATION"), participationBindValues())
+        // 活跃周期取值与康复活动类型以固定字面量落在原生 SQL 中（无绑定参数）
+        assertTrue(sql.contains("'ACTIVE'"), "活跃周期取值缺失: $sql")
+        assertTrue(sql.contains("'REHABILITATION'"), "康复活动类型缺失: $sql")
     }
 
     @Test
     fun `全院性康复活动（无周期归属）参与排期生成与今日看板`() {
         val sql = participation()
-        assertTrue(sql.contains("t.period_id is null"), "无周期条件缺失: $sql")
+        assertTrue(sql.lowercase().contains("t.period_id is null"), "无周期条件缺失: $sql")
         assertTrue(sql.contains("t.task_type = "), "REHABILITATION 条件缺失: $sql")
     }
 

@@ -106,7 +106,7 @@ class BillingWriteOffTest {
                     // ——— 未结账单：待缴费 且 余额 > 0（与 DepositOffsetService 同口径） ———
                     sql.contains("from healthcare.bills") && sql.contains("left outer join") -> {
                         val scoped = bills
-                            .filter { it["encounter_id"] == values.getOrNull(2) && it["status"] == values.getOrNull(3) }
+                            .filter { it["encounter_id"] == values.getOrNull(0) && it["status"] == values.getOrNull(1) }
                             .mapNotNull { bill ->
                                 val paid = payments
                                     .filter { it["bill_id"] == bill["id"] }
@@ -713,10 +713,11 @@ class BillingWriteOffTest {
             assertEquals(0, BigDecimal.ZERO.compareTo(amount(bill["outstanding_amount"])))
             assertNull(bill["write_off_reason"], "无未结时不得写减免原因")
         }
-        // 无原因时按 NULL 落库（不做 null 绑定参数）
+        // 无原因时按 NULL 绑定写入（原生参数化 SQL：write_off_reason = $n 绑定 null）
         assertTrue(
-            stub.queries.any { it.contains("update healthcare.bills") && it.contains("cast(null as varchar)") },
-            "write_off_reason 必须以显式 NULL 写入: ${stub.queries}",
+            stub.queries.any { it.contains("update healthcare.bills") && it.contains("write_off_reason = $") } &&
+                stub.tuples.any { it.first.contains("update healthcare.bills") && it.second.contains(null) },
+            "write_off_reason 必须以 NULL 写入: ${stub.queries}",
         )
         assertTrue(stub.tuples.none { it.first.contains("insert into healthcare.payments") }, "空体不得核销")
     }

@@ -1,13 +1,6 @@
 package com.ovaphlow.crate.healthcare
 
 import com.ovaphlow.crate.common.Ulid
-import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.database.gen.healthcare.tables.Encounters.ENCOUNTERS
-import com.ovaphlow.crate.database.gen.healthcare.tables.MedicalOrders.MEDICAL_ORDERS
-import com.ovaphlow.crate.database.gen.healthcare.tables.Patients.PATIENTS
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingServicePeriods.NURSING_SERVICE_PERIODS
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingTaskExecutions.NURSING_TASK_EXECUTIONS
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingTasks.NURSING_TASKS
 import com.ovaphlow.crate.nursing.ConflictException
 import com.ovaphlow.crate.nursing.FrequencyCalculator
 import com.ovaphlow.crate.nursing.TaskService
@@ -20,11 +13,6 @@ import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.RowSet
 import io.vertx.sqlclient.SqlClient
 import io.vertx.sqlclient.Tuple
-import org.jooq.Condition
-import org.jooq.DSLContext
-import org.jooq.JSONB
-import org.jooq.Query
-import org.jooq.impl.DSL
 import java.time.Duration
 import java.time.LocalDate
 import java.time.OffsetDateTime
@@ -91,7 +79,6 @@ class DrugAllergyWarningException(
 class MedicalOrderService(
     private val pool: Pool,
     private val taskService: TaskService,
-    private val ctx: DSLContext = DatabaseConfig.createDSL(),
     /**
      * 025 药品目录端口：由 Aceso `Main.kt` 注入 `MaterialService` 适配器。
      * 为空表示部署未接线；`MEDICATION` 医嘱一律 fail-closed（503），绝不跳过校验。
@@ -234,6 +221,35 @@ class MedicalOrderService(
         private val OPEN_PERIOD_STATUSES = setOf("ACTIVE", "SUSPENDED")
     }
 
+    // ========================================================================
+    //  原生 SQL 片段（列清单单一来源，均带表别名）
+    // ========================================================================
+
+    /** 医嘱表显式列清单（表别名 `mo`）。 */
+    private val orderColumns =
+        "healthcare.medical_orders.id, healthcare.medical_orders.encounter_id, healthcare.medical_orders.order_type, healthcare.medical_orders.order_content, healthcare.medical_orders.order_details, " +
+            "healthcare.medical_orders.start_time, healthcare.medical_orders.end_time, healthcare.medical_orders.doctor, healthcare.medical_orders.nurse, healthcare.medical_orders.status, healthcare.medical_orders.metadata, " +
+            "healthcare.medical_orders.created_at, healthcare.medical_orders.updated_at, healthcare.medical_orders.order_class, healthcare.medical_orders.nurse_checked_by, healthcare.medical_orders.nurse_checked_at"
+
+    /**
+     * 医嘱 + 关联护理任务（`task_id`）：列表/详情/回读共用。
+     * INNER JOIN 与既有语义一致：尚未派生护理任务的医嘱不出现在这些查询里。
+     */
+    private val orderSelectSql =
+        "SELECT $orderColumns, nursing.nursing_tasks.id AS task_id FROM healthcare.medical_orders " +
+            "JOIN nursing.nursing_tasks ON nursing.nursing_tasks.order_item_id = healthcare.medical_orders.id"
+
+    /** 药房待接方/护士核对/待补绑三个列表共用的 FROM+JOIN（医嘱 → 入住 → 患者）。 */
+    private val MEDICATION_LIST_FROM = "FROM healthcare.medical_orders " +
+        "JOIN healthcare.encounters ON healthcare.medical_orders.encounter_id = healthcare.encounters.id " +
+        "JOIN healthcare.patients ON healthcare.encounters.patient_id = healthcare.patients.id"
+
+    private val insertOrderSql =
+        "INSERT INTO healthcare.medical_orders " +
+            "(id, encounter_id, order_type, order_class, order_content, order_details, start_time, " +
+            "doctor, status, created_at, updated_at, end_time, metadata) " +
+            "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11, \$12, \$13)"
+
     fun createOrder(encounterId: String, body: JsonObject): Future<JsonObject> {
         val input = try {
             validateCreateInput(body)
@@ -317,26 +333,32 @@ class MedicalOrderService(
     ): Future<JsonObject> {
         val orderId = Ulid.generate()
         val now = OffsetDateTime.now()
-        var insertQuery = ctx.insertInto(MEDICAL_ORDERS)
-            .set(MEDICAL_ORDERS.ID, orderId)
-            .set(MEDICAL_ORDERS.ENCOUNTER_ID, encounterId)
-            .set(MEDICAL_ORDERS.ORDER_TYPE, input.orderType)
-            .set(MEDICAL_ORDERS.ORDER_CLASS, input.orderClass)
-            .set(MEDICAL_ORDERS.ORDER_CONTENT, input.orderContent)
-            .set(MEDICAL_ORDERS.ORDER_DETAILS, JSONB.valueOf(input.orderDetails.encode()))
-            .set(MEDICAL_ORDERS.START_TIME, input.startTime)
-            .set(MEDICAL_ORDERS.DOCTOR, input.doctor)
-            .set(MEDICAL_ORDERS.STATUS, "ACTIVE")
-            .set(MEDICAL_ORDERS.CREATED_AT, now)
-            .set(MEDICAL_ORDERS.UPDATED_AT, now)
-        input.endTime?.let { insertQuery = insertQuery.set(MEDICAL_ORDERS.END_TIME, it) }
         // 053 D3：仅在有提醒时写 metadata（新医嘱 metadata 原为 NULL，不存在被覆盖的既有内容）。
-        if (warnings.isNotEmpty()) {
-            val metadata = JsonObject().put("allergy_warnings", warningsJson(warnings))
-            insertQuery = insertQuery.set(MEDICAL_ORDERS.METADATA, JSONB.valueOf(metadata.encode()))
+        val metadata = if (warnings.isEmpty()) {
+            null
+        } else {
+            JsonObject().put("allergy_warnings", warningsJson(warnings))
         }
 
-        return execute(connection, insertQuery).compose {
+        return execute(
+            connection,
+            insertOrderSql,
+            Tuple.of(
+                orderId,
+                encounterId,
+                input.orderType,
+                input.orderClass,
+                input.orderContent,
+                input.orderDetails,
+                input.startTime,
+                input.doctor,
+                "ACTIVE",
+                now,
+                now,
+                input.endTime,
+                metadata,
+            ),
+        ).compose {
             val startDate = businessDate(input.startTime)
             val endDate = input.endTime?.let(::businessDate) ?: if (input.orderDetails.containsKey("duration_days")) {
                 startDate.plusDays(
@@ -542,27 +564,21 @@ class MedicalOrderService(
         limit: Int = 50,
         offset: Int = 0,
     ): Future<JsonObject> {
-        val conditions = mutableListOf<Condition>()
-        conditions.add(MEDICAL_ORDERS.ENCOUNTER_ID.eq(encounterId))
-        orderType?.takeIf(String::isNotBlank)?.let { conditions.add(MEDICAL_ORDERS.ORDER_TYPE.eq(it)) }
-        status?.takeIf(String::isNotBlank)?.let { conditions.add(MEDICAL_ORDERS.STATUS.eq(it)) }
+        val args = mutableListOf<Any?>(encounterId)
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
+        val conditions = mutableListOf("healthcare.medical_orders.encounter_id = \$1")
+        orderType?.takeIf(String::isNotBlank)?.let { conditions += "healthcare.medical_orders.order_type = ${bind(it)}" }
+        status?.takeIf(String::isNotBlank)?.let { conditions += "healthcare.medical_orders.status = ${bind(it)}" }
+        val where = " WHERE ${conditions.joinToString(" AND ")}"
 
-        val joinOn = MEDICAL_ORDERS.ID.eq(NURSING_TASKS.ORDER_ITEM_ID)
-        val countQuery = ctx.select(DSL.count().`as`("total"))
-            .from(MEDICAL_ORDERS)
-            .join(NURSING_TASKS).on(joinOn)
-            .where(conditions)
-        val dataQuery = ctx.select(orderSelectFields())
-            .from(MEDICAL_ORDERS)
-            .join(NURSING_TASKS).on(joinOn)
-            .where(conditions)
-            .orderBy(MEDICAL_ORDERS.CREATED_AT.desc())
-            .limit(limit)
-            .offset(offset)
+        val countSql = "SELECT count(*) AS total FROM healthcare.medical_orders " +
+            "JOIN nursing.nursing_tasks ON nursing.nursing_tasks.order_item_id = healthcare.medical_orders.id$where"
+        val dataSql = "$orderSelectSql$where ORDER BY healthcare.medical_orders.created_at DESC " +
+            "OFFSET \$${args.size + 1} ROWS FETCH NEXT \$${args.size + 2} ROWS ONLY"
 
-        return execute(pool, countQuery).compose { countRows ->
+        return execute(pool, countSql, Tuple.from(args)).compose { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(pool, dataQuery).map { dataRows ->
+            execute(pool, dataSql, Tuple.from(args + listOf<Any?>(offset, limit))).map { dataRows ->
                 val now = OffsetDateTime.now()
                 JsonObject()
                     .put("records", JsonArray(dataRows.map { orderJson(it, it.getString("task_id"), now) }))
@@ -572,22 +588,17 @@ class MedicalOrderService(
     }
 
     fun getOrder(id: String): Future<JsonObject> {
-        val query = ctx.select(orderSelectFields())
-            .from(MEDICAL_ORDERS)
-            .join(NURSING_TASKS)
-            .on(MEDICAL_ORDERS.ID.eq(NURSING_TASKS.ORDER_ITEM_ID))
-            .where(MEDICAL_ORDERS.ID.eq(id))
-        return execute(pool, query).compose { rows ->
+        return execute(pool, "$orderSelectSql WHERE healthcare.medical_orders.id = \$1", Tuple.of(id)).compose { rows ->
             val row = rows.iterator().asSequence().firstOrNull()
                 ?: return@compose Future.failedFuture(HealthcareNotFoundException("order not found: $id"))
 
-            val summaryQuery = ctx.select(NURSING_TASK_EXECUTIONS.STATUS, DSL.count().`as`("cnt"))
-                .from(NURSING_TASK_EXECUTIONS)
-                .join(NURSING_TASKS)
-                .on(NURSING_TASK_EXECUTIONS.TASK_ID.eq(NURSING_TASKS.ID))
-                .where(NURSING_TASKS.ORDER_ITEM_ID.eq(id))
-                .groupBy(NURSING_TASK_EXECUTIONS.STATUS)
-            execute(pool, summaryQuery).compose { summaryRows ->
+            val summarySql = "SELECT nursing.nursing_task_executions.status, count(*) AS cnt " +
+                "FROM nursing.nursing_task_executions " +
+                "JOIN nursing.nursing_tasks " +
+                "ON nursing.nursing_tasks.id = nursing.nursing_task_executions.task_id " +
+                "WHERE nursing.nursing_tasks.order_item_id = \$1 " +
+                "GROUP BY nursing.nursing_task_executions.status"
+            execute(pool, summarySql, Tuple.of(id)).compose { summaryRows ->
                 val summary = JsonObject()
                     .put("PENDING", 0)
                     .put("IN_PROGRESS", 0)
@@ -613,15 +624,10 @@ class MedicalOrderService(
      * 历史执行无给药记录时返回零值，读取兼容。
      */
     private fun administrationSummary(orderId: String): Future<JsonObject> {
-        val maTable = DSL.table(DSL.name("nursing", "medication_administrations"))
-        val maResult = DSL.field("ma.result", String::class.java)
-        val maQuantity = DSL.field("ma.administered_quantity", java.math.BigDecimal::class.java)
-        val maOrderId = DSL.field("ma.medical_order_id", String::class.java)
-        val adminQuery = ctx.select(maResult, DSL.count().`as`("cnt"), DSL.sum(maQuantity).`as`("qty"))
-            .from(maTable.`as`("ma"))
-            .where(maOrderId.eq(orderId))
-            .groupBy(maResult)
-        return execute(pool, adminQuery).compose { adminRows ->
+        val adminSql = "SELECT nursing.medication_administrations.result, count(*) AS cnt, sum(nursing.medication_administrations.administered_quantity) AS qty " +
+            "FROM nursing.medication_administrations WHERE nursing.medication_administrations.medical_order_id = \$1 " +
+            "GROUP BY nursing.medication_administrations.result"
+        return execute(pool, adminSql, Tuple.of(orderId)).compose { adminRows ->
             dispensedQuantity(orderId).map { dispensedQty ->
                 var administeredCount = 0L
                 var administeredQty = java.math.BigDecimal.ZERO
@@ -667,17 +673,15 @@ class MedicalOrderService(
      * 不存在时按“未发药”返回 null，保证 healthcare 独立测试与无药房部署可读。
      */
     private fun dispensedQuantity(orderId: String): Future<java.math.BigDecimal?> {
-        val dispensedQuery = ctx.select(DSL.sum(DSL.field("di.dispensed_quantity", java.math.BigDecimal::class.java)).`as`("dispensed_qty"))
-            .from(DSL.table(DSL.name("pharmacy", "pharmacy_dispense_items")).`as`("di"))
-            .join(DSL.table(DSL.name("pharmacy", "pharmacy_dispenses")).`as`("d"))
-            .on(DSL.field("d.id").eq(DSL.field("di.dispense_id")))
-            .where(DSL.field("di.order_item_id").eq(orderId))
-            .and(DSL.field("d.status").eq("DISPENSED"))
+        val dispensedSql = "SELECT sum(pharmacy.pharmacy_dispense_items.dispensed_quantity) AS dispensed_qty " +
+            "FROM pharmacy.pharmacy_dispense_items " +
+            "JOIN pharmacy.pharmacy_dispenses ON pharmacy.pharmacy_dispenses.id = pharmacy.pharmacy_dispense_items.dispense_id " +
+            "WHERE pharmacy.pharmacy_dispense_items.order_item_id = \$1 AND pharmacy.pharmacy_dispenses.status = 'DISPENSED'"
         return pharmacyDispenseTablesPresent().compose { present ->
             if (!present) {
                 Future.succeededFuture(null)
             } else {
-                execute(pool, dispensedQuery).map { dispensedRows ->
+                execute(pool, dispensedSql, Tuple.of(orderId)).map { dispensedRows ->
                     if (dispensedRows.size() == 0) {
                         null
                     } else {
@@ -688,17 +692,16 @@ class MedicalOrderService(
         }
     }
 
-    private fun pharmacyDispenseTablesPresent(): Future<Boolean> {
-        val query = ctx.select(DSL.count().`as`("cnt"))
-            .from(DSL.table(DSL.name("information_schema", "tables")))
-            .where(
-                DSL.field(DSL.name("table_schema")).eq("pharmacy")
-                    .and(DSL.field(DSL.name("table_name")).`in`("pharmacy_dispense_items", "pharmacy_dispenses")),
-            )
-        return execute(pool, query).map { rows ->
+    private fun pharmacyDispenseTablesPresent(): Future<Boolean> =
+        execute(
+            pool,
+            "SELECT count(*) AS cnt FROM information_schema.tables " +
+                "WHERE table_schema = 'pharmacy' " +
+                "AND table_name IN ('pharmacy_dispense_items', 'pharmacy_dispenses')",
+            Tuple.tuple(),
+        ).map { rows ->
             rows.iterator().next().getLong("cnt") == 2L
         }
-    }
 
     /** 给药明细列表（按 task 关联，只读）：与执行汇总/给药汇总同源一致 */
     fun listOrderAdministrations(orderId: String): Future<JsonObject> {
@@ -711,51 +714,38 @@ class MedicalOrderService(
                         .put("meta", JsonObject().put("total", 0)),
                 )
             } else {
-                val query = ctx.select(
-                    DSL.field("ma.id").`as`("id"),
-                    DSL.field("ma.task_execution_id").`as`("task_execution_id"),
-                    DSL.field("ma.result").`as`("result"),
-                    DSL.field("ma.administered_quantity").`as`("administered_quantity"),
-                    DSL.field("ma.unit").`as`("unit"),
-                    DSL.field("ma.dispense_item_id").`as`("dispense_item_id"),
-                    DSL.field("ma.lot_id").`as`("lot_id"),
-                    DSL.field("ma.warehouse").`as`("warehouse"),
-                    DSL.field("ma.administered_by").`as`("administered_by"),
-                    DSL.field("ma.administered_at").`as`("administered_at"),
-                    DSL.field("ma.reason").`as`("reason"),
-                    DSL.field("ma.created_at").`as`("created_at"),
-                    DSL.field("e.planned_time").`as`("planned_time"),
-                    DSL.field("t.description").`as`("task_description"),
-                    DSL.field("di.material_id").`as`("material_id"),
-                    DSL.field("mat.name").`as`("material_name"),
-                    DSL.field("lot.batch_no").`as`("batch_no"),
-                    DSL.field("d.dispense_no").`as`("dispense_no"),
-                )
-                    .from(DSL.table(DSL.name("nursing", "medication_administrations")).`as`("ma"))
-                    .join(NURSING_TASK_EXECUTIONS.`as`("e"))
-                    .on(DSL.field("e.id").eq(DSL.field("ma.task_execution_id")))
-                    .join(NURSING_TASKS.`as`("t"))
-                    .on(DSL.field("t.id").eq(DSL.field("e.task_id")))
-                    .leftJoin(DSL.table(DSL.name("pharmacy", "pharmacy_dispense_items")).`as`("di"))
-                    .on(DSL.field("di.id").eq(DSL.field("ma.dispense_item_id")))
-                    .leftJoin(DSL.table(DSL.name("public", "materials")).`as`("mat"))
-                    .on(DSL.field("mat.id").eq(DSL.field("di.material_id")))
-                    .leftJoin(DSL.table(DSL.name("public", "lots")).`as`("lot"))
-                    .on(DSL.field("lot.id").eq(DSL.field("di.lot_id")))
-                    .leftJoin(DSL.table(DSL.name("pharmacy", "pharmacy_dispenses")).`as`("d"))
-                    .on(DSL.field("d.id").eq(DSL.field("di.dispense_id")))
-                    .where(DSL.field("t.order_item_id").eq(orderId))
-                    .orderBy(DSL.field("ma.administered_at").desc(), DSL.field("ma.id").desc())
-                val countQuery = ctx.select(DSL.count().`as`("total"))
-                    .from(DSL.table(DSL.name("nursing", "medication_administrations")).`as`("ma"))
-                    .join(NURSING_TASK_EXECUTIONS.`as`("e"))
-                    .on(DSL.field("e.id").eq(DSL.field("ma.task_execution_id")))
-                    .join(NURSING_TASKS.`as`("t"))
-                    .on(DSL.field("t.id").eq(DSL.field("e.task_id")))
-                    .where(DSL.field("t.order_item_id").eq(orderId))
-                execute(pool, countQuery).compose { countRows ->
+                val dataSql = "SELECT nursing.medication_administrations.id AS id, " +
+                    "nursing.medication_administrations.task_execution_id AS task_execution_id, " +
+                    "nursing.medication_administrations.result AS result, nursing.medication_administrations.administered_quantity AS administered_quantity, " +
+                    "nursing.medication_administrations.unit AS unit, nursing.medication_administrations.dispense_item_id AS dispense_item_id, nursing.medication_administrations.lot_id AS lot_id, " +
+                    "nursing.medication_administrations.warehouse AS warehouse, nursing.medication_administrations.administered_by AS administered_by, " +
+                    "nursing.medication_administrations.administered_at AS administered_at, nursing.medication_administrations.reason AS reason, " +
+                    "nursing.medication_administrations.created_at AS created_at, " +
+                    "nursing.nursing_task_executions.planned_time AS planned_time, " +
+                    "nursing.nursing_tasks.description AS task_description, " +
+                    "pharmacy.pharmacy_dispense_items.material_id AS material_id, " +
+                    "public.materials.name AS material_name, public.lots.batch_no AS batch_no, pharmacy.pharmacy_dispenses.dispense_no AS dispense_no " +
+                    "FROM nursing.medication_administrations " +
+                    "JOIN nursing.nursing_task_executions ON nursing.nursing_task_executions.id = " +
+                    "nursing.medication_administrations.task_execution_id " +
+                    "JOIN nursing.nursing_tasks ON nursing.nursing_tasks.id = " +
+                    "nursing.nursing_task_executions.task_id " +
+                    "LEFT JOIN pharmacy.pharmacy_dispense_items ON pharmacy.pharmacy_dispense_items.id = nursing.medication_administrations.dispense_item_id " +
+                    "LEFT JOIN public.materials ON public.materials.id = pharmacy.pharmacy_dispense_items.material_id " +
+                    "LEFT JOIN public.lots ON public.lots.id = pharmacy.pharmacy_dispense_items.lot_id " +
+                    "LEFT JOIN pharmacy.pharmacy_dispenses ON pharmacy.pharmacy_dispenses.id = pharmacy.pharmacy_dispense_items.dispense_id " +
+                    "WHERE nursing.nursing_tasks.order_item_id = \$1 " +
+                    "ORDER BY nursing.medication_administrations.administered_at DESC, " +
+                    "nursing.medication_administrations.id DESC"
+                val countSql = "SELECT count(*) AS total FROM nursing.medication_administrations " +
+                    "JOIN nursing.nursing_task_executions ON nursing.nursing_task_executions.id = " +
+                    "nursing.medication_administrations.task_execution_id " +
+                    "JOIN nursing.nursing_tasks ON nursing.nursing_tasks.id = " +
+                    "nursing.nursing_task_executions.task_id " +
+                    "WHERE nursing.nursing_tasks.order_item_id = \$1"
+                execute(pool, countSql, Tuple.of(orderId)).compose { countRows ->
                     val total = countRows.iterator().next().getLong("total") ?: 0L
-                    execute(pool, query).map { dataRows ->
+                    execute(pool, dataSql, Tuple.of(orderId)).map { dataRows ->
                         JsonObject()
                             .put("records", JsonArray(dataRows.map(::administrationRowJson)))
                             .put("meta", JsonObject().put("total", total))
@@ -814,12 +804,12 @@ class MedicalOrderService(
                 val taskTarget = if (target == "COMPLETED") "COMPLETED" else "CANCELLED"
                 taskService.terminateOrderTask(connection, id, taskTarget)
                     .compose {
-                        val updateQuery = ctx.update(MEDICAL_ORDERS)
-                            .set(MEDICAL_ORDERS.STATUS, target)
-                            .set(MEDICAL_ORDERS.END_TIME, now)
-                            .set(MEDICAL_ORDERS.UPDATED_AT, now)
-                            .where(MEDICAL_ORDERS.ID.eq(id))
-                        execute(connection, updateQuery)
+                        execute(
+                            connection,
+                            "UPDATE healthcare.medical_orders SET status = \$2, end_time = \$3, updated_at = \$4 " +
+                                "WHERE id = \$1",
+                            Tuple.of(id, target, now, now),
+                        )
                     }
                     .compose {
                         readOrderWithTask(connection, id).map { orderRow ->
@@ -859,18 +849,21 @@ class MedicalOrderService(
                 ensureEncounterExists(connection, encounterId)
             }
             encounterGate.compose {
-                val conditions = mutableListOf<Condition>(
-                    MEDICAL_ORDERS.STATUS.eq(ACTIVE_STATUS),
-                    MEDICAL_ORDERS.END_TIME.isNotNull,
-                    MEDICAL_ORDERS.END_TIME.lt(now),
+                val args = mutableListOf<Any?>(ACTIVE_STATUS, now)
+                fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
+                val conditions = mutableListOf(
+                    "healthcare.medical_orders.status = \$1",
+                    "healthcare.medical_orders.end_time IS NOT NULL",
+                    "healthcare.medical_orders.end_time < CAST(\$2 AS TIMESTAMPTZ)",
                 )
-                encounterId?.let { conditions.add(MEDICAL_ORDERS.ENCOUNTER_ID.eq(it)) }
-                val candidateQuery = ctx.select(MEDICAL_ORDERS.ID, MEDICAL_ORDERS.END_TIME)
-                    .from(MEDICAL_ORDERS)
-                    .where(conditions)
-                    .orderBy(MEDICAL_ORDERS.ID)
-                    .forUpdate()
-                execute(connection, candidateQuery).compose { rows ->
+                encounterId?.let {
+                    conditions += "healthcare.medical_orders.encounter_id = ${bind(it)}"
+                }
+                val candidateSql = "SELECT healthcare.medical_orders.id, healthcare.medical_orders.end_time " +
+                    "FROM healthcare.medical_orders " +
+                    "WHERE ${conditions.joinToString(" AND ")} " +
+                    "ORDER BY healthcare.medical_orders.id FOR UPDATE"
+                execute(connection, candidateSql, Tuple.from(args)).compose { rows ->
                     // 先物化候选再逐条写：候选顺序即响应 order_ids 顺序，避免游标与后续写交错
                     val candidates = rows.iterator().asSequence().mapNotNull { row ->
                         row.getString("id")?.let { id -> id to row.getOffsetDateTime("end_time") }
@@ -923,12 +916,12 @@ class MedicalOrderService(
                         return@compose Future.failedFuture(ConflictException("encounter is not active"))
                     }
                     val now = OffsetDateTime.now()
-                    val updateQuery = ctx.update(MEDICAL_ORDERS)
-                        .set(MEDICAL_ORDERS.NURSE_CHECKED_BY, userId)
-                        .set(MEDICAL_ORDERS.NURSE_CHECKED_AT, now)
-                        .set(MEDICAL_ORDERS.UPDATED_AT, now)
-                        .where(MEDICAL_ORDERS.ID.eq(id))
-                    execute(connection, updateQuery).compose {
+                    execute(
+                        connection,
+                        "UPDATE healthcare.medical_orders SET nurse_checked_by = \$2, " +
+                            "nurse_checked_at = \$3, updated_at = \$4 WHERE id = \$1",
+                        Tuple.of(id, userId, now, now),
+                    ).compose {
                         readOrderWithTask(connection, id).map { row ->
                             orderJson(row, row.getString("task_id"), now)
                         }
@@ -950,59 +943,30 @@ class MedicalOrderService(
         limit: Int,
         offset: Int,
     ): Future<JsonObject> {
-        val conditions = mutableListOf<Condition>()
-        conditions.add(MEDICAL_ORDERS.ORDER_TYPE.eq("MEDICATION"))
-        conditions.add(MEDICAL_ORDERS.STATUS.eq("ACTIVE"))
-        // 药房门禁：只返回已核对的活动用药医嘱，未核对医嘱药房不可见
-        conditions.add(MEDICAL_ORDERS.NURSE_CHECKED_AT.isNotNull())
-        conditions.add(ENCOUNTERS.ENCOUNTER_TYPE.eq("ELDERLY_CARE"))
-        conditions.add(ENCOUNTERS.STATUS.eq("ACTIVE"))
-        encounterId?.let { conditions.add(MEDICAL_ORDERS.ENCOUNTER_ID.eq(it)) }
-        if (!search.isNullOrBlank()) {
-            conditions.add(
-                DSL.or(
-                    MEDICAL_ORDERS.ORDER_CONTENT.like("%$search%"),
-                    DSL.field("order_details->>'drug_name'").like("%$search%"),
-                    PATIENTS.NAME.like("%$search%"),
-                    ENCOUNTERS.ENCOUNTER_NO.like("%$search%"),
-                ),
-            )
-        }
-
-        val fields = listOf(
-            MEDICAL_ORDERS.ID.`as`("order_id"),
-            MEDICAL_ORDERS.ENCOUNTER_ID,
-            ENCOUNTERS.PATIENT_ID,
-            PATIENTS.NAME.`as`("patient_name"),
-            ENCOUNTERS.ENCOUNTER_NO,
-            MEDICAL_ORDERS.ORDER_TYPE,
-            MEDICAL_ORDERS.ORDER_CLASS,
-            MEDICAL_ORDERS.ORDER_CONTENT,
-            MEDICAL_ORDERS.ORDER_DETAILS,
-            MEDICAL_ORDERS.DOCTOR,
-            MEDICAL_ORDERS.START_TIME,
-            MEDICAL_ORDERS.END_TIME,
-            MEDICAL_ORDERS.NURSE_CHECKED_BY,
-            MEDICAL_ORDERS.NURSE_CHECKED_AT,
+        val args = mutableListOf<Any?>()
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
+        val conditions = mutableListOf(
+            "healthcare.medical_orders.order_type = ${bind("MEDICATION")}",
+            "healthcare.medical_orders.status = ${bind("ACTIVE")}",
+            // 药房门禁：只返回已核对的活动用药医嘱，未核对医嘱药房不可见
+            "healthcare.medical_orders.nurse_checked_at IS NOT NULL",
+            "healthcare.encounters.encounter_type = ${bind("ELDERLY_CARE")}",
+            "healthcare.encounters.status = ${bind("ACTIVE")}",
         )
-        val from = ctx.select(fields)
-            .from(MEDICAL_ORDERS)
-            .join(ENCOUNTERS).on(MEDICAL_ORDERS.ENCOUNTER_ID.eq(ENCOUNTERS.ID))
-            .join(PATIENTS).on(ENCOUNTERS.PATIENT_ID.eq(PATIENTS.ID))
-            .where(conditions)
-        val countQuery = ctx.select(DSL.count().`as`("total"))
-            .from(MEDICAL_ORDERS)
-            .join(ENCOUNTERS).on(MEDICAL_ORDERS.ENCOUNTER_ID.eq(ENCOUNTERS.ID))
-            .join(PATIENTS).on(ENCOUNTERS.PATIENT_ID.eq(PATIENTS.ID))
-            .where(conditions)
-        val dataQuery = from
-            .orderBy(MEDICAL_ORDERS.CREATED_AT.desc())
-            .limit(limit)
-            .offset(offset)
+        appendMedicationListFilters(conditions, args, encounterId, search)
 
-        return execute(client, countQuery).compose { countRows ->
+        val fields = "SELECT healthcare.medical_orders.id AS order_id, healthcare.medical_orders.encounter_id, healthcare.encounters.patient_id, " +
+            "healthcare.patients.name AS patient_name, healthcare.encounters.encounter_no, healthcare.medical_orders.order_type, healthcare.medical_orders.order_class, " +
+            "healthcare.medical_orders.order_content, healthcare.medical_orders.order_details, healthcare.medical_orders.doctor, healthcare.medical_orders.start_time, healthcare.medical_orders.end_time, " +
+            "healthcare.medical_orders.nurse_checked_by, healthcare.medical_orders.nurse_checked_at " + MEDICATION_LIST_FROM
+        val where = " WHERE ${conditions.joinToString(" AND ")}"
+        val countSql = "SELECT count(*) AS total $MEDICATION_LIST_FROM$where"
+        val dataSql = "$fields$where ORDER BY healthcare.medical_orders.created_at DESC " +
+            "OFFSET \$${args.size + 1} ROWS FETCH NEXT \$${args.size + 2} ROWS ONLY"
+
+        return execute(client, countSql, Tuple.from(args)).compose { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(client, dataQuery).map { dataRows ->
+            execute(client, dataSql, Tuple.from(args + listOf<Any?>(offset, limit))).map { dataRows ->
                 JsonObject()
                     .put("records", JsonArray(dataRows.map(::medicationOrderRowJson)))
                     .put("meta", JsonObject().put("total", total))
@@ -1026,62 +990,30 @@ class MedicalOrderService(
     ): Future<JsonObject> {
         // 027（P2-2）：同一响应内固定一个 now，逐行派生 is_expired/expired_minutes 复用该值
         val now = OffsetDateTime.now()
-        val conditions = mutableListOf<Condition>()
-        conditions.add(MEDICAL_ORDERS.ORDER_TYPE.eq("MEDICATION"))
-        conditions.add(MEDICAL_ORDERS.STATUS.eq("ACTIVE"))
-        // 汇总页只列尚未核对的用药医嘱；已核对医嘱在药房待接方列表可见
-        conditions.add(MEDICAL_ORDERS.NURSE_CHECKED_AT.isNull())
-        conditions.add(ENCOUNTERS.ENCOUNTER_TYPE.eq("ELDERLY_CARE"))
-        conditions.add(ENCOUNTERS.STATUS.eq("ACTIVE"))
-        encounterId?.let { conditions.add(MEDICAL_ORDERS.ENCOUNTER_ID.eq(it)) }
-        if (!search.isNullOrBlank()) {
-            conditions.add(
-                DSL.or(
-                    MEDICAL_ORDERS.ORDER_CONTENT.like("%$search%"),
-                    DSL.field("order_details->>'drug_name'").like("%$search%"),
-                    PATIENTS.NAME.like("%$search%"),
-                    ENCOUNTERS.ENCOUNTER_NO.like("%$search%"),
-                ),
-            )
-        }
-
-        val fields = listOf(
-            MEDICAL_ORDERS.ID,
-            MEDICAL_ORDERS.ENCOUNTER_ID,
-            ENCOUNTERS.PATIENT_ID,
-            PATIENTS.NAME.`as`("patient_name"),
-            ENCOUNTERS.ENCOUNTER_NO,
-            MEDICAL_ORDERS.ORDER_TYPE,
-            MEDICAL_ORDERS.ORDER_CLASS,
-            MEDICAL_ORDERS.ORDER_CONTENT,
-            MEDICAL_ORDERS.ORDER_DETAILS,
-            MEDICAL_ORDERS.DOCTOR,
-            MEDICAL_ORDERS.START_TIME,
-            MEDICAL_ORDERS.END_TIME,
-            MEDICAL_ORDERS.STATUS,
-            MEDICAL_ORDERS.NURSE_CHECKED_BY,
-            MEDICAL_ORDERS.NURSE_CHECKED_AT,
-            MEDICAL_ORDERS.CREATED_AT,
-            MEDICAL_ORDERS.UPDATED_AT,
+        val args = mutableListOf<Any?>()
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
+        val conditions = mutableListOf(
+            "healthcare.medical_orders.order_type = ${bind("MEDICATION")}",
+            "healthcare.medical_orders.status = ${bind("ACTIVE")}",
+            // 汇总页只列尚未核对的用药医嘱；已核对医嘱在药房待接方列表可见
+            "healthcare.medical_orders.nurse_checked_at IS NULL",
+            "healthcare.encounters.encounter_type = ${bind("ELDERLY_CARE")}",
+            "healthcare.encounters.status = ${bind("ACTIVE")}",
         )
-        val from = ctx.select(fields)
-            .from(MEDICAL_ORDERS)
-            .join(ENCOUNTERS).on(MEDICAL_ORDERS.ENCOUNTER_ID.eq(ENCOUNTERS.ID))
-            .join(PATIENTS).on(ENCOUNTERS.PATIENT_ID.eq(PATIENTS.ID))
-            .where(conditions)
-        val countQuery = ctx.select(DSL.count().`as`("total"))
-            .from(MEDICAL_ORDERS)
-            .join(ENCOUNTERS).on(MEDICAL_ORDERS.ENCOUNTER_ID.eq(ENCOUNTERS.ID))
-            .join(PATIENTS).on(ENCOUNTERS.PATIENT_ID.eq(PATIENTS.ID))
-            .where(conditions)
-        val dataQuery = from
-            .orderBy(MEDICAL_ORDERS.CREATED_AT.desc())
-            .limit(limit)
-            .offset(offset)
+        appendMedicationListFilters(conditions, args, encounterId, search)
 
-        return execute(client, countQuery).compose { countRows ->
+        val fields = "SELECT healthcare.medical_orders.id, healthcare.medical_orders.encounter_id, healthcare.encounters.patient_id, healthcare.patients.name AS patient_name, " +
+            "healthcare.encounters.encounter_no, healthcare.medical_orders.order_type, healthcare.medical_orders.order_class, healthcare.medical_orders.order_content, healthcare.medical_orders.order_details, " +
+            "healthcare.medical_orders.doctor, healthcare.medical_orders.start_time, healthcare.medical_orders.end_time, healthcare.medical_orders.status, healthcare.medical_orders.nurse_checked_by, " +
+            "healthcare.medical_orders.nurse_checked_at, healthcare.medical_orders.created_at, healthcare.medical_orders.updated_at " + MEDICATION_LIST_FROM
+        val where = " WHERE ${conditions.joinToString(" AND ")}"
+        val countSql = "SELECT count(*) AS total $MEDICATION_LIST_FROM$where"
+        val dataSql = "$fields$where ORDER BY healthcare.medical_orders.created_at DESC " +
+            "OFFSET \$${args.size + 1} ROWS FETCH NEXT \$${args.size + 2} ROWS ONLY"
+
+        return execute(client, countSql, Tuple.from(args)).compose { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(client, dataQuery).map { dataRows ->
+            execute(client, dataSql, Tuple.from(args + listOf<Any?>(offset, limit))).map { dataRows ->
                 JsonObject()
                     .put("records", JsonArray(dataRows.map { nurseCheckPendingRowJson(it, now) }))
                     .put("meta", JsonObject().put("total", total))
@@ -1105,61 +1037,38 @@ class MedicalOrderService(
         limit: Int,
         offset: Int,
     ): Future<JsonObject> {
-        val conditions = mutableListOf<Condition>()
-        conditions.add(MEDICAL_ORDERS.ORDER_TYPE.eq("MEDICATION"))
-        conditions.add(MEDICAL_ORDERS.STATUS.eq(ACTIVE_STATUS))
-        // 未绑目录的唯一判据与 025 补绑路径同源：`order_details->>'material_id'` 键缺失或 JSON null；
-        // 谓词只作用于 `medical_orders`，不受 join 影响。
-        // 与同文件 `order_details->>'drug_name'` 一致，使用 jOOQ 单参 `DSL.field`（plain SQL 表达式）
-        conditions.add(DSL.field("order_details->>'material_id'").isNull())
-        // 030 §4.4 入住门禁只要求 ELDERLY_CARE（终态入住下不应再有 ACTIVE 医嘱）
-        conditions.add(ENCOUNTERS.ENCOUNTER_TYPE.eq("ELDERLY_CARE"))
+        val args = mutableListOf<Any?>()
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
+        val conditions = mutableListOf(
+            "healthcare.medical_orders.order_type = ${bind("MEDICATION")}",
+            "healthcare.medical_orders.status = ${bind(ACTIVE_STATUS)}",
+            // 未绑目录的唯一判据与 025 补绑路径同源：`order_details->>'material_id'` 键缺失或 JSON null；
+            // 谓词只作用于 `medical_orders`，不受 join 影响。
+            "healthcare.medical_orders.order_details->>'material_id' is null",
+            // 030 §4.4 入住门禁只要求 ELDERLY_CARE（终态入住下不应再有 ACTIVE 医嘱）
+            "healthcare.encounters.encounter_type = ${bind("ELDERLY_CARE")}",
+        )
         // 030 评审 P2-8：空白 encounter_id 视为未提供（与同文件其它过滤的 isNotBlank 口径一致），
         // 否则 `?encounter_id=` 会退化成 `encounter_id = ''` 并恒返回空集。
-        encounterId?.takeIf(String::isNotBlank)?.let { conditions.add(MEDICAL_ORDERS.ENCOUNTER_ID.eq(it)) }
-        if (!search.isNullOrBlank()) {
-            conditions.add(
-                DSL.or(
-                    MEDICAL_ORDERS.ORDER_CONTENT.like("%$search%"),
-                    DSL.field("order_details->>'drug_name'").like("%$search%"),
-                    PATIENTS.NAME.like("%$search%"),
-                    ENCOUNTERS.ENCOUNTER_NO.like("%$search%"),
-                ),
-            )
-        }
-
-        val fields = listOf(
-            MEDICAL_ORDERS.ID,
-            MEDICAL_ORDERS.ENCOUNTER_ID,
-            ENCOUNTERS.PATIENT_ID,
-            PATIENTS.NAME.`as`("patient_name"),
-            ENCOUNTERS.ENCOUNTER_NO,
-            MEDICAL_ORDERS.ORDER_CONTENT,
-            MEDICAL_ORDERS.ORDER_DETAILS,
-            MEDICAL_ORDERS.START_TIME,
-            MEDICAL_ORDERS.END_TIME,
-            MEDICAL_ORDERS.NURSE_CHECKED_AT,
-            MEDICAL_ORDERS.CREATED_AT,
+        appendMedicationListFilters(
+            conditions,
+            args,
+            encounterId?.takeIf(String::isNotBlank),
+            search,
         )
-        val from = ctx.select(fields)
-            .from(MEDICAL_ORDERS)
-            .join(ENCOUNTERS).on(MEDICAL_ORDERS.ENCOUNTER_ID.eq(ENCOUNTERS.ID))
-            .join(PATIENTS).on(ENCOUNTERS.PATIENT_ID.eq(PATIENTS.ID))
-            .where(conditions)
-        val countQuery = ctx.select(DSL.count().`as`("total"))
-            .from(MEDICAL_ORDERS)
-            .join(ENCOUNTERS).on(MEDICAL_ORDERS.ENCOUNTER_ID.eq(ENCOUNTERS.ID))
-            .join(PATIENTS).on(ENCOUNTERS.PATIENT_ID.eq(PATIENTS.ID))
-            .where(conditions)
-        val dataQuery = from
-            // 倒序分页：created_at 相同时（存量批量导入）以 id 兜底，保证翻页不重不漏
-            .orderBy(MEDICAL_ORDERS.CREATED_AT.desc(), MEDICAL_ORDERS.ID.desc())
-            .limit(limit)
-            .offset(offset)
 
-        return execute(client, countQuery).compose { countRows ->
+        val fields = "SELECT healthcare.medical_orders.id, healthcare.medical_orders.encounter_id, healthcare.encounters.patient_id, healthcare.patients.name AS patient_name, " +
+            "healthcare.encounters.encounter_no, healthcare.medical_orders.order_content, healthcare.medical_orders.order_details, healthcare.medical_orders.start_time, healthcare.medical_orders.end_time, " +
+            "healthcare.medical_orders.nurse_checked_at, healthcare.medical_orders.created_at " + MEDICATION_LIST_FROM
+        val where = " WHERE ${conditions.joinToString(" AND ")}"
+        val countSql = "SELECT count(*) AS total $MEDICATION_LIST_FROM$where"
+        // 倒序分页：created_at 相同时（存量批量导入）以 id 兜底，保证翻页不重不漏
+        val dataSql = "$fields$where ORDER BY healthcare.medical_orders.created_at DESC, healthcare.medical_orders.id DESC " +
+            "OFFSET \$${args.size + 1} ROWS FETCH NEXT \$${args.size + 2} ROWS ONLY"
+
+        return execute(client, countSql, Tuple.from(args)).compose { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(client, dataQuery).map { dataRows ->
+            execute(client, dataSql, Tuple.from(args + listOf<Any?>(offset, limit))).map { dataRows ->
                 JsonObject()
                     .put("records", JsonArray(dataRows.map(::unboundMaterialOrderRowJson)))
                     .put("meta", JsonObject().put("total", total))
@@ -1195,33 +1104,16 @@ class MedicalOrderService(
         client: SqlClient,
         medicalOrderId: String,
     ): Future<MedicationOrderLockSnapshot> {
-        val fields = listOf(
-            MEDICAL_ORDERS.ID.`as`("order_id"),
-            MEDICAL_ORDERS.ENCOUNTER_ID,
-            MEDICAL_ORDERS.ORDER_TYPE,
-            MEDICAL_ORDERS.ORDER_CLASS,
-            MEDICAL_ORDERS.ORDER_CONTENT,
-            MEDICAL_ORDERS.ORDER_DETAILS,
-            MEDICAL_ORDERS.DOCTOR,
-            MEDICAL_ORDERS.START_TIME,
-            MEDICAL_ORDERS.END_TIME,
-            MEDICAL_ORDERS.STATUS.`as`("order_status"),
-            MEDICAL_ORDERS.NURSE_CHECKED_BY,
-            MEDICAL_ORDERS.NURSE_CHECKED_AT,
-            ENCOUNTERS.PATIENT_ID,
-            ENCOUNTERS.ENCOUNTER_NO,
-            ENCOUNTERS.ENCOUNTER_TYPE,
-            ENCOUNTERS.STATUS.`as`("encounter_status"),
-            PATIENTS.NAME.`as`("patient_name"),
-        )
-        val query = ctx.select(fields)
-            .from(MEDICAL_ORDERS)
-            .join(ENCOUNTERS).on(MEDICAL_ORDERS.ENCOUNTER_ID.eq(ENCOUNTERS.ID))
-            .join(PATIENTS).on(ENCOUNTERS.PATIENT_ID.eq(PATIENTS.ID))
-            .where(MEDICAL_ORDERS.ID.eq(medicalOrderId))
-            .forUpdate()
-            .of(MEDICAL_ORDERS)
-        return execute(client, query).compose { rows ->
+        val query = "SELECT healthcare.medical_orders.id AS order_id, healthcare.medical_orders.encounter_id, healthcare.medical_orders.order_type, healthcare.medical_orders.order_class, " +
+            "healthcare.medical_orders.order_content, healthcare.medical_orders.order_details, healthcare.medical_orders.doctor, healthcare.medical_orders.start_time, healthcare.medical_orders.end_time, " +
+            "healthcare.medical_orders.status AS order_status, healthcare.medical_orders.nurse_checked_by, healthcare.medical_orders.nurse_checked_at, " +
+            "healthcare.encounters.patient_id, healthcare.encounters.encounter_no, healthcare.encounters.encounter_type, healthcare.encounters.status AS encounter_status, " +
+            "healthcare.patients.name AS patient_name " +
+            "FROM healthcare.medical_orders " +
+            "JOIN healthcare.encounters ON healthcare.medical_orders.encounter_id = healthcare.encounters.id " +
+            "JOIN healthcare.patients ON healthcare.encounters.patient_id = healthcare.patients.id " +
+            "WHERE healthcare.medical_orders.id = \$1 FOR UPDATE OF mo"
+        return execute(client, query, Tuple.of(medicalOrderId)).compose { rows ->
             val row = rows.iterator().asSequence().firstOrNull()
             if (row == null) {
                 Future.failedFuture(HealthcareNotFoundException("order not found: $medicalOrderId"))
@@ -1323,11 +1215,9 @@ class MedicalOrderService(
         if (operatorText.isBlank()) {
             return Future.failedFuture(IllegalArgumentException("material_bound_by operator must not be blank"))
         }
-        val lockQuery = ctx.select(MEDICAL_ORDERS.ID, MEDICAL_ORDERS.ORDER_DETAILS)
-            .from(MEDICAL_ORDERS)
-            .where(MEDICAL_ORDERS.ID.eq(medicalOrderId))
-            .forUpdate()
-        return execute(client, lockQuery).compose { rows ->
+        val lockSql = "SELECT healthcare.medical_orders.id, healthcare.medical_orders.order_details FROM healthcare.medical_orders " +
+            "WHERE healthcare.medical_orders.id = \$1 FOR UPDATE"
+        return execute(client, lockSql, Tuple.of(medicalOrderId)).compose { rows ->
             val row = rows.iterator().asSequence().firstOrNull()
                 ?: return@compose Future.failedFuture(
                     HealthcareNotFoundException("order not found: $medicalOrderId"),
@@ -1356,11 +1246,12 @@ class MedicalOrderService(
             }
             merged.put("material_bound_by", operatorText)
             merged.put("material_bound_at", now.toString())
-            val updateQuery = ctx.update(MEDICAL_ORDERS)
-                .set(MEDICAL_ORDERS.ORDER_DETAILS, JSONB.valueOf(merged.encode()))
-                .set(MEDICAL_ORDERS.UPDATED_AT, now)
-                .where(MEDICAL_ORDERS.ID.eq(medicalOrderId))
-            execute(client, updateQuery).map { null as Void? }
+            execute(
+                client,
+                "UPDATE healthcare.medical_orders SET order_details = \$1, updated_at = \$2 " +
+                    "WHERE healthcare.medical_orders.id = \$3",
+                Tuple.of(merged, now, medicalOrderId),
+            ).map { null as Void? }
         }
     }
 
@@ -1411,10 +1302,10 @@ class MedicalOrderService(
      * 必须在任何写入之前调用；失败时由调用方事务整体回滚。
      */
     private fun requireBindableOrders(client: SqlClient, orderIds: List<String>): Future<Void> {
-        val query = ctx.select(MEDICAL_ORDERS.ID, MEDICAL_ORDERS.ORDER_TYPE, MEDICAL_ORDERS.STATUS)
-            .from(MEDICAL_ORDERS)
-            .where(MEDICAL_ORDERS.ID.`in`(orderIds))
-        return execute(client, query).compose { rows ->
+        val placeholders = orderIds.indices.joinToString(", ") { "\$${it + 1}" }
+        val sql = "SELECT healthcare.medical_orders.id, healthcare.medical_orders.order_type, healthcare.medical_orders.status FROM healthcare.medical_orders " +
+            "WHERE healthcare.medical_orders.id IN ($placeholders)"
+        return execute(client, sql, Tuple.from(orderIds)).compose { rows ->
             val byId = mutableMapOf<String, Pair<String?, String?>>()
             for (row in rows) {
                 byId[row.getString("id")] = row.getString("order_type") to row.getString("status")
@@ -1634,11 +1525,9 @@ class MedicalOrderService(
         encounterId: String,
         endTime: OffsetDateTime,
     ): Future<Void> {
-        val query = ctx.selectFrom(MEDICAL_ORDERS)
-            .where(MEDICAL_ORDERS.ENCOUNTER_ID.eq(encounterId))
-            .and(MEDICAL_ORDERS.STATUS.eq("ACTIVE"))
-            .forUpdate()
-        return execute(client, query).compose { rows ->
+        val sql = "SELECT healthcare.medical_orders.id FROM healthcare.medical_orders " +
+            "WHERE healthcare.medical_orders.encounter_id = \$1 AND healthcare.medical_orders.status = 'ACTIVE' FOR UPDATE"
+        return execute(client, sql, Tuple.of(encounterId)).compose { rows ->
             val now = OffsetDateTime.now()
             terminateOrders(client, rows.map { it.getString("id") }, endTime, now)
         }
@@ -1649,7 +1538,12 @@ class MedicalOrderService(
     // ========================================================================
 
     private fun lockEncounter(client: SqlClient, id: String): Future<JsonObject> =
-        execute(client, ctx.selectFrom(ENCOUNTERS).where(ENCOUNTERS.ID.eq(id)).forUpdate()).compose { rows ->
+        execute(
+            client,
+            "SELECT id, patient_id, encounter_type, status FROM healthcare.encounters " +
+                "WHERE id = \$1 FOR UPDATE",
+            Tuple.of(id),
+        ).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { row ->
                 Future.succeededFuture(
                     JsonObject()
@@ -1671,7 +1565,11 @@ class MedicalOrderService(
      * 仍供开立医嘱、护士核对、离院/去世等需要锁定入住行的路径使用。
      */
     private fun ensureEncounterExists(client: SqlClient, id: String): Future<Void> =
-        execute(client, ctx.select(ENCOUNTERS.ID).from(ENCOUNTERS).where(ENCOUNTERS.ID.eq(id))).compose { rows ->
+        execute(
+            client,
+            "SELECT id FROM healthcare.encounters WHERE id = \$1",
+            Tuple.of(id),
+        ).compose { rows ->
             if (rows.iterator().hasNext()) {
                 Future.succeededFuture()
             } else {
@@ -1682,9 +1580,9 @@ class MedicalOrderService(
     private fun lockPeriod(client: SqlClient, encounterId: String): Future<JsonObject> =
         execute(
             client,
-            ctx.selectFrom(NURSING_SERVICE_PERIODS)
-                .where(NURSING_SERVICE_PERIODS.ENCOUNTER_ID.eq(encounterId))
-                .forUpdate(),
+            "SELECT id, patient_id, status FROM nursing.nursing_service_periods " +
+                "WHERE encounter_id = \$1 FOR UPDATE",
+            Tuple.of(encounterId),
         ).compose { rows ->
             val row = rows.iterator().asSequence().firstOrNull()
             if (row == null) {
@@ -1702,7 +1600,12 @@ class MedicalOrderService(
         }
 
     private fun lockOrder(client: SqlClient, id: String): Future<Row> =
-        execute(client, ctx.selectFrom(MEDICAL_ORDERS).where(MEDICAL_ORDERS.ID.eq(id)).forUpdate()).compose { rows ->
+        execute(
+            client,
+            "SELECT id, encounter_id, order_type, order_class, status, nurse_checked_by, " +
+                "nurse_checked_at FROM healthcare.medical_orders WHERE id = \$1 FOR UPDATE",
+            Tuple.of(id),
+        ).compose { rows ->
             val row = rows.iterator().asSequence().firstOrNull()
             if (row == null) {
                 Future.failedFuture(HealthcareNotFoundException("order not found: $id"))
@@ -1712,12 +1615,7 @@ class MedicalOrderService(
         }
 
     private fun readOrderWithTask(client: SqlClient, id: String): Future<Row> {
-        val query = ctx.select(orderSelectFields())
-            .from(MEDICAL_ORDERS)
-            .join(NURSING_TASKS)
-            .on(MEDICAL_ORDERS.ID.eq(NURSING_TASKS.ORDER_ITEM_ID))
-            .where(MEDICAL_ORDERS.ID.eq(id))
-        return execute(client, query).compose { rows ->
+        return execute(client, "$orderSelectSql WHERE healthcare.medical_orders.id = \$1", Tuple.of(id)).compose { rows ->
             val row = rows.iterator().asSequence().firstOrNull()
             if (row == null) {
                 Future.failedFuture(HealthcareNotFoundException("order not found: $id"))
@@ -1736,12 +1634,12 @@ class MedicalOrderService(
         fun loop(index: Int): Future<Void> {
             if (index >= orderIds.size) return Future.succeededFuture()
             val orderId = orderIds[index]
-            val updateQuery = ctx.update(MEDICAL_ORDERS)
-                .set(MEDICAL_ORDERS.STATUS, "DISCONTINUED")
-                .set(MEDICAL_ORDERS.END_TIME, endTime)
-                .set(MEDICAL_ORDERS.UPDATED_AT, now)
-                .where(MEDICAL_ORDERS.ID.eq(orderId))
-            return execute(client, updateQuery)
+            return execute(
+                client,
+                "UPDATE healthcare.medical_orders SET status = \$2, end_time = \$3, updated_at = \$4 " +
+                    "WHERE id = \$1",
+                Tuple.of(orderId, "DISCONTINUED", endTime, now),
+            )
                 .compose { taskService.terminateOrderTask(client, orderId, "CANCELLED") }
                 .compose { loop(index + 1) }
         }
@@ -1822,26 +1720,14 @@ class MedicalOrderService(
             .put("reason", CONVERGENCE_REASON_EXPIRED)
             .put("at", now.toString())
             .put("end_time", endTime?.toString())
-        val metadataPatch = JSONB.valueOf(JsonObject().put("convergence", convergence).encode())
-        val updateQuery = ctx.update(MEDICAL_ORDERS)
-            .set(MEDICAL_ORDERS.STATUS, "COMPLETED")
-            .set(MEDICAL_ORDERS.UPDATED_AT, now)
-            .set(
-                MEDICAL_ORDERS.METADATA,
-                DSL.field(
-                    "COALESCE({0}, '{}'::jsonb) || {1}",
-                    JSONB::class.java,
-                    MEDICAL_ORDERS.METADATA,
-                    // `val` 是 Kotlin 硬关键字：Java 静态方法必须用反引号调用，才能作为绑定参数
-                    DSL.`val`(metadataPatch),
-                ),
-            )
-            .where(MEDICAL_ORDERS.ID.eq(orderId))
-        return execute(client, updateQuery).map<Void> { null }
+        val metadataPatch = JsonObject().put("convergence", convergence)
+        return execute(
+            client,
+            "UPDATE healthcare.medical_orders SET status = \$2, updated_at = \$3, " +
+                "metadata = COALESCE(metadata, '{}'::jsonb) || CAST(\$4 AS JSONB) WHERE id = \$1",
+            Tuple.of(orderId, "COMPLETED", now, metadataPatch),
+        ).map<Void> { null }
     }
-
-    private fun orderSelectFields(): List<org.jooq.Field<*>> =
-        MEDICAL_ORDERS.fields().toList() + NURSING_TASKS.ID.`as`("task_id")
 
     private fun validateCreateInput(body: JsonObject): CreateOrderInput {
         val orderType = validStatus(body.getString("order_type"), VALID_ORDER_TYPES, "order_type")
@@ -1997,8 +1883,33 @@ class MedicalOrderService(
     private fun businessDate(value: OffsetDateTime): LocalDate =
         value.atZoneSameInstant(businessZone).toLocalDate()
 
-    private fun execute(client: SqlClient, query: Query): Future<RowSet<Row>> =
-        client.preparedQuery(DatabaseConfig.sql(query)).execute(DatabaseConfig.tuple(query))
+    /**
+     * 药房三类列表共用的可选过滤（与既有 jOOQ 条件逐字同口径）：
+     * `encounter_id` 精确匹配；`search` 模糊匹配医嘱正文 / `order_details->>'drug_name'` /
+     * 患者姓名 / 住院号（绑定参数，`LIKE '%' || $n || '%'`，不拼接值）。
+     */
+    private fun appendMedicationListFilters(
+        conditions: MutableList<String>,
+        args: MutableList<Any?>,
+        encounterId: String?,
+        search: String?,
+    ) {
+        encounterId?.let {
+            conditions += "healthcare.medical_orders.encounter_id = \$${args.size + 1}"
+            args.add(it)
+        }
+        if (!search.isNullOrBlank()) {
+            val index = args.size + 1
+            args.add(search)
+            conditions += "(healthcare.medical_orders.order_content LIKE '%' || \$$index || '%' " +
+                "OR healthcare.medical_orders.order_details->>'drug_name' LIKE '%' || \$$index || '%' " +
+                "OR healthcare.patients.name LIKE '%' || \$$index || '%' " +
+                "OR healthcare.encounters.encounter_no LIKE '%' || \$$index || '%')"
+        }
+    }
+
+    private fun execute(client: SqlClient, sql: String, args: Tuple): Future<RowSet<Row>> =
+        client.preparedQuery(sql).execute(args)
 
 
     private fun requiredText(body: JsonObject, key: String): String =

@@ -1,25 +1,13 @@
 package com.ovaphlow.crate.nursing
 
 import com.ovaphlow.crate.common.Ulid
-import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingAssessments.NURSING_ASSESSMENTS
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingCarePlanRevisions.NURSING_CARE_PLAN_REVISIONS
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingPlanItems.NURSING_PLAN_ITEMS
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingPlans.NURSING_PLANS
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingServicePeriods.NURSING_SERVICE_PERIODS
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingTaskExecutions.NURSING_TASK_EXECUTIONS
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingTasks.NURSING_TASKS
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
 import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
-import io.vertx.sqlclient.RowSet
 import io.vertx.sqlclient.SqlClient
-import org.jooq.DSLContext
-import org.jooq.JSONB
-import org.jooq.Query
-import org.jooq.impl.DSL
+import io.vertx.sqlclient.Tuple
 import java.math.BigDecimal
 import java.time.LocalDate
 import java.time.OffsetDateTime
@@ -29,10 +17,11 @@ import java.time.OffsetDateTime
  *
  * 写路径的所有步骤必须在 Healthcare 外层事务传入的同一个 [SqlClient] 上执行；
  * 本服务不启动自己的事务，也不按 patient_id 猜测周期。
+ *
+ * 持久化一律原生参数化 SQL（`$1..$n` + `Tuple`），本文件无任何 jOOQ 引用。
  */
 class CarePlanRevisionService(
     private val pool: Pool,
-    private val ctx: DSLContext = DatabaseConfig.createDSL(),
 ) {
     companion object {
         /** 复评允许的评估类型（不含 ADMISSION：入住评估不是复评） */
@@ -42,6 +31,74 @@ class CarePlanRevisionService(
         )
 
         fun isValidAssessType(value: String): Boolean = value in VALID_ASSESS_TYPES
+
+        private const val PERIOD_COLUMNS = "id, patient_id, service_type, start_date, status"
+
+        private const val REVISION_COLUMNS =
+            "id, period_id, encounter_id, assessment_id, previous_plan_id, new_plan_id, " +
+                "revision_no, created_at"
+
+        /** 与 `AssessmentService.COLUMNS` 同序（评估行回读按此清单取列）。 */
+        private const val ASSESSMENT_COLUMNS =
+            "id, encounter_id, period_id, assess_type, assess_date, assessor, " +
+                "total_score, result_level, detail, remark, metadata, created_at"
+
+        private const val LOCK_PERIOD_SQL =
+            "SELECT $PERIOD_COLUMNS FROM nursing.nursing_service_periods " +
+                "WHERE encounter_id = \$1 FOR UPDATE"
+
+        private const val IN_PROGRESS_SQL =
+            "SELECT 1 AS found FROM nursing.nursing_task_executions " +
+                "WHERE task_id IN (%s) AND status = 'IN_PROGRESS'"
+
+        private const val NEXT_REVISION_NO_SQL =
+            "SELECT COALESCE(max(revision_no), 0) AS max_no " +
+                "FROM nursing.nursing_care_plan_revisions WHERE period_id = \$1"
+
+        private const val REVISION_INSERT_SQL =
+            "INSERT INTO nursing.nursing_care_plan_revisions ($REVISION_COLUMNS) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8)"
+
+        private const val REVISION_BY_ID_SQL =
+            "SELECT $REVISION_COLUMNS FROM nursing.nursing_care_plan_revisions WHERE id = \$1"
+
+        private const val REVISION_LIST_SQL =
+            "SELECT r.id, r.period_id, r.encounter_id, r.assessment_id, r.previous_plan_id, " +
+                "r.new_plan_id, r.revision_no, r.created_at, " +
+                "a.assess_type, a.assess_date, a.assessor, a.result_level, " +
+                "p.plan_name AS new_plan_name, p.status AS new_plan_status, " +
+                "prev.plan_name AS prev_plan_name, prev.status AS prev_plan_status " +
+                "FROM nursing.nursing_care_plan_revisions r " +
+                "JOIN nursing.nursing_assessments a ON a.id = r.assessment_id " +
+                "JOIN nursing.nursing_plans p ON p.id = r.new_plan_id " +
+                "LEFT JOIN nursing.nursing_plans prev ON prev.id = r.previous_plan_id " +
+                "WHERE r.encounter_id = \$1 ORDER BY r.revision_no DESC"
+
+        private const val REVISION_COUNT_SQL =
+            "SELECT count(*) AS total FROM nursing.nursing_care_plan_revisions WHERE encounter_id = \$1"
+
+        private const val PERIOD_ENCOUNTER_SQL =
+            "SELECT encounter_id FROM nursing.nursing_service_periods WHERE id = \$1"
+
+        private const val ASSESSMENT_BY_ID_SQL =
+            "SELECT $ASSESSMENT_COLUMNS FROM nursing.nursing_assessments WHERE id = \$1"
+
+        private const val PLAN_BY_ID_SQL =
+            "SELECT ${PlanService.PLAN_COLUMNS} FROM nursing.nursing_plans WHERE id = \$1"
+
+        private const val PLAN_ITEMS_SQL =
+            "SELECT ${PlanService.ITEM_COLUMNS} FROM nursing.nursing_plan_items " +
+                "WHERE plan_id = \$1 ORDER BY created_at ASC"
+
+        private const val PLAN_TASK_FIELDS =
+            "t.id, t.period_id, t.encounter_id, t.plan_item_id, t.order_item_id, t.task_type, " +
+                "t.description, t.frequency_code, t.frequency_name, t.start_date, t.end_date, " +
+                "t.status, t.metadata, t.created_at, t.updated_at"
+
+        private const val PLAN_TASKS_SQL =
+            "SELECT $PLAN_TASK_FIELDS FROM nursing.nursing_tasks t " +
+                "JOIN nursing.nursing_plan_items i ON i.id = t.plan_item_id " +
+                "WHERE i.plan_id = \$1 ORDER BY t.created_at ASC"
     }
 
     data class AssessmentCreateInput(
@@ -65,10 +122,7 @@ class CarePlanRevisionService(
         encounterId: String,
         expectedPatientId: String,
     ): Future<JsonObject> {
-        val query = ctx.selectFrom(NURSING_SERVICE_PERIODS)
-            .where(NURSING_SERVICE_PERIODS.ENCOUNTER_ID.eq(encounterId))
-            .forUpdate()
-        return execute(client, query).compose { rows ->
+        return client.preparedQuery(LOCK_PERIOD_SQL).execute(Tuple.of(encounterId)).compose { rows ->
             val row = rows.iterator().asSequence().firstOrNull()
             if (row == null) {
                 return@compose Future.failedFuture(
@@ -106,11 +160,9 @@ class CarePlanRevisionService(
      */
     fun checkNoInProgressExecution(client: SqlClient, taskIds: List<String>): Future<Void> {
         if (taskIds.isEmpty()) return Future.succeededFuture()
-        val query = ctx.selectOne()
-            .from(NURSING_TASK_EXECUTIONS)
-            .where(NURSING_TASK_EXECUTIONS.TASK_ID.`in`(taskIds))
-            .and(NURSING_TASK_EXECUTIONS.STATUS.eq("IN_PROGRESS"))
-        return execute(client, query).compose { rows ->
+        val placeholders = taskIds.indices.joinToString(", ") { "\$${it + 1}" }
+        val sql = IN_PROGRESS_SQL.format(placeholders)
+        return client.preparedQuery(sql).execute(Tuple.from(taskIds)).compose { rows ->
             if (rows.size() > 0) {
                 Future.failedFuture(
                     ConflictException("cannot revise care plan while a task execution is in progress")
@@ -126,10 +178,7 @@ class CarePlanRevisionService(
      * 数据库唯一约束 (period_id, revision_no) 作为并发兜底。
      */
     fun nextRevisionNo(client: SqlClient, periodId: String): Future<Int> {
-        val query = ctx.select(DSL.coalesce(DSL.max(NURSING_CARE_PLAN_REVISIONS.REVISION_NO), 0).`as`("max_no"))
-            .from(NURSING_CARE_PLAN_REVISIONS)
-            .where(NURSING_CARE_PLAN_REVISIONS.PERIOD_ID.eq(periodId))
-        return execute(client, query).map { rows ->
+        return client.preparedQuery(NEXT_REVISION_NO_SQL).execute(Tuple.of(periodId)).map { rows ->
             val maxNo = rows.iterator().next().getInteger("max_no") ?: 0
             maxNo + 1
         }
@@ -141,20 +190,26 @@ class CarePlanRevisionService(
     fun createAssessment(client: SqlClient, input: AssessmentCreateInput): Future<JsonObject> {
         val id = Ulid.generate()
         val now = OffsetDateTime.now()
-        var insert = ctx.insertInto(NURSING_ASSESSMENTS)
-            .set(NURSING_ASSESSMENTS.ID, id)
-            .set(NURSING_ASSESSMENTS.ENCOUNTER_ID, input.encounterId)
-            .set(NURSING_ASSESSMENTS.PERIOD_ID, input.periodId)
-            .set(NURSING_ASSESSMENTS.ASSESS_TYPE, input.assessType)
-            .set(NURSING_ASSESSMENTS.ASSESS_DATE, input.assessDate)
-            .set(NURSING_ASSESSMENTS.CREATED_AT, now)
-        input.assessor?.let { insert = insert.set(NURSING_ASSESSMENTS.ASSESSOR, it) }
-        input.totalScore?.let { insert = insert.set(NURSING_ASSESSMENTS.TOTAL_SCORE, BigDecimal.valueOf(it)) }
-        input.resultLevel?.let { insert = insert.set(NURSING_ASSESSMENTS.RESULT_LEVEL, it) }
-        input.detail?.let { insert = insert.set(NURSING_ASSESSMENTS.DETAIL, JSONB.valueOf(it.encode())) }
-        input.remark?.let { insert = insert.set(NURSING_ASSESSMENTS.REMARK, it) }
 
-        return execute(client, insert).map {
+        // 固定列 + 仅在提供时追加的可空列（原生参数化 SQL，占位符按入列顺序编号）。
+        val columns = mutableListOf(
+            "id", "encounter_id", "period_id", "assess_type", "assess_date", "created_at",
+        )
+        val values = mutableListOf<Any?>(
+            id, input.encounterId, input.periodId, input.assessType, input.assessDate, now,
+        )
+        input.assessor?.let { columns.add("assessor"); values.add(it) }
+        input.totalScore?.let { columns.add("total_score"); values.add(BigDecimal.valueOf(it)) }
+        input.resultLevel?.let { columns.add("result_level"); values.add(it) }
+        input.detail?.let { columns.add("detail"); values.add(it) }
+        input.remark?.let { columns.add("remark"); values.add(it) }
+
+        val placeholders = values.indices.joinToString(", ") { "\$${it + 1}" }
+        val sql =
+            "INSERT INTO nursing.nursing_assessments (${columns.joinToString(", ")}) " +
+                "VALUES ($placeholders)"
+
+        return client.preparedQuery(sql).execute(Tuple.from(values)).map {
             JsonObject()
                 .put("id", id)
                 .put("encounter_id", input.encounterId)
@@ -185,17 +240,10 @@ class CarePlanRevisionService(
     ): Future<JsonObject> {
         val id = Ulid.generate()
         val now = OffsetDateTime.now()
-        val insert = ctx.insertInto(NURSING_CARE_PLAN_REVISIONS)
-            .set(NURSING_CARE_PLAN_REVISIONS.ID, id)
-            .set(NURSING_CARE_PLAN_REVISIONS.PERIOD_ID, periodId)
-            .set(NURSING_CARE_PLAN_REVISIONS.ENCOUNTER_ID, encounterId)
-            .set(NURSING_CARE_PLAN_REVISIONS.ASSESSMENT_ID, assessmentId)
-            .set(NURSING_CARE_PLAN_REVISIONS.PREVIOUS_PLAN_ID, previousPlanId)
-            .set(NURSING_CARE_PLAN_REVISIONS.NEW_PLAN_ID, newPlanId)
-            .set(NURSING_CARE_PLAN_REVISIONS.REVISION_NO, revisionNo)
-            .set(NURSING_CARE_PLAN_REVISIONS.CREATED_AT, now)
-
-        return execute(client, insert).map {
+        val tuple = Tuple.of(
+            id, periodId, encounterId, assessmentId, previousPlanId, newPlanId, revisionNo, now,
+        )
+        return client.preparedQuery(REVISION_INSERT_SQL).execute(tuple).map {
             JsonObject()
                 .put("id", id)
                 .put("period_id", periodId)
@@ -217,35 +265,9 @@ class CarePlanRevisionService(
      * 空列表返回空 `records` 和 `total: 0`。
      */
     fun listRevisions(encounterId: String): Future<JsonObject> {
-        val condition = NURSING_CARE_PLAN_REVISIONS.ENCOUNTER_ID.eq(encounterId)
-
-        val countQuery = ctx.select(DSL.count().`as`("total"))
-            .from(NURSING_CARE_PLAN_REVISIONS)
-            .where(condition)
-        val dataQuery = ctx.select(
-            NURSING_CARE_PLAN_REVISIONS.fields().toList()
-                + NURSING_ASSESSMENTS.ASSESS_TYPE
-                + NURSING_ASSESSMENTS.ASSESS_DATE
-                + NURSING_ASSESSMENTS.ASSESSOR
-                + NURSING_ASSESSMENTS.RESULT_LEVEL
-                + NURSING_PLANS.PLAN_NAME.`as`("new_plan_name")
-                + NURSING_PLANS.STATUS.`as`("new_plan_status")
-                + DSL.field(DSL.name("prev", "plan_name"), String::class.java).`as`("prev_plan_name")
-                + DSL.field(DSL.name("prev", "status"), String::class.java).`as`("prev_plan_status")
-        )
-            .from(NURSING_CARE_PLAN_REVISIONS)
-            .join(NURSING_ASSESSMENTS)
-            .on(NURSING_CARE_PLAN_REVISIONS.ASSESSMENT_ID.eq(NURSING_ASSESSMENTS.ID))
-            .join(NURSING_PLANS)
-            .on(NURSING_CARE_PLAN_REVISIONS.NEW_PLAN_ID.eq(NURSING_PLANS.ID))
-            .leftJoin(DSL.table(DSL.name("nursing", "nursing_plans")).`as`("prev"))
-            .on(NURSING_CARE_PLAN_REVISIONS.PREVIOUS_PLAN_ID.eq(DSL.field(DSL.name("prev", "id"), String::class.java)))
-            .where(condition)
-            .orderBy(NURSING_CARE_PLAN_REVISIONS.REVISION_NO.desc())
-
-        return execute(pool, countQuery).compose { countRows ->
+        return pool.preparedQuery(REVISION_COUNT_SQL).execute(Tuple.of(encounterId)).compose { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(pool, dataQuery).map { dataRows ->
+            pool.preparedQuery(REVISION_LIST_SQL).execute(Tuple.of(encounterId)).map { dataRows ->
                 val records = JsonArray()
                 for (row in dataRows) records.add(listItemFromRow(row))
                 JsonObject().put("records", records)
@@ -258,9 +280,7 @@ class CarePlanRevisionService(
      * 读取单条修订详情；再次校验 period 的 encounter 归属与修订记录一致。
      */
     fun getRevision(id: String): Future<JsonObject> {
-        val revisionQuery = ctx.selectFrom(NURSING_CARE_PLAN_REVISIONS)
-            .where(NURSING_CARE_PLAN_REVISIONS.ID.eq(id))
-        return execute(pool, revisionQuery).compose { rows ->
+        return pool.preparedQuery(REVISION_BY_ID_SQL).execute(Tuple.of(id)).compose { rows ->
             val row = rows.iterator().asSequence().firstOrNull()
                 ?: return@compose Future.failedFuture(NotFoundException("care plan revision not found: $id"))
 
@@ -270,10 +290,7 @@ class CarePlanRevisionService(
             val newPlanId = requireNotNull(row.getString("new_plan_id"))
             val previousPlanId = row.getString("previous_plan_id")
 
-            val periodQuery = ctx.select(NURSING_SERVICE_PERIODS.ENCOUNTER_ID)
-                .from(NURSING_SERVICE_PERIODS)
-                .where(NURSING_SERVICE_PERIODS.ID.eq(periodId))
-            execute(pool, periodQuery).compose { periodRows ->
+            pool.preparedQuery(PERIOD_ENCOUNTER_SQL).execute(Tuple.of(periodId)).compose { periodRows ->
                 val periodRow = periodRows.iterator().asSequence().firstOrNull()
                 val boundEncounterId = periodRow?.getString("encounter_id")
                 if (boundEncounterId == null || boundEncounterId != encounterId) {
@@ -317,43 +334,28 @@ class CarePlanRevisionService(
     //  私有辅助
     // ========================================================================
 
-    private fun readAssessment(assessmentId: String): Future<JsonObject> {
-        val query = ctx.selectFrom(NURSING_ASSESSMENTS)
-            .where(NURSING_ASSESSMENTS.ID.eq(assessmentId))
-        return execute(pool, query).map { rows ->
+    private fun readAssessment(assessmentId: String): Future<JsonObject> =
+        pool.preparedQuery(ASSESSMENT_BY_ID_SQL).execute(Tuple.of(assessmentId)).map { rows ->
             AssessmentService.toJson(rows.iterator().next())
         }
-    }
 
-    private fun readPlanWithItems(planId: String): Future<JsonObject> {
-        val planQuery = ctx.selectFrom(NURSING_PLANS)
-            .where(NURSING_PLANS.ID.eq(planId))
-        val itemsQuery = ctx.selectFrom(NURSING_PLAN_ITEMS)
-            .where(NURSING_PLAN_ITEMS.PLAN_ID.eq(planId))
-            .orderBy(NURSING_PLAN_ITEMS.CREATED_AT.asc())
-        return execute(pool, planQuery).compose { planRows ->
+    private fun readPlanWithItems(planId: String): Future<JsonObject> =
+        pool.preparedQuery(PLAN_BY_ID_SQL).execute(Tuple.of(planId)).compose { planRows ->
             val planRow = planRows.iterator().asSequence().firstOrNull()
                 ?: return@compose Future.failedFuture(NotFoundException("nursing plan not found: $planId"))
-            execute(pool, itemsQuery).map { itemRows ->
+            pool.preparedQuery(PLAN_ITEMS_SQL).execute(Tuple.of(planId)).map { itemRows ->
                 val items = JsonArray()
                 for (itemRow in itemRows) items.add(PlanService.itemToJson(itemRow))
                 PlanService.planToJson(planRow).put("items", items)
             }
         }
-    }
 
-    private fun readPlanTasks(planId: String): Future<JsonArray> {
-        val query = ctx.select(NURSING_TASKS.fields().toList())
-            .from(NURSING_TASKS)
-            .join(NURSING_PLAN_ITEMS).on(NURSING_TASKS.PLAN_ITEM_ID.eq(NURSING_PLAN_ITEMS.ID))
-            .where(NURSING_PLAN_ITEMS.PLAN_ID.eq(planId))
-            .orderBy(NURSING_TASKS.CREATED_AT.asc())
-        return execute(pool, query).map { rows ->
+    private fun readPlanTasks(planId: String): Future<JsonArray> =
+        pool.preparedQuery(PLAN_TASKS_SQL).execute(Tuple.of(planId)).map { rows ->
             val tasks = JsonArray()
             for (row in rows) tasks.add(TaskService.toJson(row))
             tasks
         }
-    }
 
     private fun listItemFromRow(row: Row): JsonObject =
         JsonObject()
@@ -381,7 +383,4 @@ class CarePlanRevisionService(
                 .put("plan_name", row.getString("new_plan_name"))
                 .put("status", row.getString("new_plan_status")))
             .put("created_at", row.getOffsetDateTime("created_at")?.toString())
-
-    private fun execute(client: SqlClient, query: Query): Future<RowSet<Row>> =
-        client.preparedQuery(DatabaseConfig.sql(query)).execute(DatabaseConfig.tuple(query))
 }

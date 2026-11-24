@@ -1,25 +1,35 @@
 package com.ovaphlow.crate.inventories
 
 import com.ovaphlow.crate.common.Ulid
-import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.database.gen.inventories.public_.tables.Lots
-import com.ovaphlow.crate.database.gen.inventories.public_.tables.Materials
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
 import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
-import org.jooq.DSLContext
-import org.jooq.JSONB
-import org.jooq.impl.DSL.count
+import io.vertx.sqlclient.Tuple
 import java.time.LocalDate
 
+/**
+ * 批次（lot）服务：批号受控物资的批次建档与查询。
+ *
+ * 持久化一律原生参数化 SQL（`$1..$n` + `Tuple`），无 jOOQ。
+ */
 class LotService(
     private val pool: Pool,
-    private val ctx: DSLContext = DatabaseConfig.createDSL()
 ) {
-    private val l = Lots.LOTS
-    private val m = Materials.MATERIALS
+
+    companion object {
+        private const val COLUMNS =
+            "id, material_id, batch_no, production_date, expiry_date, manufacturer, supplier, metadata"
+
+        private const val MATERIAL_SQL =
+            "SELECT enable_batch_control FROM materials WHERE id = \$1"
+
+        private const val INSERT_SQL =
+            "INSERT INTO lots " +
+                "(id, material_id, batch_no, production_date, expiry_date, manufacturer, supplier, metadata) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8)"
+    }
 
     fun create(body: JsonObject): Future<JsonObject> {
         val materialId = body.getString("material_id")
@@ -28,68 +38,53 @@ class LotService(
             ?: return Future.failedFuture(IllegalArgumentException("batch_no is required"))
 
         // Step 1: Check material exists and has batch control enabled
-        val materialQuery = ctx.select(m.ID, m.ENABLE_BATCH_CONTROL)
-            .from(m)
-            .where(m.ID.eq(materialId))
-
-        return pool.preparedQuery(DatabaseConfig.sql(materialQuery))
-            .execute(DatabaseConfig.tuple(materialQuery))
-            .flatMap { materialRows ->
-                if (materialRows.size() == 0) {
-                    return@flatMap Future.failedFuture<JsonObject>(
-                        NotFoundException("material not found: $materialId")
-                    )
-                }
-
-                val enableBatchControl = materialRows.iterator().next()
-                    .getValue("enable_batch_control") as? Boolean ?: false
-
-                if (!enableBatchControl) {
-                    return@flatMap Future.failedFuture<JsonObject>(
-                        IllegalArgumentException("material does not enable batch control")
-                    )
-                }
-
-                // Step 2: Check if lot (material_id, batch_no) already exists
-                val existsQuery = ctx.selectFrom(l)
-                    .where(l.MATERIAL_ID.eq(materialId))
-                    .and(l.BATCH_NO.eq(batchNo))
-
-                pool.preparedQuery(DatabaseConfig.sql(existsQuery))
-                    .execute(DatabaseConfig.tuple(existsQuery))
-                    .flatMap { existRows ->
-                        if (existRows.size() > 0) {
-                            return@flatMap Future.succeededFuture(toJson(existRows.iterator().next()))
-                        }
-
-                        // Step 3: Insert new lot
-                        val id = Ulid.generate()
-                        val insertQuery = ctx.insertInto(l)
-                            .set(l.ID, id)
-                            .set(l.MATERIAL_ID, materialId)
-                            .set(l.BATCH_NO, batchNo)
-                            .set(l.PRODUCTION_DATE, body.getString("production_date")?.let { LocalDate.parse(it) })
-                            .set(l.EXPIRY_DATE, body.getString("expiry_date")?.let { LocalDate.parse(it) })
-                            .set(l.MANUFACTURER, body.getString("manufacturer"))
-                            .set(l.SUPPLIER, body.getString("supplier"))
-                            .set(l.METADATA, body.containsKey("metadata")
-                                .let { if (it) JSONB.valueOf(body.getJsonObject("metadata").encode()) else null })
-
-                        pool.preparedQuery(DatabaseConfig.sql(insertQuery))
-                            .execute(DatabaseConfig.tuple(insertQuery))
-                            .map {
-                                JsonObject()
-                                    .put("id", id)
-                                    .put("material_id", materialId)
-                                    .put("batch_no", batchNo)
-                                    .put("production_date", body.getString("production_date"))
-                                    .put("expiry_date", body.getString("expiry_date"))
-                                    .put("manufacturer", body.getString("manufacturer"))
-                                    .put("supplier", body.getString("supplier"))
-                                    .put("metadata", body.getJsonObject("metadata"))
-                            }
-                    }
+        return pool.preparedQuery(MATERIAL_SQL).execute(Tuple.of(materialId)).flatMap { materialRows ->
+            if (materialRows.size() == 0) {
+                return@flatMap Future.failedFuture<JsonObject>(
+                    NotFoundException("material not found: $materialId")
+                )
             }
+
+            val enableBatchControl = materialRows.iterator().next()
+                .getValue("enable_batch_control") as? Boolean ?: false
+
+            if (!enableBatchControl) {
+                return@flatMap Future.failedFuture<JsonObject>(
+                    IllegalArgumentException("material does not enable batch control")
+                )
+            }
+
+            // Step 2: Check if lot (material_id, batch_no) already exists
+            pool.preparedQuery(
+                "SELECT $COLUMNS FROM lots WHERE material_id = \$1 AND batch_no = \$2"
+            ).execute(Tuple.of(materialId, batchNo)).flatMap { existRows ->
+                if (existRows.size() > 0) {
+                    return@flatMap Future.succeededFuture(toJson(existRows.iterator().next()))
+                }
+
+                // Step 3: Insert new lot
+                val id = Ulid.generate()
+                val productionDate = body.getString("production_date")?.let { LocalDate.parse(it) }
+                val expiryDate = body.getString("expiry_date")?.let { LocalDate.parse(it) }
+                pool.preparedQuery(INSERT_SQL).execute(
+                    Tuple.of(
+                        id, materialId, batchNo, productionDate, expiryDate,
+                        body.getString("manufacturer"), body.getString("supplier"),
+                        body.getJsonObject("metadata"),
+                    )
+                ).map {
+                    JsonObject()
+                        .put("id", id)
+                        .put("material_id", materialId)
+                        .put("batch_no", batchNo)
+                        .put("production_date", body.getString("production_date"))
+                        .put("expiry_date", body.getString("expiry_date"))
+                        .put("manufacturer", body.getString("manufacturer"))
+                        .put("supplier", body.getString("supplier"))
+                        .put("metadata", body.getJsonObject("metadata"))
+                }
+            }
+        }
     }
 
     fun list(
@@ -101,48 +96,45 @@ class LotService(
         limit: Int = 50,
         offset: Int = 0
     ): Future<JsonObject> {
-        val conditions = mutableListOf<org.jooq.Condition>()
-        materialId?.let { conditions.add(l.MATERIAL_ID.eq(it)) }
-        batchNo?.let { conditions.add(l.BATCH_NO.like("%$it%")) }
-        expiryBefore?.let { conditions.add(l.EXPIRY_DATE.le(LocalDate.parse(it))) }
-        expiryAfter?.let { conditions.add(l.EXPIRY_DATE.ge(LocalDate.parse(it))) }
-        manufacturer?.let { conditions.add(l.MANUFACTURER.eq(it)) }
+        val where = mutableListOf<String>()
+        val args = mutableListOf<Any?>()
 
-        val countQuery = ctx.select(count().`as`("total")).from(l).where(conditions)
-        val dataQuery = ctx.selectFrom(l)
-            .where(conditions)
-            .orderBy(l.EXPIRY_DATE.asc().nullsLast())
-            .limit(limit)
-            .offset(offset)
+        /** 追加一个绑定值并返回其占位符。 */
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
 
-        return pool.preparedQuery(DatabaseConfig.sql(countQuery))
-            .execute(DatabaseConfig.tuple(countQuery))
-            .flatMap { countRows ->
-                val total = countRows.iterator().next().getLong("total") ?: 0L
-                pool.preparedQuery(DatabaseConfig.sql(dataQuery))
-                    .execute(DatabaseConfig.tuple(dataQuery))
-                    .map { dataRows ->
-                        val records = JsonArray()
-                        for (row in dataRows) {
-                            records.add(toJson(row))
-                        }
-                        JsonObject().put("records", records).put("meta", JsonObject().put("total", total))
-                    }
-            }
-    }
+        materialId?.let { where.add("material_id = ${bind(it)}") }
+        batchNo?.let { where.add("batch_no LIKE '%' || ${bind(it)} || '%'") }
+        expiryBefore?.let { where.add("expiry_date <= ${bind(LocalDate.parse(it))}") }
+        expiryAfter?.let { where.add("expiry_date >= ${bind(LocalDate.parse(it))}") }
+        manufacturer?.let { where.add("manufacturer = ${bind(it)}") }
 
-    fun get(id: String): Future<JsonObject> {
-        val query = ctx.selectFrom(l).where(l.ID.eq(id))
+        val whereClause = if (where.isEmpty()) "" else " WHERE " + where.joinToString(" AND ")
+        val countSql = "SELECT count(*) AS total FROM lots$whereClause"
+        val countArgs = args.toList()
+        val dataSql =
+            "SELECT $COLUMNS FROM lots$whereClause " +
+                "ORDER BY expiry_date ASC NULLS LAST LIMIT ${bind(limit)} OFFSET ${bind(offset)}"
+        val dataArgs = args.toList()
 
-        return pool.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
-            .map { rows ->
-                if (rows.size() == 0) {
-                    throw NotFoundException("lot not found: $id")
+        return pool.preparedQuery(countSql).execute(Tuple.from(countArgs)).flatMap { countRows ->
+            val total = countRows.iterator().next().getLong("total") ?: 0L
+            pool.preparedQuery(dataSql).execute(Tuple.from(dataArgs)).map { dataRows ->
+                val records = JsonArray()
+                for (row in dataRows) {
+                    records.add(toJson(row))
                 }
-                toJson(rows.iterator().next())
+                JsonObject().put("records", records).put("meta", JsonObject().put("total", total))
             }
+        }
     }
+
+    fun get(id: String): Future<JsonObject> =
+        pool.preparedQuery("SELECT $COLUMNS FROM lots WHERE id = \$1").execute(Tuple.of(id)).map { rows ->
+            if (rows.size() == 0) {
+                throw NotFoundException("lot not found: $id")
+            }
+            toJson(rows.iterator().next())
+        }
 
     private fun toJson(row: Row): JsonObject {
         return JsonObject()

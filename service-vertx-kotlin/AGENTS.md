@@ -19,11 +19,12 @@ database-test safety rules. Product composition and configuration are in
 
 - Find the closest existing module before adding code. Routes are thin and use
   relative paths; the app `Main.kt` mounts `/crate-api/<module>/v1/*`.
-- Put persistence and business rules in services. **New and changed persistence
-  code defaults to native parameterized SQL**: execute
-  `pool.preparedQuery(sql).execute(Tuple.of(...))` with PostgreSQL `$1..$n`
-  placeholders bound in positional order. Use `DatabaseConfig.sql/tuple` and the
-  jOOQ builders only for legacy modules kept on the jOOQ path.
+- Put persistence and business rules in services. **All persistence code is native
+  parameterized SQL** (jOOQ was removed from the whole backend on 2026-11-22):
+  execute `pool.preparedQuery(sql).execute(Tuple.of(...))` with PostgreSQL
+  `$1..$n` placeholders bound in positional order. Inside
+  `pool.withTransaction { connection -> ... }` always run statements on that
+  `connection`, never on the `pool`, or the write escapes the transaction.
 - Never interpolate user input or dynamic values into SQL text. Append dynamic
   predicate fragments together with their bound values; bind JSONB columns as
   `io.vertx.core.json.JsonObject` / `JsonArray` and read them back with
@@ -32,21 +33,24 @@ database-test safety rules. Product composition and configuration are in
   `nursing.nursing_task_executions`, `public.materials`, ...). Table and column
   names come only from the owning library's Flyway migration history; do not
   invent them.
-- Do not add new jOOQ usage. Legacy jOOQ remains only where already written
-  (e.g. parts of `libs/healthcare`); convert it only when a task explicitly
-  scopes that migration. When editing such code, keep its conventions: omit
-  `.set()` for nullable inserts/updates rather than binding `null`, and use
-  `ctx.select(listOf(...))` when a large select defeats type inference.
+- Dynamic SQL: append a predicate fragment and its bound value together (for
+  example a local `fun bind(value: Any?): String = "\$${args.size + 1}".also
+  { args.add(value) }`); build `IN` lists from `args.indices.joinToString(", ")
+  { "\$${it + 1}" }` plus `Tuple.from(list)`; reuse one placeholder when the same
+  constant appears in several `FILTER (WHERE ...)` clauses.
+- Every row read is by column name (`row.getValue("col")`), and every query
+  lists its columns explicitly with the aliases the mapper expects. `SELECT *`
+  is only acceptable where the mapper tolerates absent columns.
 
 ## Schema And Verification
 
 - Place schema changes (Flyway migrations under
   `libs/<module>/src/main/resources/db/migration/`) with the owning library.
-  Under native SQL there is no codegen step: reference new tables and columns by
-  name in the SQL. Only a module deliberately kept on the legacy jOOQ path needs
-  `jooq-config.xml` and
-  `PITCHFORK_DB_PASSWORD=... ./gradlew :libs:<module>:generateJooq`; never commit
-  rendered configuration from `build/tmp`.
+  There is no codegen step: reference new tables and columns by name in the SQL,
+  and treat the migration history as the only source of truth for those names.
+  No `jooq-config.xml`, no generated sources under `src/main/java`, no
+  `generateJooq` task — adding either back reintroduces a codegen step that can
+  only run against a live database.
 - Default checks are the narrow module compile and relevant non-database tests,
   for example `./gradlew :libs:<module>:compileKotlin`.
 - A product distribution embeds library JARs. When a distribution is explicitly

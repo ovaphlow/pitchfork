@@ -1,21 +1,13 @@
 package com.ovaphlow.crate.inventories
 
 import com.ovaphlow.crate.common.Ulid
-import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.database.gen.inventories.public_.tables.Materials
-import com.ovaphlow.crate.database.gen.inventories.public_.tables.Stocks
-import com.ovaphlow.crate.database.gen.inventories.public_.tables.records.MaterialsRecord
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
 import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.SqlClient
-import org.jooq.Condition
-import org.jooq.DSLContext
-import org.jooq.JSONB
-import org.jooq.UpdateSetMoreStep
-import org.jooq.impl.DSL.count
+import io.vertx.sqlclient.Tuple
 import java.math.BigDecimal
 import java.time.OffsetDateTime
 
@@ -42,13 +34,12 @@ data class MaterialSnapshot(
  * 每个物资在创建时一次性提交 `base_unit` 与 `quantity_scale`（0..6），不再存在
  * 包装单位、拆零单位、换算率、规格表或计量模型状态。base_unit / quantity_scale
  * 在物资存在库存事实后不可修改（409），与 ADR-001 的“存在流水后不可修改”一致。
+ *
+ * 持久化一律原生参数化 SQL（`$1..$n` + `Tuple`），无 jOOQ。
  */
 class MaterialService(
     private val pool: Pool,
-    private val ctx: DSLContext = DatabaseConfig.createDSL(),
 ) {
-    private val t = Materials.MATERIALS
-
     private val createAllowed = setOf(
         "code", "name", "category", "spec", "base_unit", "quantity_scale",
         "enable_batch_control", "cost_method", "metadata", "status",
@@ -76,43 +67,32 @@ class MaterialService(
         val scale = parseScale(body.getValue("quantity_scale"))
         validatePackageSpec(body)
 
-        val query = ctx.insertInto(t)
-            .set(t.ID, id)
-            .set(t.CODE, code)
-            .set(t.NAME, name)
-            .set(t.CATEGORY, category)
-            .set(t.SPEC, body.getString("spec"))
-            .set(t.BASE_UNIT, baseUnit)
-            .set(t.PACKAGE_UNIT, body.getString("package_unit"))
-            .set(t.PACKAGE_SIZE, body.getValue("package_size")?.let { requestDecimalText(it) })
-            .set(t.QUANTITY_SCALE, scale)
-            .set(t.ENABLE_BATCH_CONTROL, body.getBoolean("enable_batch_control"))
-            .set(t.COST_METHOD, body.getString("cost_method"))
-            .set(t.METADATA, body.containsKey("metadata")
-                .let { if (it) JSONB.valueOf(body.getJsonObject("metadata").encode()) else null })
-            .set(t.STATUS, body.getString("status"))
-            .set(t.CREATED_AT, now)
-
-        return pool.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
-            .map {
-                JsonObject()
-                    .put("id", id)
-                    .put("code", code)
-                    .put("name", name)
-                    .put("category", category)
-                    .put("spec", body.getString("spec"))
-                    .put("base_unit", baseUnit)
-                    .put("package_unit", body.getString("package_unit"))
-                    .put("package_size", decimalText(body.getValue("package_size")?.let { requestDecimalText(it) }))
-                    .put("quantity_scale", scale)
-                    .put("enable_batch_control", body.getBoolean("enable_batch_control"))
-                    .put("cost_method", body.getString("cost_method"))
-                    .put("metadata", body.getJsonObject("metadata"))
-                    .put("status", body.getString("status"))
-                    .put("created_at", now.toString())
-                    .put("updated_at", null)
-            }
+        val packageSize = body.getValue("package_size")?.let { requestDecimalText(it) }
+        return pool.preparedQuery(INSERT_SQL).execute(
+            Tuple.of(
+                id, code, name, category, body.getString("spec"), baseUnit,
+                body.getString("package_unit"), packageSize, scale,
+                body.getBoolean("enable_batch_control"), body.getString("cost_method"),
+                body.getJsonObject("metadata"), body.getString("status"), now,
+            )
+        ).map {
+            JsonObject()
+                .put("id", id)
+                .put("code", code)
+                .put("name", name)
+                .put("category", category)
+                .put("spec", body.getString("spec"))
+                .put("base_unit", baseUnit)
+                .put("package_unit", body.getString("package_unit"))
+                .put("package_size", decimalText(packageSize))
+                .put("quantity_scale", scale)
+                .put("enable_batch_control", body.getBoolean("enable_batch_control"))
+                .put("cost_method", body.getString("cost_method"))
+                .put("metadata", body.getJsonObject("metadata"))
+                .put("status", body.getString("status"))
+                .put("created_at", now.toString())
+                .put("updated_at", null)
+        }
     }
 
     fun list(
@@ -124,43 +104,42 @@ class MaterialService(
         limit: Int = 50,
         offset: Int = 0,
     ): Future<JsonObject> {
-        val conditions = mutableListOf<Condition>()
-        code?.let { conditions.add(t.CODE.eq(it)) }
-        name?.let { conditions.add(t.NAME.like("%$it%")) }
-        category?.let { conditions.add(t.CATEGORY.eq(it)) }
-        status?.let { conditions.add(t.STATUS.eq(it)) }
-        enableBatchControl?.let { conditions.add(t.ENABLE_BATCH_CONTROL.eq(it)) }
+        val where = mutableListOf<String>()
+        val args = mutableListOf<Any?>()
 
-        val countQuery = ctx.select(count().`as`("total")).from(t).where(conditions)
-        val dataQuery = ctx.selectFrom(t)
-            .where(conditions)
-            .orderBy(t.CREATED_AT.desc())
-            .limit(limit)
-            .offset(offset)
+        /** 追加一个绑定值并返回其占位符。 */
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
 
-        return pool.preparedQuery(DatabaseConfig.sql(countQuery))
-            .execute(DatabaseConfig.tuple(countQuery))
-            .flatMap { countRows ->
-                val total = countRows.iterator().next().getLong("total") ?: 0L
-                pool.preparedQuery(DatabaseConfig.sql(dataQuery))
-                    .execute(DatabaseConfig.tuple(dataQuery))
-                    .map { dataRows ->
-                        val records = JsonArray()
-                        for (row in dataRows) records.add(toJson(row))
-                        JsonObject().put("records", records).put("meta", JsonObject().put("total", total))
-                    }
+        code?.let { where.add("code = ${bind(it)}") }
+        name?.let { where.add("name LIKE '%' || ${bind(it)} || '%'") }
+        category?.let { where.add("category = ${bind(it)}") }
+        status?.let { where.add("status = ${bind(it)}") }
+        enableBatchControl?.let { where.add("enable_batch_control = ${bind(it)}") }
+
+        val whereClause = if (where.isEmpty()) "" else " WHERE " + where.joinToString(" AND ")
+        val countSql = "SELECT count(*) AS total FROM materials$whereClause"
+        val countArgs = args.toList()
+        val dataSql =
+            "SELECT $COLUMNS FROM materials$whereClause " +
+                "ORDER BY created_at DESC LIMIT ${bind(limit)} OFFSET ${bind(offset)}"
+        val dataArgs = args.toList()
+
+        return pool.preparedQuery(countSql).execute(Tuple.from(countArgs)).flatMap { countRows ->
+            val total = countRows.iterator().next().getLong("total") ?: 0L
+            pool.preparedQuery(dataSql).execute(Tuple.from(dataArgs)).map { dataRows ->
+                val records = JsonArray()
+                for (row in dataRows) records.add(toJson(row))
+                JsonObject().put("records", records).put("meta", JsonObject().put("total", total))
             }
+        }
     }
 
-    fun get(id: String): Future<JsonObject> {
-        val query = ctx.selectFrom(t).where(t.ID.eq(id))
-        return pool.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+    fun get(id: String): Future<JsonObject> =
+        pool.preparedQuery("SELECT $COLUMNS FROM materials WHERE id = \$1").execute(Tuple.of(id))
             .flatMap { rows ->
                 if (rows.size() == 0) Future.failedFuture(NotFoundException("material not found"))
                 else Future.succeededFuture(toJson(rows.iterator().next()))
             }
-    }
 
     /**
      * 025 药品目录同连接只读快照：按 id 读取目录物资。
@@ -168,26 +147,22 @@ class MaterialService(
      * 必须复用调用方外层事务连接（禁止内部重新取 Pool 或开启新事务），
      * 只读不锁行、不写任何表；物资不存在返回 null，由调用方映射 404。
      */
-    fun findMaterialById(client: SqlClient, id: String): Future<MaterialSnapshot?> {
-        val query = ctx.select(t.ID, t.CODE, t.NAME, t.SPEC, t.BASE_UNIT, t.STATUS, t.CATEGORY)
-            .from(t)
-            .where(t.ID.eq(id))
-        return client.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
-            .map { rows ->
-                rows.iterator().asSequence().firstOrNull()?.let { row ->
-                    MaterialSnapshot(
-                        id = row.getString("id"),
-                        code = row.getString("code"),
-                        name = row.getString("name"),
-                        spec = row.getString("spec"),
-                        baseUnit = row.getString("base_unit"),
-                        status = row.getString("status"),
-                        category = row.getString("category"),
-                    )
-                }
+    fun findMaterialById(client: SqlClient, id: String): Future<MaterialSnapshot?> =
+        client.preparedQuery(
+            "SELECT id, code, name, spec, base_unit, status, category FROM materials WHERE id = \$1"
+        ).execute(Tuple.of(id)).map { rows ->
+            rows.iterator().asSequence().firstOrNull()?.let { row ->
+                MaterialSnapshot(
+                    id = row.getString("id"),
+                    code = row.getString("code"),
+                    name = row.getString("name"),
+                    spec = row.getString("spec"),
+                    baseUnit = row.getString("base_unit"),
+                    status = row.getString("status"),
+                    category = row.getString("category"),
+                )
             }
-    }
+        }
 
     fun update(id: String, body: JsonObject): Future<JsonObject> {
         rejectUnknown(body, updateAllowed)?.let { return Future.failedFuture(it) }
@@ -198,12 +173,8 @@ class MaterialService(
             val immutableChanged = listOf("base_unit", "quantity_scale")
                 .any { immutableFieldChanged(existing, body, it) }
             if (immutableChanged) {
-                val stockQuery = ctx.select(Stocks.STOCKS.ID)
-                    .from(Stocks.STOCKS)
-                    .where(Stocks.STOCKS.MATERIAL_ID.eq(id))
-                    .limit(1)
-                pool.preparedQuery(DatabaseConfig.sql(stockQuery))
-                    .execute(DatabaseConfig.tuple(stockQuery))
+                pool.preparedQuery("SELECT id FROM stocks WHERE material_id = \$1 LIMIT 1")
+                    .execute(Tuple.of(id))
                     .compose { stockRows ->
                         if (stockRows.size() > 0) {
                             Future.failedFuture(
@@ -212,11 +183,11 @@ class MaterialService(
                                 ),
                             )
                         } else {
-                            applyUpdate(id, existing, body)
+                            applyUpdate(id, body)
                         }
                     }
             } else {
-                applyUpdate(id, existing, body)
+                applyUpdate(id, body)
             }
         }
     }
@@ -238,57 +209,35 @@ class MaterialService(
         }
     }
 
-    private fun applyUpdate(id: String, existing: JsonObject, body: JsonObject): Future<JsonObject> {
-        val now = OffsetDateTime.now()
-        var q: UpdateSetMoreStep<MaterialsRecord> = ctx.update(t) as UpdateSetMoreStep<MaterialsRecord>
-        if (body.containsKey("name")) {
-            q = q.set(t.NAME, body.getString("name"))
-        }
-        if (body.containsKey("category")) {
-            q = q.set(t.CATEGORY, body.getString("category"))
-        }
-        if (body.containsKey("spec")) {
-            q = q.set(t.SPEC, body.getString("spec"))
-        }
-        if (body.containsKey("base_unit")) {
-            q = q.set(t.BASE_UNIT, body.getString("base_unit"))
-        }
-        if (body.containsKey("package_unit")) {
-            q = q.set(t.PACKAGE_UNIT, body.getString("package_unit"))
-        }
-        if (body.containsKey("package_size")) {
-            q = q.set(t.PACKAGE_SIZE, body.getValue("package_size")?.let { requestDecimalText(it) })
-        }
-        if (body.containsKey("quantity_scale")) {
-            q = q.set(t.QUANTITY_SCALE, parseScale(body.getValue("quantity_scale")))
-        }
-        if (body.containsKey("enable_batch_control")) {
-            q = q.set(t.ENABLE_BATCH_CONTROL, body.getBoolean("enable_batch_control"))
-        }
-        if (body.containsKey("cost_method")) {
-            q = q.set(t.COST_METHOD, body.getString("cost_method"))
-        }
-        if (body.containsKey("metadata")) {
-            q = q.set(t.METADATA, JSONB.valueOf(body.getJsonObject("metadata").encode()))
-        }
-        if (body.containsKey("status")) {
-            q = q.set(t.STATUS, body.getString("status"))
-        }
-        q = q.set(t.UPDATED_AT, now)
+    private fun applyUpdate(id: String, body: JsonObject): Future<JsonObject> {
+        val sets = mutableListOf<String>()
+        val args = mutableListOf<Any?>()
 
-        val query = q.where(t.ID.eq(id))
+        /** 追加一个绑定值并返回其占位符。 */
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
 
-        return pool.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
-            .flatMap { get(id) }
+        if (body.containsKey("name")) sets.add("name = ${bind(body.getString("name"))}")
+        if (body.containsKey("category")) sets.add("category = ${bind(body.getString("category"))}")
+        if (body.containsKey("spec")) sets.add("spec = ${bind(body.getString("spec"))}")
+        if (body.containsKey("base_unit")) sets.add("base_unit = ${bind(body.getString("base_unit"))}")
+        if (body.containsKey("package_unit")) sets.add("package_unit = ${bind(body.getString("package_unit"))}")
+        if (body.containsKey("package_size"))
+            sets.add("package_size = ${bind(body.getValue("package_size")?.let { requestDecimalText(it) })}")
+        if (body.containsKey("quantity_scale")) sets.add("quantity_scale = ${bind(parseScale(body.getValue("quantity_scale")))}")
+        if (body.containsKey("enable_batch_control"))
+            sets.add("enable_batch_control = ${bind(body.getBoolean("enable_batch_control"))}")
+        if (body.containsKey("cost_method")) sets.add("cost_method = ${bind(body.getString("cost_method"))}")
+        if (body.containsKey("metadata")) sets.add("metadata = ${bind(body.getJsonObject("metadata"))}")
+        if (body.containsKey("status")) sets.add("status = ${bind(body.getString("status"))}")
+        sets.add("updated_at = ${bind(OffsetDateTime.now())}")
+
+        val sql = "UPDATE materials SET ${sets.joinToString(", ")} WHERE id = ${bind(id)}"
+        return pool.preparedQuery(sql).execute(Tuple.from(args)).flatMap { get(id) }
     }
 
-    fun delete(id: String): Future<Void?> {
-        val query = ctx.deleteFrom(t).where(t.ID.eq(id))
-        return pool.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+    fun delete(id: String): Future<Void?> =
+        pool.preparedQuery("DELETE FROM materials WHERE id = \$1").execute(Tuple.of(id))
             .map { null as Void? }
-    }
 
     /** 包装规格成对校验：package_unit 与 package_size 必须同空或同非空，且每包含量 > 0 */
     private fun validatePackageSpec(body: JsonObject) {
@@ -320,6 +269,16 @@ class MaterialService(
     }
 
     companion object {
+        private const val COLUMNS =
+            "id, code, name, category, spec, base_unit, package_unit, package_size, quantity_scale, " +
+                "enable_batch_control, cost_method, metadata, status, created_at, updated_at"
+
+        private const val INSERT_SQL =
+            "INSERT INTO materials " +
+                "(id, code, name, category, spec, base_unit, package_unit, package_size, quantity_scale, " +
+                "enable_batch_control, cost_method, metadata, status, created_at) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11, \$12, \$13, \$14)"
+
         fun toJson(row: Row): JsonObject {
             return JsonObject()
                 .put("id", row.getValue("id")?.toString())

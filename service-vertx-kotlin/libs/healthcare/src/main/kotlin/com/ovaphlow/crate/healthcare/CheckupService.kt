@@ -1,14 +1,6 @@
 package com.ovaphlow.crate.healthcare
 
 import com.ovaphlow.crate.common.Ulid
-import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.database.gen.healthcare.tables.Encounters.ENCOUNTERS
-import com.ovaphlow.crate.database.gen.healthcare.tables.FollowupPlans.FOLLOWUP_PLANS
-import com.ovaphlow.crate.database.gen.healthcare.tables.HealthCheckupMembers.HEALTH_CHECKUP_MEMBERS
-import com.ovaphlow.crate.database.gen.healthcare.tables.HealthCheckupResults.HEALTH_CHECKUP_RESULTS
-import com.ovaphlow.crate.database.gen.healthcare.tables.HealthCheckups.HEALTH_CHECKUPS
-import com.ovaphlow.crate.database.gen.healthcare.tables.Patients.PATIENTS
-import com.ovaphlow.crate.database.gen.healthcare.tables.VitalSignRecords.VITAL_SIGN_RECORDS
 import com.ovaphlow.crate.nursing.ConflictException
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
@@ -17,11 +9,7 @@ import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.RowSet
 import io.vertx.sqlclient.SqlClient
-import org.jooq.Condition
-import org.jooq.Field
-import org.jooq.JSONB
-import org.jooq.Query
-import org.jooq.impl.DSL
+import io.vertx.sqlclient.Tuple
 import java.math.BigDecimal
 import java.time.LocalDate
 import java.time.OffsetDateTime
@@ -50,10 +38,11 @@ import java.time.ZoneId
  *  6. 转出为事实快照：结果修正不级联修改已生成的体征/随访。
  *  7. operator/assignee 一律取认证主体；写接口按白名单校验字段；
  *     已完成批次拒绝名单追加、结果录入/修正与转出。
+ *
+ * 持久化一律原生参数化 SQL（`$1..$n` + `Tuple`），无 jOOQ。
  */
 class CheckupService(
     private val pool: Pool,
-    private val ctx: org.jooq.DSLContext = DatabaseConfig.createDSL(),
 ) {
     companion object {
         private val businessZone = ZoneId.of("Asia/Shanghai")
@@ -113,6 +102,80 @@ class CheckupService(
         /** 转随访写白名单 */
         private val followupWriteKeys = setOf("followup_type", "planned_date", "planned_way", "remark")
 
+        private const val CHECKUP_COLUMNS =
+            "healthcare.health_checkups.id, healthcare.health_checkups.checkup_year, healthcare.health_checkups.name, healthcare.health_checkups.status, healthcare.health_checkups.start_date, healthcare.health_checkups.end_date, healthcare.health_checkups.operator, " +
+                "healthcare.health_checkups.metadata, healthcare.health_checkups.created_at, healthcare.health_checkups.updated_at"
+
+        private const val MEMBER_COLUMNS =
+            "healthcare.health_checkup_members.id, healthcare.health_checkup_members.checkup_id, healthcare.health_checkup_members.patient_id, healthcare.health_checkup_members.encounter_id, healthcare.health_checkup_members.checked, healthcare.health_checkup_members.checked_at, " +
+                "healthcare.health_checkup_members.operator, healthcare.health_checkup_members.metadata, healthcare.health_checkup_members.created_at, healthcare.health_checkup_members.updated_at"
+
+        private const val RESULT_COLUMNS =
+            "healthcare.health_checkup_results.id, healthcare.health_checkup_results.checkup_id, healthcare.health_checkup_results.member_id, healthcare.health_checkup_results.patient_id, healthcare.health_checkup_results.item_name, healthcare.health_checkup_results.item_category, " +
+                "healthcare.health_checkup_results.value, healthcare.health_checkup_results.unit, healthcare.health_checkup_results.text_value, healthcare.health_checkup_results.ref_min, healthcare.health_checkup_results.ref_max, healthcare.health_checkup_results.abnormal, healthcare.health_checkup_results.exam_date, " +
+                "healthcare.health_checkup_results.operator, healthcare.health_checkup_results.vital_sign_id, healthcare.health_checkup_results.followup_plan_id, healthcare.health_checkup_results.metadata, healthcare.health_checkup_results.created_at, healthcare.health_checkup_results.updated_at"
+
+        /**
+         * 批次基础查询：带应检/已检聚合（列表与详情同口径，避免详情页显示 0）。
+         * 过滤条件占位符由调用方按出现顺序追加（`$1..`）。
+         */
+        private const val CHECKUP_BASE_SQL =
+            "SELECT $CHECKUP_COLUMNS, " +
+                "count(healthcare.health_checkup_members.id) AS member_total, " +
+                "count(*) FILTER (WHERE healthcare.health_checkup_members.checked) AS checked_total " +
+                "FROM healthcare.health_checkups " +
+                "LEFT JOIN healthcare.health_checkup_members ON healthcare.health_checkup_members.checkup_id = healthcare.health_checkups.id"
+
+        private const val CHECKUP_GROUP_BY =
+            " GROUP BY healthcare.health_checkups.id, healthcare.health_checkups.checkup_year, healthcare.health_checkups.name, healthcare.health_checkups.status, healthcare.health_checkups.start_date, healthcare.health_checkups.end_date, healthcare.health_checkups.operator, " +
+                "healthcare.health_checkups.metadata, healthcare.health_checkups.created_at, healthcare.health_checkups.updated_at"
+
+        /** 名单基础查询：挂患者名（内连）与住院号（左连，锚点可空）。 */
+        private const val MEMBER_BASE_SQL =
+            "SELECT $MEMBER_COLUMNS, healthcare.patients.name AS patient_name, healthcare.encounters.encounter_no AS encounter_no " +
+                "FROM healthcare.health_checkup_members " +
+                "JOIN healthcare.patients ON healthcare.patients.id = healthcare.health_checkup_members.patient_id " +
+                "LEFT JOIN healthcare.encounters ON healthcare.encounters.id = healthcare.health_checkup_members.encounter_id"
+
+        /** 结果基础查询：挂患者名（内连）。 */
+        private const val RESULT_BASE_SQL =
+            "SELECT $RESULT_COLUMNS, healthcare.patients.name AS patient_name " +
+                "FROM healthcare.health_checkup_results " +
+                "JOIN healthcare.patients ON healthcare.patients.id = healthcare.health_checkup_results.patient_id"
+
+        private const val INSERT_CHECKUP_SQL =
+            "INSERT INTO healthcare.health_checkups " +
+                "(id, checkup_year, name, status, operator, created_at, updated_at, start_date, end_date, metadata) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10)"
+
+        private const val INSERT_MEMBER_SQL =
+            "INSERT INTO healthcare.health_checkup_members " +
+                "(id, checkup_id, patient_id, checked, operator, created_at, updated_at, encounter_id) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8) ON CONFLICT DO NOTHING"
+
+        private const val INSERT_RESULT_SQL =
+            "INSERT INTO healthcare.health_checkup_results " +
+                "(id, checkup_id, member_id, patient_id, item_name, item_category, abnormal, exam_date, " +
+                "operator, created_at, updated_at, value, unit, text_value, ref_min, ref_max, metadata) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11, \$12, \$13, \$14, " +
+                "\$15, \$16, \$17)"
+
+        private const val INSERT_VITAL_SIGN_SQL =
+            "INSERT INTO healthcare.vital_sign_records " +
+                "(id, patient_id, type, value, unit, measured_at, recorded_by, abnormal, metadata, " +
+                "created_at, updated_at, encounter_id) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11, \$12)"
+
+        private const val INSERT_FOLLOWUP_PLAN_SQL =
+            "INSERT INTO healthcare.followup_plans " +
+                "(id, patient_id, encounter_id, followup_type, planned_date, planned_way, assignee, " +
+                "status, metadata, created_at, updated_at, remark) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11, \$12)"
+
+        private const val MARK_CHECKED_SQL =
+            "UPDATE healthcare.health_checkup_members SET checked = true, checked_at = \$3, updated_at = \$4 " +
+                "WHERE checkup_id = \$1 AND patient_id = \$2 AND checked = false"
+
         private fun today(): LocalDate = LocalDate.now(businessZone)
 
         private fun checkupJson(row: Row): JsonObject =
@@ -167,6 +230,18 @@ class CheckupService(
                 .put("metadata", row.getValue("metadata"))
                 .put("created_at", row.getOffsetDateTime("created_at")?.toString())
                 .put("updated_at", row.getOffsetDateTime("updated_at")?.toString())
+
+        /**
+         * 活动锚点优先级排序键：ELDERLY_CARE=0、其余(OUTPATIENT)=1。
+         *
+         * 字面量必须内联渲染——若走绑定参数，PostgreSQL 无法从
+         * `CASE <varchar> WHEN $n THEN $m ELSE $k END` 的上下文推断类型，
+         * 会按 SQL 规范回落为 `text`；Vert.x PG 客户端据此要求 String，
+         * 遇到 Integer 0/1 直接在编码期抛编码异常，使创建批次（默认快照名单）
+         * 与名单补录一律 500。这里是常量，不含任何用户输入。
+         */
+        private const val ANCHOR_PREFERENCE_SQL =
+            "CASE healthcare.encounters.encounter_type WHEN 'ELDERLY_CARE' THEN 0 ELSE 1 END ASC"
     }
 
     // ========================================================================
@@ -210,41 +285,64 @@ class CheckupService(
         val id = Ulid.generate()
         val now = OffsetDateTime.now()
         return pool.withTransaction<JsonObject> { connection ->
-            execute(connection, yearCountQuery(year)).compose { rows ->
+            execute(
+                connection,
+                "SELECT count(*) AS total FROM healthcare.health_checkups WHERE checkup_year = \$1",
+                Tuple.of(year),
+            ).compose { rows ->
                 val existing = rows.iterator().next().getLong("total") ?: 0L
                 if (existing > 0) {
                     Future.failedFuture(ConflictException("health checkup for year $year already exists"))
                 } else {
-                    execute(connection, checkupInsert(id, year, name, startDate, endDate, metadata, operator, now))
-                        .compose {
-                            if (!snapshot) {
-                                Future.succeededFuture(checkupCreatedJson(id, year, name, startDate, endDate, operator, metadata, now, 0))
-                            } else {
-                                snapshotMembers(connection, id, operator, now).map { memberTotal ->
-                                    checkupCreatedJson(id, year, name, startDate, endDate, operator, metadata, now, memberTotal)
-                                }
+                    execute(
+                        connection,
+                        INSERT_CHECKUP_SQL,
+                        Tuple.of(
+                            id,
+                            year,
+                            name,
+                            "草稿",
+                            operator,
+                            now,
+                            now,
+                            startDate,
+                            endDate,
+                            metadata,
+                        ),
+                    ).compose {
+                        if (!snapshot) {
+                            Future.succeededFuture(checkupCreatedJson(id, year, name, startDate, endDate, operator, metadata, now, 0))
+                        } else {
+                            snapshotMembers(connection, id, operator, now).map { memberTotal ->
+                                checkupCreatedJson(id, year, name, startDate, endDate, operator, metadata, now, memberTotal)
                             }
                         }
+                    }
                 }
             }
         }
     }
 
     fun listCheckups(status: String?, limit: Int, offset: Int): Future<JsonObject> {
-        val conditions = try {
-            mutableListOf<Condition>().also { conditions ->
-                status?.takeIf(String::isNotBlank)?.let {
-                    conditions += HEALTH_CHECKUPS.STATUS.eq(validValue(it, statuses, "status"))
-                }
+        val args = mutableListOf<Any?>()
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
+        val filters = mutableListOf<String>()
+        try {
+            status?.takeIf(String::isNotBlank)?.let {
+                filters += "healthcare.health_checkups.status = ${bind(validValue(it, statuses, "status"))}"
             }
         } catch (error: IllegalArgumentException) {
             return Future.failedFuture(error)
         }
-        val countQuery = ctx.select(DSL.count().`as`("total")).from(HEALTH_CHECKUPS).where(conditions)
-        val dataQuery = listQuery(conditions, limit, offset)
-        return execute(pool, countQuery).compose { countRows ->
+
+        val where = if (filters.isEmpty()) "" else " WHERE ${filters.joinToString(" AND ")}"
+        val countSql = "SELECT count(*) AS total FROM healthcare.health_checkups$where"
+        val dataSql = "$CHECKUP_BASE_SQL$where$CHECKUP_GROUP_BY " +
+            "ORDER BY healthcare.health_checkups.checkup_year DESC, healthcare.health_checkups.created_at DESC " +
+            "OFFSET \$${args.size + 1} ROWS FETCH NEXT \$${args.size + 2} ROWS ONLY"
+        return execute(pool, countSql, Tuple.from(args)).compose { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(pool, dataQuery).map { rows ->
+            execute(pool, dataSql, Tuple.from(args + listOf<Any?>(offset, limit))).map { rows ->
                 JsonObject()
                     .put("records", JsonArray(rows.map(::checkupJson)))
                     .put("meta", JsonObject().put("total", total))
@@ -255,7 +353,7 @@ class CheckupService(
     fun getCheckup(id: String): Future<JsonObject> = getCheckupVia(pool, id)
 
     private fun getCheckupVia(client: SqlClient, id: String): Future<JsonObject> =
-        execute(client, checkupDetailQuery(id)).compose { rows ->
+        execute(client, "$CHECKUP_BASE_SQL WHERE healthcare.health_checkups.id = \$1$CHECKUP_GROUP_BY", Tuple.of(id)).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { row ->
                 Future.succeededFuture(checkupJson(row))
             } ?: Future.failedFuture(HealthcareNotFoundException("health checkup not found: $id"))
@@ -282,10 +380,8 @@ class CheckupService(
                 } else {
                     execute(
                         connection,
-                        ctx.update(HEALTH_CHECKUPS)
-                            .set(HEALTH_CHECKUPS.STATUS, status)
-                            .set(HEALTH_CHECKUPS.UPDATED_AT, now)
-                            .where(HEALTH_CHECKUPS.ID.eq(id)),
+                        "UPDATE healthcare.health_checkups SET status = \$2, updated_at = \$3 WHERE id = \$1",
+                        Tuple.of(id, status, now),
                     ).compose { rows ->
                         if (rows.rowCount() == 1) getCheckupVia(connection, id)
                         else Future.failedFuture(HealthcareNotFoundException("health checkup not found: $id"))
@@ -299,17 +395,15 @@ class CheckupService(
     fun getCheckupStats(id: String): Future<JsonObject> =
         pool.withTransaction<JsonObject> { connection ->
             getCheckupRow(connection, id).compose {
-                val memberQuery = ctx.select(
-                    DSL.count().`as`("member_total"),
-                    DSL.count().filterWhere(HEALTH_CHECKUP_MEMBERS.CHECKED.isTrue).`as`("checked_total"),
-                ).from(HEALTH_CHECKUP_MEMBERS).where(HEALTH_CHECKUP_MEMBERS.CHECKUP_ID.eq(id))
-                val resultQuery = ctx.select(
-                    DSL.count().filterWhere(HEALTH_CHECKUP_RESULTS.ABNORMAL.isTrue).`as`("abnormal_total"),
-                    DSL.count().filterWhere(HEALTH_CHECKUP_RESULTS.VITAL_SIGN_ID.isNotNull).`as`("vital_sign_total"),
-                    DSL.count().filterWhere(HEALTH_CHECKUP_RESULTS.FOLLOWUP_PLAN_ID.isNotNull).`as`("followup_total"),
-                ).from(HEALTH_CHECKUP_RESULTS).where(HEALTH_CHECKUP_RESULTS.CHECKUP_ID.eq(id))
-                execute(connection, memberQuery).compose { memberRows ->
-                    execute(connection, resultQuery).map { resultRows ->
+                val memberSql = "SELECT count(*) AS member_total, " +
+                    "count(*) FILTER (WHERE checked) AS checked_total " +
+                    "FROM healthcare.health_checkup_members WHERE checkup_id = \$1"
+                val resultSql = "SELECT count(*) FILTER (WHERE abnormal) AS abnormal_total, " +
+                    "count(*) FILTER (WHERE vital_sign_id IS NOT NULL) AS vital_sign_total, " +
+                    "count(*) FILTER (WHERE followup_plan_id IS NOT NULL) AS followup_total " +
+                    "FROM healthcare.health_checkup_results WHERE checkup_id = \$1"
+                execute(connection, memberSql, Tuple.of(id)).compose { memberRows ->
+                    execute(connection, resultSql, Tuple.of(id)).map { resultRows ->
                         val memberTotal = memberRows.iterator().next().getLong("member_total") ?: 0L
                         val checkedTotal = memberRows.iterator().next().getLong("checked_total") ?: 0L
                         val abnormalTotal = resultRows.iterator().next().getLong("abnormal_total") ?: 0L
@@ -368,7 +462,17 @@ class CheckupService(
                     val inserts = resolved.map { (patientId, anchor) ->
                         execute(
                             connection,
-                            memberInsert(Ulid.generate(), id, patientId, anchor.encounterId, operator, now),
+                            INSERT_MEMBER_SQL,
+                            Tuple.of(
+                                Ulid.generate(),
+                                id,
+                                patientId,
+                                false,
+                                operator,
+                                now,
+                                now,
+                                anchor.encounterId,
+                            ),
                         )
                     }
                     Future.all(inserts).map { insertRows ->
@@ -393,30 +497,28 @@ class CheckupService(
     }
 
     fun listMembers(id: String, checked: String?, limit: Int, offset: Int): Future<JsonObject> {
-        val conditions = try {
-            mutableListOf<Condition>(
-                HEALTH_CHECKUP_MEMBERS.CHECKUP_ID.eq(id),
-            ).also { conditions ->
-                checked?.takeIf(String::isNotBlank)?.let {
-                    when (it) {
-                        "true" -> conditions += HEALTH_CHECKUP_MEMBERS.CHECKED.eq(true)
-                        "false" -> conditions += HEALTH_CHECKUP_MEMBERS.CHECKED.eq(false)
-                        else -> throw IllegalArgumentException("checked must be true or false")
-                    }
+        val args = mutableListOf<Any?>(id)
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
+        val filters = mutableListOf("healthcare.health_checkup_members.checkup_id = \$1")
+        try {
+            checked?.takeIf(String::isNotBlank)?.let {
+                when (it) {
+                    "true" -> filters += "healthcare.health_checkup_members.checked = ${bind(true)}"
+                    "false" -> filters += "healthcare.health_checkup_members.checked = ${bind(false)}"
+                    else -> throw IllegalArgumentException("checked must be true or false")
                 }
             }
         } catch (error: IllegalArgumentException) {
             return Future.failedFuture(error)
         }
-        val countQuery = ctx.select(DSL.count().`as`("total")).from(HEALTH_CHECKUP_MEMBERS).where(conditions)
-        val dataQuery = memberBaseQuery()
-            .where(conditions)
-            .orderBy(HEALTH_CHECKUP_MEMBERS.CREATED_AT.desc(), HEALTH_CHECKUP_MEMBERS.ID.asc())
-            .limit(limit)
-            .offset(offset)
-        return execute(pool, countQuery).compose { countRows ->
+
+        val where = " WHERE ${filters.joinToString(" AND ")}"
+        val countSql = "SELECT count(*) AS total FROM ($MEMBER_BASE_SQL$where) members"
+        val dataSql = "$MEMBER_BASE_SQL$where ORDER BY healthcare.health_checkup_members.created_at DESC, healthcare.health_checkup_members.id ASC " +
+            "OFFSET \$${args.size + 1} ROWS FETCH NEXT \$${args.size + 2} ROWS ONLY"
+        return execute(pool, countSql, Tuple.from(args)).compose { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(pool, dataQuery).map { rows ->
+            execute(pool, dataSql, Tuple.from(args + listOf<Any?>(offset, limit))).map { rows ->
                 JsonObject()
                     .put("records", JsonArray(rows.map(::memberJson)))
                     .put("meta", JsonObject().put("total", total))
@@ -463,10 +565,12 @@ class CheckupService(
                     )
                 }
                 val patientIds = validated.map { it.patientId }.distinct()
-                val memberQuery = ctx.select(HEALTH_CHECKUP_MEMBERS.ID, HEALTH_CHECKUP_MEMBERS.PATIENT_ID)
-                    .from(HEALTH_CHECKUP_MEMBERS)
-                    .where(HEALTH_CHECKUP_MEMBERS.CHECKUP_ID.eq(checkupId).and(HEALTH_CHECKUP_MEMBERS.PATIENT_ID.`in`(patientIds)))
-                execute(connection, memberQuery).compose { memberRows ->
+                val memberArgs = mutableListOf<Any?>(checkupId)
+                memberArgs.addAll(patientIds)
+                val placeholders = patientIds.indices.joinToString(", ") { "\$${it + 2}" }
+                val memberSql = "SELECT id, patient_id FROM healthcare.health_checkup_members " +
+                    "WHERE checkup_id = \$1 AND patient_id IN ($placeholders)"
+                execute(connection, memberSql, Tuple.from(memberArgs)).compose { memberRows ->
                     val memberByPatient = memberRows.associate { row ->
                         row.getString("patient_id") to row.getString("id")
                     }
@@ -482,11 +586,19 @@ class CheckupService(
                         val resultId = Ulid.generate()
                         execute(
                             connection,
-                            resultInsert(resultId, checkupId, memberByPatient.getValue(fields.patientId), fields, operator, now),
+                            INSERT_RESULT_SQL,
+                            resultInsertArgs(
+                                resultId,
+                                checkupId,
+                                memberByPatient.getValue(fields.patientId),
+                                fields,
+                                operator,
+                                now,
+                            ),
                         ).map<Any> { resultId }
                     }
                     val checkedUpdates = patientIds.map { patientId ->
-                        execute(connection, markCheckedUpdate(checkupId, patientId, now)).map<Any> { Unit }
+                        execute(connection, MARK_CHECKED_SQL, Tuple.of(checkupId, patientId, now, now)).map<Any> { Unit }
                     }
                     Future.all(inserts).compose { insertResults ->
                         Future.all(checkedUpdates).map {
@@ -504,7 +616,7 @@ class CheckupService(
     fun getResult(id: String): Future<JsonObject> = getResultVia(pool, id)
 
     private fun getResultVia(client: SqlClient, id: String): Future<JsonObject> =
-        execute(client, resultDetailQuery(id)).compose { rows ->
+        execute(client, "$RESULT_BASE_SQL WHERE healthcare.health_checkup_results.id = \$1", Tuple.of(id)).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(resultJson(it)) }
                 ?: Future.failedFuture(HealthcareNotFoundException("checkup result not found: $id"))
         }
@@ -517,34 +629,32 @@ class CheckupService(
         limit: Int,
         offset: Int,
     ): Future<JsonObject> {
-        val conditions = try {
-            mutableListOf<Condition>(
-                HEALTH_CHECKUP_RESULTS.CHECKUP_ID.eq(checkupId),
-            ).also { conditions ->
-                abnormal?.takeIf(String::isNotBlank)?.let {
-                    when (it) {
-                        "true" -> conditions += HEALTH_CHECKUP_RESULTS.ABNORMAL.eq(true)
-                        "false" -> conditions += HEALTH_CHECKUP_RESULTS.ABNORMAL.eq(false)
-                        else -> throw IllegalArgumentException("abnormal must be true or false")
-                    }
+        val args = mutableListOf<Any?>(checkupId)
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
+        val filters = mutableListOf("healthcare.health_checkup_results.checkup_id = \$1")
+        try {
+            abnormal?.takeIf(String::isNotBlank)?.let {
+                when (it) {
+                    "true" -> filters += "healthcare.health_checkup_results.abnormal = ${bind(true)}"
+                    "false" -> filters += "healthcare.health_checkup_results.abnormal = ${bind(false)}"
+                    else -> throw IllegalArgumentException("abnormal must be true or false")
                 }
-                patientId?.takeIf(String::isNotBlank)?.let { conditions += HEALTH_CHECKUP_RESULTS.PATIENT_ID.eq(it) }
-                itemCategory?.takeIf(String::isNotBlank)?.let {
-                    conditions += HEALTH_CHECKUP_RESULTS.ITEM_CATEGORY.eq(validValue(it, setOf("数值", "文本"), "item_category"))
-                }
+            }
+            patientId?.takeIf(String::isNotBlank)?.let { filters += "healthcare.health_checkup_results.patient_id = ${bind(it)}" }
+            itemCategory?.takeIf(String::isNotBlank)?.let {
+                filters += "healthcare.health_checkup_results.item_category = ${bind(validValue(it, setOf("数值", "文本"), "item_category"))}"
             }
         } catch (error: IllegalArgumentException) {
             return Future.failedFuture(error)
         }
-        val countQuery = ctx.select(DSL.count().`as`("total")).from(HEALTH_CHECKUP_RESULTS).where(conditions)
-        val dataQuery = resultBaseQuery()
-            .where(conditions)
-            .orderBy(HEALTH_CHECKUP_RESULTS.CREATED_AT.desc(), HEALTH_CHECKUP_RESULTS.ID.asc())
-            .limit(limit)
-            .offset(offset)
-        return execute(pool, countQuery).compose { countRows ->
+
+        val where = " WHERE ${filters.joinToString(" AND ")}"
+        val countSql = "SELECT count(*) AS total FROM ($RESULT_BASE_SQL$where) results"
+        val dataSql = "$RESULT_BASE_SQL$where ORDER BY healthcare.health_checkup_results.created_at DESC, healthcare.health_checkup_results.id ASC " +
+            "OFFSET \$${args.size + 1} ROWS FETCH NEXT \$${args.size + 2} ROWS ONLY"
+        return execute(pool, countSql, Tuple.from(args)).compose { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(pool, dataQuery).map { rows ->
+            execute(pool, dataSql, Tuple.from(args + listOf<Any?>(offset, limit))).map { rows ->
                 JsonObject()
                     .put("records", JsonArray(rows.map(::resultJson)))
                     .put("meta", JsonObject().put("total", total))
@@ -573,12 +683,12 @@ class CheckupService(
                         )
                     }
                     val category = result.getString("item_category")
-                    val update: Query = if (category == "数值") {
-                        numericPatchQuery(result, body, now)
+                    val (sql, args) = if (category == "数值") {
+                        numericPatch(result, body, now)
                     } else {
-                        textPatchQuery(result, body, now)
+                        textPatch(result, body, now)
                     }
-                    execute(connection, update).compose { rows ->
+                    execute(connection, sql, args).compose { rows ->
                         if (rows.rowCount() == 1) getResultVia(connection, id)
                         else Future.failedFuture(HealthcareNotFoundException("checkup result not found: $id"))
                     }
@@ -636,14 +746,27 @@ class CheckupService(
                         val metadata = conversionMetadata(id, result.getString("checkup_id"), mappedType, result)
                         execute(
                             connection,
-                            vitalSignInsert(vitalSignId, result, member, mappedType, unit, measuredAt, operator, metadata, now),
+                            INSERT_VITAL_SIGN_SQL,
+                            Tuple.of(
+                                vitalSignId,
+                                result.getString("patient_id"),
+                                mappedType,
+                                result.getBigDecimal("value"),
+                                unit,
+                                measuredAt,
+                                operator,
+                                abnormalOf(result, mappedType),
+                                metadata,
+                                now,
+                                now,
+                                member.getString("encounter_id"),
+                            ),
                         ).compose {
                             execute(
                                 connection,
-                                ctx.update(HEALTH_CHECKUP_RESULTS)
-                                    .set(HEALTH_CHECKUP_RESULTS.VITAL_SIGN_ID, vitalSignId)
-                                    .set(HEALTH_CHECKUP_RESULTS.UPDATED_AT, now)
-                                    .where(HEALTH_CHECKUP_RESULTS.ID.eq(id).and(HEALTH_CHECKUP_RESULTS.VITAL_SIGN_ID.isNull)),
+                                "UPDATE healthcare.health_checkup_results SET vital_sign_id = \$2, " +
+                                    "updated_at = \$3 WHERE id = \$1 AND vital_sign_id IS NULL",
+                                Tuple.of(id, vitalSignId, now),
                             )
                         }.compose { rows ->
                             if (rows.rowCount() != 1) {
@@ -755,14 +878,27 @@ class CheckupService(
                                     .put("checkup_id", result.getString("checkup_id"))
                                 execute(
                                     connection,
-                                    followupPlanInsert(planId, result, member, planDate, followupType, plannedWay, remark, operator, metadata, now),
+                                    INSERT_FOLLOWUP_PLAN_SQL,
+                                    Tuple.of(
+                                        planId,
+                                        patientId,
+                                        encounterId,
+                                        followupType,
+                                        planDate,
+                                        plannedWay,
+                                        operator,
+                                        "待随访",
+                                        metadata,
+                                        now,
+                                        now,
+                                        remark,
+                                    ),
                                 ).compose {
                                     execute(
                                         connection,
-                                        ctx.update(HEALTH_CHECKUP_RESULTS)
-                                            .set(HEALTH_CHECKUP_RESULTS.FOLLOWUP_PLAN_ID, planId)
-                                            .set(HEALTH_CHECKUP_RESULTS.UPDATED_AT, now)
-                                            .where(HEALTH_CHECKUP_RESULTS.ID.eq(id).and(HEALTH_CHECKUP_RESULTS.FOLLOWUP_PLAN_ID.isNull)),
+                                        "UPDATE healthcare.health_checkup_results SET followup_plan_id = \$2, " +
+                                            "updated_at = \$3 WHERE id = \$1 AND followup_plan_id IS NULL",
+                                        Tuple.of(id, planId, now),
                                     )
                                 }.compose { rows ->
                                     if (rows.rowCount() != 1) {
@@ -979,7 +1115,8 @@ class CheckupService(
         return metadata
     }
 
-    private fun numericPatchQuery(result: Row, body: JsonObject, now: OffsetDateTime): Query {
+    /** 数值项修正语句（占位符 `$1`=id，位置固定；可选列按出现顺序追加）。 */
+    private fun numericPatch(result: Row, body: JsonObject, now: OffsetDateTime): Pair<String, Tuple> {
         if (body.containsKey("text_value") || body.containsKey("abnormal")) {
             throw IllegalArgumentException("text_value/abnormal are only allowed for text items")
         }
@@ -1000,86 +1137,69 @@ class CheckupService(
         val metadata = body.getValue("metadata")?.let { jsonObject(body, "metadata") } ?: resultMetadata(result)
         if (body.containsKey("metadata") && metadata != null) validateThresholds(metadata, mappedType)
         val abnormal = abnormalOf(mappedType, value, refMin, refMax, metadata)
-        var query = ctx.update(HEALTH_CHECKUP_RESULTS)
-            .set(HEALTH_CHECKUP_RESULTS.VALUE, value)
-            .set(HEALTH_CHECKUP_RESULTS.ABNORMAL, abnormal)
-            .set(HEALTH_CHECKUP_RESULTS.UPDATED_AT, now)
+        val args = mutableListOf<Any?>(result.getString("id"), value, abnormal, now)
+        fun bind(v: Any?): String = "\$${args.size + 1}".also { args.add(v) }
+        val sets = mutableListOf("value = \$2", "abnormal = \$3", "updated_at = \$4")
         body.getString("unit")?.trim()?.takeIf(String::isNotBlank)?.let {
             if (it.length > 20) throw IllegalArgumentException("unit must not exceed 20 characters")
-            query = query.set(HEALTH_CHECKUP_RESULTS.UNIT, it)
+            sets += "unit = ${bind(it)}"
         }
-        query = query.set(HEALTH_CHECKUP_RESULTS.REF_MIN, refMin).set(HEALTH_CHECKUP_RESULTS.REF_MAX, refMax)
+        sets += "ref_min = ${bind(refMin)}"
+        sets += "ref_max = ${bind(refMax)}"
         body.getString("exam_date")?.let { raw ->
             val examDate = localDate(raw, "exam_date")
             if (examDate.isAfter(today())) throw IllegalArgumentException("exam_date must not be in the future")
-            query = query.set(HEALTH_CHECKUP_RESULTS.EXAM_DATE, examDate)
+            sets += "exam_date = ${bind(examDate)}"
         }
         if (body.containsKey("metadata")) {
-            if (metadata != null) query = query.set(HEALTH_CHECKUP_RESULTS.METADATA, JSONB.valueOf(metadata.encode()))
-            else query = query.setNull(HEALTH_CHECKUP_RESULTS.METADATA)
+            if (metadata != null) sets += "metadata = ${bind(metadata)}" else sets += "metadata = NULL"
         }
-        return query.where(HEALTH_CHECKUP_RESULTS.ID.eq(result.getString("id")))
+        val sql = "UPDATE healthcare.health_checkup_results SET ${sets.joinToString(", ")} WHERE id = \$1"
+        return sql to Tuple.from(args)
     }
 
-    private fun textPatchQuery(result: Row, body: JsonObject, now: OffsetDateTime): Query {
+    /** 文本项修正语句（占位符 `$1`=id、`$2`=updated_at；可选列按出现顺序追加）。 */
+    private fun textPatch(result: Row, body: JsonObject, now: OffsetDateTime): Pair<String, Tuple> {
         if (body.containsKey("value") || body.containsKey("unit") ||
             body.containsKey("ref_min") || body.containsKey("ref_max")
         ) {
             throw IllegalArgumentException("value/unit/ref_min/ref_max are only allowed for numeric items")
         }
-        var query = ctx.update(HEALTH_CHECKUP_RESULTS).set(HEALTH_CHECKUP_RESULTS.UPDATED_AT, now)
+        val args = mutableListOf<Any?>(result.getString("id"), now)
+        fun bind(v: Any?): String = "\$${args.size + 1}".also { args.add(v) }
+        val sets = mutableListOf("updated_at = \$2")
         body.getString("text_value")?.trim()?.takeIf(String::isNotBlank)?.let {
             if (it.length > 2000) throw IllegalArgumentException("text_value must not exceed 2000 characters")
-            query = query.set(HEALTH_CHECKUP_RESULTS.TEXT_VALUE, it)
+            sets += "text_value = ${bind(it)}"
         }
         body.getValue("abnormal")?.let {
-            query = query.set(HEALTH_CHECKUP_RESULTS.ABNORMAL, it as? Boolean
-                ?: throw IllegalArgumentException("abnormal must be a boolean"))
+            sets += "abnormal = ${bind(it as? Boolean
+                ?: throw IllegalArgumentException("abnormal must be a boolean"))}"
         }
         body.getString("exam_date")?.let { raw ->
             val examDate = localDate(raw, "exam_date")
             if (examDate.isAfter(today())) throw IllegalArgumentException("exam_date must not be in the future")
-            query = query.set(HEALTH_CHECKUP_RESULTS.EXAM_DATE, examDate)
+            sets += "exam_date = ${bind(examDate)}"
         }
         body.getValue("metadata")?.let {
             val metadata = jsonObject(body, "metadata")
                 ?: throw IllegalArgumentException("metadata must be a JSON object")
-            query = query.set(HEALTH_CHECKUP_RESULTS.METADATA, JSONB.valueOf(metadata.encode()))
+            sets += "metadata = ${bind(metadata)}"
         }
-        return query.where(HEALTH_CHECKUP_RESULTS.ID.eq(result.getString("id")))
+        val sql = "UPDATE healthcare.health_checkup_results SET ${sets.joinToString(", ")} WHERE id = \$1"
+        return sql to Tuple.from(args)
     }
 
     private data class ResolvedAnchor(val patientName: String, val encounterId: String?)
 
-    /**
-     * 活动锚点优先级排序键：ELDERLY_CARE=0、其余(OUTPATIENT)=1。
-     *
-     * 字面量必须内联渲染——若走绑定参数，PostgreSQL 无法从
-     * `case <varchar> when $n then $m else $k end` 的上下文推断 $m/$k 类型，
-     * 会按 SQL 规范回落为 `text`；Vert.x PG 客户端据此要求 String，
-     * 遇到 Integer 0/1 直接在编码期抛
-     * "Parameter at position[...] ... can not be coerced to the expected class = [java.lang.String]"，
-     * 使创建批次（默认快照名单）与名单补录一律 500。
-     */
-    private fun anchorPreference(): Field<Int> =
-        DSL.case_(ENCOUNTERS.ENCOUNTER_TYPE)
-            .`when`(DSL.inline("ELDERLY_CARE"), DSL.inline(0))
-            .else_(DSL.inline(1))
-
     /** 解析在册患者与活动锚点：ELDERLY_CARE 优先、OUTPATIENT 次之（可无锚点） */
     private fun resolveMemberAnchor(client: SqlClient, patientId: String): Future<ResolvedAnchor> {
-        val preference = anchorPreference()
-        val query = ctx.select(PATIENTS.NAME, PATIENTS.STATUS, ENCOUNTERS.ID.`as`("encounter_id"))
-            .distinctOn(PATIENTS.ID)
-            .from(PATIENTS)
-            .leftJoin(ENCOUNTERS).on(
-                ENCOUNTERS.PATIENT_ID.eq(PATIENTS.ID)
-                    .and(ENCOUNTERS.STATUS.eq("ACTIVE"))
-                    .and(ENCOUNTERS.ENCOUNTER_TYPE.`in`("ELDERLY_CARE", "OUTPATIENT")),
-            )
-            .where(PATIENTS.ID.eq(patientId))
-            .orderBy(PATIENTS.ID.asc(), preference.asc())
-        return execute(client, query).compose { rows ->
+        val sql = "SELECT DISTINCT ON (healthcare.patients.id) healthcare.patients.id AS patient_id, healthcare.patients.name, healthcare.patients.status, healthcare.encounters.id AS encounter_id " +
+            "FROM healthcare.patients " +
+            "LEFT JOIN healthcare.encounters ON healthcare.encounters.patient_id = healthcare.patients.id " +
+            "AND healthcare.encounters.status = 'ACTIVE' AND healthcare.encounters.encounter_type IN ('ELDERLY_CARE', 'OUTPATIENT') " +
+            "WHERE healthcare.patients.id = \$1 ORDER BY healthcare.patients.id ASC, $ANCHOR_PREFERENCE_SQL"
+        return execute(client, sql, Tuple.of(patientId)).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { row ->
                 if (row.getString("status") != "ACTIVE") {
                     Future.failedFuture(
@@ -1099,22 +1219,26 @@ class CheckupService(
         operator: String,
         now: OffsetDateTime,
     ): Future<Int> {
-        val preference = anchorPreference()
-        val query = ctx.select(PATIENTS.ID, ENCOUNTERS.ID.`as`("encounter_id"))
-            .distinctOn(PATIENTS.ID)
-            .from(PATIENTS)
-            .leftJoin(ENCOUNTERS).on(
-                ENCOUNTERS.PATIENT_ID.eq(PATIENTS.ID)
-                    .and(ENCOUNTERS.STATUS.eq("ACTIVE"))
-                    .and(ENCOUNTERS.ENCOUNTER_TYPE.`in`("ELDERLY_CARE", "OUTPATIENT")),
-            )
-            .where(PATIENTS.STATUS.eq("ACTIVE"))
-            .orderBy(PATIENTS.ID.asc(), preference.asc())
-        return execute(client, query).compose { rows ->
+        val sql = "SELECT DISTINCT ON (healthcare.patients.id) healthcare.patients.id AS patient_id, healthcare.encounters.id AS encounter_id " +
+            "FROM healthcare.patients " +
+            "LEFT JOIN healthcare.encounters ON healthcare.encounters.patient_id = healthcare.patients.id " +
+            "AND healthcare.encounters.status = 'ACTIVE' AND healthcare.encounters.encounter_type IN ('ELDERLY_CARE', 'OUTPATIENT') " +
+            "WHERE healthcare.patients.status = 'ACTIVE' ORDER BY healthcare.patients.id ASC, $ANCHOR_PREFERENCE_SQL"
+        return execute(client, sql, Tuple.tuple()).compose { rows ->
             val inserts = rows.map { row ->
                 execute(
                     client,
-                    memberInsert(Ulid.generate(), checkupId, row.getString("id"), row.getString("encounter_id"), operator, now),
+                    INSERT_MEMBER_SQL,
+                    Tuple.of(
+                        Ulid.generate(),
+                        checkupId,
+                        row.getString("patient_id"),
+                        false,
+                        operator,
+                        now,
+                        now,
+                        row.getString("encounter_id"),
+                    ),
                 )
             }
             Future.all(inserts).map { rows.size() }
@@ -1122,227 +1246,56 @@ class CheckupService(
     }
 
     // ========================================================================
-    //  查询构造
-    // ========================================================================
-
-    private fun yearCountQuery(year: Int) =
-        ctx.select(DSL.count().`as`("total")).from(HEALTH_CHECKUPS).where(HEALTH_CHECKUPS.CHECKUP_YEAR.eq(year))
-
-    private fun listQuery(conditions: List<Condition>, limit: Int, offset: Int) = ctx.select(
-        HEALTH_CHECKUPS.fields().toList() +
-            listOf(
-                DSL.count(HEALTH_CHECKUP_MEMBERS.ID).`as`("member_total"),
-                DSL.count().filterWhere(HEALTH_CHECKUP_MEMBERS.CHECKED.isTrue).`as`("checked_total"),
-            ),
-    )
-        .from(HEALTH_CHECKUPS)
-        .leftJoin(HEALTH_CHECKUP_MEMBERS).on(HEALTH_CHECKUP_MEMBERS.CHECKUP_ID.eq(HEALTH_CHECKUPS.ID))
-        .where(conditions)
-        .groupBy(HEALTH_CHECKUPS.fields().toList())
-        .orderBy(HEALTH_CHECKUPS.CHECKUP_YEAR.desc(), HEALTH_CHECKUPS.CREATED_AT.desc())
-        .limit(limit)
-        .offset(offset)
-
-    /** 详情查询：与列表同口径带应检/已检聚合（member_total/checked_total），避免详情页显示 0 */
-    private fun checkupDetailQuery(id: String) = ctx.select(
-        HEALTH_CHECKUPS.fields().toList() +
-            listOf(
-                DSL.count(HEALTH_CHECKUP_MEMBERS.ID).`as`("member_total"),
-                DSL.count().filterWhere(HEALTH_CHECKUP_MEMBERS.CHECKED.isTrue).`as`("checked_total"),
-            ),
-    )
-        .from(HEALTH_CHECKUPS)
-        .leftJoin(HEALTH_CHECKUP_MEMBERS).on(HEALTH_CHECKUP_MEMBERS.CHECKUP_ID.eq(HEALTH_CHECKUPS.ID))
-        .where(HEALTH_CHECKUPS.ID.eq(id))
-        .groupBy(HEALTH_CHECKUPS.fields().toList())
-
-    private fun memberBaseQuery() = ctx.select(
-        HEALTH_CHECKUP_MEMBERS.fields().toList() +
-            listOf(PATIENTS.NAME.`as`("patient_name"), ENCOUNTERS.ENCOUNTER_NO.`as`("encounter_no")),
-    )
-        .from(HEALTH_CHECKUP_MEMBERS)
-        .join(PATIENTS).on(HEALTH_CHECKUP_MEMBERS.PATIENT_ID.eq(PATIENTS.ID))
-        .leftJoin(ENCOUNTERS).on(HEALTH_CHECKUP_MEMBERS.ENCOUNTER_ID.eq(ENCOUNTERS.ID))
-
-    private fun resultBaseQuery() = ctx.select(
-        HEALTH_CHECKUP_RESULTS.fields().toList() +
-            listOf(PATIENTS.NAME.`as`("patient_name")),
-    )
-        .from(HEALTH_CHECKUP_RESULTS)
-        .join(PATIENTS).on(HEALTH_CHECKUP_RESULTS.PATIENT_ID.eq(PATIENTS.ID))
-
-    private fun resultDetailQuery(id: String) = resultBaseQuery().where(HEALTH_CHECKUP_RESULTS.ID.eq(id))
-
-    private fun checkupInsert(
-        id: String,
-        year: Int,
-        name: String,
-        startDate: LocalDate?,
-        endDate: LocalDate?,
-        metadata: JsonObject?,
-        operator: String,
-        now: OffsetDateTime,
-    ): Query {
-        var query = ctx.insertInto(HEALTH_CHECKUPS)
-            .set(HEALTH_CHECKUPS.ID, id)
-            .set(HEALTH_CHECKUPS.CHECKUP_YEAR, year)
-            .set(HEALTH_CHECKUPS.NAME, name)
-            .set(HEALTH_CHECKUPS.STATUS, "草稿")
-            .set(HEALTH_CHECKUPS.OPERATOR, operator)
-            .set(HEALTH_CHECKUPS.CREATED_AT, now)
-            .set(HEALTH_CHECKUPS.UPDATED_AT, now)
-        startDate?.let { query = query.set(HEALTH_CHECKUPS.START_DATE, it) }
-        endDate?.let { query = query.set(HEALTH_CHECKUPS.END_DATE, it) }
-        metadata?.let { query = query.set(HEALTH_CHECKUPS.METADATA, JSONB.valueOf(it.encode())) }
-        return query
-    }
-
-    private fun memberInsert(
-        id: String,
-        checkupId: String,
-        patientId: String,
-        encounterId: String?,
-        operator: String,
-        now: OffsetDateTime,
-    ): Query {
-        var query = ctx.insertInto(HEALTH_CHECKUP_MEMBERS)
-            .set(HEALTH_CHECKUP_MEMBERS.ID, id)
-            .set(HEALTH_CHECKUP_MEMBERS.CHECKUP_ID, checkupId)
-            .set(HEALTH_CHECKUP_MEMBERS.PATIENT_ID, patientId)
-            .set(HEALTH_CHECKUP_MEMBERS.CHECKED, false)
-            .set(HEALTH_CHECKUP_MEMBERS.OPERATOR, operator)
-            .set(HEALTH_CHECKUP_MEMBERS.CREATED_AT, now)
-            .set(HEALTH_CHECKUP_MEMBERS.UPDATED_AT, now)
-        encounterId?.let { query = query.set(HEALTH_CHECKUP_MEMBERS.ENCOUNTER_ID, it) }
-        // 幂等：已存在成员（唯一索引 checkup_id+patient_id）静默跳过
-        return query.onDuplicateKeyIgnore()
-    }
-
-    private fun markCheckedUpdate(checkupId: String, patientId: String, now: OffsetDateTime): Query =
-        ctx.update(HEALTH_CHECKUP_MEMBERS)
-            .set(HEALTH_CHECKUP_MEMBERS.CHECKED, true)
-            .set(HEALTH_CHECKUP_MEMBERS.CHECKED_AT, now)
-            .set(HEALTH_CHECKUP_MEMBERS.UPDATED_AT, now)
-            .where(
-                HEALTH_CHECKUP_MEMBERS.CHECKUP_ID.eq(checkupId)
-                    .and(HEALTH_CHECKUP_MEMBERS.PATIENT_ID.eq(patientId))
-                    .and(HEALTH_CHECKUP_MEMBERS.CHECKED.eq(false)),
-            )
-
-    private fun resultInsert(
-        id: String,
-        checkupId: String,
-        memberId: String,
-        fields: ResultFields,
-        operator: String,
-        now: OffsetDateTime,
-    ): Query {
-        var query = ctx.insertInto(HEALTH_CHECKUP_RESULTS)
-            .set(HEALTH_CHECKUP_RESULTS.ID, id)
-            .set(HEALTH_CHECKUP_RESULTS.CHECKUP_ID, checkupId)
-            .set(HEALTH_CHECKUP_RESULTS.MEMBER_ID, memberId)
-            .set(HEALTH_CHECKUP_RESULTS.PATIENT_ID, fields.patientId)
-            .set(HEALTH_CHECKUP_RESULTS.ITEM_NAME, fields.itemName)
-            .set(HEALTH_CHECKUP_RESULTS.ITEM_CATEGORY, fields.itemCategory)
-            .set(HEALTH_CHECKUP_RESULTS.ABNORMAL, fields.abnormal)
-            .set(HEALTH_CHECKUP_RESULTS.EXAM_DATE, fields.examDate)
-            .set(HEALTH_CHECKUP_RESULTS.OPERATOR, operator)
-            .set(HEALTH_CHECKUP_RESULTS.CREATED_AT, now)
-            .set(HEALTH_CHECKUP_RESULTS.UPDATED_AT, now)
-        fields.value?.let { query = query.set(HEALTH_CHECKUP_RESULTS.VALUE, it) }
-        fields.unit?.let { query = query.set(HEALTH_CHECKUP_RESULTS.UNIT, it) }
-        fields.textValue?.let { query = query.set(HEALTH_CHECKUP_RESULTS.TEXT_VALUE, it) }
-        fields.refMin?.let { query = query.set(HEALTH_CHECKUP_RESULTS.REF_MIN, it) }
-        fields.refMax?.let { query = query.set(HEALTH_CHECKUP_RESULTS.REF_MAX, it) }
-        fields.metadata?.let { query = query.set(HEALTH_CHECKUP_RESULTS.METADATA, JSONB.valueOf(it.encode())) }
-        return query
-    }
-
-    private fun vitalSignInsert(
-        id: String,
-        result: Row,
-        member: Row,
-        type: String,
-        unit: String,
-        measuredAt: OffsetDateTime,
-        recordedBy: String,
-        metadata: JsonObject,
-        now: OffsetDateTime,
-    ): Query {
-        var query = ctx.insertInto(VITAL_SIGN_RECORDS)
-            .set(VITAL_SIGN_RECORDS.ID, id)
-            .set(VITAL_SIGN_RECORDS.PATIENT_ID, result.getString("patient_id"))
-            .set(VITAL_SIGN_RECORDS.TYPE, type)
-            .set(VITAL_SIGN_RECORDS.VALUE, result.getBigDecimal("value"))
-            .set(VITAL_SIGN_RECORDS.UNIT, unit)
-            .set(VITAL_SIGN_RECORDS.MEASURED_AT, measuredAt)
-            .set(VITAL_SIGN_RECORDS.RECORDED_BY, recordedBy)
-            .set(VITAL_SIGN_RECORDS.ABNORMAL, abnormalOf(result, type))
-            .set(VITAL_SIGN_RECORDS.METADATA, JSONB.valueOf(metadata.encode()))
-            .set(VITAL_SIGN_RECORDS.CREATED_AT, now)
-            .set(VITAL_SIGN_RECORDS.UPDATED_AT, now)
-        member.getString("encounter_id")?.let { query = query.set(VITAL_SIGN_RECORDS.ENCOUNTER_ID, it) }
-        return query
-    }
-
-    private fun followupPlanInsert(
-        id: String,
-        result: Row,
-        member: Row,
-        plannedDate: LocalDate,
-        followupType: String,
-        plannedWay: String,
-        remark: String?,
-        assignee: String,
-        metadata: JsonObject,
-        now: OffsetDateTime,
-    ): Query {
-        var query = ctx.insertInto(FOLLOWUP_PLANS)
-            .set(FOLLOWUP_PLANS.ID, id)
-            .set(FOLLOWUP_PLANS.PATIENT_ID, result.getString("patient_id"))
-            .set(FOLLOWUP_PLANS.ENCOUNTER_ID, member.getString("encounter_id"))
-            .set(FOLLOWUP_PLANS.FOLLOWUP_TYPE, followupType)
-            .set(FOLLOWUP_PLANS.PLANNED_DATE, plannedDate)
-            .set(FOLLOWUP_PLANS.PLANNED_WAY, plannedWay)
-            .set(FOLLOWUP_PLANS.ASSIGNEE, assignee)
-            .set(FOLLOWUP_PLANS.STATUS, "待随访")
-            .set(FOLLOWUP_PLANS.METADATA, JSONB.valueOf(metadata.encode()))
-            .set(FOLLOWUP_PLANS.CREATED_AT, now)
-            .set(FOLLOWUP_PLANS.UPDATED_AT, now)
-        remark?.let { query = query.set(FOLLOWUP_PLANS.REMARK, it) }
-        return query
-    }
-
-    // ========================================================================
     //  行读取与通用辅助
     // ========================================================================
 
     private fun getCheckupRow(client: SqlClient, id: String): Future<Row> =
-        execute(client, ctx.selectFrom(HEALTH_CHECKUPS).where(HEALTH_CHECKUPS.ID.eq(id))).compose { rows ->
+        execute(
+            client,
+            "SELECT id, checkup_year, name, status, start_date, end_date, operator, metadata, " +
+                "created_at, updated_at FROM healthcare.health_checkups WHERE id = \$1",
+            Tuple.of(id),
+        ).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(it) }
                 ?: Future.failedFuture(HealthcareNotFoundException("health checkup not found: $id"))
         }
 
     private fun getMemberRow(client: SqlClient, id: String): Future<Row> =
-        execute(client, ctx.selectFrom(HEALTH_CHECKUP_MEMBERS).where(HEALTH_CHECKUP_MEMBERS.ID.eq(id))).compose { rows ->
+        execute(
+            client,
+            "SELECT id, checkup_id, patient_id, encounter_id, checked, checked_at, operator, metadata, " +
+                "created_at, updated_at FROM healthcare.health_checkup_members WHERE id = \$1",
+            Tuple.of(id),
+        ).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(it) }
                 ?: Future.failedFuture(HealthcareNotFoundException("checkup member not found: $id"))
         }
 
     private fun getMemberVia(client: SqlClient, id: String): Future<JsonObject> =
-        execute(client, memberBaseQuery().where(HEALTH_CHECKUP_MEMBERS.ID.eq(id))).compose { rows ->
+        execute(client, "$MEMBER_BASE_SQL WHERE healthcare.health_checkup_members.id = \$1", Tuple.of(id)).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(memberJson(it)) }
                 ?: Future.failedFuture(HealthcareNotFoundException("checkup member not found: $id"))
         }
 
     private fun getResultRow(client: SqlClient, id: String): Future<Row> =
-        execute(client, ctx.selectFrom(HEALTH_CHECKUP_RESULTS).where(HEALTH_CHECKUP_RESULTS.ID.eq(id))).compose { rows ->
+        execute(
+            client,
+            "SELECT id, checkup_id, member_id, patient_id, item_name, item_category, value, unit, " +
+                "text_value, ref_min, ref_max, abnormal, exam_date, operator, vital_sign_id, " +
+                "followup_plan_id, metadata, created_at, updated_at " +
+                "FROM healthcare.health_checkup_results WHERE id = \$1",
+            Tuple.of(id),
+        ).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(it) }
                 ?: Future.failedFuture(HealthcareNotFoundException("checkup result not found: $id"))
         }
 
     private fun getPatient(client: SqlClient, id: String): Future<JsonObject> =
-        execute(client, ctx.selectFrom(PATIENTS).where(PATIENTS.ID.eq(id))).compose { rows ->
+        execute(
+            client,
+            "SELECT id, name, status FROM healthcare.patients WHERE id = \$1",
+            Tuple.of(id),
+        ).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { row ->
                 Future.succeededFuture(
                     JsonObject()
@@ -1354,7 +1307,11 @@ class CheckupService(
         }
 
     private fun validateEncounterOwnership(client: SqlClient, patientId: String, encounterId: String): Future<Row> =
-        execute(client, ctx.selectFrom(ENCOUNTERS).where(ENCOUNTERS.ID.eq(encounterId))).compose { rows ->
+        execute(
+            client,
+            "SELECT id, patient_id, admit_date FROM healthcare.encounters WHERE id = \$1",
+            Tuple.of(encounterId),
+        ).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { encounter ->
                 if (encounter.getString("patient_id") != patientId) {
                     Future.failedFuture(
@@ -1368,6 +1325,34 @@ class CheckupService(
 
     private fun patientAdmitDate(encounter: Row): LocalDate? =
         encounter.getOffsetDateTime("admit_date")?.atZoneSameInstant(businessZone)?.toLocalDate()
+
+    /** 结果行写入参数（可空列按位置绑定 null，占位符顺序固定）。 */
+    private fun resultInsertArgs(
+        id: String,
+        checkupId: String,
+        memberId: String,
+        fields: ResultFields,
+        operator: String,
+        now: OffsetDateTime,
+    ): Tuple = Tuple.of(
+        id,
+        checkupId,
+        memberId,
+        fields.patientId,
+        fields.itemName,
+        fields.itemCategory,
+        fields.abnormal,
+        fields.examDate,
+        operator,
+        now,
+        now,
+        fields.value,
+        fields.unit,
+        fields.textValue,
+        fields.refMin,
+        fields.refMax,
+        fields.metadata,
+    )
 
     private fun checkupCreatedJson(
         id: String,
@@ -1511,8 +1496,8 @@ class CheckupService(
             .put("created_at", now.toString())
             .put("updated_at", now.toString())
 
-    private fun execute(client: SqlClient, query: Query): Future<RowSet<Row>> =
-        client.preparedQuery(DatabaseConfig.sql(query)).execute(DatabaseConfig.tuple(query))
+    private fun execute(client: SqlClient, sql: String, args: Tuple): Future<RowSet<Row>> =
+        client.preparedQuery(sql).execute(args)
 
     private fun requiredText(body: JsonObject, key: String): String =
         body.getString(key)?.trim()?.takeIf(String::isNotBlank)

@@ -1,44 +1,38 @@
 package com.ovaphlow.crate.nursing
 
 import com.ovaphlow.crate.common.Ulid
-import com.ovaphlow.crate.database.DatabaseConfig
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
 import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
-import org.jooq.DSLContext
-import org.jooq.JSONB
-import org.jooq.impl.DSL
-import org.jooq.impl.DSL.count
+import io.vertx.sqlclient.Tuple
 import java.math.BigDecimal
 import java.time.LocalDate
 import java.time.OffsetDateTime
 
+/** 护理评估服务。持久化一律原生参数化 SQL（`$1..$n` + `Tuple`），无 jOOQ。 */
 class AssessmentService(
-    private val pool: Pool,
-    private val ctx: DSLContext = DatabaseConfig.createDSL()
+    private val pool: Pool
 ) {
-    private val t = DSL.table(DSL.name("nursing", "nursing_assessments"))
-
-    private val cId = DSL.field("id", String::class.java)
-    private val cEncounterId = DSL.field("encounter_id", String::class.java)
-    private val cPeriodId = DSL.field("period_id", String::class.java)
-    private val cAssessType = DSL.field("assess_type", String::class.java)
-    private val cAssessDate = DSL.field("assess_date", LocalDate::class.java)
-    private val cAssessor = DSL.field("assessor", String::class.java)
-    private val cTotalScore = DSL.field("total_score", BigDecimal::class.java)
-    private val cResultLevel = DSL.field("result_level", String::class.java)
-    private val cDetail = DSL.field("detail", JSONB::class.java)
-    private val cRemark = DSL.field("remark", String::class.java)
-    private val cMetadata = DSL.field("metadata", JSONB::class.java)
-    private val cCreatedAt = DSL.field("created_at", OffsetDateTime::class.java)
-
     companion object {
         private val VALID_ASSESS_TYPES = setOf(
             "ADMISSION", "FALL_RISK", "PRESSURE_SORE", "PAIN",
             "BARTHEL", "NUTRITION", "HOME_ENVIRONMENT", "OTHER"
         )
+
+        private const val COLUMNS =
+            "id, encounter_id, period_id, assess_type, assess_date, assessor, " +
+                "total_score, result_level, detail, remark, metadata, created_at"
+
+        private const val INSERT_SQL =
+            "INSERT INTO nursing.nursing_assessments ($COLUMNS) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11, \$12)"
+
+        private const val SELECT_BY_ID_SQL =
+            "SELECT $COLUMNS FROM nursing.nursing_assessments WHERE id = \$1"
+
+        private const val DELETE_SQL = "DELETE FROM nursing.nursing_assessments WHERE id = \$1"
 
         fun toJson(row: Row): JsonObject {
             return JsonObject()
@@ -74,24 +68,23 @@ class AssessmentService(
         val id = Ulid.generate()
         val now = OffsetDateTime.now()
 
-        val query = ctx.insertInto(t)
-            .set(cId, id)
-            .set(cEncounterId, encounterId?.takeIf { it.isNotBlank() })
-            .set(cPeriodId, periodId?.takeIf { it.isNotBlank() })
-            .set(cAssessType, assessType)
-            .set(cAssessDate, LocalDate.parse(body.getString("assess_date")))
-            .set(cAssessor, assessor)
-            .set(cTotalScore, body.getDouble("total_score")?.let { BigDecimal.valueOf(it) })
-            .set(cResultLevel, body.getString("result_level"))
-            .set(cDetail, body.containsKey("detail")
-                .let { if (it) JSONB.valueOf(body.getJsonObject("detail").encode()) else null })
-            .set(cRemark, body.getString("remark"))
-            .set(cMetadata, body.containsKey("metadata")
-                .let { if (it) JSONB.valueOf(body.getJsonObject("metadata").encode()) else null })
-            .set(cCreatedAt, now)
+        val tuple = Tuple.of(
+            id,
+            encounterId?.takeIf { it.isNotBlank() },
+            periodId?.takeIf { it.isNotBlank() },
+            assessType,
+            LocalDate.parse(body.getString("assess_date")),
+            assessor,
+            body.getDouble("total_score")?.let { BigDecimal.valueOf(it) },
+            body.getString("result_level"),
+            if (body.containsKey("detail")) body.getJsonObject("detail") else null,
+            body.getString("remark"),
+            if (body.containsKey("metadata")) body.getJsonObject("metadata") else null,
+            now,
+        )
 
-        return pool.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+        return pool.preparedQuery(INSERT_SQL)
+            .execute(tuple)
             .map {
                 JsonObject()
                     .put("id", id)
@@ -116,37 +109,39 @@ class AssessmentService(
         limit: Int = 50,
         offset: Int = 0
     ): Future<JsonObject> {
-        val conditions = mutableListOf<org.jooq.Condition>()
-        encounterId?.let { conditions.add(cEncounterId.eq(it)) }
-        periodId?.let { conditions.add(cPeriodId.eq(it)) }
-        assessType?.let { conditions.add(cAssessType.eq(it)) }
+        val where = mutableListOf<String>()
+        val args = mutableListOf<Any?>()
 
-        val countQuery = ctx.select(count().`as`("total")).from(t).where(conditions)
-        val dataQuery = ctx.selectFrom(t)
-            .where(conditions)
-            .orderBy(cCreatedAt.desc())
-            .limit(limit)
-            .offset(offset)
+        /** 追加一个绑定值并返回其占位符。 */
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
 
-        return pool.preparedQuery(DatabaseConfig.sql(countQuery))
-            .execute(DatabaseConfig.tuple(countQuery))
-            .flatMap { countRows ->
-                val total = countRows.iterator().next().getLong("total") ?: 0L
-                pool.preparedQuery(DatabaseConfig.sql(dataQuery))
-                    .execute(DatabaseConfig.tuple(dataQuery))
-                    .map { dataRows ->
-                        val records = JsonArray()
-                        for (row in dataRows) records.add(toJson(row))
-                        JsonObject().put("records", records)
-                            .put("meta", JsonObject().put("total", total))
-                    }
-            }
+        encounterId?.let { where.add("encounter_id = ${bind(it)}") }
+        periodId?.let { where.add("period_id = ${bind(it)}") }
+        assessType?.let { where.add("assess_type = ${bind(it)}") }
+
+        val whereClause = if (where.isEmpty()) "" else " WHERE " + where.joinToString(" AND ")
+        val countSql = "SELECT count(*) AS total FROM nursing.nursing_assessments$whereClause"
+        val countArgs = args.toList()
+        val dataSql =
+            "SELECT $COLUMNS FROM nursing.nursing_assessments$whereClause " +
+                "ORDER BY created_at DESC LIMIT ${bind(limit)} OFFSET ${bind(offset)}"
+        val dataArgs = args.toList()
+
+        return pool.preparedQuery(countSql).execute(Tuple.from(countArgs)).flatMap { countRows ->
+            val total = countRows.iterator().next().getLong("total") ?: 0L
+            pool.preparedQuery(dataSql).execute(Tuple.from(dataArgs))
+                .map { dataRows ->
+                    val records = JsonArray()
+                    for (row in dataRows) records.add(toJson(row))
+                    JsonObject().put("records", records)
+                        .put("meta", JsonObject().put("total", total))
+                }
+        }
     }
 
     fun get(id: String): Future<JsonObject> {
-        val query = ctx.selectFrom(t).where(cId.eq(id))
-        return pool.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+        return pool.preparedQuery(SELECT_BY_ID_SQL)
+            .execute(Tuple.of(id))
             .flatMap { rows ->
                 if (rows.size() == 0)
                     Future.failedFuture(NotFoundException("assessment not found: $id"))
@@ -156,31 +151,39 @@ class AssessmentService(
 
     fun update(id: String, body: JsonObject, assessor: String?): Future<JsonObject> {
         return get(id).flatMap { _ ->
-            var q = ctx.update(t).set(cAssessor, assessor)
+            val sets = mutableListOf<String>()
+            val args = mutableListOf<Any?>()
+
+            /** 追加一个绑定值并返回其占位符。 */
+            fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
+
+            sets.add("assessor = ${bind(assessor)}")
 
             if (body.containsKey("total_score"))
-                q = q.set(cTotalScore, body.getDouble("total_score")?.let { BigDecimal.valueOf(it) })
+                sets.add("total_score = ${bind(body.getDouble("total_score")?.let { BigDecimal.valueOf(it) })}")
             if (body.containsKey("result_level"))
-                q = q.set(cResultLevel, body.getString("result_level"))
+                sets.add("result_level = ${bind(body.getString("result_level"))}")
             if (body.containsKey("detail"))
-                q = q.set(cDetail, JSONB.valueOf(body.getJsonObject("detail").encode()))
+                sets.add("detail = ${bind(body.getJsonObject("detail"))}")
             if (body.containsKey("remark"))
-                q = q.set(cRemark, body.getString("remark"))
+                sets.add("remark = ${bind(body.getString("remark"))}")
             if (body.containsKey("metadata"))
-                q = q.set(cMetadata, JSONB.valueOf(body.getJsonObject("metadata").encode()))
+                sets.add("metadata = ${bind(body.getJsonObject("metadata"))}")
 
-            val updateQuery = q.where(cId.eq(id))
+            val idPlaceholder = bind(id)
+            val updateSql =
+                "UPDATE nursing.nursing_assessments SET ${sets.joinToString(", ")} " +
+                    "WHERE id = $idPlaceholder"
 
-            pool.preparedQuery(DatabaseConfig.sql(updateQuery))
-                .execute(DatabaseConfig.tuple(updateQuery))
+            pool.preparedQuery(updateSql)
+                .execute(Tuple.from(args))
                 .flatMap { get(id) }
         }
     }
 
     fun delete(id: String): Future<Void?> {
-        val query = ctx.deleteFrom(t).where(cId.eq(id))
-        return pool.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+        return pool.preparedQuery(DELETE_SQL)
+            .execute(Tuple.of(id))
             .map { null as Void? }
     }
 }

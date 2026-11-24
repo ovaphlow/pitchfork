@@ -1,13 +1,6 @@
 package com.ovaphlow.crate.healthcare
 
 import com.ovaphlow.crate.common.Ulid
-import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.database.gen.healthcare.tables.ChronicDiseaseRegistrations.CHRONIC_DISEASE_REGISTRATIONS
-import com.ovaphlow.crate.database.gen.healthcare.tables.Encounters.ENCOUNTERS
-import com.ovaphlow.crate.database.gen.healthcare.tables.FollowupPlans.FOLLOWUP_PLANS
-import com.ovaphlow.crate.database.gen.healthcare.tables.FollowupRecords.FOLLOWUP_RECORDS
-import com.ovaphlow.crate.database.gen.healthcare.tables.Patients.PATIENTS
-import com.ovaphlow.crate.database.gen.healthcare.tables.ProgressNotes.PROGRESS_NOTES
 import com.ovaphlow.crate.nursing.ConflictException
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
@@ -16,10 +9,7 @@ import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.RowSet
 import io.vertx.sqlclient.SqlClient
-import org.jooq.Condition
-import org.jooq.JSONB
-import org.jooq.Query
-import org.jooq.impl.DSL
+import io.vertx.sqlclient.Tuple
 import java.time.LocalDate
 import java.time.OffsetDateTime
 import java.time.ZoneId
@@ -44,10 +34,11 @@ import java.time.ZoneId
  *     软停管不物理删除，审计一致；停管后不再自动生成新计划。
  *  7. 病程记录复用 progress_notes（note_type=CHRONIC，metadata.chronic_disease_id
  *     关联本档案），只增不改。
+ *
+ * 持久化一律原生参数化 SQL（`$1..$n` + `Tuple`），无 jOOQ。
  */
 class ChronicDiseaseService(
     private val pool: Pool,
-    private val ctx: org.jooq.DSLContext = DatabaseConfig.createDSL(),
 ) {
     companion object {
         private val businessZone = ZoneId.of("Asia/Shanghai")
@@ -77,6 +68,80 @@ class ChronicDiseaseService(
         /** 状态 PATCH 白名单 */
         private val statusKeys = setOf("status")
 
+        /** 计划状态：待随访（登记/滚动生成时写入，唯一性/逾期口径依赖它） */
+        private const val PLAN_STATUS_PENDING = "待随访"
+
+        private const val REGISTRATION_COLUMNS =
+            "healthcare.chronic_disease_registrations.id, healthcare.chronic_disease_registrations.patient_id, healthcare.chronic_disease_registrations.encounter_id, healthcare.chronic_disease_registrations.disease_name, healthcare.chronic_disease_registrations.icd_code, healthcare.chronic_disease_registrations.confirmed_date, " +
+                "healthcare.chronic_disease_registrations.control_status, healthcare.chronic_disease_registrations.followup_frequency, healthcare.chronic_disease_registrations.physician, healthcare.chronic_disease_registrations.remark, healthcare.chronic_disease_registrations.status, healthcare.chronic_disease_registrations.metadata, " +
+                "healthcare.chronic_disease_registrations.created_at, healthcare.chronic_disease_registrations.updated_at"
+
+        private const val PLAN_COLUMNS =
+            "healthcare.followup_plans.id, healthcare.followup_plans.patient_id, healthcare.followup_plans.encounter_id, healthcare.followup_plans.followup_type, healthcare.followup_plans.planned_date, healthcare.followup_plans.planned_way, " +
+                "healthcare.followup_plans.assignee, healthcare.followup_plans.status, healthcare.followup_plans.completed_at, healthcare.followup_plans.cancel_reason, healthcare.followup_plans.remark, healthcare.followup_plans.metadata, " +
+                "healthcare.followup_plans.created_at, healthcare.followup_plans.updated_at"
+
+        private const val RECORD_COLUMNS =
+            "healthcare.followup_records.id, healthcare.followup_records.plan_id, healthcare.followup_records.patient_id, healthcare.followup_records.encounter_id, healthcare.followup_records.followup_type, healthcare.followup_records.followup_way, " +
+                "healthcare.followup_records.followup_date, healthcare.followup_records.contact_object, healthcare.followup_records.condition_summary, healthcare.followup_records.vitals, healthcare.followup_records.guidance, " +
+                "healthcare.followup_records.result, healthcare.followup_records.next_followup_date, healthcare.followup_records.operator, healthcare.followup_records.metadata, healthcare.followup_records.created_at, healthcare.followup_records.updated_at"
+
+        private const val PROGRESS_NOTE_COLUMNS =
+            "healthcare.progress_notes.id, healthcare.progress_notes.encounter_id, healthcare.progress_notes.note_type, healthcare.progress_notes.content, healthcare.progress_notes.physician, healthcare.progress_notes.record_time, " +
+                "healthcare.progress_notes.metadata, healthcare.progress_notes.created_at"
+
+        /**
+         * 档案基础查询（列表/详情/更新回读共用）：`$1` = 计划状态「待随访」，
+         * 过滤条件占位符从 `$2` 起，由调用方按出现顺序追加。
+         */
+        private const val REGISTRATION_BASE_SQL =
+            "SELECT $REGISTRATION_COLUMNS, healthcare.patients.name AS patient_name, " +
+                "healthcare.encounters.encounter_no AS encounter_no, healthcare.encounters.admit_date AS admit_date, " +
+                "(SELECT min(healthcare.followup_plans.planned_date) FROM healthcare.followup_plans " +
+                "WHERE healthcare.followup_plans.metadata ->> 'chronic_disease_id' = healthcare.chronic_disease_registrations.id AND healthcare.followup_plans.status = \$1) " +
+                "AS next_followup_date, " +
+                "(SELECT max(healthcare.followup_records.followup_date) FROM healthcare.followup_records " +
+                "JOIN healthcare.followup_plans ON healthcare.followup_records.plan_id = healthcare.followup_plans.id " +
+                "WHERE healthcare.followup_plans.metadata ->> 'chronic_disease_id' = healthcare.chronic_disease_registrations.id) AS recent_followup_date, " +
+                "(SELECT healthcare.followup_records.result FROM healthcare.followup_records " +
+                "JOIN healthcare.followup_plans ON healthcare.followup_records.plan_id = healthcare.followup_plans.id " +
+                "WHERE healthcare.followup_plans.metadata ->> 'chronic_disease_id' = healthcare.chronic_disease_registrations.id " +
+                "ORDER BY healthcare.followup_records.followup_date DESC LIMIT 1) AS recent_followup_result " +
+                "FROM healthcare.chronic_disease_registrations " +
+                "JOIN healthcare.patients ON healthcare.patients.id = healthcare.chronic_disease_registrations.patient_id " +
+                "JOIN healthcare.encounters ON healthcare.encounters.id = healthcare.chronic_disease_registrations.encounter_id"
+
+        /** 计划基础查询：挂患者名与住院号（时间线用）。 */
+        private const val PLAN_BASE_SQL =
+            "SELECT $PLAN_COLUMNS, healthcare.patients.name AS patient_name, healthcare.encounters.encounter_no AS encounter_no " +
+                "FROM healthcare.followup_plans " +
+                "JOIN healthcare.patients ON healthcare.patients.id = healthcare.followup_plans.patient_id " +
+                "JOIN healthcare.encounters ON healthcare.encounters.id = healthcare.followup_plans.encounter_id"
+
+        /** 记录基础查询：挂患者名与住院号（时间线用）。 */
+        private const val RECORD_BASE_SQL =
+            "SELECT $RECORD_COLUMNS, healthcare.patients.name AS patient_name, healthcare.encounters.encounter_no AS encounter_no " +
+                "FROM healthcare.followup_records " +
+                "JOIN healthcare.followup_plans ON healthcare.followup_records.plan_id = healthcare.followup_plans.id " +
+                "JOIN healthcare.patients ON healthcare.patients.id = healthcare.followup_records.patient_id " +
+                "JOIN healthcare.encounters ON healthcare.encounters.id = healthcare.followup_records.encounter_id"
+
+        private const val INSERT_REGISTRATION_SQL =
+            "INSERT INTO healthcare.chronic_disease_registrations " +
+                "(id, patient_id, encounter_id, disease_name, confirmed_date, control_status, " +
+                "followup_frequency, status, created_at, updated_at, icd_code, physician, remark, metadata) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11, \$12, \$13, \$14)"
+
+        private const val INSERT_PLAN_SQL =
+            "INSERT INTO healthcare.followup_plans " +
+                "(id, patient_id, encounter_id, followup_type, planned_date, planned_way, assignee, " +
+                "status, metadata, created_at, updated_at) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11)"
+
+        private const val UPDATE_STATUS_SQL =
+            "UPDATE healthcare.chronic_disease_registrations SET status = \$1, updated_at = \$2 " +
+                "WHERE healthcare.chronic_disease_registrations.id = \$3"
+
         private fun today(): LocalDate = LocalDate.now(businessZone)
 
         /** 频率 → 月数（滚动生成下一轮计划用） */
@@ -90,23 +155,11 @@ class ChronicDiseaseService(
                 else -> throw IllegalArgumentException("invalid followup_frequency: $frequency")
             }
 
+        /** 计划/记录 metadata 关联的慢病档案 ID（JSONB `metadata.chronic_disease_id`）。 */
         private fun chronicIdOf(metadata: Any?): String? {
-            if (metadata == null) return null
-            val value = try {
-                when (metadata) {
-                    is JsonObject -> metadata
-                    is JSONB -> JsonObject(metadata.data())
-                    else -> return null
-                }
-            } catch (_: RuntimeException) {
-                return null
-            }
+            val value = metadata as? JsonObject ?: return null
             return value.getString("chronic_disease_id")?.trim()?.takeIf(String::isNotBlank)
         }
-
-        /** PG 特定：JSONB 对象键提取（metadata ->> 'chronic_disease_id'） */
-        private fun chronicDiseaseIdField(field: org.jooq.Field<JSONB>): org.jooq.Field<String> =
-            DSL.field("{0} ->> 'chronic_disease_id'", String::class.java, field)
     }
 
     // ========================================================================
@@ -151,7 +204,7 @@ class ChronicDiseaseService(
                         )
                     }
                     ensureNoActiveRegistration(connection, input.patientId, input.diseaseName).compose {
-                        execute(connection, registrationInsert(body, id, input, now))
+                        execute(connection, INSERT_REGISTRATION_SQL, registrationInsertArgs(id, input, now))
                             .compose {
                                 // 自动生成首轮随访计划（同事务，失败整体回滚）
                                 createFirstFollowupPlan(
@@ -185,32 +238,34 @@ class ChronicDiseaseService(
         limit: Int,
         offset: Int,
     ): Future<JsonObject> {
-        val conditions = try {
-            mutableListOf<Condition>().also { list ->
-                patientId?.takeIf(String::isNotBlank)?.let { list += CHRONIC_DISEASE_REGISTRATIONS.PATIENT_ID.eq(it) }
-                diseaseName?.takeIf(String::isNotBlank)?.let {
-                    list += CHRONIC_DISEASE_REGISTRATIONS.DISEASE_NAME.containsIgnoreCase(it)
-                }
-                controlStatus?.takeIf(String::isNotBlank)?.let {
-                    list += CHRONIC_DISEASE_REGISTRATIONS.CONTROL_STATUS.eq(validValue(it, controlStatuses, "control_status"))
-                }
-                status?.takeIf(String::isNotBlank)?.let {
-                    list += CHRONIC_DISEASE_REGISTRATIONS.STATUS.eq(validValue(it, registrationStatuses, "status"))
-                }
+        // $1 固定为计划状态「待随访」（基础查询的子查询用）；过滤条件从 $2 起
+        val args = mutableListOf<Any?>(PLAN_STATUS_PENDING)
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
+
+        val filters = mutableListOf<String>()
+        try {
+            patientId?.takeIf(String::isNotBlank)?.let { filters += "healthcare.chronic_disease_registrations.patient_id = ${bind(it)}" }
+            diseaseName?.takeIf(String::isNotBlank)?.let {
+                filters += "healthcare.chronic_disease_registrations.disease_name ILIKE '%' || ${bind(it)} || '%'"
+            }
+            controlStatus?.takeIf(String::isNotBlank)?.let {
+                filters += "healthcare.chronic_disease_registrations.control_status = ${bind(validValue(it, controlStatuses, "control_status"))}"
+            }
+            status?.takeIf(String::isNotBlank)?.let {
+                filters += "healthcare.chronic_disease_registrations.status = ${bind(validValue(it, registrationStatuses, "status"))}"
             }
         } catch (error: IllegalArgumentException) {
             return Future.failedFuture(error)
         }
 
-        val countQuery = ctx.select(DSL.count().`as`("total")).from(CHRONIC_DISEASE_REGISTRATIONS).where(conditions)
-        val dataQuery = registrationBaseQuery(conditions)
-            .orderBy(CHRONIC_DISEASE_REGISTRATIONS.CONFIRMED_DATE.desc(), CHRONIC_DISEASE_REGISTRATIONS.CREATED_AT.desc())
-            .limit(limit)
-            .offset(offset)
+        val where = if (filters.isEmpty()) "" else " WHERE ${filters.joinToString(" AND ")}"
+        val countSql = "SELECT count(*) AS total FROM ($REGISTRATION_BASE_SQL$where) regs"
+        val dataSql = "$REGISTRATION_BASE_SQL$where ORDER BY healthcare.chronic_disease_registrations.confirmed_date DESC, healthcare.chronic_disease_registrations.created_at DESC " +
+            "OFFSET \$${args.size + 1} ROWS FETCH NEXT \$${args.size + 2} ROWS ONLY"
 
-        return execute(pool, countQuery).compose { countRows ->
+        return execute(pool, countSql, Tuple.from(args)).compose { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(pool, dataQuery).map { rows ->
+            execute(pool, dataSql, Tuple.from(args + listOf<Any?>(offset, limit))).map { rows ->
                 JsonObject()
                     .put("records", JsonArray(rows.map(::registrationJson)))
                     .put("meta", JsonObject().put("total", total))
@@ -220,10 +275,7 @@ class ChronicDiseaseService(
 
     /** 档案详情：按 ID 读取（历史只读，不校验入住状态） */
     fun getRegistration(id: String): Future<JsonObject> =
-        execute(pool, registrationBaseQuery(listOf(CHRONIC_DISEASE_REGISTRATIONS.ID.eq(id)))).compose { rows ->
-            rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(registrationJson(it)) }
-                ?: Future.failedFuture(HealthcareNotFoundException("chronic disease registration not found: $id"))
-        }
+        getRegistrationVia(pool, id)
 
     /**
      * 档案详情时间线：慢病病程记录（progress_notes note_type=CHRONIC 且
@@ -231,35 +283,36 @@ class ChronicDiseaseService(
      * 中 followup_type=慢病随访 且 metadata.chronic_disease_id=本档案），各按时间倒序。
      */
     fun getRegistrationTimeline(id: String): Future<JsonObject> =
-        execute(pool, ctx.selectOne().from(CHRONIC_DISEASE_REGISTRATIONS).where(CHRONIC_DISEASE_REGISTRATIONS.ID.eq(id)))
-            .compose { rows ->
-                if (rows.size() == 0) {
-                    return@compose Future.failedFuture(
-                        HealthcareNotFoundException("chronic disease registration not found: $id"),
-                    )
-                }
-                val chronicCondition = chronicDiseaseIdField(FOLLOWUP_PLANS.METADATA).eq(id)
-                val notesQuery = ctx.selectFrom(PROGRESS_NOTES)
-                    .where(chronicDiseaseIdField(PROGRESS_NOTES.METADATA).eq(id))
-                    .orderBy(PROGRESS_NOTES.RECORD_TIME.desc(), PROGRESS_NOTES.CREATED_AT.desc())
-                val plansQuery = planBaseQuery()
-                    .where(chronicCondition)
-                    .orderBy(FOLLOWUP_PLANS.PLANNED_DATE.desc(), FOLLOWUP_PLANS.CREATED_AT.desc())
-                val recordsQuery = recordBaseQuery()
-                    .where(chronicCondition)
-                    .orderBy(FOLLOWUP_RECORDS.FOLLOWUP_DATE.desc(), FOLLOWUP_RECORDS.CREATED_AT.desc())
-                execute(pool, notesQuery).compose { noteRows ->
-                    execute(pool, plansQuery).compose { planRows ->
-                        execute(pool, recordsQuery).map { recordRows ->
-                            JsonObject()
-                                .put("chronic_disease_id", id)
-                                .put("progress_notes", JsonArray(noteRows.map(::progressNoteJson)))
-                                .put("followup_plans", JsonArray(planRows.map(::planJson)))
-                                .put("followup_records", JsonArray(recordRows.map(::recordJson)))
-                        }
+        execute(
+            pool,
+            "SELECT 1 FROM healthcare.chronic_disease_registrations " +
+                "WHERE healthcare.chronic_disease_registrations.id = \$1",
+            Tuple.of(id),
+        ).compose { rows ->
+            if (rows.size() == 0) {
+                return@compose Future.failedFuture(
+                    HealthcareNotFoundException("chronic disease registration not found: $id"),
+                )
+            }
+            val notesSql = "SELECT $PROGRESS_NOTE_COLUMNS FROM healthcare.progress_notes " +
+                "WHERE healthcare.progress_notes.metadata ->> 'chronic_disease_id' = \$1 " +
+                "ORDER BY healthcare.progress_notes.record_time DESC, healthcare.progress_notes.created_at DESC"
+            val plansSql = "$PLAN_BASE_SQL WHERE healthcare.followup_plans.metadata ->> 'chronic_disease_id' = \$1 " +
+                "ORDER BY healthcare.followup_plans.planned_date DESC, healthcare.followup_plans.created_at DESC"
+            val recordsSql = "$RECORD_BASE_SQL WHERE healthcare.followup_plans.metadata ->> 'chronic_disease_id' = \$1 " +
+                "ORDER BY healthcare.followup_records.followup_date DESC, healthcare.followup_records.created_at DESC"
+            execute(pool, notesSql, Tuple.of(id)).compose { noteRows ->
+                execute(pool, plansSql, Tuple.of(id)).compose { planRows ->
+                    execute(pool, recordsSql, Tuple.of(id)).map { recordRows ->
+                        JsonObject()
+                            .put("chronic_disease_id", id)
+                            .put("progress_notes", JsonArray(noteRows.map(::progressNoteJson)))
+                            .put("followup_plans", JsonArray(planRows.map(::planJson)))
+                            .put("followup_records", JsonArray(recordRows.map(::recordJson)))
                     }
                 }
             }
+        }
 
     /**
      * 档案状态 PATCH：管理中 → 已缓解 | 已停管；已缓解/已停管 → 管理中。
@@ -292,15 +345,8 @@ class ChronicDiseaseService(
                 } else {
                     Future.succeededFuture()
                 }.compose {
-                    execute(
-                        connection,
-                        ctx.update(CHRONIC_DISEASE_REGISTRATIONS)
-                            .set(CHRONIC_DISEASE_REGISTRATIONS.STATUS, status)
-                            .set(CHRONIC_DISEASE_REGISTRATIONS.UPDATED_AT, now)
-                            .where(CHRONIC_DISEASE_REGISTRATIONS.ID.eq(id)),
-                    ).compose {
-                        getRegistrationVia(connection, id)
-                    }
+                    execute(connection, UPDATE_STATUS_SQL, Tuple.of(status, now, id))
+                        .compose { getRegistrationVia(connection, id) }
                 }
             }
         }
@@ -334,7 +380,12 @@ class ChronicDiseaseService(
         }
         return execute(
             client,
-            ctx.selectFrom(CHRONIC_DISEASE_REGISTRATIONS).where(CHRONIC_DISEASE_REGISTRATIONS.ID.eq(chronicId)),
+            "SELECT healthcare.chronic_disease_registrations.id, " +
+                "healthcare.chronic_disease_registrations.status, " +
+                "healthcare.chronic_disease_registrations.followup_frequency " +
+                "FROM healthcare.chronic_disease_registrations " +
+                "WHERE healthcare.chronic_disease_registrations.id = \$1",
+            Tuple.of(chronicId),
         ).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { registration ->
                 if (registration.getString("status") != "管理中") {
@@ -365,86 +416,26 @@ class ChronicDiseaseService(
                             .put("source", "慢病随访完成")
                         execute(
                             client,
-                            ctx.insertInto(FOLLOWUP_PLANS)
-                                .set(FOLLOWUP_PLANS.ID, planId)
-                                .set(FOLLOWUP_PLANS.PATIENT_ID, plan.getString("patient_id"))
-                                .set(FOLLOWUP_PLANS.ENCOUNTER_ID, encounterId)
-                                .set(FOLLOWUP_PLANS.FOLLOWUP_TYPE, "慢病随访")
-                                .set(FOLLOWUP_PLANS.PLANNED_DATE, effectiveDate)
-                                .set(FOLLOWUP_PLANS.PLANNED_WAY, "电话")
-                                .set(FOLLOWUP_PLANS.ASSIGNEE, operator)
-                                .set(FOLLOWUP_PLANS.STATUS, "待随访")
-                                .set(FOLLOWUP_PLANS.METADATA, JSONB.valueOf(metadata.encode()))
-                                .set(FOLLOWUP_PLANS.CREATED_AT, now)
-                                .set(FOLLOWUP_PLANS.UPDATED_AT, now),
+                            INSERT_PLAN_SQL,
+                            Tuple.of(
+                                planId,
+                                plan.getString("patient_id"),
+                                encounterId,
+                                "慢病随访",
+                                effectiveDate,
+                                "电话",
+                                operator,
+                                PLAN_STATUS_PENDING,
+                                metadata,
+                                now,
+                                now,
+                            ),
                         ).map { true }
                     }
                 }
             } ?: Future.succeededFuture(false)
         }
     }
-
-    // ========================================================================
-    //  查询构造
-    // ========================================================================
-
-    private fun registrationBaseQuery(conditions: List<Condition>): org.jooq.SelectConditionStep<org.jooq.Record> {
-        val chronicIdOfPlan = chronicDiseaseIdField(FOLLOWUP_PLANS.METADATA)
-        val nextPlanDate = DSL.select(DSL.min(FOLLOWUP_PLANS.PLANNED_DATE))
-            .from(FOLLOWUP_PLANS)
-            .where(
-                chronicIdOfPlan.eq(CHRONIC_DISEASE_REGISTRATIONS.ID)
-                    .and(FOLLOWUP_PLANS.STATUS.eq("待随访")),
-            )
-        val recentRecordDate = DSL.select(DSL.max(FOLLOWUP_RECORDS.FOLLOWUP_DATE))
-            .from(FOLLOWUP_RECORDS)
-            .join(FOLLOWUP_PLANS).on(FOLLOWUP_RECORDS.PLAN_ID.eq(FOLLOWUP_PLANS.ID))
-            .where(chronicIdOfPlan.eq(CHRONIC_DISEASE_REGISTRATIONS.ID))
-        val recentRecordResult = DSL.select(FOLLOWUP_RECORDS.RESULT)
-            .from(FOLLOWUP_RECORDS)
-            .join(FOLLOWUP_PLANS).on(FOLLOWUP_RECORDS.PLAN_ID.eq(FOLLOWUP_PLANS.ID))
-            .where(chronicIdOfPlan.eq(CHRONIC_DISEASE_REGISTRATIONS.ID))
-            .orderBy(FOLLOWUP_RECORDS.FOLLOWUP_DATE.desc())
-            .limit(1)
-        return ctx.select(
-            CHRONIC_DISEASE_REGISTRATIONS.fields().toList() +
-                listOf(
-                    PATIENTS.NAME.`as`("patient_name"),
-                    ENCOUNTERS.ENCOUNTER_NO.`as`("encounter_no"),
-                    ENCOUNTERS.ADMIT_DATE.`as`("admit_date"),
-                    DSL.field(nextPlanDate).`as`("next_followup_date"),
-                    DSL.field(recentRecordDate).`as`("recent_followup_date"),
-                    DSL.field(recentRecordResult).`as`("recent_followup_result"),
-                ),
-        )
-            .from(CHRONIC_DISEASE_REGISTRATIONS)
-            .join(PATIENTS).on(CHRONIC_DISEASE_REGISTRATIONS.PATIENT_ID.eq(PATIENTS.ID))
-            .join(ENCOUNTERS).on(CHRONIC_DISEASE_REGISTRATIONS.ENCOUNTER_ID.eq(ENCOUNTERS.ID))
-            .where(conditions)
-    }
-
-    private fun planBaseQuery() = ctx.select(
-        FOLLOWUP_PLANS.fields().toList() +
-            listOf(PATIENTS.NAME.`as`("patient_name"), ENCOUNTERS.ENCOUNTER_NO.`as`("encounter_no")),
-    )
-        .from(FOLLOWUP_PLANS)
-        .join(PATIENTS).on(FOLLOWUP_PLANS.PATIENT_ID.eq(PATIENTS.ID))
-        .join(ENCOUNTERS).on(FOLLOWUP_PLANS.ENCOUNTER_ID.eq(ENCOUNTERS.ID))
-
-    private fun recordBaseQuery() = ctx.select(
-        FOLLOWUP_RECORDS.fields().toList() +
-            listOf(PATIENTS.NAME.`as`("patient_name"), ENCOUNTERS.ENCOUNTER_NO.`as`("encounter_no")),
-    )
-        .from(FOLLOWUP_RECORDS)
-        .join(FOLLOWUP_PLANS).on(FOLLOWUP_RECORDS.PLAN_ID.eq(FOLLOWUP_PLANS.ID))
-        .join(PATIENTS).on(FOLLOWUP_RECORDS.PATIENT_ID.eq(PATIENTS.ID))
-        .join(ENCOUNTERS).on(FOLLOWUP_RECORDS.ENCOUNTER_ID.eq(ENCOUNTERS.ID))
-
-    private fun getRegistrationVia(client: SqlClient, id: String): Future<JsonObject> =
-        execute(client, registrationBaseQuery(listOf(CHRONIC_DISEASE_REGISTRATIONS.ID.eq(id)))).compose { rows ->
-            rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(registrationJson(it)) }
-                ?: Future.failedFuture(HealthcareNotFoundException("chronic disease registration not found: $id"))
-        }
 
     // ========================================================================
     //  自动生成首轮随访计划（登记事务内）
@@ -469,32 +460,31 @@ class ChronicDiseaseService(
             .put("source", "慢病登记")
         return execute(
             client,
-            ctx.insertInto(FOLLOWUP_PLANS)
-                .set(FOLLOWUP_PLANS.ID, planId)
-                .set(FOLLOWUP_PLANS.PATIENT_ID, patientId)
-                .set(FOLLOWUP_PLANS.ENCOUNTER_ID, encounterId)
-                .set(FOLLOWUP_PLANS.FOLLOWUP_TYPE, "慢病随访")
-                .set(FOLLOWUP_PLANS.PLANNED_DATE, effectiveDate)
-                .set(FOLLOWUP_PLANS.PLANNED_WAY, "电话")
-                .set(FOLLOWUP_PLANS.ASSIGNEE, assignee)
-                .set(FOLLOWUP_PLANS.STATUS, "待随访")
-                .set(FOLLOWUP_PLANS.METADATA, JSONB.valueOf(metadata.encode()))
-                .set(FOLLOWUP_PLANS.CREATED_AT, now)
-                .set(FOLLOWUP_PLANS.UPDATED_AT, now),
+            INSERT_PLAN_SQL,
+            Tuple.of(
+                planId,
+                patientId,
+                encounterId,
+                "慢病随访",
+                effectiveDate,
+                "电话",
+                assignee,
+                PLAN_STATUS_PENDING,
+                metadata,
+                now,
+                now,
+            ),
         ).map { null }
     }
 
     /** 幂等：同档案同 planned_date 不存在未取消（待随访/已完成）计划 */
-    private fun ensureNoActivePlan(client: SqlClient, chronicId: String, plannedDate: LocalDate): Future<Boolean> {
-        val query = ctx.selectOne()
-            .from(FOLLOWUP_PLANS)
-            .where(
-                chronicDiseaseIdField(FOLLOWUP_PLANS.METADATA).eq(chronicId)
-                    .and(FOLLOWUP_PLANS.PLANNED_DATE.eq(plannedDate))
-                    .and(FOLLOWUP_PLANS.STATUS.ne("已取消")),
-            )
-        return execute(client, query).map { rows -> rows.size() == 0 }
-    }
+    private fun ensureNoActivePlan(client: SqlClient, chronicId: String, plannedDate: LocalDate): Future<Boolean> =
+        execute(
+            client,
+            "SELECT 1 FROM healthcare.followup_plans WHERE metadata ->> 'chronic_disease_id' = \$1 " +
+                "AND planned_date = \$2 AND status <> \$3",
+            Tuple.of(chronicId, plannedDate, "已取消"),
+        ).map { rows -> rows.size() == 0 }
 
     /** 同一患者同一病种仅允许一条「管理中」档案 */
     private fun ensureNoActiveRegistration(
@@ -503,14 +493,14 @@ class ChronicDiseaseService(
         diseaseName: String,
         excludeId: String? = null,
     ): Future<Void> {
-        var condition: Condition = CHRONIC_DISEASE_REGISTRATIONS.PATIENT_ID.eq(patientId)
-            .and(CHRONIC_DISEASE_REGISTRATIONS.DISEASE_NAME.eq(diseaseName))
-            .and(CHRONIC_DISEASE_REGISTRATIONS.STATUS.eq("管理中"))
+        val args = mutableListOf<Any?>(patientId, diseaseName, "管理中")
+        var sql = "SELECT 1 FROM healthcare.chronic_disease_registrations " +
+            "WHERE patient_id = \$1 AND disease_name = \$2 AND status = \$3"
         if (excludeId != null) {
-            condition = condition.and(CHRONIC_DISEASE_REGISTRATIONS.ID.ne(excludeId))
+            args.add(excludeId)
+            sql += " AND id <> \$4"
         }
-        val query = ctx.selectOne().from(CHRONIC_DISEASE_REGISTRATIONS).where(condition)
-        return execute(client, query).compose { rows ->
+        return execute(client, sql, Tuple.from(args)).compose { rows ->
             if (rows.size() == 0) {
                 Future.succeededFuture()
             } else {
@@ -572,21 +562,8 @@ class ChronicDiseaseService(
         )
     }
 
-    private fun registrationInsert(body: JsonObject, id: String, input: CreateInput, now: OffsetDateTime): Query {
-        var query = ctx.insertInto(CHRONIC_DISEASE_REGISTRATIONS)
-            .set(CHRONIC_DISEASE_REGISTRATIONS.ID, id)
-            .set(CHRONIC_DISEASE_REGISTRATIONS.PATIENT_ID, input.patientId)
-            .set(CHRONIC_DISEASE_REGISTRATIONS.ENCOUNTER_ID, input.encounterId)
-            .set(CHRONIC_DISEASE_REGISTRATIONS.DISEASE_NAME, input.diseaseName)
-            .set(CHRONIC_DISEASE_REGISTRATIONS.CONFIRMED_DATE, input.confirmedDate)
-            .set(CHRONIC_DISEASE_REGISTRATIONS.CONTROL_STATUS, input.controlStatus)
-            .set(CHRONIC_DISEASE_REGISTRATIONS.FOLLOWUP_FREQUENCY, input.followupFrequency)
-            .set(CHRONIC_DISEASE_REGISTRATIONS.STATUS, "管理中")
-            .set(CHRONIC_DISEASE_REGISTRATIONS.CREATED_AT, now)
-            .set(CHRONIC_DISEASE_REGISTRATIONS.UPDATED_AT, now)
-        input.icdCode?.let { query = query.set(CHRONIC_DISEASE_REGISTRATIONS.ICD_CODE, it) }
-        input.physician?.let { query = query.set(CHRONIC_DISEASE_REGISTRATIONS.PHYSICIAN, it) }
-        input.remark?.let { query = query.set(CHRONIC_DISEASE_REGISTRATIONS.REMARK, it) }
+    /** 登记写入参数：可空列按位置绑定 null（占位符顺序固定）。 */
+    private fun registrationInsertArgs(id: String, input: CreateInput, now: OffsetDateTime): Tuple {
         // 扩展 metadata 与「登记来源诊断」合并：metadata.diagnosis_id 保留追溯
         val metadata = JsonObject()
         input.metadata?.forEach { entry -> metadata.put(entry.key, entry.value) }
@@ -594,10 +571,22 @@ class ChronicDiseaseService(
         if (diagnosisId != null) {
             metadata.put("diagnosis_id", diagnosisId)
         }
-        if (metadata.size() > 0) {
-            query = query.set(CHRONIC_DISEASE_REGISTRATIONS.METADATA, JSONB.valueOf(metadata.encode()))
-        }
-        return query
+        return Tuple.of(
+            id,
+            input.patientId,
+            input.encounterId,
+            input.diseaseName,
+            input.confirmedDate,
+            input.controlStatus,
+            input.followupFrequency,
+            "管理中",
+            now,
+            now,
+            input.icdCode,
+            input.physician,
+            input.remark,
+            if (metadata.size() > 0) metadata else null,
+        )
     }
 
     // ========================================================================
@@ -605,7 +594,11 @@ class ChronicDiseaseService(
     // ========================================================================
 
     private fun getPatient(client: SqlClient, id: String): Future<JsonObject> =
-        execute(client, ctx.selectFrom(PATIENTS).where(PATIENTS.ID.eq(id))).compose { rows ->
+        execute(
+            client,
+            "SELECT id, name, status FROM healthcare.patients WHERE id = \$1",
+            Tuple.of(id),
+        ).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { row ->
                 Future.succeededFuture(
                     JsonObject()
@@ -617,25 +610,48 @@ class ChronicDiseaseService(
         }
 
     private fun lockEncounter(client: SqlClient, id: String): Future<Row> =
-        execute(client, ctx.selectFrom(ENCOUNTERS).where(ENCOUNTERS.ID.eq(id)).forUpdate()).compose { rows ->
+        execute(
+            client,
+            "SELECT id, patient_id, encounter_type, status, admit_date " +
+                "FROM healthcare.encounters WHERE id = \$1 FOR UPDATE",
+            Tuple.of(id),
+        ).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(it) }
                 ?: Future.failedFuture(HealthcareNotFoundException("encounter not found: $id"))
         }
 
     private fun lockRegistration(client: SqlClient, id: String): Future<Row> =
-        execute(client, ctx.selectFrom(CHRONIC_DISEASE_REGISTRATIONS).where(CHRONIC_DISEASE_REGISTRATIONS.ID.eq(id)).forUpdate())
-            .compose { rows ->
-                rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(it) }
-                    ?: Future.failedFuture(HealthcareNotFoundException("chronic disease registration not found: $id"))
-            }
+        execute(
+            client,
+            "SELECT id, patient_id, disease_name, status " +
+                "FROM healthcare.chronic_disease_registrations " +
+                "WHERE healthcare.chronic_disease_registrations.id = \$1 FOR UPDATE",
+            Tuple.of(id),
+        ).compose { rows ->
+            rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(it) }
+                ?: Future.failedFuture(HealthcareNotFoundException("chronic disease registration not found: $id"))
+        }
 
     private fun getAdmitDate(client: SqlClient, encounterId: String): Future<LocalDate?> =
-        execute(client, ctx.select(ENCOUNTERS.ADMIT_DATE).from(ENCOUNTERS).where(ENCOUNTERS.ID.eq(encounterId))).map { rows ->
+        execute(
+            client,
+            "SELECT admit_date FROM healthcare.encounters WHERE id = \$1",
+            Tuple.of(encounterId),
+        ).map { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { patientAdmitDate(it) }
         }
 
     private fun patientAdmitDate(encounter: Row): LocalDate? =
         encounter.getOffsetDateTime("admit_date")?.atZoneSameInstant(businessZone)?.toLocalDate()
+
+    private fun getRegistrationVia(client: SqlClient, id: String): Future<JsonObject> {
+        val args = mutableListOf<Any?>(PLAN_STATUS_PENDING, id)
+        val sql = "$REGISTRATION_BASE_SQL WHERE healthcare.chronic_disease_registrations.id = \$2"
+        return execute(client, sql, Tuple.from(args)).compose { rows ->
+            rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(registrationJson(it)) }
+                ?: Future.failedFuture(HealthcareNotFoundException("chronic disease registration not found: $id"))
+        }
+    }
 
     private fun registrationJson(row: Row): JsonObject {
         val nextDate = row.getLocalDate("next_followup_date")
@@ -697,7 +713,7 @@ class ChronicDiseaseService(
         val plannedDate = row.getLocalDate("planned_date")
         val status = row.getString("status")
         val computedStatus =
-            if (status == "待随访" && plannedDate != null && plannedDate.isBefore(today())) "已逾期" else status
+            if (status == PLAN_STATUS_PENDING && plannedDate != null && plannedDate.isBefore(today())) "已逾期" else status
         return JsonObject()
             .put("id", row.getString("id"))
             .put("patient_id", row.getString("patient_id"))
@@ -754,8 +770,8 @@ class ChronicDiseaseService(
     //  通用辅助
     // ========================================================================
 
-    private fun execute(client: SqlClient, query: Query): Future<RowSet<Row>> =
-        client.preparedQuery(DatabaseConfig.sql(query)).execute(DatabaseConfig.tuple(query))
+    private fun execute(client: SqlClient, sql: String, args: Tuple): Future<RowSet<Row>> =
+        client.preparedQuery(sql).execute(args)
 
     private fun requiredText(body: JsonObject, key: String): String =
         body.getString(key)?.trim()?.takeIf(String::isNotBlank)

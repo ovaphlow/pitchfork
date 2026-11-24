@@ -1,9 +1,6 @@
 package com.ovaphlow.crate.pharmacy
 
 import com.ovaphlow.crate.common.Ulid
-import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyDispenseItems.PHARMACY_DISPENSE_ITEMS
-import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyDispenses.PHARMACY_DISPENSES
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
@@ -12,9 +9,6 @@ import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.SqlClient
 import io.vertx.sqlclient.SqlConnection
 import io.vertx.sqlclient.Tuple
-import org.jooq.DSLContext
-import org.jooq.JSONB
-import org.jooq.impl.DSL.count
 import java.math.BigDecimal
 import java.time.OffsetDateTime
 
@@ -87,7 +81,6 @@ class DispenseService(
      * 为 null 时**完全不做检查**，发药确认行为与接线前逐字一致（响应也不追加新字段）。
      */
     private val drugAllergyCheckPort: DrugAllergyCheckPort? = null,
-    private val ctx: DSLContext = DatabaseConfig.createDSL(),
 ) {
     companion object {
         private val VALID_STATUS_TRANSITIONS = mapOf(
@@ -123,6 +116,60 @@ class DispenseService(
                 "FROM pharmacy.pharmacy_dispenses d " +
                 "JOIN pharmacy.pharmacy_dispense_items i ON i.dispense_id = d.id " +
                 "WHERE d.id = \$1 AND i.material_id IS NOT NULL"
+
+        private const val DISPENSE_COLUMNS =
+            "id, dispense_no, patient_id, encounter_id, dispense_type, status, pharmacist, reviewer, " +
+                "warehouse, metadata, created_at, dispensed_at"
+
+        private const val ITEM_COLUMNS =
+            "id, dispense_id, order_item_id, order_execution_id, material_id, lot_id, " +
+                "prescribed_quantity, dispensed_quantity, stock_operation_detail_id, unit_cost, " +
+                "total_cost, metadata"
+
+        /** 同一医嘱已有未取消发药单时命中（并发安全由外层医嘱行锁保证）。 */
+        private const val DISPENSE_BY_ORDER_SQL =
+            "SELECT 1 FROM pharmacy.pharmacy_dispense_items i " +
+                "JOIN pharmacy.pharmacy_dispenses d ON d.id = i.dispense_id " +
+                "WHERE i.order_item_id = \$1 AND d.status <> \$2 LIMIT 1"
+
+        private const val INSERT_DISPENSE_SQL =
+            "INSERT INTO pharmacy.pharmacy_dispenses " +
+                "(id, dispense_no, patient_id, encounter_id, dispense_type, status, warehouse, " +
+                "metadata, created_at) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9)"
+
+        private const val INSERT_ITEM_FROM_ORDER_SQL =
+            "INSERT INTO pharmacy.pharmacy_dispense_items " +
+                "(id, dispense_id, order_item_id, material_id, lot_id, dispensed_quantity) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6)"
+
+        private const val INSERT_LEGACY_DISPENSE_SQL =
+            "INSERT INTO pharmacy.pharmacy_dispenses " +
+                "(id, dispense_no, patient_id, encounter_id, dispense_type, status, pharmacist, " +
+                "reviewer, metadata, created_at) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10)"
+
+        private const val INSERT_ITEM_SQL =
+            "INSERT INTO pharmacy.pharmacy_dispense_items " +
+                "(id, dispense_id, order_item_id, order_execution_id, material_id, lot_id, " +
+                "prescribed_quantity, dispensed_quantity, unit_cost, total_cost, metadata) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11)"
+
+        private const val REVIEW_SQL =
+            "UPDATE pharmacy.pharmacy_dispenses SET reviewer = \$1, status = \$2 WHERE id = \$3"
+
+        private const val START_SQL =
+            "UPDATE pharmacy.pharmacy_dispenses SET pharmacist = \$1, status = \$2 WHERE id = \$3"
+
+        private const val CANCEL_SQL =
+            "UPDATE pharmacy.pharmacy_dispenses SET status = \$1 WHERE id = \$2"
+
+        private const val CONFIRM_ITEM_SQL =
+            "UPDATE pharmacy.pharmacy_dispense_items " +
+                "SET stock_operation_detail_id = \$1, unit_cost = \$2, total_cost = \$3 WHERE id = \$4"
+
+        private const val CONFIRM_HEADER_SQL =
+            "UPDATE pharmacy.pharmacy_dispenses SET status = \$1, dispensed_at = \$2 WHERE id = \$3"
 
         fun toJson(row: Row): JsonObject {
             return JsonObject()
@@ -178,19 +225,17 @@ class DispenseService(
                 if (orderIds.isEmpty()) {
                     return@compose Future.succeededFuture(result)
                 }
-                val dispenseQuery = ctx.select(
-                    PHARMACY_DISPENSE_ITEMS.ORDER_ITEM_ID,
-                    PHARMACY_DISPENSES.ID.`as`("dispense_id"),
-                    PHARMACY_DISPENSES.STATUS.`as`("dispense_status"),
-                )
-                    .from(PHARMACY_DISPENSE_ITEMS)
-                    .join(PHARMACY_DISPENSES)
-                    .on(PHARMACY_DISPENSE_ITEMS.DISPENSE_ID.eq(PHARMACY_DISPENSES.ID))
-                    .where(PHARMACY_DISPENSE_ITEMS.ORDER_ITEM_ID.`in`(orderIds))
-                    .and(PHARMACY_DISPENSES.STATUS.ne("CANCELLED"))
-                    .orderBy(PHARMACY_DISPENSES.CREATED_AT.desc())
-                pool.preparedQuery(DatabaseConfig.sql(dispenseQuery))
-                    .execute(DatabaseConfig.tuple(dispenseQuery))
+                val orderPlaceholders = orderIds.indices.joinToString(", ") { "\$${it + 1}" }
+                val dispenseSql =
+                    "SELECT i.order_item_id AS order_item_id, d.id AS dispense_id, " +
+                        "d.status AS dispense_status " +
+                        "FROM pharmacy.pharmacy_dispense_items i " +
+                        "JOIN pharmacy.pharmacy_dispenses d ON d.id = i.dispense_id " +
+                        "WHERE i.order_item_id IN ($orderPlaceholders) AND d.status <> \$${orderIds.size + 1} " +
+                        "ORDER BY d.created_at DESC"
+                val dispenseArgs = orderIds.toMutableList<Any>().apply { add("CANCELLED") }
+                pool.preparedQuery(dispenseSql)
+                    .execute(Tuple.from(dispenseArgs))
                     .map { rows ->
                         val byOrder = LinkedHashMap<String, Pair<String, String>>()
                         for (row in rows) {
@@ -359,15 +404,8 @@ class DispenseService(
      * 同一医嘱的并发创建在医嘱行锁上串行，后到的事务必然看到先到事务提交的发药单。
      */
     private fun rejectDuplicate(connection: SqlConnection, medicalOrderId: String): Future<Void?> {
-        val query = ctx.select(PHARMACY_DISPENSE_ITEMS.ID)
-            .from(PHARMACY_DISPENSE_ITEMS)
-            .join(PHARMACY_DISPENSES)
-            .on(PHARMACY_DISPENSE_ITEMS.DISPENSE_ID.eq(PHARMACY_DISPENSES.ID))
-            .where(PHARMACY_DISPENSE_ITEMS.ORDER_ITEM_ID.eq(medicalOrderId))
-            .and(PHARMACY_DISPENSES.STATUS.ne("CANCELLED"))
-            .limit(1)
-        return connection.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+        return connection.preparedQuery(DISPENSE_BY_ORDER_SQL)
+            .execute(Tuple.of(medicalOrderId, "CANCELLED"))
             .compose { rows ->
                 if (rows.size() > 0) {
                     Future.failedFuture(ConflictException("order already has a non-cancelled dispense: $medicalOrderId"))
@@ -390,35 +428,23 @@ class DispenseService(
         val itemId = Ulid.generate()
         val dispenseNo = "DS-$headerId"
 
-        val headerInsert = ctx.insertInto(PHARMACY_DISPENSES)
-            .set(PHARMACY_DISPENSES.ID, headerId)
-            .set(PHARMACY_DISPENSES.DISPENSE_NO, dispenseNo)
-            .set(PHARMACY_DISPENSES.PATIENT_ID, snapshot.patientId)
-            .set(PHARMACY_DISPENSES.ENCOUNTER_ID, snapshot.encounterId)
-            .set(PHARMACY_DISPENSES.DISPENSE_TYPE, ELDERLY_ROUTINE)
-            .set(PHARMACY_DISPENSES.STATUS, "PENDING")
-            .set(PHARMACY_DISPENSES.WAREHOUSE, warehouse)
-            .set(PHARMACY_DISPENSES.METADATA, JSONB.valueOf(
-                JsonObject()
-                    .put("medical_order_id", snapshot.orderId)
-                    .put("drug_name", snapshot.orderDetails.getString("drug_name"))
-                    .put("order_content", snapshot.orderContent)
-                    .put("doctor", snapshot.doctor)
-                    .encode(),
-            ))
-            .set(PHARMACY_DISPENSES.CREATED_AT, now)
+        val metadata = JsonObject()
+            .put("medical_order_id", snapshot.orderId)
+            .put("drug_name", snapshot.orderDetails.getString("drug_name"))
+            .put("order_content", snapshot.orderContent)
+            .put("doctor", snapshot.doctor)
 
-        val itemInsert = ctx.insertInto(PHARMACY_DISPENSE_ITEMS)
-            .set(PHARMACY_DISPENSE_ITEMS.ID, itemId)
-            .set(PHARMACY_DISPENSE_ITEMS.DISPENSE_ID, headerId)
-            .set(PHARMACY_DISPENSE_ITEMS.ORDER_ITEM_ID, snapshot.orderId)
-            .set(PHARMACY_DISPENSE_ITEMS.MATERIAL_ID, materialId)
-            .set(PHARMACY_DISPENSE_ITEMS.LOT_ID, lotId)
-            .set(PHARMACY_DISPENSE_ITEMS.DISPENSED_QUANTITY, dispensedQuantity)
-
-        return connection.preparedQuery(DatabaseConfig.sql(headerInsert))
-            .execute(DatabaseConfig.tuple(headerInsert))
-            .compose { connection.preparedQuery(DatabaseConfig.sql(itemInsert)).execute(DatabaseConfig.tuple(itemInsert)) }
+        return connection.preparedQuery(INSERT_DISPENSE_SQL).execute(
+            Tuple.of(
+                headerId, dispenseNo, snapshot.patientId, snapshot.encounterId,
+                ELDERLY_ROUTINE, "PENDING", warehouse, metadata, now,
+            )
+        )
+            .compose {
+                connection.preparedQuery(INSERT_ITEM_FROM_ORDER_SQL).execute(
+                    Tuple.of(itemId, headerId, snapshot.orderId, materialId, lotId, dispensedQuantity)
+                )
+            }
             .map {
                 JsonObject()
                     .put("id", headerId)
@@ -461,12 +487,8 @@ class DispenseService(
                         ConflictException("cannot review dispense in status ${current.getString("status")}"),
                     )
                 }
-                val updateQuery = ctx.update(PHARMACY_DISPENSES)
-                    .set(PHARMACY_DISPENSES.REVIEWER, reviewer)
-                    .set(PHARMACY_DISPENSES.STATUS, "REVIEWED")
-                    .where(PHARMACY_DISPENSES.ID.eq(id))
-                connection.preparedQuery(DatabaseConfig.sql(updateQuery))
-                    .execute(DatabaseConfig.tuple(updateQuery))
+                connection.preparedQuery(REVIEW_SQL)
+                    .execute(Tuple.of(reviewer, "REVIEWED", id))
                     .compose { get(connection, id) }
             }
         }
@@ -487,12 +509,8 @@ class DispenseService(
                         ConflictException("cannot start dispense in status ${current.getString("status")}"),
                     )
                 }
-                val updateQuery = ctx.update(PHARMACY_DISPENSES)
-                    .set(PHARMACY_DISPENSES.PHARMACIST, pharmacist)
-                    .set(PHARMACY_DISPENSES.STATUS, "DISPENSING")
-                    .where(PHARMACY_DISPENSES.ID.eq(id))
-                connection.preparedQuery(DatabaseConfig.sql(updateQuery))
-                    .execute(DatabaseConfig.tuple(updateQuery))
+                connection.preparedQuery(START_SQL)
+                    .execute(Tuple.of(pharmacist, "DISPENSING", id))
                     .compose { get(connection, id) }
             }
         }
@@ -663,18 +681,13 @@ class DispenseService(
     ): Future<Void?> {
         val now = OffsetDateTime.now()
         val totalCost = outbound.unitCost.multiply(quantity)
-        val itemUpdate = ctx.update(PHARMACY_DISPENSE_ITEMS)
-            .set(PHARMACY_DISPENSE_ITEMS.STOCK_OPERATION_DETAIL_ID, outbound.stockOperationDetailId)
-            .set(PHARMACY_DISPENSE_ITEMS.UNIT_COST, outbound.unitCost)
-            .set(PHARMACY_DISPENSE_ITEMS.TOTAL_COST, totalCost)
-            .where(PHARMACY_DISPENSE_ITEMS.ID.eq(itemId))
-        val headerUpdate = ctx.update(PHARMACY_DISPENSES)
-            .set(PHARMACY_DISPENSES.STATUS, "DISPENSED")
-            .set(PHARMACY_DISPENSES.DISPENSED_AT, now)
-            .where(PHARMACY_DISPENSES.ID.eq(dispenseId))
-        return connection.preparedQuery(DatabaseConfig.sql(itemUpdate))
-            .execute(DatabaseConfig.tuple(itemUpdate))
-            .compose { connection.preparedQuery(DatabaseConfig.sql(headerUpdate)).execute(DatabaseConfig.tuple(headerUpdate)) }
+        return connection.preparedQuery(CONFIRM_ITEM_SQL).execute(
+            Tuple.of(outbound.stockOperationDetailId, outbound.unitCost, totalCost, itemId)
+        )
+            .compose {
+                connection.preparedQuery(CONFIRM_HEADER_SQL)
+                    .execute(Tuple.of("DISPENSED", now, dispenseId))
+            }
             .map { null }
     }
 
@@ -694,11 +707,8 @@ class DispenseService(
                             ConflictException("cannot cancel dispense with stock operation, use return flow"),
                         )
                     }
-                    val updateQuery = ctx.update(PHARMACY_DISPENSES)
-                        .set(PHARMACY_DISPENSES.STATUS, "CANCELLED")
-                        .where(PHARMACY_DISPENSES.ID.eq(id))
-                    connection.preparedQuery(DatabaseConfig.sql(updateQuery))
-                        .execute(DatabaseConfig.tuple(updateQuery))
+                    connection.preparedQuery(CANCEL_SQL)
+                        .execute(Tuple.of("CANCELLED", id))
                         .compose { get(connection, id) }
                 }
             }
@@ -764,21 +774,13 @@ class DispenseService(
         val now = OffsetDateTime.now()
         val headerId = Ulid.generate()
 
-        val headerInsert = ctx.insertInto(PHARMACY_DISPENSES)
-            .set(PHARMACY_DISPENSES.ID, headerId)
-            .set(PHARMACY_DISPENSES.DISPENSE_NO, dispenseNo)
-            .set(PHARMACY_DISPENSES.PATIENT_ID, patientId)
-            .set(PHARMACY_DISPENSES.ENCOUNTER_ID, body.getString("encounter_id"))
-            .set(PHARMACY_DISPENSES.DISPENSE_TYPE, dispenseType)
-            .set(PHARMACY_DISPENSES.STATUS, "PENDING")
-            .set(PHARMACY_DISPENSES.PHARMACIST, body.getString("pharmacist"))
-            .set(PHARMACY_DISPENSES.REVIEWER, body.getString("reviewer"))
-            .set(PHARMACY_DISPENSES.METADATA, body.containsKey("metadata")
-                .let { if (it) JSONB.valueOf(body.getJsonObject("metadata").encode()) else null })
-            .set(PHARMACY_DISPENSES.CREATED_AT, now)
-
-        return pool.preparedQuery(DatabaseConfig.sql(headerInsert))
-            .execute(DatabaseConfig.tuple(headerInsert))
+        return pool.preparedQuery(INSERT_LEGACY_DISPENSE_SQL).execute(
+            Tuple.of(
+                headerId, dispenseNo, patientId, body.getString("encounter_id"), dispenseType,
+                "PENDING", body.getString("pharmacist"), body.getString("reviewer"),
+                body.getJsonObject("metadata"), now,
+            )
+        )
             .flatMap { _ ->
                 val header = JsonObject()
                     .put("id", headerId)
@@ -832,22 +834,14 @@ class DispenseService(
                     val totalCost = if (dispensedQty != null && unitCost != null)
                         dispensedQty.multiply(unitCost) else null
 
-                    val itemInsert = ctx.insertInto(PHARMACY_DISPENSE_ITEMS)
-                        .set(PHARMACY_DISPENSE_ITEMS.ID, itemId)
-                        .set(PHARMACY_DISPENSE_ITEMS.DISPENSE_ID, headerId)
-                        .set(PHARMACY_DISPENSE_ITEMS.ORDER_ITEM_ID, itemObj.getString("order_item_id"))
-                        .set(PHARMACY_DISPENSE_ITEMS.ORDER_EXECUTION_ID, itemObj.getString("order_execution_id"))
-                        .set(PHARMACY_DISPENSE_ITEMS.MATERIAL_ID, itemObj.getString("material_id"))
-                        .set(PHARMACY_DISPENSE_ITEMS.LOT_ID, itemObj.getString("lot_id"))
-                        .set(PHARMACY_DISPENSE_ITEMS.PRESCRIBED_QUANTITY, prescribedQty)
-                        .set(PHARMACY_DISPENSE_ITEMS.DISPENSED_QUANTITY, dispensedQty)
-                        .set(PHARMACY_DISPENSE_ITEMS.UNIT_COST, unitCost)
-                        .set(PHARMACY_DISPENSE_ITEMS.TOTAL_COST, totalCost)
-                        .set(PHARMACY_DISPENSE_ITEMS.METADATA, itemObj.containsKey("metadata")
-                            .let { if (it) JSONB.valueOf(itemObj.getJsonObject("metadata").encode()) else null })
-
-                    return pool.preparedQuery(DatabaseConfig.sql(itemInsert))
-                        .execute(DatabaseConfig.tuple(itemInsert))
+                    return pool.preparedQuery(INSERT_ITEM_SQL).execute(
+                        Tuple.of(
+                            itemId, headerId, itemObj.getString("order_item_id"),
+                            itemObj.getString("order_execution_id"), itemObj.getString("material_id"),
+                            itemObj.getString("lot_id"), prescribedQty, dispensedQty, unitCost,
+                            totalCost, itemObj.getJsonObject("metadata"),
+                        )
+                    )
                         .flatMap { _ ->
                             items.add(JsonObject()
                                 .put("id", itemId)
@@ -877,25 +871,31 @@ class DispenseService(
         limit: Int = 50,
         offset: Int = 0,
     ): Future<JsonObject> {
-        val conditions = mutableListOf<org.jooq.Condition>()
-        patientId?.let { conditions.add(PHARMACY_DISPENSES.PATIENT_ID.eq(it)) }
-        encounterId?.let { conditions.add(PHARMACY_DISPENSES.ENCOUNTER_ID.eq(it)) }
-        dispenseType?.let { conditions.add(PHARMACY_DISPENSES.DISPENSE_TYPE.eq(it)) }
-        status?.let { conditions.add(PHARMACY_DISPENSES.STATUS.eq(it)) }
+        val where = mutableListOf<String>()
+        val args = mutableListOf<Any?>()
 
-        val countQuery = ctx.select(count().`as`("total")).from(PHARMACY_DISPENSES).where(conditions)
-        val dataQuery = ctx.selectFrom(PHARMACY_DISPENSES)
-            .where(conditions)
-            .orderBy(PHARMACY_DISPENSES.CREATED_AT.desc())
-            .limit(limit)
-            .offset(offset)
+        /** 追加一个绑定值并返回其占位符。 */
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
 
-        return pool.preparedQuery(DatabaseConfig.sql(countQuery))
-            .execute(DatabaseConfig.tuple(countQuery))
+        patientId?.let { where.add("patient_id = ${bind(it)}") }
+        encounterId?.let { where.add("encounter_id = ${bind(it)}") }
+        dispenseType?.let { where.add("dispense_type = ${bind(it)}") }
+        status?.let { where.add("status = ${bind(it)}") }
+
+        val whereClause = if (where.isEmpty()) "" else " WHERE " + where.joinToString(" AND ")
+        val countSql = "SELECT count(*) AS total FROM pharmacy.pharmacy_dispenses$whereClause"
+        val countArgs = args.toList()
+        val dataSql =
+            "SELECT $DISPENSE_COLUMNS FROM pharmacy.pharmacy_dispenses$whereClause " +
+                "ORDER BY created_at DESC LIMIT ${bind(limit)} OFFSET ${bind(offset)}"
+        val dataArgs = args.toList()
+
+        return pool.preparedQuery(countSql)
+            .execute(Tuple.from(countArgs))
             .flatMap { countRows ->
                 val total = countRows.iterator().next().getLong("total") ?: 0L
-                pool.preparedQuery(DatabaseConfig.sql(dataQuery))
-                    .execute(DatabaseConfig.tuple(dataQuery))
+                pool.preparedQuery(dataSql)
+                    .execute(Tuple.from(dataArgs))
                     .map { dataRows ->
                         val records = JsonArray()
                         for (row in dataRows) {
@@ -910,20 +910,19 @@ class DispenseService(
     fun get(id: String): Future<JsonObject> = get(pool, id)
 
     private fun get(client: SqlClient, id: String): Future<JsonObject> {
-        val query = ctx.selectFrom(PHARMACY_DISPENSES).where(PHARMACY_DISPENSES.ID.eq(id))
-        val itemsQuery = ctx.selectFrom(PHARMACY_DISPENSE_ITEMS)
-            .where(PHARMACY_DISPENSE_ITEMS.DISPENSE_ID.eq(id))
-            .orderBy(PHARMACY_DISPENSE_ITEMS.ID.asc())
+        val itemsSql =
+            "SELECT $ITEM_COLUMNS FROM pharmacy.pharmacy_dispense_items " +
+                "WHERE dispense_id = \$1 ORDER BY id ASC"
 
-        return client.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+        return client.preparedQuery("SELECT $DISPENSE_COLUMNS FROM pharmacy.pharmacy_dispenses WHERE id = \$1")
+            .execute(Tuple.of(id))
             .flatMap { rows ->
                 if (rows.size() == 0) {
                     Future.failedFuture(NotFoundException("dispense not found: $id"))
                 } else {
                     val header = toJson(rows.iterator().next())
-                    client.preparedQuery(DatabaseConfig.sql(itemsQuery))
-                        .execute(DatabaseConfig.tuple(itemsQuery))
+                    client.preparedQuery(itemsSql)
+                        .execute(Tuple.of(id))
                         .compose { itemRows ->
                             val items = JsonArray()
                             val dispenseItemIds = mutableListOf<String>()
@@ -933,8 +932,8 @@ class DispenseService(
                             }
                             // 退药可退数量口径（ADR-001）：实发 − 累计已给药 − 未取消退药。
                             Future.all(
-                                ReturnableQuantities.administeredQuantities(client, ctx, dispenseItemIds),
-                                ReturnableQuantities.reservedQuantities(client, ctx, dispenseItemIds),
+                                ReturnableQuantities.administeredQuantities(client, dispenseItemIds),
+                                ReturnableQuantities.reservedQuantities(client, dispenseItemIds),
                             ).map { lookup ->
                                 val administered = lookup.resultAt<Map<String, BigDecimal>>(0)
                                 val reserved = lookup.resultAt<Map<String, BigDecimal>>(1)
@@ -965,11 +964,10 @@ class DispenseService(
     // ========================================================================
 
     private fun lockDispense(connection: SqlConnection, id: String): Future<JsonObject> {
-        val query = ctx.selectFrom(PHARMACY_DISPENSES)
-            .where(PHARMACY_DISPENSES.ID.eq(id))
-            .forUpdate()
-        return connection.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+        return connection.preparedQuery(
+            "SELECT $DISPENSE_COLUMNS FROM pharmacy.pharmacy_dispenses WHERE id = \$1 FOR UPDATE"
+        )
+            .execute(Tuple.of(id))
             .compose { rows ->
                 if (rows.size() == 0) {
                     Future.failedFuture(NotFoundException("dispense not found: $id"))
@@ -980,11 +978,11 @@ class DispenseService(
     }
 
     private fun loadDispenseItem(connection: SqlConnection, dispenseId: String): Future<JsonObject> {
-        val query = ctx.selectFrom(PHARMACY_DISPENSE_ITEMS)
-            .where(PHARMACY_DISPENSE_ITEMS.DISPENSE_ID.eq(dispenseId))
-            .limit(1)
-        return connection.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+        return connection.preparedQuery(
+            "SELECT $ITEM_COLUMNS FROM pharmacy.pharmacy_dispense_items " +
+                "WHERE dispense_id = \$1 LIMIT 1"
+        )
+            .execute(Tuple.of(dispenseId))
             .compose { rows ->
                 if (rows.size() == 0) {
                     Future.failedFuture(ConflictException("dispense has no items"))
@@ -994,16 +992,13 @@ class DispenseService(
             }
     }
 
-    private fun hasStockOperation(connection: SqlConnection, dispenseId: String): Future<Boolean> {
-        val query = ctx.select(PHARMACY_DISPENSE_ITEMS.ID)
-            .from(PHARMACY_DISPENSE_ITEMS)
-            .where(PHARMACY_DISPENSE_ITEMS.DISPENSE_ID.eq(dispenseId))
-            .and(PHARMACY_DISPENSE_ITEMS.STOCK_OPERATION_DETAIL_ID.isNotNull)
-            .limit(1)
-        return connection.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+    private fun hasStockOperation(connection: SqlConnection, dispenseId: String): Future<Boolean> =
+        connection.preparedQuery(
+            "SELECT 1 FROM pharmacy.pharmacy_dispense_items " +
+                "WHERE dispense_id = \$1 AND stock_operation_detail_id IS NOT NULL LIMIT 1"
+        )
+            .execute(Tuple.of(dispenseId))
             .map { it.size() > 0 }
-    }
 
     private fun requiredOperator(value: String?): String =
         value?.trim()?.takeIf(String::isNotBlank)

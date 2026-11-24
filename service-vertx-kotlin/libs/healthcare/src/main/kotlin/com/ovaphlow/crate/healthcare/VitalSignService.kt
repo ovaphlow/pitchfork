@@ -1,11 +1,6 @@
 package com.ovaphlow.crate.healthcare
 
 import com.ovaphlow.crate.common.Ulid
-import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.database.gen.healthcare.tables.Encounters.ENCOUNTERS
-import com.ovaphlow.crate.database.gen.healthcare.tables.FollowupPlans.FOLLOWUP_PLANS
-import com.ovaphlow.crate.database.gen.healthcare.tables.Patients.PATIENTS
-import com.ovaphlow.crate.database.gen.healthcare.tables.VitalSignRecords.VITAL_SIGN_RECORDS
 import com.ovaphlow.crate.nursing.ConflictException
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
@@ -14,10 +9,7 @@ import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.RowSet
 import io.vertx.sqlclient.SqlClient
-import org.jooq.Condition
-import org.jooq.JSONB
-import org.jooq.Query
-import org.jooq.impl.DSL
+import io.vertx.sqlclient.Tuple
 import java.math.BigDecimal
 import java.time.LocalDate
 import java.time.OffsetDateTime
@@ -42,11 +34,12 @@ import java.time.ZoneId
  *     计划 metadata 关联体征记录 id；已转诊/已误报为终态不可再复核。
  *  8. PATCH 修正导致 abnormal 翻转时，review_status 重置为待复核并清空复核/转诊结论；
  *     同事务把该记录转诊自动生成的「待随访」计划置为已取消并写明原因（避免孤儿随访任务累积）。
+ *
+ * 持久化一律原生参数化 SQL（`$1..$n` + `Tuple`），无 jOOQ。
  */
 class VitalSignService(
     private val pool: Pool,
-    private val ctx: org.jooq.DSLContext = DatabaseConfig.createDSL(),
-    private val followupService: FollowupService = FollowupService(pool, ctx),
+    private val followupService: FollowupService = FollowupService(pool),
 ) {
     companion object {
         private val businessZone = ZoneId.of("Asia/Shanghai")
@@ -82,6 +75,9 @@ class VitalSignService(
         /** 复核状态枚举（中文白名单）：待复核/已确认/已误报/已转诊 */
         val reviewStatuses = setOf("待复核", "已确认", "已误报", "已转诊")
 
+        /** 复核状态取值常量（DB 默认 待复核） */
+        private const val REVIEW_PENDING = "待复核"
+
         /** 转诊自动生成计划在 `followup_plans.metadata` 里的来源标记（与 FollowupService 一致） */
         private const val REFERRAL_METADATA_SOURCE = "体征异常告警"
 
@@ -106,6 +102,51 @@ class VitalSignService(
         /** 转诊写白名单：planned_date 可选，默认当天；remark 可选 */
         private val referKeys = setOf("planned_date", "remark")
 
+        /** 体征表显式列清单（表别名 vs）。 */
+        private const val RECORD_COLUMNS =
+            "healthcare.vital_sign_records.id, healthcare.vital_sign_records.patient_id, " +
+                "healthcare.vital_sign_records.encounter_id, healthcare.vital_sign_records.type, " +
+                "healthcare.vital_sign_records.value, healthcare.vital_sign_records.unit, " +
+                "healthcare.vital_sign_records.measured_at, healthcare.vital_sign_records.recorded_by, " +
+                "healthcare.vital_sign_records.abnormal, healthcare.vital_sign_records.note, " +
+                "healthcare.vital_sign_records.metadata, healthcare.vital_sign_records.review_status, " +
+                "healthcare.vital_sign_records.review_result, healthcare.vital_sign_records.review_note, " +
+                "healthcare.vital_sign_records.reviewed_by, healthcare.vital_sign_records.reviewed_at, " +
+                "healthcare.vital_sign_records.created_at, healthcare.vital_sign_records.updated_at, " +
+                "healthcare.vital_sign_records.deleted_at"
+
+        /** 基础查询：挂患者名（内连）与住院号（左连，居家场景 encounter_id 为空）。 */
+        private const val BASE_SQL =
+            "SELECT $RECORD_COLUMNS, healthcare.patients.name AS patient_name, " +
+                "healthcare.encounters.encounter_no AS encounter_no " +
+                "FROM healthcare.vital_sign_records " +
+                "JOIN healthcare.patients " +
+                "ON healthcare.patients.id = healthcare.vital_sign_records.patient_id " +
+                "LEFT OUTER JOIN healthcare.encounters " +
+                "ON healthcare.encounters.id = healthcare.vital_sign_records.encounter_id"
+
+        /** 最新快照：每种类型最近一条（含软删除过滤）。 */
+        private const val SNAPSHOT_SQL =
+            "SELECT latest.*, healthcare.patients.name AS patient_name, " +
+                "healthcare.encounters.encounter_no AS encounter_no " +
+                "FROM (SELECT DISTINCT ON (type) " +
+                "id, patient_id, encounter_id, type, value, unit, measured_at, recorded_by, abnormal, " +
+                "note, metadata, review_status, review_result, review_note, reviewed_by, reviewed_at, " +
+                "created_at, updated_at, deleted_at " +
+                "FROM healthcare.vital_sign_records " +
+                "WHERE patient_id = \$1 AND deleted_at IS NULL " +
+                "ORDER BY type ASC, measured_at DESC, created_at DESC) AS latest " +
+                "JOIN healthcare.patients ON healthcare.patients.id = latest.patient_id " +
+                "LEFT OUTER JOIN healthcare.encounters " +
+                "ON healthcare.encounters.id = latest.encounter_id " +
+                "ORDER BY latest.type ASC"
+
+        private const val INSERT_SQL =
+            "INSERT INTO healthcare.vital_sign_records " +
+                "(id, patient_id, type, value, unit, measured_at, recorded_by, abnormal, created_at, " +
+                "updated_at, encounter_id, note, metadata) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11, \$12, \$13)"
+
         private fun recordJson(row: Row): JsonObject =
             JsonObject()
                 .put("id", row.getString("id"))
@@ -121,7 +162,7 @@ class VitalSignService(
                 .put("abnormal", row.getBoolean("abnormal"))
                 .put("note", row.getString("note"))
                 .put("metadata", row.getValue("metadata"))
-                .put("review_status", row.getString("review_status") ?: "待复核")
+                .put("review_status", row.getString("review_status") ?: REVIEW_PENDING)
                 .put("review_result", row.getString("review_result"))
                 .put("review_note", row.getString("review_note"))
                 .put("reviewed_by", row.getString("reviewed_by"))
@@ -177,7 +218,8 @@ class VitalSignService(
                         val inserts = effectiveRecords.mapIndexed { index, record ->
                             execute(
                                 connection,
-                                insertQuery(record, ids[index], recordedBy, now),
+                                INSERT_SQL,
+                                insertArgs(record, ids[index], recordedBy, now),
                             )
                         }
                         Future.all(inserts).map {
@@ -200,7 +242,12 @@ class VitalSignService(
     fun getVitalSign(id: String): Future<JsonObject> = getVitalSignVia(pool, id)
 
     private fun getVitalSignVia(client: SqlClient, id: String): Future<JsonObject> =
-        execute(client, detailQuery(id)).compose { rows ->
+        execute(
+            client,
+            "$BASE_SQL WHERE healthcare.vital_sign_records.id = \$1 " +
+                "AND healthcare.vital_sign_records.deleted_at IS NULL",
+            Tuple.of(id),
+        ).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(recordJson(it)) }
                 ?: Future.failedFuture(HealthcareNotFoundException("vital sign record not found: $id"))
         }
@@ -212,18 +259,21 @@ class VitalSignService(
      * 状态仍为「待随访」的计划：已完成/已取消的计划不动，也不删除行（取消原因留痕，
      * 护士在随访管理里能看到「已取消 + 原因」，而不是一条无法解释的待随访任务）。
      */
-    private fun cancelReferralPlans(client: SqlClient, vitalSignRecordId: String, now: OffsetDateTime): Future<Int> {
-        val update = ctx.update(FOLLOWUP_PLANS)
-            .set(FOLLOWUP_PLANS.STATUS, "已取消")
-            .set(FOLLOWUP_PLANS.CANCEL_REASON, REVOKED_REFERRAL_CANCEL_REASON)
-            .set(FOLLOWUP_PLANS.UPDATED_AT, now)
-            .where(
-                FOLLOWUP_PLANS.STATUS.eq("待随访")
-                    .and(DSL.field("metadata ->> 'source'", String::class.java).eq(REFERRAL_METADATA_SOURCE))
-                    .and(DSL.field("metadata ->> 'vital_sign_record_id'", String::class.java).eq(vitalSignRecordId)),
-            )
-        return execute(client, update).map { it.rowCount() }
-    }
+    private fun cancelReferralPlans(client: SqlClient, vitalSignRecordId: String, now: OffsetDateTime): Future<Int> =
+        execute(
+            client,
+            "UPDATE healthcare.followup_plans SET status = \$1, cancel_reason = \$2, updated_at = \$3 " +
+                "WHERE status = \$4 AND metadata ->> 'source' = \$5 " +
+                "AND metadata ->> 'vital_sign_record_id' = \$6",
+            Tuple.of(
+                "已取消",
+                REVOKED_REFERRAL_CANCEL_REASON,
+                now,
+                "待随访",
+                REFERRAL_METADATA_SOURCE,
+                vitalSignRecordId,
+            ),
+        ).map { it.rowCount() }
 
     fun listVitalSigns(
         patientId: String?,
@@ -233,37 +283,39 @@ class VitalSignService(
         limit: Int,
         offset: Int,
     ): Future<JsonObject> {
-        val conditions = try {
-            mutableListOf<Condition>(
-                VITAL_SIGN_RECORDS.DELETED_AT.isNull,
-            ).also { conditions ->
-                val patient = patientId?.trim()?.takeIf(String::isNotBlank)
-                    ?: throw IllegalArgumentException("patient_id is required")
-                conditions += VITAL_SIGN_RECORDS.PATIENT_ID.eq(patient)
-                type?.takeIf(String::isNotBlank)?.let {
-                    conditions += VITAL_SIGN_RECORDS.TYPE.eq(validType(it))
-                }
-                dateFrom?.takeIf(String::isNotBlank)?.let {
-                    conditions += VITAL_SIGN_RECORDS.MEASURED_AT.ge(offsetDateTime(it, "date_from"))
-                }
-                dateTo?.takeIf(String::isNotBlank)?.let {
-                    conditions += VITAL_SIGN_RECORDS.MEASURED_AT.le(offsetDateTime(it, "date_to"))
-                }
+        val args = mutableListOf<Any?>()
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
+        val filters = mutableListOf<String>()
+        try {
+            val patient = patientId?.trim()?.takeIf(String::isNotBlank)
+                ?: throw IllegalArgumentException("patient_id is required")
+            filters += "healthcare.vital_sign_records.deleted_at IS NULL"
+            filters += "healthcare.vital_sign_records.patient_id = ${bind(patient)}"
+            type?.takeIf(String::isNotBlank)?.let {
+                filters += "healthcare.vital_sign_records.type = ${bind(validType(it))}"
+            }
+            dateFrom?.takeIf(String::isNotBlank)?.let {
+                filters += "healthcare.vital_sign_records.measured_at >= " +
+                    "CAST(${bind(offsetDateTime(it, "date_from"))} AS TIMESTAMPTZ)"
+            }
+            dateTo?.takeIf(String::isNotBlank)?.let {
+                filters += "healthcare.vital_sign_records.measured_at <= " +
+                    "CAST(${bind(offsetDateTime(it, "date_to"))} AS TIMESTAMPTZ)"
             }
         } catch (error: IllegalArgumentException) {
             return Future.failedFuture(error)
         }
 
-        val countQuery = ctx.select(DSL.count().`as`("total")).from(VITAL_SIGN_RECORDS).where(conditions)
-        val dataQuery = baseQuery()
-            .where(conditions)
-            .orderBy(VITAL_SIGN_RECORDS.MEASURED_AT.desc(), VITAL_SIGN_RECORDS.CREATED_AT.desc())
-            .limit(limit)
-            .offset(offset)
+        val where = " WHERE ${filters.joinToString(" AND ")}"
+        val countSql = "SELECT count(*) AS total FROM ($BASE_SQL$where) signs"
+        val dataSql = "$BASE_SQL$where " +
+            "ORDER BY healthcare.vital_sign_records.measured_at DESC, " +
+            "healthcare.vital_sign_records.created_at DESC " +
+            "OFFSET \$${args.size + 1} ROWS FETCH NEXT \$${args.size + 2} ROWS ONLY"
 
-        return execute(pool, countQuery).compose { countRows ->
+        return execute(pool, countSql, Tuple.from(args)).compose { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(pool, dataQuery).map { rows ->
+            execute(pool, dataSql, Tuple.from(args + listOf<Any?>(offset, limit))).map { rows ->
                 JsonObject()
                     .put("records", JsonArray(rows.map(::recordJson)))
                     .put("meta", JsonObject().put("total", total))
@@ -285,41 +337,43 @@ class VitalSignService(
         limit: Int,
         offset: Int,
     ): Future<JsonObject> {
-        val conditions = try {
-            mutableListOf<Condition>(
-                VITAL_SIGN_RECORDS.DELETED_AT.isNull,
-                VITAL_SIGN_RECORDS.ABNORMAL.eq(true),
-            ).also { conditions ->
-                patientId?.takeIf(String::isNotBlank)?.let {
-                    conditions += VITAL_SIGN_RECORDS.PATIENT_ID.eq(it)
-                }
-                type?.takeIf(String::isNotBlank)?.let {
-                    conditions += VITAL_SIGN_RECORDS.TYPE.eq(validType(it))
-                }
-                reviewStatus?.takeIf(String::isNotBlank)?.let {
-                    conditions += VITAL_SIGN_RECORDS.REVIEW_STATUS.eq(validReviewStatus(it))
-                }
-                dateFrom?.takeIf(String::isNotBlank)?.let {
-                    conditions += VITAL_SIGN_RECORDS.MEASURED_AT.ge(offsetDateTime(it, "date_from"))
-                }
-                dateTo?.takeIf(String::isNotBlank)?.let {
-                    conditions += VITAL_SIGN_RECORDS.MEASURED_AT.le(offsetDateTime(it, "date_to"))
-                }
+        val args = mutableListOf<Any?>()
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
+        val filters = mutableListOf<String>()
+        try {
+            filters += "healthcare.vital_sign_records.deleted_at IS NULL"
+            filters += "healthcare.vital_sign_records.abnormal = ${bind(true)}"
+            patientId?.takeIf(String::isNotBlank)?.let {
+                filters += "healthcare.vital_sign_records.patient_id = ${bind(it)}"
+            }
+            type?.takeIf(String::isNotBlank)?.let {
+                filters += "healthcare.vital_sign_records.type = ${bind(validType(it))}"
+            }
+            reviewStatus?.takeIf(String::isNotBlank)?.let {
+                filters += "healthcare.vital_sign_records.review_status = ${bind(validReviewStatus(it))}"
+            }
+            dateFrom?.takeIf(String::isNotBlank)?.let {
+                filters += "healthcare.vital_sign_records.measured_at >= " +
+                    "CAST(${bind(offsetDateTime(it, "date_from"))} AS TIMESTAMPTZ)"
+            }
+            dateTo?.takeIf(String::isNotBlank)?.let {
+                filters += "healthcare.vital_sign_records.measured_at <= " +
+                    "CAST(${bind(offsetDateTime(it, "date_to"))} AS TIMESTAMPTZ)"
             }
         } catch (error: IllegalArgumentException) {
             return Future.failedFuture(error)
         }
 
-        val countQuery = ctx.select(DSL.count().`as`("total")).from(VITAL_SIGN_RECORDS).where(conditions)
-        val dataQuery = baseQuery()
-            .where(conditions)
-            .orderBy(VITAL_SIGN_RECORDS.MEASURED_AT.desc(), VITAL_SIGN_RECORDS.CREATED_AT.desc())
-            .limit(limit)
-            .offset(offset)
+        val where = " WHERE ${filters.joinToString(" AND ")}"
+        val countSql = "SELECT count(*) AS total FROM ($BASE_SQL$where) signs"
+        val dataSql = "$BASE_SQL$where " +
+            "ORDER BY healthcare.vital_sign_records.measured_at DESC, " +
+            "healthcare.vital_sign_records.created_at DESC " +
+            "OFFSET \$${args.size + 1} ROWS FETCH NEXT \$${args.size + 2} ROWS ONLY"
 
-        return execute(pool, countQuery).compose { countRows ->
+        return execute(pool, countSql, Tuple.from(args)).compose { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(pool, dataQuery).map { rows ->
+            execute(pool, dataSql, Tuple.from(args + listOf<Any?>(offset, limit))).map { rows ->
                 JsonObject()
                     .put("records", JsonArray(rows.map(::recordJson)))
                     .put("meta", JsonObject().put("total", total))
@@ -334,31 +388,39 @@ class VitalSignService(
     fun getAbnormalSummary(): Future<JsonObject> {
         val todayStart = LocalDate.now(businessZone).atStartOfDay(businessZone).toOffsetDateTime()
         val tomorrowStart = todayStart.plusDays(1)
-        val base = VITAL_SIGN_RECORDS.DELETED_AT.isNull.and(VITAL_SIGN_RECORDS.ABNORMAL.eq(true))
+        val base = "healthcare.vital_sign_records.deleted_at IS NULL"
 
-        fun count(condition: Condition): Future<Long> {
-            val query = ctx.select(DSL.count().`as`("total")).from(VITAL_SIGN_RECORDS).where(condition)
-            return execute(pool, query).map { rows -> rows.iterator().next().getLong("total") ?: 0L }
+        fun count(filter: String, args: Tuple): Future<Long> {
+            val sql = "SELECT count(*) AS total FROM healthcare.vital_sign_records " +
+                "WHERE $base AND healthcare.vital_sign_records.abnormal = \$1 AND $filter"
+            return execute(pool, sql, args).map { rows -> rows.iterator().next().getLong("total") ?: 0L }
         }
 
-        val pending = count(base.and(VITAL_SIGN_RECORDS.REVIEW_STATUS.eq("待复核")))
-        val today = count(base.and(VITAL_SIGN_RECORDS.MEASURED_AT.ge(todayStart)).and(VITAL_SIGN_RECORDS.MEASURED_AT.lt(tomorrowStart)))
-        val referred = count(base.and(VITAL_SIGN_RECORDS.REVIEW_STATUS.eq("已转诊")))
+        val pending = count(
+            "healthcare.vital_sign_records.review_status = \$2",
+            Tuple.of(true, REVIEW_PENDING),
+        )
+        val today = count(
+            "healthcare.vital_sign_records.measured_at >= CAST(\$2 AS TIMESTAMPTZ) " +
+                "AND healthcare.vital_sign_records.measured_at < CAST(\$3 AS TIMESTAMPTZ)",
+            Tuple.of(true, todayStart, tomorrowStart),
+        )
+        val referred = count(
+            "healthcare.vital_sign_records.review_status = \$2",
+            Tuple.of(true, "已转诊"),
+        )
 
-        val byTypeQuery = ctx.select(VITAL_SIGN_RECORDS.TYPE, DSL.count().`as`("count"))
-            .from(VITAL_SIGN_RECORDS)
-            .where(base)
-            .groupBy(VITAL_SIGN_RECORDS.TYPE)
-        val byStatusQuery = ctx.select(VITAL_SIGN_RECORDS.REVIEW_STATUS, DSL.count().`as`("count"))
-            .from(VITAL_SIGN_RECORDS)
-            .where(base)
-            .groupBy(VITAL_SIGN_RECORDS.REVIEW_STATUS)
+        val byTypeSql = "SELECT healthcare.vital_sign_records.type, count(*) AS count " +
+            "FROM healthcare.vital_sign_records WHERE $base GROUP BY healthcare.vital_sign_records.type"
+        val byStatusSql = "SELECT healthcare.vital_sign_records.review_status, count(*) AS count " +
+            "FROM healthcare.vital_sign_records WHERE $base " +
+            "GROUP BY healthcare.vital_sign_records.review_status"
 
         return pending.compose { pendingTotal ->
             today.compose { todayTotal ->
                 referred.compose { referredTotal ->
-                    execute(pool, byTypeQuery).compose { typeRows ->
-                        execute(pool, byStatusQuery).map { statusRows ->
+                    execute(pool, byTypeSql, Tuple.tuple()).compose { typeRows ->
+                        execute(pool, byStatusSql, Tuple.tuple()).map { statusRows ->
                             JsonObject()
                                 .put("pending_total", pendingTotal)
                                 .put("today_total", todayTotal)
@@ -397,31 +459,7 @@ class VitalSignService(
     fun getSnapshot(patientId: String): Future<JsonObject> =
         pool.withTransaction<JsonObject> { connection ->
             getPatientRow(connection, patientId).compose {
-                val latest = ctx.select(VITAL_SIGN_RECORDS.fields().toList())
-                    .distinctOn(VITAL_SIGN_RECORDS.TYPE)
-                    .from(VITAL_SIGN_RECORDS)
-                    .where(
-                        VITAL_SIGN_RECORDS.PATIENT_ID.eq(patientId)
-                            .and(VITAL_SIGN_RECORDS.DELETED_AT.isNull),
-                    )
-                    .orderBy(
-                        VITAL_SIGN_RECORDS.TYPE.asc(),
-                        VITAL_SIGN_RECORDS.MEASURED_AT.desc(),
-                        VITAL_SIGN_RECORDS.CREATED_AT.desc(),
-                    )
-                    .asTable("latest")
-                val query = ctx.select(
-                    latest.fields().toList() +
-                        listOf(
-                            PATIENTS.NAME.`as`("patient_name"),
-                            ENCOUNTERS.ENCOUNTER_NO.`as`("encounter_no"),
-                        ),
-                )
-                    .from(latest)
-                    .join(PATIENTS).on(latest.field(VITAL_SIGN_RECORDS.PATIENT_ID)!!.eq(PATIENTS.ID))
-                    .leftJoin(ENCOUNTERS).on(latest.field(VITAL_SIGN_RECORDS.ENCOUNTER_ID)!!.eq(ENCOUNTERS.ID))
-                    .orderBy(latest.field(VITAL_SIGN_RECORDS.TYPE)!!.asc())
-                execute(connection, query).map { rows ->
+                execute(connection, SNAPSHOT_SQL, Tuple.of(patientId)).map { rows ->
                     JsonObject().put("records", JsonArray(rows.map(::recordJson)))
                 }
             }
@@ -443,25 +481,29 @@ class VitalSignService(
         }
         return pool.withTransaction<JsonObject> { connection ->
             getPatientRow(connection, patientId).compose {
-                val conditions = mutableListOf<Condition>(
-                    VITAL_SIGN_RECORDS.PATIENT_ID.eq(patientId),
-                    VITAL_SIGN_RECORDS.TYPE.eq(validTypeValue),
-                    VITAL_SIGN_RECORDS.DELETED_AT.isNull,
+                val filters = mutableListOf(
+                    "healthcare.vital_sign_records.patient_id = \$1",
+                    "healthcare.vital_sign_records.type = \$2",
+                    "healthcare.vital_sign_records.deleted_at IS NULL",
                 )
+                val args = mutableListOf<Any?>(patientId, validTypeValue)
+                fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
                 try {
                     dateFrom?.takeIf(String::isNotBlank)?.let {
-                        conditions += VITAL_SIGN_RECORDS.MEASURED_AT.ge(offsetDateTime(it, "date_from"))
+                        filters += "healthcare.vital_sign_records.measured_at >= " +
+                            "CAST(${bind(offsetDateTime(it, "date_from"))} AS TIMESTAMPTZ)"
                     }
                     dateTo?.takeIf(String::isNotBlank)?.let {
-                        conditions += VITAL_SIGN_RECORDS.MEASURED_AT.le(offsetDateTime(it, "date_to"))
+                        filters += "healthcare.vital_sign_records.measured_at <= " +
+                            "CAST(${bind(offsetDateTime(it, "date_to"))} AS TIMESTAMPTZ)"
                     }
                 } catch (error: IllegalArgumentException) {
                     return@compose Future.failedFuture(error)
                 }
-                val query = baseQuery()
-                    .where(conditions)
-                    .orderBy(VITAL_SIGN_RECORDS.MEASURED_AT.asc(), VITAL_SIGN_RECORDS.CREATED_AT.asc())
-                execute(connection, query).map { rows ->
+                val sql = "$BASE_SQL WHERE ${filters.joinToString(" AND ")} " +
+                    "ORDER BY healthcare.vital_sign_records.measured_at ASC, " +
+                    "healthcare.vital_sign_records.created_at ASC"
+                execute(connection, sql, Tuple.from(args)).map { rows ->
                     JsonObject().put("records", JsonArray(rows.map(::recordJson)))
                 }
             }
@@ -508,29 +550,20 @@ class VitalSignService(
                 val measuredAt = newMeasuredAt ?: record.getOffsetDateTime("measured_at") ?: now
                 val abnormal = isAbnormal(type, value, metadata)
                 val oldAbnormal = record.getBoolean("abnormal")
-                execute(
-                    connection,
-                    ctx.update(VITAL_SIGN_RECORDS)
-                        .set(VITAL_SIGN_RECORDS.VALUE, value)
-                        .set(VITAL_SIGN_RECORDS.UNIT, unit)
-                        .set(VITAL_SIGN_RECORDS.MEASURED_AT, measuredAt)
-                        .set(VITAL_SIGN_RECORDS.ABNORMAL, abnormal)
-                        .set(VITAL_SIGN_RECORDS.UPDATED_AT, now)
-                        .apply {
-                            if (note != null) set(VITAL_SIGN_RECORDS.NOTE, note) else setNull(VITAL_SIGN_RECORDS.NOTE)
-                            if (metadata != null) set(VITAL_SIGN_RECORDS.METADATA, JSONB.valueOf(metadata.encode()))
-                            else setNull(VITAL_SIGN_RECORDS.METADATA)
-                            // abnormal 翻转时重置复核状态，防止陈旧结论污染闭环
-                            if (abnormal != oldAbnormal) {
-                                set(VITAL_SIGN_RECORDS.REVIEW_STATUS, "待复核")
-                                setNull(VITAL_SIGN_RECORDS.REVIEW_RESULT)
-                                setNull(VITAL_SIGN_RECORDS.REVIEW_NOTE)
-                                setNull(VITAL_SIGN_RECORDS.REVIEWED_BY)
-                                setNull(VITAL_SIGN_RECORDS.REVIEWED_AT)
-                            }
-                        }
-                        .where(VITAL_SIGN_RECORDS.ID.eq(id).and(VITAL_SIGN_RECORDS.DELETED_AT.isNull)),
-                ).compose { rows ->
+                val args = mutableListOf<Any?>(value, unit, measuredAt, abnormal, now, note, metadata)
+                var sql = "UPDATE healthcare.vital_sign_records SET value = \$1, unit = \$2, " +
+                    "measured_at = \$3, abnormal = \$4, updated_at = \$5, note = \$6, metadata = \$7"
+                // abnormal 翻转时重置复核状态，防止陈旧结论污染闭环
+                if (abnormal != oldAbnormal) {
+                    sql += ", review_status = \$${args.size + 1}"
+                    args.add(REVIEW_PENDING)
+                    sql += ", review_result = NULL, review_note = NULL, " +
+                        "reviewed_by = NULL, reviewed_at = NULL"
+                }
+                sql += " WHERE healthcare.vital_sign_records.id = \$${args.size + 1} " +
+                    "AND healthcare.vital_sign_records.deleted_at IS NULL"
+                args.add(id)
+                execute(connection, sql, Tuple.from(args)).compose { rows ->
                     if (rows.rowCount() != 1) {
                         return@compose Future.failedFuture(HealthcareNotFoundException("vital sign record not found: $id"))
                     }
@@ -572,7 +605,7 @@ class VitalSignService(
                         IllegalArgumentException("only abnormal records can be reviewed"),
                     )
                 }
-                val currentStatus = record.getString("review_status") ?: "待复核"
+                val currentStatus = record.getString("review_status") ?: REVIEW_PENDING
                 if (currentStatus == "已误报" || currentStatus == "已转诊") {
                     return@compose Future.failedFuture(
                         IllegalArgumentException("review_status $currentStatus is terminal, correct the record instead"),
@@ -581,17 +614,11 @@ class VitalSignService(
                 val reviewStatus = if (result == "确认异常") "已确认" else "已误报"
                 execute(
                     connection,
-                    ctx.update(VITAL_SIGN_RECORDS)
-                        .set(VITAL_SIGN_RECORDS.REVIEW_STATUS, reviewStatus)
-                        .set(VITAL_SIGN_RECORDS.REVIEW_RESULT, result)
-                        .set(VITAL_SIGN_RECORDS.REVIEWED_BY, userId)
-                        .set(VITAL_SIGN_RECORDS.REVIEWED_AT, now)
-                        .set(VITAL_SIGN_RECORDS.UPDATED_AT, now)
-                        .apply {
-                            if (note != null) set(VITAL_SIGN_RECORDS.REVIEW_NOTE, note)
-                            else setNull(VITAL_SIGN_RECORDS.REVIEW_NOTE)
-                        }
-                        .where(VITAL_SIGN_RECORDS.ID.eq(id).and(VITAL_SIGN_RECORDS.DELETED_AT.isNull)),
+                    "UPDATE healthcare.vital_sign_records SET review_status = \$1, review_result = \$2, " +
+                        "reviewed_by = \$3, reviewed_at = \$4, updated_at = \$5, review_note = \$6 " +
+                        "WHERE healthcare.vital_sign_records.id = \$7 " +
+                        "AND healthcare.vital_sign_records.deleted_at IS NULL",
+                    Tuple.of(reviewStatus, result, userId, now, now, note, id),
                 ).compose { rows ->
                     if (rows.rowCount() == 1) getVitalSignVia(connection, id)
                     else Future.failedFuture(HealthcareNotFoundException("vital sign record not found: $id"))
@@ -637,10 +664,10 @@ class VitalSignService(
                 }
                 execute(
                     connection,
-                    ctx.update(VITAL_SIGN_RECORDS)
-                        .set(VITAL_SIGN_RECORDS.REVIEW_STATUS, "已转诊")
-                        .set(VITAL_SIGN_RECORDS.UPDATED_AT, now)
-                        .where(VITAL_SIGN_RECORDS.ID.eq(id).and(VITAL_SIGN_RECORDS.DELETED_AT.isNull)),
+                    "UPDATE healthcare.vital_sign_records SET review_status = \$1, updated_at = \$2 " +
+                        "WHERE healthcare.vital_sign_records.id = \$3 " +
+                        "AND healthcare.vital_sign_records.deleted_at IS NULL",
+                    Tuple.of("已转诊", now, id),
                 ).compose { rows ->
                     if (rows.rowCount() != 1) {
                         return@compose Future.failedFuture(
@@ -677,10 +704,10 @@ class VitalSignService(
         return pool.withTransaction<JsonObject> { connection ->
             execute(
                 connection,
-                ctx.update(VITAL_SIGN_RECORDS)
-                    .set(VITAL_SIGN_RECORDS.DELETED_AT, now)
-                    .set(VITAL_SIGN_RECORDS.UPDATED_AT, now)
-                    .where(VITAL_SIGN_RECORDS.ID.eq(id).and(VITAL_SIGN_RECORDS.DELETED_AT.isNull)),
+                "UPDATE healthcare.vital_sign_records SET deleted_at = \$1, updated_at = \$2 " +
+                    "WHERE healthcare.vital_sign_records.id = \$3 " +
+                    "AND healthcare.vital_sign_records.deleted_at IS NULL",
+                Tuple.of(now, now, id),
             ).compose { rows ->
                 if (rows.rowCount() == 1) {
                     Future.succeededFuture(
@@ -824,42 +851,29 @@ class VitalSignService(
     }
 
     // ========================================================================
-    //  查询构造
+    //  写入语句参数
     // ========================================================================
 
-    private fun baseQuery() = ctx.select(
-        VITAL_SIGN_RECORDS.fields().toList() +
-            listOf(PATIENTS.NAME.`as`("patient_name"), ENCOUNTERS.ENCOUNTER_NO.`as`("encounter_no")),
-    )
-        .from(VITAL_SIGN_RECORDS)
-        .join(PATIENTS).on(VITAL_SIGN_RECORDS.PATIENT_ID.eq(PATIENTS.ID))
-        .leftJoin(ENCOUNTERS).on(VITAL_SIGN_RECORDS.ENCOUNTER_ID.eq(ENCOUNTERS.ID))
-
-    private fun detailQuery(id: String) = baseQuery()
-        .where(VITAL_SIGN_RECORDS.ID.eq(id).and(VITAL_SIGN_RECORDS.DELETED_AT.isNull))
-
-    private fun insertQuery(
+    private fun insertArgs(
         record: RecordFields,
         id: String,
         recordedBy: String,
         now: OffsetDateTime,
-    ): Query {
-        var query = ctx.insertInto(VITAL_SIGN_RECORDS)
-            .set(VITAL_SIGN_RECORDS.ID, id)
-            .set(VITAL_SIGN_RECORDS.PATIENT_ID, record.patientId)
-            .set(VITAL_SIGN_RECORDS.TYPE, record.type)
-            .set(VITAL_SIGN_RECORDS.VALUE, record.value)
-            .set(VITAL_SIGN_RECORDS.UNIT, record.unit)
-            .set(VITAL_SIGN_RECORDS.MEASURED_AT, record.measuredAt)
-            .set(VITAL_SIGN_RECORDS.RECORDED_BY, recordedBy)
-            .set(VITAL_SIGN_RECORDS.ABNORMAL, isAbnormal(record.type, record.value, record.metadata))
-            .set(VITAL_SIGN_RECORDS.CREATED_AT, now)
-            .set(VITAL_SIGN_RECORDS.UPDATED_AT, now)
-        record.encounterId?.let { query = query.set(VITAL_SIGN_RECORDS.ENCOUNTER_ID, it) }
-        record.note?.let { query = query.set(VITAL_SIGN_RECORDS.NOTE, it) }
-        record.metadata?.let { query = query.set(VITAL_SIGN_RECORDS.METADATA, JSONB.valueOf(it.encode())) }
-        return query
-    }
+    ): Tuple = Tuple.of(
+        id,
+        record.patientId,
+        record.type,
+        record.value,
+        record.unit,
+        record.measuredAt,
+        recordedBy,
+        isAbnormal(record.type, record.value, record.metadata),
+        now,
+        now,
+        record.encounterId,
+        record.note,
+        record.metadata,
+    )
 
     private fun createdJson(
         id: String,
@@ -883,7 +897,7 @@ class VitalSignService(
             .put("abnormal", isAbnormal(record.type, record.value, record.metadata))
             .put("note", record.note)
             .put("metadata", record.metadata)
-            .put("review_status", "待复核")
+            .put("review_status", REVIEW_PENDING)
             .put("review_result", null as String?)
             .put("review_note", null as String?)
             .put("reviewed_by", null as String?)
@@ -896,7 +910,21 @@ class VitalSignService(
     // ========================================================================
 
     private fun getRecordRow(client: SqlClient, id: String): Future<Row> =
-        execute(client, ctx.selectFrom(VITAL_SIGN_RECORDS).where(VITAL_SIGN_RECORDS.ID.eq(id))).compose { rows ->
+        execute(
+            client,
+            "SELECT healthcare.vital_sign_records.id, healthcare.vital_sign_records.patient_id, " +
+                "healthcare.vital_sign_records.encounter_id, healthcare.vital_sign_records.type, " +
+                "healthcare.vital_sign_records.value, healthcare.vital_sign_records.unit, " +
+                "healthcare.vital_sign_records.measured_at, healthcare.vital_sign_records.recorded_by, " +
+                "healthcare.vital_sign_records.abnormal, healthcare.vital_sign_records.note, " +
+                "healthcare.vital_sign_records.metadata, healthcare.vital_sign_records.deleted_at, " +
+                "healthcare.vital_sign_records.created_at, healthcare.vital_sign_records.updated_at, " +
+                "healthcare.vital_sign_records.review_status, healthcare.vital_sign_records.review_result, " +
+                "healthcare.vital_sign_records.review_note, healthcare.vital_sign_records.reviewed_by, " +
+                "healthcare.vital_sign_records.reviewed_at " +
+                "FROM healthcare.vital_sign_records WHERE healthcare.vital_sign_records.id = \$1",
+            Tuple.of(id),
+        ).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { row ->
                 if (row.getOffsetDateTime("deleted_at") != null) {
                     Future.failedFuture(HealthcareNotFoundException("vital sign record not found: $id"))
@@ -907,13 +935,23 @@ class VitalSignService(
         }
 
     private fun getPatientRow(client: SqlClient, id: String): Future<Row> =
-        execute(client, ctx.selectFrom(PATIENTS).where(PATIENTS.ID.eq(id))).compose { rows ->
+        execute(
+            client,
+            "SELECT healthcare.patients.id, healthcare.patients.name, healthcare.patients.status " +
+                "FROM healthcare.patients WHERE healthcare.patients.id = \$1",
+            Tuple.of(id),
+        ).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(it) }
                 ?: Future.failedFuture(HealthcareNotFoundException("patient not found: $id"))
         }
 
     private fun validateEncounterOwnership(client: SqlClient, patientId: String, encounterId: String): Future<Row> =
-        execute(client, ctx.selectFrom(ENCOUNTERS).where(ENCOUNTERS.ID.eq(encounterId))).compose { rows ->
+        execute(
+            client,
+            "SELECT healthcare.encounters.id, healthcare.encounters.patient_id " +
+                "FROM healthcare.encounters WHERE healthcare.encounters.id = \$1",
+            Tuple.of(encounterId),
+        ).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { encounter ->
                 if (encounter.getString("patient_id") != patientId) {
                     Future.failedFuture(
@@ -951,33 +989,34 @@ class VitalSignService(
      * 029 D4：该长者当前唯一的 ACTIVE 养老入住 id；无在住记录时返回 null。
      *
      * `V501` 的部分唯一索引 `uq_encounters_active_elderly_care` 保证同一长者至多一条
-     * ACTIVE 养老入住，因此这里无需在应用层消歧；`limit(1)` 只是让 SQL 意图显式。
+     * ACTIVE 养老入住，因此这里无需在应用层消歧；`LIMIT 1` 只是让 SQL 意图显式。
      */
-    private fun resolveActiveElderlyEncounterId(client: SqlClient, patientId: String): Future<String?> {
-        val query = ctx.select(ENCOUNTERS.ID)
-            .from(ENCOUNTERS)
-            .where(
-                ENCOUNTERS.PATIENT_ID.eq(patientId)
-                    .and(ENCOUNTERS.ENCOUNTER_TYPE.eq("ELDERLY_CARE"))
-                    .and(ENCOUNTERS.STATUS.eq("ACTIVE")),
-            )
-            .limit(1)
-        return execute(client, query).map { rows ->
+    private fun resolveActiveElderlyEncounterId(client: SqlClient, patientId: String): Future<String?> =
+        execute(
+            client,
+            "SELECT healthcare.encounters.id FROM healthcare.encounters " +
+                "WHERE healthcare.encounters.patient_id = \$1 " +
+                "AND healthcare.encounters.encounter_type = \$2 " +
+                "AND healthcare.encounters.status = \$3 OFFSET \$4 ROWS FETCH NEXT \$5 ROWS ONLY",
+            Tuple.of(patientId, "ELDERLY_CARE", "ACTIVE", 0, 1),
+        ).map { rows ->
             rows.iterator().asSequence().firstOrNull()?.getString("id")
         }
-    }
 
     /** 029 D4：`id → encounter_no` 批量回填，供创建响应自证挂接的入住。 */
     private fun encounterNoMap(client: SqlClient, encounterIds: List<String>): Future<Map<String, String?>> {
         if (encounterIds.isEmpty()) return Future.succeededFuture(emptyMap())
-        val query = ctx.select(ENCOUNTERS.ID, ENCOUNTERS.ENCOUNTER_NO)
-            .from(ENCOUNTERS)
-            .where(ENCOUNTERS.ID.`in`(encounterIds))
-        return execute(client, query).map { rows ->
+        val placeholders = encounterIds.indices.joinToString(", ") { "\$${it + 1}" }
+        return execute(
+            client,
+            "SELECT healthcare.encounters.id, healthcare.encounters.encounter_no " +
+                "FROM healthcare.encounters WHERE healthcare.encounters.id IN ($placeholders)",
+            Tuple.from(encounterIds),
+        ).map { rows ->
             rows.iterator().asSequence().associate { it.getString("id") to it.getString("encounter_no") }
         }
     }
 
-    private fun execute(client: SqlClient, query: Query): Future<RowSet<Row>> =
-        client.preparedQuery(DatabaseConfig.sql(query)).execute(DatabaseConfig.tuple(query))
+    private fun execute(client: SqlClient, sql: String, args: Tuple): Future<RowSet<Row>> =
+        client.preparedQuery(sql).execute(args)
 }

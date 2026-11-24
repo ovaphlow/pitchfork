@@ -1,6 +1,5 @@
 package com.ovaphlow.crate.nursing
 
-import com.ovaphlow.crate.database.DatabaseConfig
 import io.mockk.every
 import io.mockk.mockk
 import io.vertx.core.Future
@@ -17,9 +16,9 @@ import java.time.LocalDate
 /**
  * 027 新增执行查询的离线 SQL 渲染断言（不访问数据库）。
  *
- * 本轮 DB 门控集成用例不执行，无法在真库上验证新增 SQL；本类用 jOOQ 离线渲染
- * （`DatabaseConfig.createDSL()` 不需要连接）+ mockk 捕获连接池上实际执行的 SQL 文本，
- * 把 §4.2 聚合与 §4.3 跨日队列的 SQL 形状固定下来：
+ * 本轮 DB 门控集成用例不执行，无法在真库上验证新增 SQL；本类用 mockk 捕获连接池上
+ * 实际执行的 SQL 文本（原生参数化 SQL，无需渲染器），把 §4.2 聚合与 §4.3 跨日队列的
+ * SQL 形状固定下来：
  *   - `/overdue` 的 WHERE 只有逾期定义与参与条件，不含任何日期窗口下界；
  *   - `/today` 的 `status_totals` 与 `overdue_total_all` 在同一条聚合 SQL 内用
  *     `count(*) FILTER (WHERE ...)` 一次取回（不拉全表、不 N+1）；
@@ -44,7 +43,7 @@ class TaskExecutionQuerySqlTest {
         val prepared = mockk<PreparedQuery<RowSet<Row>>>()
         every { prepared.execute(any<Tuple>()) } returns Future.succeededFuture(rows)
         every { pool.preparedQuery(capture(log.statements)) } returns prepared
-        return TaskExecutionService(pool, DatabaseConfig.createDSL())
+        return TaskExecutionService(pool)
     }
 
     /** 别名匹配带上词边界，避免 `"total"` 误匹配 `"total_cost"` */
@@ -62,7 +61,7 @@ class TaskExecutionQuerySqlTest {
         val lower = sql.lowercase()
         val from = lower.indexOf(" from ")
         val where = lower.indexOf(" where ", from)
-        return if (from < 0 || where < 0) "" else sql.substring(from, where)
+        return if (from < 0 || where < 0) "" else lower.substring(from, where)
     }
 
     @Test
@@ -163,7 +162,7 @@ class TaskExecutionQuerySqlTest {
         )
 
         // 投影列共用：两条列表 SQL 的 select 列完全一致
-        fun projection(sql: String) = sql.substringAfter("select ", "").substringBefore(" from ", "")
+        fun projection(sql: String) = sql.lowercase().substringAfter("select ", "").substringBefore(" from ", "")
         assertEquals(projection(todayData), projection(overdueData), "/today 与 /overdue 必须共用同一投影列")
         assertTrue(projection(overdueData).contains("patient_name"), "投影必须包含 patient_name：$overdueData")
         // 028：药品 / 项目 依赖的两个字段必须在共用投影里（/today 与 /overdue 都生效；

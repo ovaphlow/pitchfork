@@ -1,13 +1,6 @@
 package com.ovaphlow.crate.nursing
 
 import com.ovaphlow.crate.common.Ulid
-import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingIncidentActions.NURSING_INCIDENT_ACTIONS
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingIncidents.NURSING_INCIDENTS
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingShiftHandoverItems.NURSING_SHIFT_HANDOVER_ITEMS
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingShiftHandovers.NURSING_SHIFT_HANDOVERS
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingTaskExecutions.NURSING_TASK_EXECUTIONS
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingTasks.NURSING_TASKS
 import io.vertx.core.CompositeFuture
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
@@ -15,11 +8,8 @@ import io.vertx.core.json.JsonObject
 import io.vertx.pgclient.PgException
 import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
-import io.vertx.sqlclient.RowSet
 import io.vertx.sqlclient.SqlClient
-import org.jooq.DSLContext
-import org.jooq.Query
-import org.jooq.impl.DSL
+import io.vertx.sqlclient.Tuple
 import java.security.MessageDigest
 import java.time.LocalDate
 import java.time.OffsetDateTime
@@ -39,10 +29,11 @@ import java.time.ZoneId
  * - 快照只是交接时的事实，不会改变源任务、执行、事件或护理记录的状态；
  * - 同一键同内容重试幂等返回原交班单，同键不同内容或不同键冲突返回 409；
  * - 接班只允许一次，接班人来自认证主体；已接班交班单仍可追加新事项。
+ *
+ * 持久化一律原生参数化 SQL（`$1..$n` + `Tuple`），本文件无任何 jOOQ 引用。
  */
 class ShiftHandoverService(
     private val pool: Pool,
-    private val ctx: DSLContext = DatabaseConfig.createDSL(),
     /**
      * Healthcare 注入的连接绑定端口：校验照护单元仍有活动养老入住。
      * 读取 healthcare.encounters 的职责归 Healthcare 侧，Nursing 不直接访问
@@ -52,13 +43,84 @@ class ShiftHandoverService(
 ) {
     companion object {
         val VALID_SHIFTS = setOf("早班", "中班", "夜班")
-        private val EXECUTION_OPEN_STATUSES = setOf("PENDING", "IN_PROGRESS")
         private val businessZone: ZoneId = ZoneId.of("Asia/Shanghai")
+
+        /** `nursing.nursing_shift_handovers` 显式列清单（与 [handoverHeadFromRow] 读取的键一致）。 */
+        private const val HANDOVER_COLUMNS =
+            "id, care_unit, business_date, shift, handover_by, handed_over_at, received_by, " +
+                "received_at, status, created_at, updated_at"
+
+        /** `nursing.nursing_shift_handover_items` 显式列清单。 */
+        private const val ITEM_COLUMNS =
+            "id, handover_id, item_kind, encounter_id, period_id, source_id, summary, " +
+                "created_by, snapshot_at, created_at"
+
+        private const val HANDOVER_BY_ID_SQL =
+            "SELECT $HANDOVER_COLUMNS FROM nursing.nursing_shift_handovers WHERE id = \$1"
+
+        private const val HANDOVER_BY_ID_LOCKED_SQL =
+            "SELECT $HANDOVER_COLUMNS FROM nursing.nursing_shift_handovers WHERE id = \$1 FOR UPDATE"
+
+        private const val HANDOVER_BY_SCOPE_LOCKED_SQL =
+            "SELECT $HANDOVER_COLUMNS FROM nursing.nursing_shift_handovers " +
+                "WHERE care_unit = \$1 AND business_date = \$2 AND shift = \$3 FOR UPDATE"
+
+        private const val HANDOVER_ITEMS_SQL =
+            "SELECT $ITEM_COLUMNS FROM nursing.nursing_shift_handover_items " +
+                "WHERE handover_id = \$1 ORDER BY created_at ASC, id ASC"
+
+        private const val HANDOVER_INSERT_SQL =
+            "INSERT INTO nursing.nursing_shift_handovers " +
+                "(id, care_unit, business_date, shift, handover_by, handed_over_at, status, " +
+                "idempotency_key, content_digest, created_at, updated_at) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, '待接班', \$7, \$8, \$9, \$10)"
+
+        /** 手工补充事项：来源关联恒空，创建人/快照时间由服务端写入。 */
+        private const val MANUAL_ITEM_INSERT_SQL =
+            "INSERT INTO nursing.nursing_shift_handover_items " +
+                "(id, handover_id, item_kind, summary, created_by, snapshot_at, created_at) " +
+                "VALUES (\$1, \$2, '手工', \$3, \$4, \$5, \$6)"
+
+        private const val RECEIVE_SQL =
+            "UPDATE nursing.nursing_shift_handovers " +
+                "SET received_by = \$2, received_at = \$3, status = '已接班', updated_at = \$4 " +
+                "WHERE id = \$1"
+
+        private const val TOUCH_HANDOVER_SQL =
+            "UPDATE nursing.nursing_shift_handovers SET updated_at = \$2 WHERE id = \$1"
+
+        private const val OPEN_EXECUTIONS_SQL =
+            "SELECT e.id, e.task_id, e.planned_time, e.actual_time, e.executor, e.status, e.note, " +
+                "t.description AS task_description, t.period_id " +
+                "FROM nursing.nursing_task_executions e " +
+                "JOIN nursing.nursing_tasks t ON t.id = e.task_id " +
+                "WHERE t.period_id IN (%s) AND e.status IN ('PENDING', 'IN_PROGRESS') " +
+                "ORDER BY e.planned_time ASC NULLS LAST, e.created_at ASC"
+
+        private const val OPEN_INCIDENTS_SQL =
+            "SELECT id, period_id, incident_type, severity, status, occurred_at, description " +
+                "FROM nursing.nursing_incidents " +
+                "WHERE period_id IN (%s) AND status <> '已关闭' " +
+                "ORDER BY occurred_at ASC, created_at ASC"
+
+        private const val INCIDENT_ACTIONS_SQL =
+            "SELECT incident_id, action_type, body, actor " +
+                "FROM nursing.nursing_incident_actions " +
+                "WHERE incident_id IN (%s) ORDER BY created_at ASC, id ASC"
+
+        private const val ITEM_COUNTS_SQL =
+            "SELECT handover_id, count(*) AS item_count " +
+                "FROM nursing.nursing_shift_handover_items " +
+                "WHERE handover_id IN (%s) GROUP BY handover_id"
 
         fun sha256Digest(value: String): String =
             MessageDigest.getInstance("SHA-256")
                 .digest(value.toByteArray(Charsets.UTF_8))
                 .joinToString("") { "%02x".format(it) }
+
+        /** 生成 `$1, $2, ...` 占位符串（[count] 个）。 */
+        private fun placeholders(count: Int): String =
+            (1..count).joinToString(", ") { "\$$it" }
     }
 
     data class HandoverCreateInput(
@@ -87,19 +149,11 @@ class ShiftHandoverService(
             buildSnapshot(client, snapshot).compose { fullSnapshot ->
                 val now = OffsetDateTime.now()
                 val id = Ulid.generate()
-                val insertHead = ctx.insertInto(NURSING_SHIFT_HANDOVERS)
-                    .set(NURSING_SHIFT_HANDOVERS.ID, id)
-                    .set(NURSING_SHIFT_HANDOVERS.CARE_UNIT, input.careUnit)
-                    .set(NURSING_SHIFT_HANDOVERS.BUSINESS_DATE, input.businessDate)
-                    .set(NURSING_SHIFT_HANDOVERS.SHIFT, input.shift)
-                    .set(NURSING_SHIFT_HANDOVERS.HANDOVER_BY, input.handoverBy)
-                    .set(NURSING_SHIFT_HANDOVERS.HANDED_OVER_AT, now)
-                    .set(NURSING_SHIFT_HANDOVERS.STATUS, "待接班")
-                    .set(NURSING_SHIFT_HANDOVERS.IDEMPOTENCY_KEY, input.idempotencyKey)
-                    .set(NURSING_SHIFT_HANDOVERS.CONTENT_DIGEST, digest)
-                    .set(NURSING_SHIFT_HANDOVERS.CREATED_AT, now)
-                    .set(NURSING_SHIFT_HANDOVERS.UPDATED_AT, now)
-                execute(client, insertHead).compose { _ ->
+                val tuple = Tuple.of(
+                    id, input.careUnit, input.businessDate, input.shift, input.handoverBy, now,
+                    input.idempotencyKey, digest, now, now,
+                )
+                client.preparedQuery(HANDOVER_INSERT_SQL).execute(tuple).compose { _ ->
                     insertItems(client, id, input.handoverBy, now, fullSnapshot, input.manualItems).map {
                         Pair(true, handoverResponse(id, input, digest, now, fullSnapshot))
                     }
@@ -130,13 +184,8 @@ class ShiftHandoverService(
             }
             ensureCareUnitActive(client, requireNotNull(handover.getString("care_unit"))).compose {
                 val now = OffsetDateTime.now()
-                val update = ctx.update(NURSING_SHIFT_HANDOVERS)
-                    .set(NURSING_SHIFT_HANDOVERS.RECEIVED_BY, receiver)
-                    .set(NURSING_SHIFT_HANDOVERS.RECEIVED_AT, now)
-                    .set(NURSING_SHIFT_HANDOVERS.STATUS, "已接班")
-                    .set(NURSING_SHIFT_HANDOVERS.UPDATED_AT, now)
-                    .where(NURSING_SHIFT_HANDOVERS.ID.eq(id))
-                execute(client, update).compose { getHandover(client, id) }
+                client.preparedQuery(RECEIVE_SQL).execute(Tuple.of(id, receiver, now, now))
+                    .compose { getHandover(client, id) }
             }
         }
     }
@@ -150,30 +199,19 @@ class ShiftHandoverService(
             ensureCareUnitActive(client, requireNotNull(handover.getString("care_unit"))).compose {
                 val now = OffsetDateTime.now()
                 val itemId = Ulid.generate()
-                val insert = ctx.insertInto(NURSING_SHIFT_HANDOVER_ITEMS)
-                    .set(NURSING_SHIFT_HANDOVER_ITEMS.ID, itemId)
-                    .set(NURSING_SHIFT_HANDOVER_ITEMS.HANDOVER_ID, id)
-                    .set(NURSING_SHIFT_HANDOVER_ITEMS.ITEM_KIND, "手工")
-                    .set(NURSING_SHIFT_HANDOVER_ITEMS.SUMMARY, content)
-                    .set(NURSING_SHIFT_HANDOVER_ITEMS.CREATED_BY, createdBy)
-                    .set(NURSING_SHIFT_HANDOVER_ITEMS.SNAPSHOT_AT, now)
-                    .set(NURSING_SHIFT_HANDOVER_ITEMS.CREATED_AT, now)
-                execute(client, insert).compose {
-                    val update = ctx.update(NURSING_SHIFT_HANDOVERS)
-                        .set(NURSING_SHIFT_HANDOVERS.UPDATED_AT, now)
-                        .where(NURSING_SHIFT_HANDOVERS.ID.eq(id))
-                    execute(client, update).compose { getHandover(client, id) }
-                }
+                client.preparedQuery(MANUAL_ITEM_INSERT_SQL)
+                    .execute(Tuple.of(itemId, id, content, createdBy, now, now))
+                    .compose {
+                        client.preparedQuery(TOUCH_HANDOVER_SQL).execute(Tuple.of(id, now))
+                            .compose { getHandover(client, id) }
+                    }
             }
         }
     }
 
     /** 锁定交接单头。必须在调用方外层事务内执行。 */
     fun lockHandover(client: SqlClient, id: String): Future<JsonObject> {
-        val query = ctx.selectFrom(NURSING_SHIFT_HANDOVERS)
-            .where(NURSING_SHIFT_HANDOVERS.ID.eq(id))
-            .forUpdate()
-        return execute(client, query).compose { rows ->
+        return client.preparedQuery(HANDOVER_BY_ID_LOCKED_SQL).execute(Tuple.of(id)).compose { rows ->
             val row = rows.iterator().asSequence().firstOrNull()
             if (row == null) {
                 return@compose Future.failedFuture(NotFoundException("shift handover not found: $id"))
@@ -194,21 +232,27 @@ class ShiftHandoverService(
         limit: Int,
         offset: Int,
     ): Future<JsonObject> {
-        val conditions = mutableListOf<org.jooq.Condition>()
-        conditions.add(NURSING_SHIFT_HANDOVERS.CARE_UNIT.eq(careUnit))
-        businessDate?.let { conditions.add(NURSING_SHIFT_HANDOVERS.BUSINESS_DATE.eq(it)) }
-        shift?.takeIf(String::isNotBlank)?.let { conditions.add(NURSING_SHIFT_HANDOVERS.SHIFT.eq(it)) }
+        val where = mutableListOf<String>()
+        val args = mutableListOf<Any?>(careUnit)
 
-        val countQuery = ctx.select(DSL.count().`as`("total")).from(NURSING_SHIFT_HANDOVERS).where(conditions)
-        val dataQuery = ctx.selectFrom(NURSING_SHIFT_HANDOVERS)
-            .where(conditions)
-            .orderBy(NURSING_SHIFT_HANDOVERS.BUSINESS_DATE.desc(), NURSING_SHIFT_HANDOVERS.CREATED_AT.desc())
-            .limit(limit)
-            .offset(offset)
+        /** 追加一个绑定值并返回其占位符。 */
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
 
-        return execute(pool, countQuery).compose { countRows ->
+        businessDate?.let { where.add("business_date = ${bind(it)}") }
+        shift?.takeIf(String::isNotBlank)?.let { where.add("shift = ${bind(it)}") }
+
+        val whereClause = if (where.isEmpty()) "" else " WHERE " + where.joinToString(" AND ")
+        val countSql = "SELECT count(*) AS total FROM nursing.nursing_shift_handovers$whereClause"
+        val countArgs = args.toList()
+        val dataSql =
+            "SELECT $HANDOVER_COLUMNS FROM nursing.nursing_shift_handovers$whereClause " +
+                "ORDER BY business_date DESC, created_at DESC " +
+                "LIMIT ${bind(limit)} OFFSET ${bind(offset)}"
+        val dataArgs = args.toList()
+
+        return pool.preparedQuery(countSql).execute(Tuple.from(countArgs)).compose { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(pool, dataQuery).compose { rows ->
+            pool.preparedQuery(dataSql).execute(Tuple.from(dataArgs)).compose { rows ->
                 val heads = rows.map { handoverHeadFromRow(it) }
                 if (heads.isEmpty()) {
                     return@compose Future.succeededFuture(
@@ -230,15 +274,10 @@ class ShiftHandoverService(
     fun getHandover(id: String): Future<JsonObject> = getHandover(pool, id)
 
     private fun getHandover(client: SqlClient, id: String): Future<JsonObject> {
-        val headQuery = ctx.selectFrom(NURSING_SHIFT_HANDOVERS)
-            .where(NURSING_SHIFT_HANDOVERS.ID.eq(id))
-        return execute(client, headQuery).compose { rows ->
+        return client.preparedQuery(HANDOVER_BY_ID_SQL).execute(Tuple.of(id)).compose { rows ->
             val row = rows.iterator().asSequence().firstOrNull()
                 ?: return@compose Future.failedFuture(NotFoundException("shift handover not found: $id"))
-            val itemsQuery = ctx.selectFrom(NURSING_SHIFT_HANDOVER_ITEMS)
-                .where(NURSING_SHIFT_HANDOVER_ITEMS.HANDOVER_ID.eq(id))
-                .orderBy(NURSING_SHIFT_HANDOVER_ITEMS.CREATED_AT.asc(), NURSING_SHIFT_HANDOVER_ITEMS.ID.asc())
-            execute(client, itemsQuery).map { itemRows ->
+            client.preparedQuery(HANDOVER_ITEMS_SQL).execute(Tuple.of(id)).map { itemRows ->
                 handoverHeadFromRow(row)
                     .put("items", JsonArray(itemRows.map { handoverItemFromRow(it) }))
             }
@@ -247,7 +286,7 @@ class ShiftHandoverService(
 
     // ========================================================================
     //  快照装配（只读批量查询，固定查询次数，不产生任何写副作用）
-    //  Healthcare 已在连接上收集活动养老入住与本业务日护理记录（生成表类），
+    //  Healthcare 已在连接上收集活动养老入住与本业务日护理记录，
     //  本服务只补齐 Nursing 事实表的未完成执行与未关闭事件。
     // ========================================================================
 
@@ -277,25 +316,8 @@ class ShiftHandoverService(
 
     /** 本班尚未完成或进行中的护理执行（PENDING / IN_PROGRESS）。 */
     private fun loadOpenExecutions(client: SqlClient, periodIds: List<String>): Future<List<JsonObject>> {
-        val query = ctx.select(
-            NURSING_TASK_EXECUTIONS.ID,
-            NURSING_TASK_EXECUTIONS.TASK_ID,
-            NURSING_TASK_EXECUTIONS.PLANNED_TIME,
-            NURSING_TASK_EXECUTIONS.ACTUAL_TIME,
-            NURSING_TASK_EXECUTIONS.EXECUTOR,
-            NURSING_TASK_EXECUTIONS.STATUS,
-            NURSING_TASK_EXECUTIONS.NOTE,
-            NURSING_TASKS.DESCRIPTION.`as`("task_description"),
-            NURSING_TASKS.PERIOD_ID,
-        )
-            .from(NURSING_TASK_EXECUTIONS)
-            .join(NURSING_TASKS).on(NURSING_TASK_EXECUTIONS.TASK_ID.eq(NURSING_TASKS.ID))
-            .where(
-                NURSING_TASKS.PERIOD_ID.`in`(periodIds)
-                    .and(NURSING_TASK_EXECUTIONS.STATUS.`in`(EXECUTION_OPEN_STATUSES)),
-            )
-            .orderBy(NURSING_TASK_EXECUTIONS.PLANNED_TIME.asc().nullsLast(), NURSING_TASK_EXECUTIONS.CREATED_AT.asc())
-        return execute(client, query).map { rows ->
+        val sql = OPEN_EXECUTIONS_SQL.format(placeholders(periodIds.size))
+        return client.preparedQuery(sql).execute(Tuple.from(periodIds)).map { rows ->
             rows.map { row ->
                 JsonObject()
                     .put("id", row.getString("id"))
@@ -311,13 +333,8 @@ class ShiftHandoverService(
 
     /** 尚未关闭的异常事件及最新处置摘要（两批查询，内存归组，无 N+1）。 */
     private fun loadOpenIncidents(client: SqlClient, periodIds: List<String>): Future<List<JsonObject>> {
-        val incidentQuery = ctx.selectFrom(NURSING_INCIDENTS)
-            .where(
-                NURSING_INCIDENTS.PERIOD_ID.`in`(periodIds)
-                    .and(NURSING_INCIDENTS.STATUS.ne("已关闭")),
-            )
-            .orderBy(NURSING_INCIDENTS.OCCURRED_AT.asc(), NURSING_INCIDENTS.CREATED_AT.asc())
-        return execute(client, incidentQuery).compose { incidentRows ->
+        val incidentSql = OPEN_INCIDENTS_SQL.format(placeholders(periodIds.size))
+        return client.preparedQuery(incidentSql).execute(Tuple.from(periodIds)).compose { incidentRows ->
             val incidents = incidentRows.map { row ->
                 JsonObject()
                     .put("id", row.getString("id"))
@@ -332,10 +349,8 @@ class ShiftHandoverService(
                 return@compose Future.succeededFuture(emptyList())
             }
             val incidentIds = incidents.mapNotNull { it.getString("id") }
-            val actionQuery = ctx.selectFrom(NURSING_INCIDENT_ACTIONS)
-                .where(NURSING_INCIDENT_ACTIONS.INCIDENT_ID.`in`(incidentIds))
-                .orderBy(NURSING_INCIDENT_ACTIONS.CREATED_AT.asc(), NURSING_INCIDENT_ACTIONS.ID.asc())
-            execute(client, actionQuery).map { actionRows ->
+            val actionSql = INCIDENT_ACTIONS_SQL.format(placeholders(incidentIds.size))
+            client.preparedQuery(actionSql).execute(Tuple.from(incidentIds)).map { actionRows ->
                 val latestByIncident = mutableMapOf<String, JsonObject>()
                 for (actionRow in actionRows) {
                     latestByIncident[actionRow.getString("incident_id")] = JsonObject()
@@ -416,18 +431,23 @@ class ShiftHandoverService(
         fun loop(index: Int): Future<Void> {
             if (index >= items.size) return Future.succeededFuture()
             val item = items[index]
-            var insert = ctx.insertInto(NURSING_SHIFT_HANDOVER_ITEMS)
-                .set(NURSING_SHIFT_HANDOVER_ITEMS.ID, Ulid.generate())
-                .set(NURSING_SHIFT_HANDOVER_ITEMS.HANDOVER_ID, handoverId)
-                .set(NURSING_SHIFT_HANDOVER_ITEMS.ITEM_KIND, item.getString("item_kind"))
-                .set(NURSING_SHIFT_HANDOVER_ITEMS.SUMMARY, requireNotNull(item.getString("summary")))
-                .set(NURSING_SHIFT_HANDOVER_ITEMS.CREATED_BY, createdBy)
-                .set(NURSING_SHIFT_HANDOVER_ITEMS.SNAPSHOT_AT, now)
-                .set(NURSING_SHIFT_HANDOVER_ITEMS.CREATED_AT, now)
-            item.getString("encounter_id")?.let { insert = insert.set(NURSING_SHIFT_HANDOVER_ITEMS.ENCOUNTER_ID, it) }
-            item.getString("period_id")?.let { insert = insert.set(NURSING_SHIFT_HANDOVER_ITEMS.PERIOD_ID, it) }
-            item.getString("source_id")?.let { insert = insert.set(NURSING_SHIFT_HANDOVER_ITEMS.SOURCE_ID, it) }
-            return execute(client, insert).compose { loop(index + 1) }
+            // 可空来源关联仅在存在时入列，避免绑定 null（原生参数化 SQL，$1..$n 位置绑定）。
+            val columns = mutableListOf(
+                "id", "handover_id", "item_kind", "summary", "created_by", "snapshot_at", "created_at",
+            )
+            val values = mutableListOf<Any?>(
+                Ulid.generate(), handoverId, item.getString("item_kind"),
+                requireNotNull(item.getString("summary")), createdBy, now, now,
+            )
+            item.getString("encounter_id")?.let { columns.add("encounter_id"); values.add(it) }
+            item.getString("period_id")?.let { columns.add("period_id"); values.add(it) }
+            item.getString("source_id")?.let { columns.add("source_id"); values.add(it) }
+
+            val sql =
+                "INSERT INTO nursing.nursing_shift_handover_items " +
+                    "(${columns.joinToString(", ")}) VALUES (${placeholders(values.size)})"
+
+            return client.preparedQuery(sql).execute(Tuple.from(values)).compose { loop(index + 1) }
         }
         return loop(0)
     }
@@ -520,29 +540,15 @@ class ShiftHandoverService(
         careUnit: String,
         businessDate: LocalDate,
         shift: String,
-    ): Future<Row?> {
-        val query = ctx.selectFrom(NURSING_SHIFT_HANDOVERS)
-            .where(
-                NURSING_SHIFT_HANDOVERS.CARE_UNIT.eq(careUnit)
-                    .and(NURSING_SHIFT_HANDOVERS.BUSINESS_DATE.eq(businessDate))
-                    .and(NURSING_SHIFT_HANDOVERS.SHIFT.eq(shift)),
-            )
-            .forUpdate()
-        return execute(client, query).map { rows ->
-            rows.iterator().asSequence().firstOrNull()
-        }
-    }
+    ): Future<Row?> =
+        client.preparedQuery(HANDOVER_BY_SCOPE_LOCKED_SQL)
+            .execute(Tuple.of(careUnit, businessDate, shift))
+            .map { rows -> rows.iterator().asSequence().firstOrNull() }
 
-    /** 周期终态判定由 Healthcare 注入的端口完成（读 healthcare.encounters），本服务不再直接访问。 */
+    /** 交接单「事项数」：按 handover_id 归组统计，避免列表接口带出全部明细。 */
     private fun countItems(client: SqlClient, handoverIds: List<String>): Future<Map<String, Long>> {
-        val query = ctx.select(
-            NURSING_SHIFT_HANDOVER_ITEMS.HANDOVER_ID,
-            DSL.count().`as`("item_count"),
-        )
-            .from(NURSING_SHIFT_HANDOVER_ITEMS)
-            .where(NURSING_SHIFT_HANDOVER_ITEMS.HANDOVER_ID.`in`(handoverIds))
-            .groupBy(NURSING_SHIFT_HANDOVER_ITEMS.HANDOVER_ID)
-        return execute(client, query).map { rows ->
+        val sql = ITEM_COUNTS_SQL.format(placeholders(handoverIds.size))
+        return client.preparedQuery(sql).execute(Tuple.from(handoverIds)).map { rows ->
             rows.associate { it.getString("handover_id") to (it.getLong("item_count") ?: 0L) }
         }
     }
@@ -590,7 +596,4 @@ class ShiftHandoverService(
         }
         return false
     }
-
-    private fun execute(client: SqlClient, query: Query): Future<RowSet<Row>> =
-        client.preparedQuery(DatabaseConfig.sql(query)).execute(DatabaseConfig.tuple(query))
 }

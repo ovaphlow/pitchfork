@@ -41,8 +41,8 @@ class RequisitionStockServiceTest {
         service = StockService(mockk<Pool>())
     }
 
-    private fun rowOf(vararg values: Any?): Row = mockk {
-        every { getValue(any<Int>()) } answers { values.getOrNull(firstArg<Int>()) }
+    private fun rowOf(vararg pairs: Pair<String, Any?>): Row = mockk {
+        every { getValue(any<String>()) } answers { pairs.toMap()[firstArg<String>()] }
     }
 
     private fun rowIterator(rows: Iterator<Row>): RowIterator<Row> = mockk {
@@ -67,22 +67,33 @@ class RequisitionStockServiceTest {
         }
     }
 
-    /** loadStock 行：id, lot_id, quantity, locked_quantity, total_cost */
+    /** loadStock 行：按列名台账。 */
     private fun stockRow(
         id: String,
         lotId: String?,
         qty: BigDecimal,
         locked: BigDecimal = BigDecimal.ZERO,
         totalCost: BigDecimal = BigDecimal.ZERO,
-    ): Row = rowOf(id, lotId, qty, locked, totalCost)
+    ): Row = rowOf(
+        "stock_id" to id,
+        "stock_lot_id" to lotId,
+        "stock_quantity" to qty,
+        "stock_locked_quantity" to locked,
+        "stock_total_cost" to totalCost,
+    )
 
-    /** loadMaterial 行：status, base_unit, quantity_scale, batch_control */
+    /** loadMaterial 行：按列名台账。 */
     private fun materialRow(
         status: String = "ACTIVE",
         baseUnit: String = "片",
         scale: Int = 0,
         batchControl: Boolean = false,
-    ): Row = rowOf(status, baseUnit, scale, batchControl)
+    ): Row = rowOf(
+        "material_status" to status,
+        "material_base_unit" to baseUnit,
+        "material_quantity_scale" to scale,
+        "material_batch_control" to batchControl,
+    )
 
     private fun failureOf(future: Future<*>): Throwable {
         val failures = mutableListOf<Throwable>()

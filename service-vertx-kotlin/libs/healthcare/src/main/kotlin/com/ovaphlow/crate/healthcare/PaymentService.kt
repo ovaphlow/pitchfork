@@ -1,10 +1,6 @@
 package com.ovaphlow.crate.healthcare
 
 import com.ovaphlow.crate.common.Ulid
-import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.database.gen.healthcare.tables.Bills.BILLS
-import com.ovaphlow.crate.database.gen.healthcare.tables.Encounters.ENCOUNTERS
-import com.ovaphlow.crate.database.gen.healthcare.tables.Payments.PAYMENTS
 import com.ovaphlow.crate.nursing.ConflictException
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
@@ -13,9 +9,7 @@ import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.RowSet
 import io.vertx.sqlclient.SqlClient
-import org.jooq.JSONB
-import org.jooq.Query
-import org.jooq.impl.DSL
+import io.vertx.sqlclient.Tuple
 import java.math.BigDecimal
 import java.time.OffsetDateTime
 
@@ -46,10 +40,11 @@ import java.time.OffsetDateTime
  *     红冲后应缴靠正负相抵归零（原单 + 红字单），欠费靠排除已红冲原单归零，
  *     两者一致，恒等式仍成立（034 §2.2/§2.6）。
  *  7. 冻结守卫：结算收束后（encounters.settled_at 非空）缴费一律 409。
+ *
+ * 持久化一律原生参数化 SQL（`$1..$n` + `Tuple`），无 jOOQ。
  */
 class PaymentService(
     private val pool: Pool,
-    private val ctx: org.jooq.DSLContext = DatabaseConfig.createDSL(),
 ) {
     companion object {
         /** 缴费方式中文枚举（DB CHECK 与应用层白名单保持一致） */
@@ -79,6 +74,84 @@ class PaymentService(
         /** 写白名单：bill_id/operator/created_at/updated_at/id 由服务端管控 */
         private val createKeys = setOf("amount", "method", "remark", "metadata")
 
+        private const val COLUMNS =
+            "healthcare.payments.id, healthcare.payments.bill_id, healthcare.payments.amount, " +
+                "healthcare.payments.method, healthcare.payments.operator, healthcare.payments.remark, " +
+                "healthcare.payments.metadata, healthcare.payments.created_at, healthcare.payments.updated_at"
+
+        /** 账单行锁读（事务内串行化缴费）：不存在 404；状态/合计由调用方校验。 */
+        private const val REQUIRE_BILL_SQL =
+            "SELECT healthcare.bills.id, healthcare.bills.encounter_id, healthcare.bills.status, " +
+                "healthcare.bills.total_amount, healthcare.bills.reversal_of, healthcare.bills.reversed_at " +
+                "FROM healthcare.bills WHERE healthcare.bills.id = \$1 FOR UPDATE"
+
+        /** 事务内按 encounter 行锁读（冻结守卫）：不存在 404。 */
+        private const val REQUIRE_ENCOUNTER_SQL =
+            "SELECT healthcare.encounters.settled_at FROM healthcare.encounters " +
+                "WHERE healthcare.encounters.id = \$1 FOR UPDATE"
+
+        private const val PAYMENT_AMOUNTS_SQL =
+            "SELECT healthcare.payments.amount FROM healthcare.payments " +
+                "WHERE healthcare.payments.bill_id = \$1"
+
+        private const val INSERT_PAYMENT_SQL =
+            "INSERT INTO healthcare.payments " +
+                "(id, bill_id, amount, method, operator, created_at, updated_at, remark, metadata) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9)"
+
+        private const val MARK_BILL_PAID_SQL =
+            "UPDATE healthcare.bills SET status = \$1, updated_at = \$2 WHERE healthcare.bills.id = \$3"
+
+        private const val COUNT_PAYMENTS_SQL =
+            "SELECT count(*) AS total FROM healthcare.payments " +
+                "WHERE healthcare.payments.bill_id = \$1"
+
+        private const val LIST_PAYMENTS_SQL =
+            "SELECT $COLUMNS FROM healthcare.payments WHERE healthcare.payments.bill_id = \$1 " +
+                "ORDER BY healthcare.payments.created_at DESC, healthcare.payments.id DESC " +
+                "OFFSET \$2 ROWS FETCH NEXT \$3 ROWS ONLY"
+
+        /**
+         * 欠费基数（数据与计数共用）：每账单累计缴费派生表 LEFT JOIN；
+         * 034：排除已红冲原单（`reversed_at` 非空）——它已被红字单抵消，不再是欠费；
+         * 红字单（负的 total_amount）靠 `total_amount > paid` 天然排除，不另加谓词。
+         */
+        private const val ARREARS_BASE_SQL =
+            "SELECT healthcare.bills.id, healthcare.bills.encounter_id, healthcare.bills.period_start, " +
+                "healthcare.bills.period_end, healthcare.bills.status, healthcare.bills.total_amount, " +
+                "coalesce(ppb.paid, 0) AS paid_amount, " +
+                "healthcare.bills.total_amount - coalesce(ppb.paid, 0) AS balance, " +
+                "healthcare.bills.created_at, healthcare.bills.updated_at " +
+                "FROM healthcare.bills " +
+                "LEFT OUTER JOIN (" +
+                "SELECT bill_id, sum(amount) AS paid FROM healthcare.payments GROUP BY bill_id" +
+                ") ppb ON ppb.bill_id = healthcare.bills.id " +
+                "WHERE healthcare.bills.status = \$1 " +
+                "AND healthcare.bills.total_amount > coalesce(ppb.paid, 0) " +
+                "AND healthcare.bills.reversed_at IS NULL"
+
+        private const val SUMMARY_ARREARS_SQL =
+            "SELECT coalesce(sum(healthcare.bills.total_amount - coalesce(ppb.paid, 0)), 0) " +
+                "AS arrears_amount " +
+                "FROM healthcare.bills " +
+                "LEFT OUTER JOIN (" +
+                "SELECT bill_id, sum(amount) AS paid FROM healthcare.payments GROUP BY bill_id" +
+                ") ppb ON ppb.bill_id = healthcare.bills.id " +
+                "WHERE healthcare.bills.status = \$1 " +
+                "AND healthcare.bills.total_amount > coalesce(ppb.paid, 0) " +
+                "AND healthcare.bills.reversed_at IS NULL"
+
+        private const val SUMMARY_DUE_SQL =
+            "SELECT coalesce(sum(healthcare.bills.total_amount), 0) AS due_amount FROM healthcare.bills"
+
+        private const val SUMMARY_PAID_SQL =
+            "SELECT coalesce(sum(healthcare.payments.amount), 0) AS paid_amount FROM healthcare.payments"
+
+        /** 减免合计 = Σ(已结算账单的 outstanding_amount)：收束时被放弃的未结余额快照。 */
+        private const val SUMMARY_WRITE_OFF_SQL =
+            "SELECT coalesce(sum(healthcare.bills.outstanding_amount), 0) AS write_off_amount " +
+                "FROM healthcare.bills WHERE healthcare.bills.status = \$1"
+
         private fun recordJson(row: Row): JsonObject =
             JsonObject()
                 .put("id", row.getString("id"))
@@ -95,13 +168,6 @@ class PaymentService(
         internal fun paidOf(amounts: List<BigDecimal>): BigDecimal =
             amounts.fold(BigDecimal.ZERO) { acc, amount -> acc.add(amount) }
     }
-
-    // ========================================================================
-    //  V523 账单红冲列（未重跑 jOOQ codegen：按列名引用，SELECT 带表名限定）
-    // ========================================================================
-
-    private val sReversalOf = DSL.field(DSL.name("bills", "reversal_of"), String::class.java)
-    private val sReversedAt = DSL.field(DSL.name("bills", "reversed_at"), OffsetDateTime::class.java)
 
     /**
      * 034 §2.6 守卫：红字单与已红冲原单一律不可缴费，非正金额账单（0 元封口）
@@ -164,15 +230,27 @@ class PaymentService(
                                 ),
                             )
                         } else {
-                            execute(connection, insertQuery(id, billId, fields, operator, now)).compose {
+                            execute(
+                                connection,
+                                INSERT_PAYMENT_SQL,
+                                Tuple.of(
+                                    id,
+                                    billId,
+                                    fields.amount,
+                                    fields.method,
+                                    operator,
+                                    now,
+                                    now,
+                                    fields.remark,
+                                    fields.metadata,
+                                ),
+                            ).compose {
                                 val newPaid = paid.add(fields.amount)
                                 val settle = if (newPaid.compareTo(total) >= 0) {
                                     execute(
                                         connection,
-                                        ctx.update(BILLS)
-                                            .set(BILLS.STATUS, BillingEngine.STATUS_PAID)
-                                            .set(BILLS.UPDATED_AT, now)
-                                            .where(BILLS.ID.eq(billId)),
+                                        MARK_BILL_PAID_SQL,
+                                        Tuple.of(BillingEngine.STATUS_PAID, now, billId),
                                     ).map { Unit }
                                 } else {
                                     Future.succeededFuture()
@@ -191,33 +269,15 @@ class PaymentService(
     // ========================================================================
 
     /** 按账单查询缴费流水（倒序分页），返回 {records, meta:{total}}；空流水 records: [] 且 total: 0。 */
-    fun listPayments(billId: String, limit: Int = 50, offset: Int = 0): Future<JsonObject> {
-        val countQuery = ctx.select(DSL.count().`as`("total")).from(PAYMENTS)
-            .where(PAYMENTS.BILL_ID.eq(billId))
-        val dataQuery = ctx.select(
-            PAYMENTS.ID,
-            PAYMENTS.BILL_ID,
-            PAYMENTS.AMOUNT,
-            PAYMENTS.METHOD,
-            PAYMENTS.OPERATOR,
-            PAYMENTS.REMARK,
-            PAYMENTS.METADATA,
-            PAYMENTS.CREATED_AT,
-            PAYMENTS.UPDATED_AT,
-        ).from(PAYMENTS)
-            .where(PAYMENTS.BILL_ID.eq(billId))
-            .orderBy(PAYMENTS.CREATED_AT.desc(), PAYMENTS.ID.desc())
-            .limit(limit)
-            .offset(offset)
-        return execute(pool, countQuery).compose { countRows ->
+    fun listPayments(billId: String, limit: Int = 50, offset: Int = 0): Future<JsonObject> =
+        execute(pool, COUNT_PAYMENTS_SQL, Tuple.of(billId)).compose { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(pool, dataQuery).map { dataRows ->
+            execute(pool, LIST_PAYMENTS_SQL, Tuple.of(billId, offset, limit)).map { dataRows ->
                 JsonObject()
                     .put("records", JsonArray(dataRows.map(::recordJson)))
                     .put("meta", JsonObject().put("total", total))
             }
         }
-    }
 
     // ========================================================================
     //  欠费列表
@@ -229,13 +289,22 @@ class PaymentService(
      * 记录含 paid_amount（累计缴费）与 balance（余额），供结算收束读账。
      *
      * [encounterId] 可选：传入时只返回该入住的欠费账单，**数据与计数同源过滤**
-     * （[arrearsQuery] 与 [arrearsCountQuery] 加同一条件），`meta.total` 为过滤后的行数；
+     * （同一 [ARREARS_BASE_SQL] 加同一条件），`meta.total` 为过滤后的行数；
      * 省略时行为与改动前逐字段一致。不存在/非法的 id 只是过滤条件 → 空列表（不返回 404）。
      */
     fun listArrears(encounterId: String? = null, limit: Int = 50, offset: Int = 0): Future<JsonObject> {
-        return execute(pool, arrearsCountQuery(encounterId)).compose { countRows ->
+        val args = mutableListOf<Any?>(BillingEngine.STATUS_PENDING)
+        val filter = encounterId?.let {
+            args.add(it)
+            " AND healthcare.bills.encounter_id = \$2"
+        } ?: ""
+        val countSql = "SELECT count(*) AS total FROM (" + ARREARS_BASE_SQL + filter + ") arrears"
+        val dataSql = ARREARS_BASE_SQL + filter +
+            " ORDER BY healthcare.bills.period_start DESC, healthcare.bills.id DESC " +
+            "OFFSET \$${args.size + 1} ROWS FETCH NEXT \$${args.size + 2} ROWS ONLY"
+        return execute(pool, countSql, Tuple.from(args)).compose { countRows ->
             val total = countRows.iterator().next().getLong("total") ?: 0L
-            execute(pool, arrearsQuery(encounterId, limit, offset)).map { dataRows ->
+            execute(pool, dataSql, Tuple.from(args + listOf<Any?>(offset, limit))).map { dataRows ->
                 JsonObject()
                     .put("records", JsonArray(dataRows.map(::arrearsJson)))
                     .put("meta", JsonObject().put("total", total))
@@ -254,10 +323,10 @@ class PaymentService(
      * 减免单独成项、不并入欠费。无数据时四项均为 0。
      */
     fun summary(): Future<JsonObject> =
-        execute(pool, summaryDueQuery()).compose { dueRows ->
-            execute(pool, summaryPaidQuery()).compose { paidRows ->
-                execute(pool, summaryArrearsQuery()).compose { arrearsRows ->
-                    execute(pool, summaryWriteOffQuery()).map { writeOffRows ->
+        execute(pool, SUMMARY_DUE_SQL, Tuple.tuple()).compose { dueRows ->
+            execute(pool, SUMMARY_PAID_SQL, Tuple.tuple()).compose { paidRows ->
+                execute(pool, SUMMARY_ARREARS_SQL, Tuple.of(BillingEngine.STATUS_PENDING)).compose { arrearsRows ->
+                    execute(pool, SUMMARY_WRITE_OFF_SQL, Tuple.of(BillingEngine.STATUS_SETTLED)).map { writeOffRows ->
                         JsonObject()
                             .put("due_amount", dueRows.iterator().next().getBigDecimal("due_amount"))
                             .put("paid_amount", paidRows.iterator().next().getBigDecimal("paid_amount"))
@@ -339,119 +408,23 @@ class PaymentService(
 
     /** 账单行锁读（事务内串行化缴费）：不存在 404；状态/合计由调用方校验。 */
     private fun requireBill(client: SqlClient, billId: String): Future<Row> =
-        execute(
-            client,
-            ctx.select(
-                BILLS.ID,
-                BILLS.ENCOUNTER_ID,
-                BILLS.STATUS,
-                BILLS.TOTAL_AMOUNT,
-                sReversalOf,
-                sReversedAt,
-            ).from(BILLS)
-                .where(BILLS.ID.eq(billId))
-                .forUpdate(),
-        ).compose { rows ->
+        execute(client, REQUIRE_BILL_SQL, Tuple.of(billId)).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(it) }
                 ?: Future.failedFuture(HealthcareNotFoundException("bill not found: $billId"))
         }
 
     /** 事务内按 encounter 行锁读（冻结守卫）：不存在 404。 */
     private fun requireEncounter(client: SqlClient, encounterId: String): Future<Row> =
-        execute(
-            client,
-            ctx.selectFrom(ENCOUNTERS).where(ENCOUNTERS.ID.eq(encounterId)).forUpdate(),
-        ).compose { rows ->
+        execute(client, REQUIRE_ENCOUNTER_SQL, Tuple.of(encounterId)).compose { rows ->
             rows.iterator().asSequence().firstOrNull()?.let { Future.succeededFuture(it) }
                 ?: Future.failedFuture(HealthcareNotFoundException("encounter not found: $encounterId"))
         }
 
     /** 账单已缴明细金额，累计由 [paidOf] 纯函数计算。 */
-    private fun paymentAmounts(client: SqlClient, billId: String): Future<List<BigDecimal>> {
-        val query = ctx.select(PAYMENTS.AMOUNT)
-            .from(PAYMENTS)
-            .where(PAYMENTS.BILL_ID.eq(billId))
-        return execute(client, query).map { rows ->
+    private fun paymentAmounts(client: SqlClient, billId: String): Future<List<BigDecimal>> =
+        execute(client, PAYMENT_AMOUNTS_SQL, Tuple.of(billId)).map { rows ->
             rows.map { row -> row.getBigDecimal("amount") }
         }
-    }
-
-    /** 账单每账单累计缴费（派生表），欠费列表/汇总共用。 */
-    private val paidPerBill = DSL.table(
-        DSL.select(PAYMENTS.BILL_ID.`as`("bill_id"), DSL.sum(PAYMENTS.AMOUNT).`as`("paid"))
-            .from(PAYMENTS)
-            .groupBy(PAYMENTS.BILL_ID),
-    ).`as`("ppb")
-
-    private val ppbBillId = DSL.field(DSL.name("ppb", "bill_id"), String::class.java)
-    private val ppbPaid = DSL.field(DSL.name("ppb", "paid"), BigDecimal::class.java)
-
-    /**
-     * 欠费基数（数据与计数共用）：可选 encounter_id 过滤条件对两者同源生效。
-     * 034：排除已红冲原单（`reversed_at` 非空）——它已被红字单抵消，不再是欠费；
-     * 红字单（负的 total_amount）靠 `total_amount > paid` 天然排除，不另加谓词。
-     */
-    private fun arrearsBase(encounterId: String?) =
-        ctx.select(
-            BILLS.ID,
-            BILLS.ENCOUNTER_ID,
-            BILLS.PERIOD_START,
-            BILLS.PERIOD_END,
-            BILLS.STATUS,
-            BILLS.TOTAL_AMOUNT,
-            DSL.coalesce(ppbPaid, BigDecimal.ZERO).`as`("paid_amount"),
-            BILLS.TOTAL_AMOUNT.subtract(DSL.coalesce(ppbPaid, BigDecimal.ZERO)).`as`("balance"),
-            BILLS.CREATED_AT,
-            BILLS.UPDATED_AT,
-        ).from(BILLS)
-            .leftJoin(paidPerBill).on(ppbBillId.eq(BILLS.ID))
-            .where(
-                listOfNotNull(
-                    BILLS.STATUS.eq(BillingEngine.STATUS_PENDING),
-                    BILLS.TOTAL_AMOUNT.gt(DSL.coalesce(ppbPaid, BigDecimal.ZERO)),
-                    sReversedAt.isNull(),
-                    encounterId?.let { BILLS.ENCOUNTER_ID.eq(it) },
-                ),
-            )
-
-    private fun arrearsQuery(encounterId: String?, limit: Int, offset: Int): Query =
-        arrearsBase(encounterId)
-            .orderBy(BILLS.PERIOD_START.desc(), BILLS.ID.desc())
-            .limit(limit)
-            .offset(offset)
-
-    private fun arrearsCountQuery(encounterId: String?): Query =
-        ctx.select(DSL.count().`as`("total")).from(arrearsBase(encounterId).asTable("arrears"))
-
-    private fun summaryDueQuery(): Query =
-        ctx.select(DSL.coalesce(DSL.sum(BILLS.TOTAL_AMOUNT), BigDecimal.ZERO).`as`("due_amount")).from(BILLS)
-
-    private fun summaryPaidQuery(): Query =
-        ctx.select(DSL.coalesce(DSL.sum(PAYMENTS.AMOUNT), BigDecimal.ZERO).`as`("paid_amount")).from(PAYMENTS)
-
-    /**
-     * 欠费合计 = Σ(待缴费且余额 > 0 的账单余额)；034 起排除已红冲原单，
-     * 与 [arrearsBase]（欠费列表）同口径；红字单靠 `total_amount > paid` 天然排除。
-     * 这样红冲后 due = A + (−A) = 0、arrears = 0，恒等式 应缴 − 已缴 = 欠费 不被破坏。
-     */
-    private fun summaryArrearsQuery(): Query =
-        ctx.select(
-            DSL.coalesce(
-                DSL.sum(BILLS.TOTAL_AMOUNT.subtract(DSL.coalesce(ppbPaid, BigDecimal.ZERO))),
-                BigDecimal.ZERO,
-            ).`as`("arrears_amount"),
-        ).from(BILLS)
-            .leftJoin(paidPerBill).on(ppbBillId.eq(BILLS.ID))
-            .where(BILLS.STATUS.eq(BillingEngine.STATUS_PENDING))
-            .and(BILLS.TOTAL_AMOUNT.gt(DSL.coalesce(ppbPaid, BigDecimal.ZERO)))
-            .and(sReversedAt.isNull())
-
-    /** 减免合计 = Σ(已结算账单的 outstanding_amount)：收束时被放弃的未结余额快照。 */
-    private fun summaryWriteOffQuery(): Query =
-        ctx.select(
-            DSL.coalesce(DSL.sum(BILLS.OUTSTANDING_AMOUNT), BigDecimal.ZERO).`as`("write_off_amount"),
-        ).from(BILLS)
-            .where(BILLS.STATUS.eq(BillingEngine.STATUS_SETTLED))
 
     private fun arrearsJson(row: Row): JsonObject =
         JsonObject()
@@ -465,26 +438,6 @@ class PaymentService(
             .put("balance", row.getBigDecimal("balance"))
             .put("created_at", row.getOffsetDateTime("created_at")?.toString())
             .put("updated_at", row.getOffsetDateTime("updated_at")?.toString())
-
-    private fun insertQuery(
-        id: String,
-        billId: String,
-        fields: Fields,
-        operator: String,
-        now: OffsetDateTime,
-    ): Query {
-        var query = ctx.insertInto(PAYMENTS)
-            .set(PAYMENTS.ID, id)
-            .set(PAYMENTS.BILL_ID, billId)
-            .set(PAYMENTS.AMOUNT, fields.amount)
-            .set(PAYMENTS.METHOD, fields.method)
-            .set(PAYMENTS.OPERATOR, operator)
-            .set(PAYMENTS.CREATED_AT, now)
-            .set(PAYMENTS.UPDATED_AT, now)
-        fields.remark?.let { query = query.set(PAYMENTS.REMARK, it) }
-        fields.metadata?.let { query = query.set(PAYMENTS.METADATA, JSONB.valueOf(it.encode())) }
-        return query
-    }
 
     private fun createdJson(
         id: String,
@@ -504,6 +457,6 @@ class PaymentService(
             .put("created_at", now.toString())
             .put("updated_at", now.toString())
 
-    private fun execute(client: SqlClient, query: Query): Future<RowSet<Row>> =
-        client.preparedQuery(DatabaseConfig.sql(query)).execute(DatabaseConfig.tuple(query))
+    private fun execute(client: SqlClient, sql: String, args: Tuple): Future<RowSet<Row>> =
+        client.preparedQuery(sql).execute(args)
 }

@@ -1,18 +1,12 @@
 package com.ovaphlow.crate.nursing
 
-import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingAssessments
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingPlanItems
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingPlans
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingTaskExecutions
-import com.ovaphlow.crate.database.gen.nursing.tables.NursingTasks
 import io.vertx.core.CompositeFuture
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
 import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.SqlClient
-import org.jooq.DSLContext
+import io.vertx.sqlclient.Tuple
 import java.time.LocalDate
 import java.time.OffsetDateTime
 
@@ -27,13 +21,43 @@ import java.time.OffsetDateTime
  * 查询次数固定：评估 1 次、计划 1 次、措施 1 次（计划非空时）、任务 1 次、
  * 执行 1 次（JOIN 任务按 period 关联，不按患者或日期猜测）；不产生任何写
  * 副作用，不调用任务生成、状态流转、库存或时间线能力。
+ *
+ * 持久化一律原生参数化 SQL（`$1..$n` + `Tuple`），无 jOOQ。
  */
-class ElderlyDischargeHandoverSnapshotService(
-    private val ctx: DSLContext = DatabaseConfig.createDSL(),
-) {
+class ElderlyDischargeHandoverSnapshotService {
     companion object {
         /** 执行状态计数键的稳定顺序（PENDING/IN_PROGRESS/COMPLETED/SKIPPED/CANCELLED） */
         private val EXECUTION_STATUSES = listOf("PENDING", "IN_PROGRESS", "COMPLETED", "SKIPPED", "CANCELLED")
+
+        private const val ASSESSMENTS_SQL =
+            "SELECT id, assess_type, assess_date, assessor, total_score, result_level, detail, remark, created_at " +
+                "FROM nursing.nursing_assessments WHERE period_id = \$1 " +
+                "ORDER BY assess_date ASC, created_at ASC, id ASC"
+
+        private const val PLANS_SQL =
+            "SELECT id, plan_name, goals, status, created_by, start_date, end_date, created_at " +
+                "FROM nursing.nursing_plans WHERE period_id = \$1 " +
+                "ORDER BY created_at ASC, id ASC"
+
+        private const val PLAN_ITEMS_COLUMNS =
+            "id, plan_id, action, frequency_code, frequency_name, duration_days, remark, status, created_at"
+
+        private const val PLAN_ITEMS_FROM = " FROM nursing.nursing_plan_items WHERE plan_id IN "
+
+        private const val PLAN_ITEMS_ORDER = " ORDER BY created_at ASC, id ASC"
+
+        private const val TASKS_SQL =
+            "SELECT id, description, task_type, frequency_code, frequency_name, start_date, end_date, " +
+                "status, created_at FROM nursing.nursing_tasks WHERE period_id = \$1 " +
+                "ORDER BY created_at ASC, id ASC"
+
+        private const val EXECUTIONS_SQL =
+            "SELECT e.id, e.task_id, e.planned_time, e.actual_time, e.executor, e.status, e.note, e.created_at " +
+                "FROM nursing.nursing_task_executions e " +
+                "JOIN nursing.nursing_tasks t ON e.task_id = t.id " +
+                "WHERE t.period_id = \$1 " +
+                "ORDER BY e.actual_time ASC NULLS LAST, e.planned_time ASC NULLS LAST, " +
+                "e.created_at ASC, e.id ASC"
 
         private fun rowString(row: Row, name: String): String? = row.getValue(name)?.toString()
         private fun rowDate(row: Row, name: String): String? = (row.getValue(name) as? LocalDate)?.toString()
@@ -172,120 +196,26 @@ class ElderlyDischargeHandoverSnapshotService(
         }
     }
 
-    private fun loadAssessments(client: SqlClient, periodId: String): Future<List<JsonObject>> {
-        val t = NursingAssessments.NURSING_ASSESSMENTS
-        val query = ctx.select(
-            t.ID,
-            t.ASSESS_TYPE,
-            t.ASSESS_DATE,
-            t.ASSESSOR,
-            t.TOTAL_SCORE,
-            t.RESULT_LEVEL,
-            t.DETAIL,
-            t.REMARK,
-            t.CREATED_AT,
-        )
-            .from(t)
-            .where(t.PERIOD_ID.eq(periodId))
-            .orderBy(
-                t.ASSESS_DATE.asc(),
-                t.CREATED_AT.asc(),
-                t.ID.asc(),
-            )
-        return execute(client, query).map { rows -> rows.map { assessmentToJson(it) } }
-    }
+    private fun loadAssessments(client: SqlClient, periodId: String): Future<List<JsonObject>> =
+        client.preparedQuery(ASSESSMENTS_SQL).execute(Tuple.of(periodId))
+            .map { rows -> rows.map { assessmentToJson(it) } }
 
-    private fun loadPlans(client: SqlClient, periodId: String): Future<List<JsonObject>> {
-        val t = NursingPlans.NURSING_PLANS
-        val query = ctx.select(
-            t.ID,
-            t.PLAN_NAME,
-            t.GOALS,
-            t.STATUS,
-            t.CREATED_BY,
-            t.START_DATE,
-            t.END_DATE,
-            t.CREATED_AT,
-        )
-            .from(t)
-            .where(t.PERIOD_ID.eq(periodId))
-            .orderBy(
-                t.CREATED_AT.asc(),
-                t.ID.asc(),
-            )
-        return execute(client, query).map { rows -> rows.map { planToJson(it) } }
-    }
+    private fun loadPlans(client: SqlClient, periodId: String): Future<List<JsonObject>> =
+        client.preparedQuery(PLANS_SQL).execute(Tuple.of(periodId))
+            .map { rows -> rows.map { planToJson(it) } }
 
     private fun loadItems(client: SqlClient, planIds: List<String>): Future<List<JsonObject>> {
-        val t = NursingPlanItems.NURSING_PLAN_ITEMS
-        val query = ctx.select(
-            t.ID,
-            t.PLAN_ID,
-            t.ACTION,
-            t.FREQUENCY_CODE,
-            t.FREQUENCY_NAME,
-            t.DURATION_DAYS,
-            t.REMARK,
-            t.STATUS,
-            t.CREATED_AT,
-        )
-            .from(t)
-            .where(t.PLAN_ID.`in`(planIds))
-            .orderBy(
-                t.CREATED_AT.asc(),
-                t.ID.asc(),
-            )
-        return execute(client, query).map { rows -> rows.map { itemToJson(it) } }
+        val placeholders = planIds.indices.joinToString(", ") { "\$${it + 1}" }
+        val sql = "SELECT $PLAN_ITEMS_COLUMNS$PLAN_ITEMS_FROM($placeholders)$PLAN_ITEMS_ORDER"
+        return client.preparedQuery(sql).execute(Tuple.from(planIds))
+            .map { rows -> rows.map { itemToJson(it) } }
     }
 
-    private fun loadTasks(client: SqlClient, periodId: String): Future<List<JsonObject>> {
-        val t = NursingTasks.NURSING_TASKS
-        val query = ctx.select(
-            t.ID,
-            t.DESCRIPTION,
-            t.TASK_TYPE,
-            t.FREQUENCY_CODE,
-            t.FREQUENCY_NAME,
-            t.START_DATE,
-            t.END_DATE,
-            t.STATUS,
-            t.CREATED_AT,
-        )
-            .from(t)
-            .where(t.PERIOD_ID.eq(periodId))
-            .orderBy(
-                t.CREATED_AT.asc(),
-                t.ID.asc(),
-            )
-        return execute(client, query).map { rows -> rows.map { taskToJson(it) } }
-    }
+    private fun loadTasks(client: SqlClient, periodId: String): Future<List<JsonObject>> =
+        client.preparedQuery(TASKS_SQL).execute(Tuple.of(periodId))
+            .map { rows -> rows.map { taskToJson(it) } }
 
-    private fun loadExecutions(client: SqlClient, periodId: String): Future<List<JsonObject>> {
-        val e = NursingTaskExecutions.NURSING_TASK_EXECUTIONS
-        val t = NursingTasks.NURSING_TASKS
-        val query = ctx.select(
-            e.ID,
-            e.TASK_ID,
-            e.PLANNED_TIME,
-            e.ACTUAL_TIME,
-            e.EXECUTOR,
-            e.STATUS,
-            e.NOTE,
-            e.CREATED_AT,
-        )
-            .from(e)
-            .join(t)
-            .on(e.TASK_ID.eq(t.ID))
-            .where(t.PERIOD_ID.eq(periodId))
-            .orderBy(
-                e.ACTUAL_TIME.asc().nullsLast(),
-                e.PLANNED_TIME.asc().nullsLast(),
-                e.CREATED_AT.asc(),
-                e.ID.asc(),
-            )
-        return execute(client, query).map { rows -> rows.map { executionToJson(it) } }
-    }
-
-    private fun execute(client: SqlClient, query: org.jooq.Query): Future<io.vertx.sqlclient.RowSet<Row>> =
-        client.preparedQuery(DatabaseConfig.sql(query)).execute(DatabaseConfig.tuple(query))
+    private fun loadExecutions(client: SqlClient, periodId: String): Future<List<JsonObject>> =
+        client.preparedQuery(EXECUTIONS_SQL).execute(Tuple.of(periodId))
+            .map { rows -> rows.map { executionToJson(it) } }
 }

@@ -1,6 +1,5 @@
 package com.ovaphlow.crate.nursing
 
-import com.ovaphlow.crate.database.DatabaseConfig
 import io.mockk.every
 import io.mockk.mockk
 import io.vertx.core.Future
@@ -28,7 +27,7 @@ import java.time.LocalDate
  * 新口径（本测试锁定）：`应完成 = 已到计划时间 或 已完成`，且全局汇总与按执行人分组
  * 必须用同一份定义；`逾期` 定义不变（仍只认 PENDING/IN_PROGRESS 且已过计划时间）。
  *
- * 用 jOOQ 离线渲染 + mockk 捕获池上实际执行的 SQL 文本与绑定参数（与 `TaskExecutionQuerySqlTest` 同法），
+ * 用 mockk 捕获池上实际执行的 SQL 文本与绑定参数（与 `TaskExecutionQuerySqlTest` 同法），
  * 因为 DB 门控集成用例默认不执行，本断言是这套口径在无库环境下的唯一护栏。
  */
 class TaskExecutionStatisticsSqlTest {
@@ -53,11 +52,11 @@ class TaskExecutionStatisticsSqlTest {
         val prepared = mockk<PreparedQuery<RowSet<Row>>>()
         every { prepared.execute(capture(log.tuples)) } returns Future.succeededFuture(rows)
         every { pool.preparedQuery(capture(log.statements)) } returns prepared
-        return TaskExecutionService(pool, DatabaseConfig.createDSL())
+        return TaskExecutionService(pool)
     }
 
     private fun statisticsSql(log: QueryLogWithParams): List<String> =
-        log.statements.filter { it.contains("filter") && it.contains("scheduled_total") }
+        log.statements.filter { it.contains("filter", ignoreCase = true) && it.contains("scheduled_total") }
 
     /**
      * 取出某个聚合别名对应的 `filter (where …)` 片段。
@@ -66,10 +65,10 @@ class TaskExecutionStatisticsSqlTest {
      * 一起吞进来（各 FILTER 表达式形状不同，逐个断言前必须先精确定位）。
      */
     private fun filterFor(sql: String, alias: String): String {
-        val aliasIndex = sql.indexOf("as \"$alias\"")
-        if (aliasIndex < 0) return ""
-        val head = sql.substring(0, aliasIndex)
-        val filterIndex = head.lastIndexOf("filter")
+        val match = Regex("as\\s+${Regex.escape(alias)}(?![\\w_])", RegexOption.IGNORE_CASE).find(sql)
+            ?: return ""
+        val head = sql.substring(0, match.range.first)
+        val filterIndex = head.lowercase().lastIndexOf("filter")
         return if (filterIndex < 0) "" else head.substring(filterIndex)
     }
 
@@ -132,8 +131,8 @@ class TaskExecutionStatisticsSqlTest {
         runStatistics(log)
 
         val aggregates = statisticsSql(log)
-        val globalSql = aggregates.single { !it.contains("group by") }
-        val groupedSql = aggregates.single { it.contains("group by") }
+        val globalSql = aggregates.single { !it.contains("group by", ignoreCase = true) }
+        val groupedSql = aggregates.single { it.contains("group by", ignoreCase = true) }
 
         assertEquals(
             filterFor(globalSql, "due_total").replace(Regex("\\s+"), " ").trim(),
@@ -143,20 +142,31 @@ class TaskExecutionStatisticsSqlTest {
     }
 
     @Test
-    fun `应完成的析取分支绑定的是已完成状态`() {
+    fun `应完成的析取分支指向已完成状态`() {
         val log = QueryLogWithParams()
         runStatistics(log)
 
-        // 绑定参数按 SQL 文本出现顺序编号，聚合投影固定为
-        // scheduled/pending/in_progress/completed/skipped/cancelled → due_total 的 OR 分支是第 7 个：
-        // $6 = now（planned_time < now），$7 = 应完成析取分支的状态值。
-        val tuples = log.tuples.filter { it.size() > 7 }
+        // 迁移到原生参数化 SQL 后，状态枚举以固定字面量直接落在 SQL 文本中
+        // （与全仓其它原生 SQL 口径一致），因此不再以第 7 个绑定参数的形式出现；
+        // 被锁定的业务口径不变：应完成的 OR 分支只认「已完成」。
+        val aggregates = statisticsSql(log)
+        assertEquals(2, aggregates.size, "全局汇总与按执行人分组各一条聚合 SQL：$aggregates")
+        for (sql in aggregates) {
+            val due = filterFor(sql, "due_total").replace(Regex("\\s+"), " ")
+            assertTrue(due.isNotBlank(), "必须能取到应完成的 FILTER 表达式：$sql")
+            assertTrue(
+                Regex("e\\.status\\s*=\\s*'COMPLETED'", RegexOption.IGNORE_CASE).containsMatchIn(due),
+                "应完成析取分支必须指向「已完成」：$due",
+            )
+        }
+
+        // 应完成分界仍以 now 绑定参数落在 $1（聚合投影第一位）
+        val tuples = log.tuples.filter { it.size() > 1 }
         assertTrue(tuples.isNotEmpty(), "必须捕获到聚合查询的绑定参数")
         for (tuple in tuples) {
-            assertEquals(
-                "COMPLETED",
-                tuple.getValue(6)?.toString(),
-                "应完成的 OR 分支必须绑定「已完成」，实际绑定：${tuple.getValue(6)}",
+            assertTrue(
+                tuple.getValue(0) is java.time.OffsetDateTime,
+                "聚合查询 $1 必须是 now（应完成/逾期分界），实际：${tuple.getValue(0)}",
             )
         }
     }

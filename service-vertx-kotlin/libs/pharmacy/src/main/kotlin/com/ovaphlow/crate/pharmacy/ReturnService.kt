@@ -1,11 +1,6 @@
 package com.ovaphlow.crate.pharmacy
 
 import com.ovaphlow.crate.common.Ulid
-import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyDispenseItems.PHARMACY_DISPENSE_ITEMS
-import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyDispenses.PHARMACY_DISPENSES
-import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyReturnItems.PHARMACY_RETURN_ITEMS
-import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyReturns.PHARMACY_RETURNS
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
@@ -13,17 +8,19 @@ import io.vertx.sqlclient.Pool
 import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.SqlClient
 import io.vertx.sqlclient.SqlConnection
-import org.jooq.DSLContext
-import org.jooq.JSONB
-import org.jooq.impl.DSL
-import org.jooq.impl.DSL.count
+import io.vertx.sqlclient.Tuple
 import java.math.BigDecimal
 import java.time.OffsetDateTime
 
+/**
+ * 退药（012）：从原发药明细退回到药房库存，带可退数量校验与库存 INBOUND 联动。
+ *
+ * 持久化一律原生参数化 SQL（`$1..$n` + `Tuple`），无 jOOQ；所有写路径复用调用方
+ * 事务连接，行锁用 `FOR UPDATE`。
+ */
 class ReturnService(
     private val pool: Pool,
     private val inventoryInboundPort: InventoryInboundPort,
-    private val ctx: DSLContext = DatabaseConfig.createDSL(),
 ) {
     private data class ReturnSource(
         val returnItemId: String,
@@ -45,6 +42,67 @@ class ReturnService(
     )
 
     companion object {
+        private const val RETURN_COLUMNS =
+            "id, return_no, original_dispense_id, patient_id, return_reason, status, operator, " +
+                "metadata, created_at, confirmed_at"
+
+        private const val ITEM_COLUMNS =
+            "id, return_id, dispense_item_id, quantity, stock_operation_detail_id, unit_cost, " +
+                "total_cost, metadata"
+
+        private const val INSERT_RETURN_SQL =
+            "INSERT INTO pharmacy.pharmacy_returns " +
+                "(id, return_no, original_dispense_id, patient_id, return_reason, status, operator, " +
+                "metadata, created_at) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9)"
+
+        private const val INSERT_ITEM_SQL =
+            "INSERT INTO pharmacy.pharmacy_return_items " +
+                "(id, return_id, dispense_item_id, quantity, unit_cost, total_cost, metadata) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7)"
+
+        private const val CONFIRM_ITEM_SQL =
+            "UPDATE pharmacy.pharmacy_return_items " +
+                "SET stock_operation_detail_id = \$1, unit_cost = \$2, total_cost = \$3 WHERE id = \$4"
+
+        private const val CONFIRM_RETURN_SQL =
+            "UPDATE pharmacy.pharmacy_returns SET status = \$1, operator = \$2, confirmed_at = \$3 " +
+                "WHERE id = \$4"
+
+        private const val CANCEL_SQL =
+            "UPDATE pharmacy.pharmacy_returns SET status = \$1 WHERE id = \$2"
+
+        /** 发药明细来源（创建退药单）：发药单与明细同锁。 */
+        private const val DISPENSE_SOURCE_SQL =
+            "SELECT d.id AS dispense_id, d.patient_id AS patient_id, d.warehouse AS warehouse, " +
+                "d.status AS dispense_status, i.id AS dispense_item_id, i.material_id AS material_id, " +
+                "i.lot_id AS lot_id, i.dispensed_quantity AS dispensed_quantity, i.unit_cost AS unit_cost, " +
+                "i.stock_operation_detail_id AS original_stock_operation_detail_id " +
+                "FROM pharmacy.pharmacy_dispenses d " +
+                "JOIN pharmacy.pharmacy_dispense_items i ON i.dispense_id = d.id " +
+                "WHERE d.id = \$1 AND i.id = \$2 FOR UPDATE"
+
+        /** 退药来源（确认入库）：退药单/明细、发药明细与发药单一起锁。 */
+        private const val RETURN_SOURCE_SQL =
+            "SELECT r.id AS return_id, r.status AS return_status, " +
+                "r.original_dispense_id AS dispense_id, r.patient_id AS patient_id, " +
+                "d.warehouse AS warehouse, d.status AS dispense_status, " +
+                "ri.id AS return_item_id, ri.dispense_item_id AS dispense_item_id, " +
+                "ri.quantity AS return_quantity, " +
+                "ri.stock_operation_detail_id AS return_stock_operation_detail_id, " +
+                "i.material_id AS material_id, i.lot_id AS lot_id, " +
+                "i.dispensed_quantity AS dispensed_quantity, i.unit_cost AS unit_cost, " +
+                "i.stock_operation_detail_id AS original_stock_operation_detail_id " +
+                "FROM pharmacy.pharmacy_returns r " +
+                "JOIN pharmacy.pharmacy_return_items ri ON ri.return_id = r.id " +
+                "JOIN pharmacy.pharmacy_dispense_items i ON i.id = ri.dispense_item_id " +
+                "JOIN pharmacy.pharmacy_dispenses d ON d.id = r.original_dispense_id " +
+                "WHERE r.id = \$1 FOR UPDATE"
+
+        private const val TOTAL_QUANTITY_SUBQUERY =
+            "(SELECT COALESCE(SUM(ri.quantity), 0) FROM pharmacy.pharmacy_return_items ri " +
+                "WHERE ri.return_id = pharmacy_returns.id) AS total_quantity"
+
         fun toJson(row: Row): JsonObject = JsonObject()
             .put("id", row.getValue("id")?.toString())
             .put("return_no", row.getValue("return_no")?.toString())
@@ -100,8 +158,8 @@ class ReturnService(
                 validateDispenseSource(source)
                 val requested = quantity
                 // 可退口径：实发 − 累计已给药 − 未取消退药（待确认 + 已确认）；已给药不得退回库存。
-                ReturnableQuantities.administeredQuantity(connection, ctx, dispenseItemId).compose { administered ->
-                    ReturnableQuantities.reservedQuantity(connection, ctx, dispenseItemId).compose { reserved ->
+                ReturnableQuantities.administeredQuantity(connection, dispenseItemId).compose { administered ->
+                    ReturnableQuantities.reservedQuantity(connection, dispenseItemId).compose { reserved ->
                         ReturnableQuantities.overReturnError(requested, source.dispensedQuantity, administered, reserved)
                             ?.let { return@compose Future.failedFuture(it) }
                         insertReturn(
@@ -124,32 +182,29 @@ class ReturnService(
         limit: Int = 50,
         offset: Int = 0,
     ): Future<JsonObject> {
-        val conditions = mutableListOf<org.jooq.Condition>()
-        patientId?.takeIf(String::isNotBlank)?.let { conditions.add(PHARMACY_RETURNS.PATIENT_ID.eq(it)) }
-        status?.takeIf(String::isNotBlank)?.let { conditions.add(PHARMACY_RETURNS.STATUS.eq(it)) }
+        val where = mutableListOf<String>()
+        val args = mutableListOf<Any?>()
+
+        /** 追加一个绑定值并返回其占位符。 */
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
+
+        patientId?.takeIf(String::isNotBlank)?.let { where.add("patient_id = ${bind(it)}") }
+        status?.takeIf(String::isNotBlank)?.let { where.add("status = ${bind(it)}") }
         val safeLimit = limit.coerceIn(1, 200)
         val safeOffset = offset.coerceAtLeast(0)
-        val countQuery = ctx.select(count(PHARMACY_RETURNS.ID).`as`("total"))
-            .from(PHARMACY_RETURNS)
-            .where(conditions)
-        val totalQuantity = DSL.field(
-            DSL.select(DSL.coalesce(DSL.sum(PHARMACY_RETURN_ITEMS.QUANTITY), DSL.inline(BigDecimal.ZERO)))
-                .from(PHARMACY_RETURN_ITEMS)
-                .where(PHARMACY_RETURN_ITEMS.RETURN_ID.eq(PHARMACY_RETURNS.ID)),
-        ).`as`("total_quantity")
-        val dataQuery = ctx.select(PHARMACY_RETURNS.fields().toList() + totalQuantity)
-            .from(PHARMACY_RETURNS)
-            .where(conditions)
-            .orderBy(PHARMACY_RETURNS.CREATED_AT.desc())
-            .limit(safeLimit)
-            .offset(safeOffset)
 
-        return pool.preparedQuery(DatabaseConfig.sql(countQuery))
-            .execute(DatabaseConfig.tuple(countQuery))
+        val whereClause = if (where.isEmpty()) "" else " WHERE " + where.joinToString(" AND ")
+        val countSql = "SELECT count(id) AS total FROM pharmacy.pharmacy_returns$whereClause"
+        val countArgs = args.toList()
+        val dataSql =
+            "SELECT $RETURN_COLUMNS, $TOTAL_QUANTITY_SUBQUERY FROM pharmacy.pharmacy_returns$whereClause " +
+                "ORDER BY created_at DESC LIMIT ${bind(safeLimit)} OFFSET ${bind(safeOffset)}"
+        val dataArgs = args.toList()
+
+        return pool.preparedQuery(countSql).execute(Tuple.from(countArgs))
             .compose { countRows ->
                 val total = countRows.iterator().next().getLong("total") ?: 0L
-                pool.preparedQuery(DatabaseConfig.sql(dataQuery))
-                    .execute(DatabaseConfig.tuple(dataQuery))
+                pool.preparedQuery(dataSql).execute(Tuple.from(dataArgs))
                     .map { dataRows ->
                         val records = JsonArray()
                         for (row in dataRows) records.add(toJson(row))
@@ -160,20 +215,18 @@ class ReturnService(
 
     fun get(id: String): Future<JsonObject> = get(pool, id)
 
-    private fun get(client: SqlClient, id: String): Future<JsonObject> {
-        val query = ctx.selectFrom(PHARMACY_RETURNS).where(PHARMACY_RETURNS.ID.eq(id))
-        val itemsQuery = ctx.selectFrom(PHARMACY_RETURN_ITEMS)
-            .where(PHARMACY_RETURN_ITEMS.RETURN_ID.eq(id))
-            .orderBy(PHARMACY_RETURN_ITEMS.ID.asc())
-        return client.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+    private fun get(client: SqlClient, id: String): Future<JsonObject> =
+        client.preparedQuery("SELECT $RETURN_COLUMNS FROM pharmacy.pharmacy_returns WHERE id = \$1")
+            .execute(Tuple.of(id))
             .compose { rows ->
                 if (rows.size() == 0) {
                     Future.failedFuture(NotFoundException("return not found: $id"))
                 } else {
                     val header = toJson(rows.iterator().next())
-                    client.preparedQuery(DatabaseConfig.sql(itemsQuery))
-                        .execute(DatabaseConfig.tuple(itemsQuery))
+                    client.preparedQuery(
+                        "SELECT $ITEM_COLUMNS FROM pharmacy.pharmacy_return_items " +
+                            "WHERE return_id = \$1 ORDER BY id ASC"
+                    ).execute(Tuple.of(id))
                         .map { itemRows ->
                             val items = JsonArray()
                             for (row in itemRows) items.add(itemToJson(row))
@@ -182,7 +235,6 @@ class ReturnService(
                         }
                 }
             }
-    }
 
     fun confirm(id: String, body: JsonObject, operator: String?): Future<JsonObject> {
         rejectUnknown(body, setOf("operator", "remark"))?.let { return Future.failedFuture(it) }
@@ -200,11 +252,10 @@ class ReturnService(
                             return@compose Future.failedFuture(ConflictException("return already has stock operation"))
                         }
                         // 待确认期间可能补水给药记录：确认前按同一可退口径复验（本单排除后叠加本单数量）。
-                        ReturnableQuantities.administeredQuantity(connection, ctx, source.dispenseItemId)
+                        ReturnableQuantities.administeredQuantity(connection, source.dispenseItemId)
                             .compose { administered ->
                                 ReturnableQuantities.reservedQuantity(
                                     connection,
-                                    ctx,
                                     source.dispenseItemId,
                                     excludeReturnId = id,
                                 ).compose { reservedByOthers ->
@@ -226,24 +277,24 @@ class ReturnService(
                                         ),
                                     ).compose { inbound ->
                                         val now = OffsetDateTime.now()
-                                        val itemUpdate = ctx.update(PHARMACY_RETURN_ITEMS)
-                                            .set(PHARMACY_RETURN_ITEMS.STOCK_OPERATION_DETAIL_ID, inbound.stockOperationDetailId)
-                                            .set(PHARMACY_RETURN_ITEMS.UNIT_COST, inbound.unitCost)
-                                            .set(PHARMACY_RETURN_ITEMS.TOTAL_COST, inbound.unitCost.multiply(source.quantity))
-                                            .where(PHARMACY_RETURN_ITEMS.ID.eq(source.returnItemId))
-                                        val headerUpdate = ctx.update(PHARMACY_RETURNS)
-                                            .set(PHARMACY_RETURNS.STATUS, "CONFIRMED")
-                                            .set(PHARMACY_RETURNS.OPERATOR, operatorValue)
-                                            .set(PHARMACY_RETURNS.CONFIRMED_AT, now)
-                                            .where(PHARMACY_RETURNS.ID.eq(id))
-                                        connection.preparedQuery(DatabaseConfig.sql(itemUpdate))
-                                            .execute(DatabaseConfig.tuple(itemUpdate))
-                                            .compose { connection.preparedQuery(DatabaseConfig.sql(headerUpdate)).execute(DatabaseConfig.tuple(headerUpdate)) }
+                                        connection.preparedQuery(CONFIRM_ITEM_SQL).execute(
+                                            Tuple.of(
+                                                inbound.stockOperationDetailId,
+                                                inbound.unitCost,
+                                                inbound.unitCost.multiply(source.quantity),
+                                                source.returnItemId,
+                                            )
+                                        )
+                                            .compose {
+                                                connection.preparedQuery(CONFIRM_RETURN_SQL).execute(
+                                                    Tuple.of("CONFIRMED", operatorValue, now, id)
+                                                )
+                                            }
                                             .compose { get(connection, id) }
                                     }
                                 }
                             }
-                        }
+                    }
                     else -> Future.failedFuture(ConflictException("cannot confirm return in status ${current.getString("status")}"))
                 }
             }
@@ -256,11 +307,7 @@ class ReturnService(
                 if (current.getString("status") != "PENDING") {
                     return@compose Future.failedFuture(ConflictException("cannot cancel return in status ${current.getString("status")}"))
                 }
-                val query = ctx.update(PHARMACY_RETURNS)
-                    .set(PHARMACY_RETURNS.STATUS, "CANCELLED")
-                    .where(PHARMACY_RETURNS.ID.eq(id))
-                connection.preparedQuery(DatabaseConfig.sql(query))
-                    .execute(DatabaseConfig.tuple(query))
+                connection.preparedQuery(CANCEL_SQL).execute(Tuple.of("CANCELLED", id))
                     .compose { get(connection, id) }
             }
         }
@@ -280,102 +327,50 @@ class ReturnService(
             .put("restockable", true)
             .put("dispense_id", source.dispenseId)
         body.getString("remark")?.takeIf(String::isNotBlank)?.let { metadata.put("remark", it) }
-        val headerInsert = ctx.insertInto(PHARMACY_RETURNS)
-            .set(PHARMACY_RETURNS.ID, returnId)
-            .set(PHARMACY_RETURNS.RETURN_NO, returnNo)
-            .set(PHARMACY_RETURNS.ORIGINAL_DISPENSE_ID, source.dispenseId)
-            .set(PHARMACY_RETURNS.PATIENT_ID, source.patientId)
-            .set(PHARMACY_RETURNS.RETURN_REASON, reason)
-            .set(PHARMACY_RETURNS.STATUS, "PENDING")
-            .set(PHARMACY_RETURNS.OPERATOR, operator)
-            .set(PHARMACY_RETURNS.METADATA, JSONB.valueOf(metadata.encode()))
-            .set(PHARMACY_RETURNS.CREATED_AT, now)
-        val itemInsert = ctx.insertInto(PHARMACY_RETURN_ITEMS)
-            .set(PHARMACY_RETURN_ITEMS.ID, Ulid.generate())
-            .set(PHARMACY_RETURN_ITEMS.RETURN_ID, returnId)
-            .set(PHARMACY_RETURN_ITEMS.DISPENSE_ITEM_ID, source.dispenseItemId)
-            .set(PHARMACY_RETURN_ITEMS.QUANTITY, quantity)
-            .set(PHARMACY_RETURN_ITEMS.UNIT_COST, source.unitCost)
-            .set(PHARMACY_RETURN_ITEMS.TOTAL_COST, source.unitCost.multiply(quantity))
-            .set(PHARMACY_RETURN_ITEMS.METADATA, JSONB.valueOf(JsonObject().put("restockable", true).encode()))
-        return connection.preparedQuery(DatabaseConfig.sql(headerInsert))
-            .execute(DatabaseConfig.tuple(headerInsert))
-            .compose { connection.preparedQuery(DatabaseConfig.sql(itemInsert)).execute(DatabaseConfig.tuple(itemInsert)) }
+        return connection.preparedQuery(INSERT_RETURN_SQL).execute(
+            Tuple.of(
+                returnId, returnNo, source.dispenseId, source.patientId, reason, "PENDING",
+                operator, metadata, now,
+            )
+        )
+            .compose {
+                connection.preparedQuery(INSERT_ITEM_SQL).execute(
+                    Tuple.of(
+                        Ulid.generate(), returnId, source.dispenseItemId, quantity,
+                        source.unitCost, source.unitCost.multiply(quantity),
+                        JsonObject().put("restockable", true),
+                    )
+                )
+            }
             .compose { get(connection, returnId) }
     }
 
-    private fun lockReturn(connection: SqlConnection, id: String): Future<JsonObject> {
-        val query = ctx.selectFrom(PHARMACY_RETURNS)
-            .where(PHARMACY_RETURNS.ID.eq(id))
-            .forUpdate()
-        return connection.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+    private fun lockReturn(connection: SqlConnection, id: String): Future<JsonObject> =
+        connection.preparedQuery(
+            "SELECT $RETURN_COLUMNS FROM pharmacy.pharmacy_returns WHERE id = \$1 FOR UPDATE"
+        ).execute(Tuple.of(id))
             .compose { rows ->
                 if (rows.size() == 0) Future.failedFuture(NotFoundException("return not found: $id"))
                 else Future.succeededFuture(toJson(rows.iterator().next()))
             }
-    }
 
     private fun loadDispenseSource(
         connection: SqlConnection,
         dispenseId: String,
         dispenseItemId: String,
-    ): Future<ReturnSource> {
-        val query = ctx.select(
-            PHARMACY_DISPENSES.ID.`as`("dispense_id"),
-            PHARMACY_DISPENSES.PATIENT_ID,
-            PHARMACY_DISPENSES.WAREHOUSE,
-            PHARMACY_DISPENSES.STATUS.`as`("dispense_status"),
-            PHARMACY_DISPENSE_ITEMS.ID.`as`("dispense_item_id"),
-            PHARMACY_DISPENSE_ITEMS.MATERIAL_ID,
-            PHARMACY_DISPENSE_ITEMS.LOT_ID,
-            PHARMACY_DISPENSE_ITEMS.DISPENSED_QUANTITY,
-            PHARMACY_DISPENSE_ITEMS.UNIT_COST,
-            PHARMACY_DISPENSE_ITEMS.STOCK_OPERATION_DETAIL_ID.`as`("original_stock_operation_detail_id"),
-        )
-            .from(PHARMACY_DISPENSES)
-            .join(PHARMACY_DISPENSE_ITEMS).on(PHARMACY_DISPENSE_ITEMS.DISPENSE_ID.eq(PHARMACY_DISPENSES.ID))
-            .where(PHARMACY_DISPENSES.ID.eq(dispenseId).and(PHARMACY_DISPENSE_ITEMS.ID.eq(dispenseItemId)))
-            .forUpdate()
-        return connection.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+    ): Future<ReturnSource> =
+        connection.preparedQuery(DISPENSE_SOURCE_SQL).execute(Tuple.of(dispenseId, dispenseItemId))
             .compose { rows ->
                 if (rows.size() == 0) return@compose Future.failedFuture(NotFoundException("dispense item not found: $dispenseItemId"))
                 Future.succeededFuture(sourceFromRow(rows.iterator().next()))
             }
-    }
 
-    private fun loadReturnSource(connection: SqlConnection, returnId: String): Future<ReturnSource> {
-        val query = ctx.select(
-            PHARMACY_RETURNS.ID.`as`("return_id"),
-            PHARMACY_RETURNS.STATUS.`as`("return_status"),
-            PHARMACY_RETURNS.ORIGINAL_DISPENSE_ID.`as`("dispense_id"),
-            PHARMACY_RETURNS.PATIENT_ID,
-            PHARMACY_DISPENSES.WAREHOUSE,
-            PHARMACY_DISPENSES.STATUS.`as`("dispense_status"),
-            PHARMACY_RETURN_ITEMS.ID.`as`("return_item_id"),
-            PHARMACY_RETURN_ITEMS.DISPENSE_ITEM_ID.`as`("dispense_item_id"),
-            PHARMACY_RETURN_ITEMS.QUANTITY.`as`("return_quantity"),
-            PHARMACY_RETURN_ITEMS.STOCK_OPERATION_DETAIL_ID.`as`("return_stock_operation_detail_id"),
-            PHARMACY_DISPENSE_ITEMS.MATERIAL_ID,
-            PHARMACY_DISPENSE_ITEMS.LOT_ID,
-            PHARMACY_DISPENSE_ITEMS.DISPENSED_QUANTITY.`as`("dispensed_quantity"),
-            PHARMACY_DISPENSE_ITEMS.UNIT_COST,
-            PHARMACY_DISPENSE_ITEMS.STOCK_OPERATION_DETAIL_ID.`as`("original_stock_operation_detail_id"),
-        )
-            .from(PHARMACY_RETURNS)
-            .join(PHARMACY_RETURN_ITEMS).on(PHARMACY_RETURN_ITEMS.RETURN_ID.eq(PHARMACY_RETURNS.ID))
-            .join(PHARMACY_DISPENSE_ITEMS).on(PHARMACY_DISPENSE_ITEMS.ID.eq(PHARMACY_RETURN_ITEMS.DISPENSE_ITEM_ID))
-            .join(PHARMACY_DISPENSES).on(PHARMACY_DISPENSES.ID.eq(PHARMACY_RETURNS.ORIGINAL_DISPENSE_ID))
-            .where(PHARMACY_RETURNS.ID.eq(returnId))
-            .forUpdate()
-        return connection.preparedQuery(DatabaseConfig.sql(query))
-            .execute(DatabaseConfig.tuple(query))
+    private fun loadReturnSource(connection: SqlConnection, returnId: String): Future<ReturnSource> =
+        connection.preparedQuery(RETURN_SOURCE_SQL).execute(Tuple.of(returnId))
             .compose { rows ->
                 if (rows.size() == 0) return@compose Future.failedFuture(NotFoundException("return item not found: $returnId"))
                 Future.succeededFuture(sourceFromRow(rows.iterator().next(), returnRow = true))
             }
-    }
 
     private fun sourceFromRow(row: Row, returnRow: Boolean = false): ReturnSource = ReturnSource(
         returnItemId = if (row.getColumnIndex("return_item_id") >= 0) row.getString("return_item_id") ?: "" else "",

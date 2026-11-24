@@ -760,8 +760,11 @@ class HealthcareIncidentHandoverRoutesTest {
                     val update = stub.connTuples.first {
                         it.first.startsWith("update") && it.first.contains("nursing_shift_handovers")
                     }
-                    assertEquals("subj-nurse", update.second[0])
-                    assertEquals("已接班", update.second[2])
+                    assertTrue(update.second.contains("subj-nurse"), "接班人必须写入: ${update.second}")
+                    assertTrue(
+                        update.first.contains("已接班") || update.second.contains("已接班"),
+                        "状态必须置为已接班: ${update.first} / ${update.second}",
+                    )
                     assertTrue(stub.connQueries.first { it.startsWith("update") }.contains("received_by"))
                     ctx.completeNow()
                 }

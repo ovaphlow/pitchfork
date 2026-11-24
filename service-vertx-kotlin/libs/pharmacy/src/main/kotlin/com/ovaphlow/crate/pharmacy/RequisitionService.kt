@@ -1,9 +1,6 @@
 package com.ovaphlow.crate.pharmacy
 
 import com.ovaphlow.crate.common.Ulid
-import com.ovaphlow.crate.database.DatabaseConfig
-import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyRequisitionItems
-import com.ovaphlow.crate.database.gen.pharmacy.tables.PharmacyRequisitions
 import io.vertx.core.Future
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
@@ -13,9 +10,7 @@ import io.vertx.sqlclient.Row
 import io.vertx.sqlclient.RowSet
 import io.vertx.sqlclient.SqlClient
 import io.vertx.sqlclient.SqlConnection
-import org.jooq.DSLContext
-import org.jooq.impl.DSL
-import org.jooq.impl.DSL.count
+import io.vertx.sqlclient.Tuple
 import java.math.BigDecimal
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
@@ -34,50 +29,10 @@ import java.time.OffsetDateTime
 class RequisitionService(
     private val pool: Pool,
     private val inventoryPort: InventoryRequisitionTransferPort,
-    private val ctx: DSLContext = DatabaseConfig.createDSL(),
 ) {
-    private val r = PharmacyRequisitions.PHARMACY_REQUISITIONS
-    private val ri = PharmacyRequisitionItems.PHARMACY_REQUISITION_ITEMS
-
-    // jOOQ 查询对象是可变的：每次 `.where(...)` 都会原地追加条件。
-    // 这里必须每次调用都新建查询，禁止用共享 val 累积历史谓词
-    // （曾导致回读 WHERE 叠成 id=$1 AND id=$2 … 永不匹配，创建后报 requisition not found）。
-    private fun headerSelect() = ctx.select(
-        r.ID.`as`("id"),
-        r.REQUISITION_NO.`as`("requisition_no"),
-        r.WAREHOUSE.`as`("warehouse"),
-        r.DEPARTMENT.`as`("department"),
-        r.STATUS.`as`("status"),
-        r.REQUESTER.`as`("requester"),
-        r.METADATA.`as`("metadata"),
-        r.CREATED_AT.`as`("created_at"),
-        r.DISPENSED_AT.`as`("dispensed_at"),
-        r.DESTINATION_WAREHOUSE.`as`("destination_warehouse"),
-        r.REQUESTER_ID.`as`("requester_id"),
-        r.APPROVED_BY.`as`("approved_by"),
-        r.APPROVED_AT.`as`("approved_at"),
-        r.DISPENSED_BY.`as`("dispensed_by"),
-        r.CANCELLED_BY.`as`("cancelled_by"),
-        r.CANCELLED_AT.`as`("cancelled_at"),
-        r.CANCEL_REASON.`as`("cancel_reason"),
-        r.UPDATED_AT.`as`("updated_at"),
-    )
-        .from(r)
-
-    private fun itemSelect() = ctx.select(
-        ri.ID.`as`("id"),
-        ri.REQUISITION_ID.`as`("requisition_id"),
-        ri.MATERIAL_ID.`as`("material_id"),
-        ri.REQUESTED_QUANTITY.`as`("requested_quantity"),
-        ri.APPROVED_QUANTITY.`as`("approved_quantity"),
-        ri.DISPENSED_QUANTITY.`as`("dispensed_quantity"),
-        ri.STOCK_OPERATION_DETAIL_ID.`as`("stock_operation_detail_id"),
-        ri.LOT_ID.`as`("lot_id"),
-        ri.OUTBOUND_STOCK_OPERATION_DETAIL_ID.`as`("outbound_stock_operation_detail_id"),
-        ri.INBOUND_STOCK_OPERATION_DETAIL_ID.`as`("inbound_stock_operation_detail_id"),
-        ri.METADATA.`as`("metadata"),
-    )
-        .from(ri)
+    // 查询一律「每次调用新建 SQL 字符串」：曾因 jOOQ 查询对象可变而把回读谓词叠成
+    // `id=$1 AND id=$2 …` 永不匹配（创建后报 requisition not found）。原生 SQL 下
+    // 同样禁止在共享 val 上累积条件。
 
     /** 创建成功结果：`replayed` 为 true 表示 Idempotency-Key 命中并返回原单据（200）。 */
     data class CreateResult(val id: String, val replayed: Boolean, val requisition: JsonObject)
@@ -96,13 +51,13 @@ class RequisitionService(
             findByIdempotencyKey(conn, key)
                 .compose { existing: Row? ->
                     if (existing != null) {
-                        val storedFingerprint = existing.getValue(1)?.toString()
+                        val storedFingerprint = existing.getValue("fingerprint")?.toString()
                         if (storedFingerprint != fingerprint) {
                             Future.failedFuture(
                                 ConflictException("idempotency key already used with a different request"),
                             )
                         } else {
-                            loadDetail(conn, existing.getValue(0)?.toString() ?: "")
+                            loadDetail(conn, existing.getValue("id")?.toString() ?: "")
                                 .map { detail: JsonObject ->
                                     CreateResult(
                                         id = detail.getString("id") ?: "",
@@ -126,13 +81,13 @@ class RequisitionService(
                                 ConflictException("idempotency key raced during concurrent create"),
                             )
                         } else {
-                            val storedFingerprint = existing.getValue(1)?.toString()
+                            val storedFingerprint = existing.getValue("fingerprint")?.toString()
                             if (storedFingerprint != fingerprint) {
                                 Future.failedFuture(
                                     ConflictException("idempotency key already used with a different request"),
                                 )
                             } else {
-                                loadDetail(pool, existing.getValue(0)?.toString() ?: "")
+                                loadDetail(pool, existing.getValue("id")?.toString() ?: "")
                                     .map { detail: JsonObject ->
                                         CreateResult(
                                             id = detail.getString("id") ?: "",
@@ -163,20 +118,13 @@ class RequisitionService(
 
         return inventoryPort.validateRequisitionMaterials(conn, materialIds)
             .compose { _: Void? ->
-                val insertHeader = ctx.insertInto(r)
-                    .set(r.ID, reqId)
-                    .set(r.REQUISITION_NO, requisitionNo)
-                    .set(r.WAREHOUSE, body.getString("warehouse"))
-                    .set(r.DEPARTMENT, body.getString("department"))
-                    .set(r.STATUS, "DRAFT")
-                    .set(r.CREATED_AT, now)
-                    .set(r.DESTINATION_WAREHOUSE, body.getString("destination_warehouse"))
-                    .set(r.REQUESTER_ID, userId)
-                    .set(r.IDEMPOTENCY_KEY, idempotencyKey)
-                    .set(r.REQUEST_FINGERPRINT, fingerprint)
-                    .set(r.UPDATED_AT, now)
-                conn.preparedQuery(DatabaseConfig.sql(insertHeader))
-                    .execute(DatabaseConfig.tuple(insertHeader))
+                conn.preparedQuery(INSERT_REQUISITION_SQL).execute(
+                    Tuple.of(
+                        reqId, requisitionNo, body.getString("warehouse"), body.getString("department"),
+                        "DRAFT", now, body.getString("destination_warehouse"), userId,
+                        idempotencyKey, fingerprint, now,
+                    )
+                )
             }
             .compose { _: RowSet<Row> -> insertItems(conn, reqId, body.getJsonArray("items"), now) }
             .compose { _: Void? -> loadDetail(conn, reqId) }
@@ -190,13 +138,12 @@ class RequisitionService(
             if (index >= items.size()) return Future.succeededFuture(null)
             val item = items.getJsonObject(index)
             val itemId = Ulid.generate()
-            val insertItem = ctx.insertInto(ri)
-                .set(ri.ID, itemId)
-                .set(ri.REQUISITION_ID, requisitionId)
-                .set(ri.MATERIAL_ID, item.getString("material_id"))
-                .set(ri.REQUESTED_QUANTITY, toBigDecimal(item.getValue("requested_quantity")))
-            return conn.preparedQuery(DatabaseConfig.sql(insertItem))
-                .execute(DatabaseConfig.tuple(insertItem))
+            return conn.preparedQuery(INSERT_ITEM_SQL).execute(
+                Tuple.of(
+                    itemId, requisitionId, item.getString("material_id"),
+                    toBigDecimal(item.getValue("requested_quantity")),
+                )
+            )
                 .compose { _: RowSet<Row> -> insertOne(index + 1) }
         }
         return insertOne(0)
@@ -311,14 +258,8 @@ class RequisitionService(
                     updateApprovedItems(conn, reqId, rows, approveMap)
                         .compose { _: Void? ->
                             val now = OffsetDateTime.now()
-                            val updateHeader = ctx.update(r)
-                                .set(r.STATUS, "APPROVED")
-                                .set(r.APPROVED_BY, userId)
-                                .set(r.APPROVED_AT, now)
-                                .set(r.UPDATED_AT, now)
-                                .where(r.ID.eq(reqId))
-                            conn.preparedQuery(DatabaseConfig.sql(updateHeader))
-                                .execute(DatabaseConfig.tuple(updateHeader))
+                            conn.preparedQuery(APPROVE_SQL)
+                                .execute(Tuple.of("APPROVED", userId, now, now, reqId))
                         }
                         .compose { _: RowSet<Row> -> loadDetail(conn, reqId) }
                 }
@@ -336,13 +277,9 @@ class RequisitionService(
             if (index >= rows.size) return Future.succeededFuture(null)
             val row = rows[index]
             val entry = approveMap[row.getString("id")]!!
-            val update = ctx.update(ri)
-                .set(ri.APPROVED_QUANTITY, entry.first)
-                .set(ri.LOT_ID, entry.second)
-                .where(ri.ID.eq(row.getString("id") ?: ""))
-                .and(ri.REQUISITION_ID.eq(requisitionId))
-            return conn.preparedQuery(DatabaseConfig.sql(update))
-                .execute(DatabaseConfig.tuple(update))
+            return conn.preparedQuery(UPDATE_APPROVED_ITEM_SQL).execute(
+                Tuple.of(entry.first, entry.second, row.getString("id") ?: "", requisitionId)
+            )
                 .compose { _: RowSet<Row> -> updateOne(index + 1) }
         }
         return updateOne(0)
@@ -400,14 +337,8 @@ class RequisitionService(
                     writeTransferDetails(conn, reqId, rows, result)
                         .compose { _: Void? ->
                             val now = OffsetDateTime.now()
-                            val updateHeader = ctx.update(r)
-                                .set(r.STATUS, "DISPENSED")
-                                .set(r.DISPENSED_BY, userId)
-                                .set(r.DISPENSED_AT, now)
-                                .set(r.UPDATED_AT, now)
-                                .where(r.ID.eq(reqId))
-                            conn.preparedQuery(DatabaseConfig.sql(updateHeader))
-                                .execute(DatabaseConfig.tuple(updateHeader))
+                            conn.preparedQuery(DISPENSE_SQL)
+                                .execute(Tuple.of("DISPENSED", userId, now, now, reqId))
                         }
                         .compose { _: RowSet<Row> -> loadDetail(conn, reqId) }
                 }
@@ -435,14 +366,12 @@ class RequisitionService(
                     ConflictException("transfer result missing material ${row.getString("material_id")}"),
                 )
             }
-            val update = ctx.update(ri)
-                .set(ri.DISPENSED_QUANTITY, approvedQty)
-                .set(ri.OUTBOUND_STOCK_OPERATION_DETAIL_ID, itemResult.outboundStockOperationDetailId)
-                .set(ri.INBOUND_STOCK_OPERATION_DETAIL_ID, itemResult.inboundStockOperationDetailId)
-                .where(ri.ID.eq(row.getString("id") ?: ""))
-                .and(ri.REQUISITION_ID.eq(requisitionId))
-            return conn.preparedQuery(DatabaseConfig.sql(update))
-                .execute(DatabaseConfig.tuple(update))
+            return conn.preparedQuery(UPDATE_DISPENSED_ITEM_SQL).execute(
+                Tuple.of(
+                    approvedQty, itemResult.outboundStockOperationDetailId,
+                    itemResult.inboundStockOperationDetailId, row.getString("id") ?: "", requisitionId,
+                )
+            )
                 .compose { _: RowSet<Row> -> updateOne(index + 1) }
         }
         return updateOne(0)
@@ -501,15 +430,8 @@ class RequisitionService(
 
         return afterRelease.compose { _: Void? ->
             val now = OffsetDateTime.now()
-            val update = ctx.update(r)
-                .set(r.STATUS, "CANCELLED")
-                .set(r.CANCELLED_BY, userId)
-                .set(r.CANCELLED_AT, now)
-                .set(r.CANCEL_REASON, reason)
-                .set(r.UPDATED_AT, now)
-                .where(r.ID.eq(reqId))
-            conn.preparedQuery(DatabaseConfig.sql(update))
-                .execute(DatabaseConfig.tuple(update))
+            conn.preparedQuery(CANCEL_SQL)
+                .execute(Tuple.of("CANCELLED", userId, now, reason, now, reqId))
         }.compose { _: RowSet<Row> -> loadDetail(conn, reqId) }
     }
 
@@ -525,39 +447,31 @@ class RequisitionService(
         limit: Int = 50,
         offset: Int = 0,
     ): Future<JsonObject> {
-        val conditions = mutableListOf<org.jooq.Condition>()
-        warehouse?.let { conditions.add(r.WAREHOUSE.eq(it)) }
-        destinationWarehouse?.let { conditions.add(r.DESTINATION_WAREHOUSE.eq(it)) }
-        department?.let { conditions.add(r.DEPARTMENT.eq(it)) }
-        status?.let { conditions.add(r.STATUS.eq(it)) }
+        val where = mutableListOf<String>()
+        val args = mutableListOf<Any?>()
 
-        val countQuery = ctx.select(count().`as`("total")).from(r).where(conditions)
-        val dataQuery = ctx.select(
-            r.ID.`as`("id"),
-            r.REQUISITION_NO.`as`("requisition_no"),
-            r.WAREHOUSE.`as`("warehouse"),
-            r.DEPARTMENT.`as`("department"),
-            r.STATUS.`as`("status"),
-            r.DESTINATION_WAREHOUSE.`as`("destination_warehouse"),
-            r.REQUESTER_ID.`as`("requester_id"),
-            r.CREATED_AT.`as`("created_at"),
-            r.APPROVED_AT.`as`("approved_at"),
-            r.DISPENSED_AT.`as`("dispensed_at"),
-            r.CANCELLED_AT.`as`("cancelled_at"),
-            r.UPDATED_AT.`as`("updated_at"),
-        )
-            .from(r)
-            .where(conditions)
-            .orderBy(r.CREATED_AT.desc())
-            .limit(limit)
-            .offset(offset)
+        /** 追加一个绑定值并返回其占位符。 */
+        fun bind(value: Any?): String = "\$${args.size + 1}".also { args.add(value) }
 
-        return pool.preparedQuery(DatabaseConfig.sql(countQuery))
-            .execute(DatabaseConfig.tuple(countQuery))
+        warehouse?.let { where.add("warehouse = ${bind(it)}") }
+        destinationWarehouse?.let { where.add("destination_warehouse = ${bind(it)}") }
+        department?.let { where.add("department = ${bind(it)}") }
+        status?.let { where.add("status = ${bind(it)}") }
+
+        val whereClause = if (where.isEmpty()) "" else " WHERE " + where.joinToString(" AND ")
+        val countSql = "SELECT count(*) AS total FROM pharmacy.pharmacy_requisitions$whereClause"
+        val countArgs = args.toList()
+        val dataSql =
+            "SELECT $LIST_COLUMNS FROM pharmacy.pharmacy_requisitions$whereClause " +
+                "ORDER BY created_at DESC LIMIT ${bind(limit)} OFFSET ${bind(offset)}"
+        val dataArgs = args.toList()
+
+        return pool.preparedQuery(countSql)
+            .execute(Tuple.from(countArgs))
             .compose { countRows: RowSet<Row> ->
                 val total = countRows.iterator().next().getValue("total")?.toString()?.toLong() ?: 0L
-                pool.preparedQuery(DatabaseConfig.sql(dataQuery))
-                    .execute(DatabaseConfig.tuple(dataQuery))
+                pool.preparedQuery(dataSql)
+                    .execute(Tuple.from(dataArgs))
                     .map { dataRows: RowSet<Row> ->
                         val records = JsonArray()
                         for (row in dataRows) {
@@ -589,17 +503,15 @@ class RequisitionService(
     // ========================================================================
 
     private fun loadDetail(client: SqlClient, id: String): Future<JsonObject> {
-        val headerQuery = headerSelect().where(r.ID.eq(id))
-        return client.preparedQuery(DatabaseConfig.sql(headerQuery))
-            .execute(DatabaseConfig.tuple(headerQuery))
+        return client.preparedQuery("$HEADER_SELECT WHERE id = \$1")
+            .execute(Tuple.of(id))
             .compose { rows: RowSet<Row> ->
                 if (rows.size() == 0) {
                     Future.failedFuture(NotFoundException("requisition not found: $id"))
                 } else {
                     val header = headerToJson(rows.iterator().next())
-                    val itemQuery = itemSelect().where(ri.REQUISITION_ID.eq(id))
-                    client.preparedQuery(DatabaseConfig.sql(itemQuery))
-                        .execute(DatabaseConfig.tuple(itemQuery))
+                    client.preparedQuery("$ITEM_SELECT WHERE requisition_id = \$1")
+                        .execute(Tuple.of(id))
                         .map { itemRows: RowSet<Row> ->
                             val items = JsonArray()
                             for (row in itemRows) {
@@ -613,25 +525,15 @@ class RequisitionService(
 
     private fun findByIdempotencyKey(client: SqlClient, key: String): Future<Row?> =
         client.preparedQuery(
-            DatabaseConfig.sql(
-                ctx.select(r.ID.`as`("id"), r.REQUEST_FINGERPRINT.`as`("fingerprint"))
-                    .from(r)
-                    .where(r.IDEMPOTENCY_KEY.eq(key)),
-            ),
+            "SELECT id AS id, request_fingerprint AS fingerprint " +
+                "FROM pharmacy.pharmacy_requisitions WHERE idempotency_key = \$1"
         )
-            .execute(
-                DatabaseConfig.tuple(
-                    ctx.select(r.ID.`as`("id"), r.REQUEST_FINGERPRINT.`as`("fingerprint"))
-                        .from(r)
-                        .where(r.IDEMPOTENCY_KEY.eq(key)),
-                ),
-            )
+            .execute(Tuple.of(key))
             .map { rows: RowSet<Row> -> if (rows.size() > 0) rows.iterator().next() else null }
 
     private fun lockHeader(client: SqlClient, id: String): Future<Row> {
-        val lockHeaderQuery = headerSelect().where(r.ID.eq(id)).forUpdate()
-        return client.preparedQuery(DatabaseConfig.sql(lockHeaderQuery))
-            .execute(DatabaseConfig.tuple(lockHeaderQuery))
+        return client.preparedQuery("$HEADER_SELECT WHERE id = \$1 FOR UPDATE")
+            .execute(Tuple.of(id))
             .compose { rows: RowSet<Row> ->
                 if (rows.size() == 0) {
                     Future.failedFuture(NotFoundException("requisition not found: $id"))
@@ -642,9 +544,8 @@ class RequisitionService(
     }
 
     private fun lockItems(client: SqlClient, requisitionId: String): Future<List<Row>> {
-        val lockItemsQuery = itemSelect().where(ri.REQUISITION_ID.eq(requisitionId)).orderBy(ri.ID).forUpdate()
-        return client.preparedQuery(DatabaseConfig.sql(lockItemsQuery))
-            .execute(DatabaseConfig.tuple(lockItemsQuery))
+        return client.preparedQuery("$ITEM_SELECT WHERE requisition_id = \$1 ORDER BY id FOR UPDATE")
+            .execute(Tuple.of(requisitionId))
             .map { rows: RowSet<Row> -> rows.map { it } }
     }
 
@@ -653,6 +554,59 @@ class RequisitionService(
     // ========================================================================
 
     companion object {
+        private const val HEADER_COLUMNS =
+            "id, requisition_no, warehouse, department, status, requester, metadata, created_at, " +
+                "dispensed_at, destination_warehouse, requester_id, approved_by, approved_at, " +
+                "dispensed_by, cancelled_by, cancelled_at, cancel_reason, updated_at"
+
+        private const val ITEM_COLUMNS =
+            "id, requisition_id, material_id, requested_quantity, approved_quantity, " +
+                "dispensed_quantity, stock_operation_detail_id, lot_id, " +
+                "outbound_stock_operation_detail_id, inbound_stock_operation_detail_id, metadata"
+
+        private const val LIST_COLUMNS =
+            "id, requisition_no, warehouse, department, status, destination_warehouse, " +
+                "requester_id, created_at, approved_at, dispensed_at, cancelled_at, updated_at"
+
+        private const val HEADER_SELECT =
+            "SELECT $HEADER_COLUMNS FROM pharmacy.pharmacy_requisitions"
+
+        private const val ITEM_SELECT =
+            "SELECT $ITEM_COLUMNS FROM pharmacy.pharmacy_requisition_items"
+
+        private const val INSERT_REQUISITION_SQL =
+            "INSERT INTO pharmacy.pharmacy_requisitions " +
+                "(id, requisition_no, warehouse, department, status, created_at, destination_warehouse, " +
+                "requester_id, idempotency_key, request_fingerprint, updated_at) " +
+                "VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11)"
+
+        private const val INSERT_ITEM_SQL =
+            "INSERT INTO pharmacy.pharmacy_requisition_items " +
+                "(id, requisition_id, material_id, requested_quantity) " +
+                "VALUES (\$1, \$2, \$3, \$4)"
+
+        private const val APPROVE_SQL =
+            "UPDATE pharmacy.pharmacy_requisitions " +
+                "SET status = \$1, approved_by = \$2, approved_at = \$3, updated_at = \$4 WHERE id = \$5"
+
+        private const val DISPENSE_SQL =
+            "UPDATE pharmacy.pharmacy_requisitions " +
+                "SET status = \$1, dispensed_by = \$2, dispensed_at = \$3, updated_at = \$4 WHERE id = \$5"
+
+        private const val CANCEL_SQL =
+            "UPDATE pharmacy.pharmacy_requisitions " +
+                "SET status = \$1, cancelled_by = \$2, cancelled_at = \$3, cancel_reason = \$4, " +
+                "updated_at = \$5 WHERE id = \$6"
+
+        private const val UPDATE_APPROVED_ITEM_SQL =
+            "UPDATE pharmacy.pharmacy_requisition_items " +
+                "SET approved_quantity = \$1, lot_id = \$2 WHERE id = \$3 AND requisition_id = \$4"
+
+        private const val UPDATE_DISPENSED_ITEM_SQL =
+            "UPDATE pharmacy.pharmacy_requisition_items " +
+                "SET dispensed_quantity = \$1, outbound_stock_operation_detail_id = \$2, " +
+                "inbound_stock_operation_detail_id = \$3 WHERE id = \$4 AND requisition_id = \$5"
+
         fun headerToJson(row: Row): JsonObject =
             JsonObject()
                 .put("id", row.getValue("id")?.toString())
