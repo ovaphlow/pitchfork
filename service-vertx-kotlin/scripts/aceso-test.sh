@@ -126,7 +126,8 @@ aceso-test.sh —— 一条命令跑 Aceso / Healthcare 数据库集成测试
      --no-migrate 用于只读 schema、不动迁移。
 
 Flyway 冲突（已解决，不再是执行顺序约束）：
-  DatabaseConfig.migrate 配了 baselineOnMigrate + ignoreMigrationPatterns("*:missing","*:ignored")
+  DatabaseConfig.migrate 配了 baselineOnMigrate +
+  ignoreMigrationPatterns("*:missing","*:ignored","*:future")
   + outOfOrder(true)，各模块号段（V2xx/V3xx/V4xx/V5xx/V6xx）共享一个 schema history 也能共存。
   历史上要求的「先 :libs:healthcare:test、再 :apps:aceso:test」因此不再必要；
   本脚本改为一次 gradle 调用同时跑两个模块。
@@ -836,7 +837,7 @@ info "  - 不 DROP/CREATE 已存在的库；数据隔离靠测试自身的 fixtu
 if [[ "$NO_MIGRATE" == "1" ]]; then
     info "  - Flyway：未执行（-Dintegration.db.migrate=false，复用既有 schema）"
 else
-    info "  - Flyway：已执行 migrate（baselineOnMigrate + ignore missing/ignored + outOfOrder）"
+    info "  - Flyway：已执行 migrate（baselineOnMigrate + ignore missing/ignored/future + outOfOrder）"
 fi
 info "逐类 tests/failures/errors/skipped 见各模块 build/test-results/test/*.xml"
 info "========================================="
