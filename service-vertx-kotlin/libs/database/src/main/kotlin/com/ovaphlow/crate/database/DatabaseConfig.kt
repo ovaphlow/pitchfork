@@ -51,10 +51,11 @@ object DatabaseConfig {
             .dataSource(url, user, password)
             .locations("classpath:db/migration")
             .baselineOnMigrate(true)
-            .ignoreMigrationPatterns("*:missing", "*:ignored")
+            .ignoreMigrationPatterns("*:missing", "*:ignored", "*:future")
             // 各模块按独立号段（inventories V2xx、pharmacy V3xx、nursing V4xx、
-            // healthcare V5xx）共享一个 schema history；全局 current 由任一模块
-            // 推进后，其他模块的 pending 迁移版本号低于 current，必须乱序执行。
+            // healthcare V5xx、dining V6xx）共享一个 schema history。只加载部分模块时，
+            // 已应用但本地缺失的迁移可能是 missing（低于本地最高版本），也可能是 future
+            // （高于本地最高版本）；全局 current 由任一模块推进后还必须允许乱序执行。
             .outOfOrder(true)
             .load()
             .migrate()

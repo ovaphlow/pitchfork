@@ -76,14 +76,15 @@ export PITCHFORK_DB_PASSWORD=<密码>
 
 ```kotlin
 .baselineOnMigrate(true)
-.ignoreMigrationPatterns("*:missing", "*:ignored")
+.ignoreMigrationPatterns("*:missing", "*:ignored", "*:future")
 .outOfOrder(true)   // 各模块号段（V2xx/V3xx/V4xx/V5xx/V6xx）共享一个 schema history
 ```
 
 因此：
 
 - `:libs:healthcare` 的 classpath 只带自己那套子集迁移，`db/migration` 里看不到 dining 的
-  `V600` —— 但 `V600` 已应用、本地解析不到属于 `*:missing`，被忽略；
+  `V600` —— `V600` 高于该模块本地最高版本 `V540`，已应用但本地解析不到属于 `*:future`，被忽略；
+- 已应用迁移低于本地最高版本但本地缺失时属于 `*:missing`，同样被忽略；
 - `:apps:aceso` 的 classpath 是全集，随后要应用的低版本号迁移由 `outOfOrder` 放行；
 - 于是**「先 healthcare 后 aceso」不再是硬约束**，脚本改为一次 gradle 调用。
 

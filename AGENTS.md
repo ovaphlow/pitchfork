@@ -38,7 +38,7 @@
 
 - 领域表及迁移归属其 lib：`libs/<module>/src/main/resources/db/migration/`。只有依赖该 lib 的 app 才会获得对应迁移。
 - 迁移版本号按号段隔离：`V200+` inventories、`V300+` pharmacy、`V400+` nursing、`V500+` healthcare、`V600–V699` Aceso dining（膳食营养）；应用组合根下不得新增迁移（Trainova 删除后已无白名单例外）。
-- 各模块号段共享一个 schema history：`DatabaseConfig.migrate` 已配 `baselineOnMigrate` + `ignoreMigrationPatterns(*:missing,*:ignored)` + `outOfOrder`，用于容纳「模块 classpath 只见自己那段」。新增 lib 仍按最大号段递增 100，不要靠乱序来塞新表。
+- 各模块号段共享一个 schema history：`DatabaseConfig.migrate` 已配 `baselineOnMigrate` + `ignoreMigrationPatterns(*:missing,*:ignored,*:future)` + `outOfOrder`，用于容纳「模块 classpath 只见自己那段」。新增 lib 仍按最大号段递增 100，不要靠乱序来塞新表。
 - 跨产品或跨领域改动必须保持最小范围，不把无关迁移、表、权限或后台任务并入小功能计划。
 
 ## 测试与数据库安全
