@@ -46,3 +46,38 @@
 html, body {
   font-family: var(--font-body);
 }
+
+/*
+ * 滚动条统一（2026-11-24）：此前所有滚动容器都用浏览器默认滚动条，深色面板旁
+ * 会出现一条亮色轨道 + 灰白滑块，和 `bg-surface` / `border` 的令牌体系割裂。
+ * 这里按令牌统一成「透明轨道 + 半透明细滑块」，并由 `--color-fg-dimmed` 派生，
+ * 因此 `.light` 主题自动跟着变；放在 base 层，单个容器仍可用工具类覆盖。
+ */
+@layer base {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in oklch, var(--color-fg-dimmed) 45%, transparent) transparent;
+  }
+
+  /* WebKit 回退（Safari / 旧版 Chromium 不认 scrollbar-width、scrollbar-color） */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track,
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    border: 3px solid transparent;
+    border-radius: 9999px;
+    background-color: color-mix(in oklch, var(--color-fg-dimmed) 60%, transparent);
+    background-clip: content-box;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: color-mix(in oklch, var(--color-fg-dimmed) 90%, transparent);
+  }
+}

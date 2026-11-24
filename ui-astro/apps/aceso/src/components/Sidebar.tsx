@@ -103,7 +103,7 @@ export default function Sidebar({ currentPath }: SidebarProps) {
   const { codes: permissionCodes, platformAdmin } = useSubjectPermissions();
 
   return (
-    <aside className="fixed top-0 left-0 z-40 w-[var(--sidebar-w)] h-screen bg-surface border-r border-border overflow-y-auto flex flex-col">
+    <aside className="fixed top-0 left-0 z-40 w-[var(--sidebar-w)] h-screen bg-surface border-r border-border overflow-y-auto [scrollbar-gutter:stable] flex flex-col">
       {/* Branding */}
       <a href="/eldercare" className="flex items-center gap-2.5 px-3 h-[var(--topbar-h)] border-b border-border shrink-0">
         <svg width="24" height="24" viewBox="0 0 32 32" fill="none" className="shrink-0">
