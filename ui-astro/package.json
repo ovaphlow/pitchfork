@@ -5,6 +5,9 @@
     "dev": "pnpm --filter @pitchfork/aceso dev",
     "build": "pnpm -r build",
     "preview": "pnpm --filter @pitchfork/aceso preview",
+    "dev:aceso": "pnpm --filter @pitchfork/aceso dev",
+    "build:aceso": "pnpm -r build",
+    "preview:aceso": "pnpm --filter @pitchfork/aceso preview",
     "test:e2e": "playwright test",
     "test:e2e:aceso": "playwright test apps/aceso/e2e/elderly-care-lifecycle.spec.ts --project=chromium",
     "test:unit:aceso": "node --test apps/aceso/tests/*.test.ts"
