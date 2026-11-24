@@ -8,11 +8,6 @@ dist/
 # dependencies
 node_modules/
 
-# pnpm local store & cache
-.pnpm-store/
-.pnpm-state/
-.pnpm-cache/
-
 # env files
 .env
 .env.*

@@ -2,7 +2,7 @@
  * 054 F1：前端权限感知（菜单显隐）单元测试。
  *
  * Runner：内置 `node:test` + `node:assert/strict`。
- * 运行（在 `ui-astro/` 下）：`pnpm test:unit:aceso`
+ * 运行（在 `ui-astro/` 下）：`bun run test:unit:aceso`
  *
  * 锁定的验收口径（计划 §8.6 / §7 F1 + 架构师 BL3）：
  *   - 无权限码账号看不到声明 `requiredPermissions` 的菜单入口；
@@ -15,7 +15,7 @@
  *
  * 覆盖方式说明：`node:test` 无法加载 `.tsx`（没有 JSX 变换），所以菜单显隐由
  * `permissions.ts` 的纯函数 + `Sidebar.tsx` 源码接线断言共同覆盖；组件自身的类型
- * 与编译由 `pnpm --filter @pitchfork/aceso build`（`astro check` 硬门槛）把关。
+ * 与编译由 `bun run --filter @pitchfork/aceso build`（`astro check` 硬门槛）把关。
  */
 
 import { test } from "node:test";

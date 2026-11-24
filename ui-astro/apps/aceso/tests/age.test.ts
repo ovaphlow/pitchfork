@@ -4,7 +4,7 @@
  * Runner：内置 `node:test` + `node:assert/strict`，与 `datetime.test.ts` /
  * 运行（在 `ui-astro/` 下）：
  *
- *   pnpm test:unit:aceso
+ *   bun run test:unit:aceso
  *   # 或单独：
  *   TZ=UTC node --test apps/aceso/tests/age.test.ts
  *

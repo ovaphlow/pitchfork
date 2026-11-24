@@ -2,7 +2,7 @@
  * 权限闸门错误文案单元测试（`packages/shared/src/problem-message.ts`）。
  *
  * Runner：内置 `node:test` + `node:assert/strict`，与 `age.test.ts` 等同一口径。
- * 运行（在 `ui-astro/` 下）：`pnpm test:unit:aceso`
+ * 运行（在 `ui-astro/` 下）：`bun run test:unit:aceso`
  *
  * 为什么逐字锁定：403/503 是 037 权限闸门新增的两条失败路径，409 是 041 新增的删除冲突
  * 映射（部门/角色仍被引用）；用户看到的必须是"要哪个权限、去找谁"、"未被登出，稍后重试"

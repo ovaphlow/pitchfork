@@ -2,7 +2,7 @@
  * 054 F3：操作审计查询展示辅助（`src/lib/auditLog.ts`）单元测试。
  *
  * Runner：内置 `node:test` + `node:assert/strict`（与 `childcare.test.ts` 同口径）。
- * 运行（在 `ui-astro/` 下）：`pnpm test:unit:aceso`
+ * 运行（在 `ui-astro/` 下）：`bun run test:unit:aceso`
  *
  * 覆盖口径：
  *   - 受审计方法白名单与后端 `AuditMiddleware.AUDITED_METHODS` **逐字一致**（源码漂移守卫）；

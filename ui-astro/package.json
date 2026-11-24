@@ -1,13 +1,17 @@
 {
   "name": "ui-astro",
   "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
-    "dev": "pnpm --filter @pitchfork/aceso dev",
-    "build": "pnpm -r build",
-    "preview": "pnpm --filter @pitchfork/aceso preview",
-    "dev:aceso": "pnpm --filter @pitchfork/aceso dev",
-    "build:aceso": "pnpm -r build",
-    "preview:aceso": "pnpm --filter @pitchfork/aceso preview",
+    "dev": "bun run --filter @pitchfork/aceso dev",
+    "build": "bun run --filter '*' build",
+    "preview": "bun run --filter @pitchfork/aceso preview",
+    "dev:aceso": "bun run --filter @pitchfork/aceso dev",
+    "build:aceso": "bun run --filter '*' build",
+    "preview:aceso": "bun run --filter @pitchfork/aceso preview",
     "test:e2e": "playwright test",
     "test:e2e:aceso": "playwright test apps/aceso/e2e/elderly-care-lifecycle.spec.ts --project=chromium",
     "test:unit:aceso": "node --test apps/aceso/tests/*.test.ts"

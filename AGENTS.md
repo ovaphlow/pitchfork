@@ -22,7 +22,7 @@
 ## 代码发现与命令
 
 - 代码定位和调用关系优先使用 `codebase-memory-mcp`：先索引，再依次使用 `search_graph`、`trace_path`、`get_code_snippet`；只有图谱不足、查找字符串字面量或非代码文件时才回退文本搜索。
-- Bash 命令优先加 `rtk`，例如 `rtk git status`、`rtk rg`、`rtk read`、`rtk pnpm`；不要为普通代码理解使用未经必要验证的全库扫描。
+- Bash 命令优先加 `rtk`，例如 `rtk git status`、`rtk rg`、`rtk read`、`rtk bun`；不要为普通代码理解使用未经必要验证的全库扫描。
 - 保留用户已有的未提交改动；不得自行执行破坏性 Git 命令、重置工作区或删除宽泛目录。
 
 ## 共享 API 与数据约定
