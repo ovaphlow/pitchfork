@@ -172,60 +172,27 @@ export function Modal({
   if (!open) return null;
   return (
     <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        zIndex: 50,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        background: "rgba(0,0,0,0.6)",
-        padding: "1rem",
-      }}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
       onClick={onClose}
     >
       <div
         role="dialog"
         aria-modal="true"
         aria-labelledby={title ? titleId : undefined}
-        style={{
-          background: "oklch(22% 0.012 250)",
-          border: "1px solid oklch(25% 0.01 250)",
-          borderRadius: "0.5rem",
-          width: "100%",
-          maxWidth: width,
-          maxHeight: "85vh",
-          overflowY: "auto",
-          boxShadow: "0 8px 32px rgba(0,0,0,0.4)",
-        }}
+        className="max-h-[85vh] w-full overflow-y-auto rounded-lg border border-border bg-surface-overlay shadow-overlay"
+        style={{ maxWidth: width }}
         onClick={(e) => e.stopPropagation()}
       >
         {title && (
-          <div style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            padding: "1.25rem 2rem",
-            borderBottom: "1px solid oklch(25% 0.01 250)",
-          }}>
-            <h3 id={titleId} style={{ fontSize: "1rem", fontWeight: 600, color: "oklch(95% 0.005 250)" }}>
+          <div className="flex items-center justify-between border-b border-border px-8 py-5">
+            <h3 id={titleId} className="text-base font-semibold text-fg-emphasis">
               {title}
             </h3>
             <button
+              type="button"
               onClick={onClose}
               aria-label="关闭"
-              style={{
-                width: "2rem",
-                height: "2rem",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                background: "transparent",
-                border: "none",
-                borderRadius: "0.375rem",
-                color: "oklch(65% 0.015 250)",
-                cursor: "pointer",
-              }}
+              className="flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-md border-none bg-transparent text-fg-muted transition-colors hover:bg-surface-alt hover:text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
             >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <line x1="18" y1="6" x2="6" y2="18" />
@@ -234,7 +201,7 @@ export function Modal({
             </button>
           </div>
         )}
-        <div style={{ padding: "2rem" }}>{children}</div>
+        <div className="p-8">{children}</div>
       </div>
     </div>
   );
