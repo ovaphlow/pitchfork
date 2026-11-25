@@ -11,6 +11,7 @@ import {
 } from "@pitchfork/shared/aceso";
 import { formatDate } from "../lib/datetime";
 import { ENTITY_LABELS } from "../lib/labels";
+import { validatePatientForm, type PatientFormErrors } from "../lib/patientForm";
 
 const PAGE_SIZE = 20;
 
@@ -38,6 +39,31 @@ function patientStatusBadgeVariant(status: string): "success" | "default" | "dan
 /** 表单原生控件样式（与 `@pitchfork/ui` 的 Input / select 保持一致） */
 const FORM_CONTROL_CLASS =
   "h-10 rounded-md border border-border bg-surface px-3 text-sm text-fg placeholder:text-fg-dimmed focus:outline-none focus-visible:ring-2 focus-visible:ring-accent";
+
+/**
+ * 医保类型下拉标准值（`patients.medical_insurance`）。
+ *
+ * 服务端按自由文本存储、不做白名单校验，因此既有库里的历史文本不会被改写；
+ * `insuranceOptions` 会把档案中不在标准列表的取值补成额外选项，避免编辑时丢失原值。
+ */
+const MEDICAL_INSURANCE_OPTIONS = [
+  "城镇职工基本医疗保险",
+  "城乡居民基本医疗保险",
+  "长期护理保险",
+  "商业医疗保险",
+  "无医保",
+  "其他",
+];
+
+/** 下拉选项 = 标准值 + 当前档案的历史文本（若有） */
+function insuranceOptions(value: string): string[] {
+  const trimmed = value.trim();
+  if (!trimmed || MEDICAL_INSURANCE_OPTIONS.includes(trimmed)) return MEDICAL_INSURANCE_OPTIONS;
+  return [...MEDICAL_INSURANCE_OPTIONS, trimmed];
+}
+
+/** 本地校验失败时的汇总提示（服务端错误另有自己的 message，两者不能混淆） */
+const VALIDATION_SUMMARY = "请先修正标红的字段";
 
 /** 入住状态 → 入住管理页视图参数（URL ?view=），与 AdmissionsPage 的 `view` 取值同源 */
 const ENCOUNTER_VIEW: Record<string, string> = {
@@ -73,6 +99,7 @@ interface ElderForm {
   emergencyRelationship: string;
   emergencyPhone: string;
   medicalInsurance: string;
+  medicalInsuranceNo: string;
   allergies: string;
   pastHistory: string;
 }
@@ -88,6 +115,7 @@ const elderFormDefaults: ElderForm = {
   emergencyRelationship: "",
   emergencyPhone: "",
   medicalInsurance: "",
+  medicalInsuranceNo: "",
   allergies: "",
   pastHistory: "",
 };
@@ -132,6 +160,11 @@ function buildPatientInput(form: ElderForm, editing: boolean): PatientInput | nu
     ...(editing ? { address: form.address.trim() || null } : form.address.trim() ? { address: form.address.trim() } : {}),
     ...(editing ? { emergency_contact: emergencyContact } : Object.keys(emergencyContact).length > 0 ? { emergency_contact: emergencyContact } : {}),
     ...(editing ? { medical_insurance: form.medicalInsurance.trim() || null } : form.medicalInsurance.trim() ? { medical_insurance: form.medicalInsurance.trim() } : {}),
+    ...(editing
+      ? { medical_insurance_no: form.medicalInsuranceNo.trim() || null }
+      : form.medicalInsuranceNo.trim()
+        ? { medical_insurance_no: form.medicalInsuranceNo.trim() }
+        : {}),
     ...(editing ? { allergies } : allergies.length > 0 ? { allergies } : {}),
     ...(editing ? { past_history: form.pastHistory.trim() || null } : form.pastHistory.trim() ? { past_history: form.pastHistory.trim() } : {}),
   };
@@ -152,6 +185,7 @@ function formFromPatient(patient: Patient): ElderForm {
     emergencyRelationship: emergencyContact.relationship ?? "",
     emergencyPhone: emergencyContact.phone ?? "",
     medicalInsurance: patient.medical_insurance ?? "",
+    medicalInsuranceNo: patient.medical_insurance_no ?? "",
     allergies: patient.allergies?.join("，") ?? "",
     pastHistory: patient.past_history ?? "",
   };
@@ -171,6 +205,8 @@ export default function EldersPage() {
   const [editTarget, setEditTarget] = useState<Patient | null>(null);
   const [form, setForm] = useState<ElderForm>(elderFormDefaults);
   const [formError, setFormError] = useState("");
+  /** 字段级校验错误（姓名 / 身份证号 / 本人联系电话 / 联系人电话）；改动对应字段时即时清除 */
+  const [fieldErrors, setFieldErrors] = useState<PatientFormErrors>({});
   const [saving, setSaving] = useState(false);
 
   const load = useCallback(async (targetPage: number) => {
@@ -211,6 +247,7 @@ export default function EldersPage() {
     setEditTarget(null);
     setForm(elderFormDefaults);
     setFormError("");
+    setFieldErrors({});
     setEditorOpen(true);
   }
 
@@ -218,16 +255,34 @@ export default function EldersPage() {
     setEditTarget(patient);
     setForm(formFromPatient(patient));
     setFormError("");
+    setFieldErrors({});
     setEditorOpen(true);
   }
 
-
-
+  /** 改字段即清除该字段的旧错误（避免用户改对了还标红） */
+  function clearFieldError(field: keyof PatientFormErrors) {
+    setFieldErrors((current) => (current[field] ? { ...current, [field]: undefined } : current));
+    // 只收掣本地校验的汇总提示；服务端报错（如身份证号已存在）保留，直到再次提交
+    setFormError((current) => (current === VALIDATION_SUMMARY ? "" : current));
+  }
 
   async function handleSave() {
+    // 先做本地格式校验（不访库）：失败时逐字段标红，不发请求
+    const errors = validatePatientForm({
+      name: form.name,
+      idCardNo: form.idCardNo,
+      phone: form.phone,
+      emergencyPhone: form.emergencyPhone,
+    });
+    setFieldErrors(errors);
+    if (Object.keys(errors).some((key) => errors[key as keyof PatientFormErrors])) {
+      setFormError(VALIDATION_SUMMARY);
+      return;
+    }
     const input = buildPatientInput(form, editTarget !== null);
     if (!input) {
-      setFormError("姓名不能为空");
+      setFieldErrors({ name: "姓名不能为空" });
+      setFormError(VALIDATION_SUMMARY);
       return;
     }
     setSaving(true);
@@ -353,9 +408,14 @@ export default function EldersPage() {
         </div>
       </Card>
 
-      <Modal open={editorOpen} onClose={() => !saving && setEditorOpen(false)} title={editTarget ? `编辑${archive}` : `录入${archive}`}>
+      <Modal
+        open={editorOpen}
+        onClose={() => !saving && setEditorOpen(false)}
+        title={editTarget ? `编辑${archive}` : `录入${archive}`}
+        width="64rem"
+      >
         <form
-          className="space-y-5"
+          className="space-y-6"
           onSubmit={(event) => {
             event.preventDefault();
             void handleSave();
@@ -363,124 +423,183 @@ export default function EldersPage() {
         >
           {formError && <div className="rounded-lg border border-danger/30 bg-danger-bg px-3 py-2 text-sm text-danger">{formError}</div>}
 
-          <>
-            {/* 长者档案表单 */}
-            <div>
-              <h4 className="text-sm font-semibold text-fg-emphasis">基本信息</h4>
-          <div className="mt-3 grid gap-4 sm:grid-cols-2">
-            <Input
-              label="姓名"
-              value={form.name}
-              onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))}
-              placeholder="请输入姓名"
-              required
-              autoComplete="name"
-            />
-            <div className="flex flex-col gap-1.5">
-              <label className="text-sm font-medium text-fg-muted" htmlFor="elder-gender">性别</label>
-              <select
-                id="elder-gender"
-                value={form.gender}
-                onChange={(event) => setForm((current) => ({ ...current, gender: event.target.value }))}
-                className="h-10 rounded-md border border-border bg-surface px-3 text-sm text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-              >
-                <option value="">请选择</option>
-                <option value="男">男</option>
-                <option value="女">女</option>
-              </select>
+          <section aria-labelledby="elder-basic-heading">
+            <div className="mb-4 flex items-center gap-3">
+              <h4 id="elder-basic-heading" className="shrink-0 text-sm font-semibold text-fg-emphasis">基本信息</h4>
+              <span aria-hidden="true" className="h-px flex-1 bg-border" />
             </div>
-            <Input
-              label="出生日期"
-              type="date"
-              value={form.birthDate}
-              onChange={(event) => setForm((current) => ({ ...current, birthDate: event.target.value }))}
-            />
-            <Input
-              label="身份证号"
-              value={form.idCardNo}
-              onChange={(event) => setForm((current) => ({ ...current, idCardNo: event.target.value }))}
-              placeholder="请输入身份证号"
-              autoComplete="off"
-            />
-          </div>
-        </div>
-
-        <div>
-          <h4 className="text-sm font-semibold text-fg-emphasis">联系方式</h4>
-          <div className="mt-3 grid gap-4 sm:grid-cols-2">
-            <Input
-              label="本人联系电话"
-              type="tel"
-              value={form.phone}
-              onChange={(event) => setForm((current) => ({ ...current, phone: event.target.value }))}
-              placeholder="请输入联系电话"
-              autoComplete="tel"
-            />
-            <Input
-              label="紧急联系人"
-              value={form.emergencyName}
-              onChange={(event) => setForm((current) => ({ ...current, emergencyName: event.target.value }))}
-              placeholder="请输入联系人姓名"
-              autoComplete="off"
-            />
-            <Input
-              label="联系人关系"
-              value={form.emergencyRelationship}
-              onChange={(event) => setForm((current) => ({ ...current, emergencyRelationship: event.target.value }))}
-              placeholder="例如：女儿"
-              autoComplete="off"
-            />
-            <Input
-              label="联系人电话"
-              type="tel"
-              value={form.emergencyPhone}
-              onChange={(event) => setForm((current) => ({ ...current, emergencyPhone: event.target.value }))}
-              placeholder="请输入联系人电话"
-              autoComplete="off"
-            />
-          </div>
-          <div className="mt-4 flex flex-col gap-1.5">
-            <label className="text-sm font-medium text-fg-muted" htmlFor="elder-address">居住地址</label>
-            <textarea
-              id="elder-address"
-              value={form.address}
-              onChange={(event) => setForm((current) => ({ ...current, address: event.target.value }))}
-              rows={2}
-              className="resize-none rounded-md border border-border bg-surface px-3 py-2 text-sm text-fg placeholder:text-fg-dimmed focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-              placeholder="请输入居住地址"
-            />
-          </div>
-        </div>
-
-        <div>
-          <h4 className="text-sm font-semibold text-fg-emphasis">健康信息</h4>
-          <div className="mt-3 space-y-4">
-            <Input
-              label="医保信息"
-              value={form.medicalInsurance}
-              onChange={(event) => setForm((current) => ({ ...current, medicalInsurance: event.target.value }))}
-              placeholder="例如：城乡居民医保"
-            />
-            <Input
-              label="过敏史"
-              value={form.allergies}
-              onChange={(event) => setForm((current) => ({ ...current, allergies: event.target.value }))}
-              placeholder="多个过敏项请用逗号分隔，没有可不填"
-            />
-            <div className="flex flex-col gap-1.5">
-              <label className="text-sm font-medium text-fg-muted" htmlFor="elder-past-history">既往病史</label>
-              <textarea
-                id="elder-past-history"
-                value={form.pastHistory}
-                onChange={(event) => setForm((current) => ({ ...current, pastHistory: event.target.value }))}
-                rows={3}
-                className="resize-none rounded-md border border-border bg-surface px-3 py-2 text-sm text-fg placeholder:text-fg-dimmed focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-                placeholder="请输入既往病史、手术史等信息"
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-3 lg:grid-cols-4">
+              <div className="md:col-span-2 lg:col-span-1">
+                <Input
+                  label="姓名"
+                  value={form.name}
+                  onChange={(event) => {
+                    clearFieldError("name");
+                    setForm((current) => ({ ...current, name: event.target.value }));
+                  }}
+                  placeholder="请输入姓名"
+                  error={fieldErrors.name}
+                  required
+                  autoComplete="name"
+                />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <label className="text-sm font-medium text-fg-muted" htmlFor="elder-gender">性别</label>
+                <select
+                  id="elder-gender"
+                  value={form.gender}
+                  onChange={(event) => setForm((current) => ({ ...current, gender: event.target.value }))}
+                  className={FORM_CONTROL_CLASS}
+                >
+                  <option value="">请选择</option>
+                  <option value="男">男</option>
+                  <option value="女">女</option>
+                </select>
+              </div>
+              <Input
+                label="出生日期"
+                type="date"
+                value={form.birthDate}
+                onChange={(event) => setForm((current) => ({ ...current, birthDate: event.target.value }))}
               />
+              <div className="md:col-span-2 lg:col-span-1">
+                <Input
+                  label="身份证号"
+                  value={form.idCardNo}
+                  onChange={(event) => {
+                    clearFieldError("idCardNo");
+                    setForm((current) => ({ ...current, idCardNo: event.target.value }));
+                  }}
+                  placeholder="18 位身份证号，末位可为 X"
+                  error={fieldErrors.idCardNo}
+                  autoComplete="off"
+                  maxLength={18}
+                />
+              </div>
             </div>
-          </div>
-        </div>
-          </>
+          </section>
+
+          <section aria-labelledby="elder-contact-heading" className="border-t border-border pt-6">
+            <div className="mb-4 flex items-center gap-3">
+              <h4 id="elder-contact-heading" className="shrink-0 text-sm font-semibold text-fg-emphasis">联系方式</h4>
+              <span aria-hidden="true" className="h-px flex-1 bg-border" />
+            </div>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-3 lg:grid-cols-4">
+              <div className="md:col-span-3 lg:col-span-1">
+                <Input
+                  label="本人联系电话"
+                  type="tel"
+                  value={form.phone}
+                  onChange={(event) => {
+                    clearFieldError("phone");
+                    setForm((current) => ({ ...current, phone: event.target.value }));
+                  }}
+                  placeholder="11 位手机号"
+                  error={fieldErrors.phone}
+                  autoComplete="tel"
+                  inputMode="numeric"
+                  maxLength={11}
+                />
+              </div>
+              <Input
+                label="紧急联系人"
+                value={form.emergencyName}
+                onChange={(event) => setForm((current) => ({ ...current, emergencyName: event.target.value }))}
+                placeholder="请输入联系人姓名"
+                autoComplete="off"
+              />
+              <Input
+                label="联系人关系"
+                value={form.emergencyRelationship}
+                onChange={(event) => setForm((current) => ({ ...current, emergencyRelationship: event.target.value }))}
+                placeholder="例如：女儿"
+                autoComplete="off"
+              />
+              <Input
+                label="联系人电话"
+                type="tel"
+                value={form.emergencyPhone}
+                onChange={(event) => {
+                  clearFieldError("emergencyPhone");
+                  setForm((current) => ({ ...current, emergencyPhone: event.target.value }));
+                }}
+                placeholder="11 位手机号"
+                error={fieldErrors.emergencyPhone}
+                autoComplete="off"
+                inputMode="numeric"
+                maxLength={11}
+              />
+              <div className="flex flex-col gap-1.5 md:col-span-3 lg:col-span-4">
+                <label className="text-sm font-medium text-fg-muted" htmlFor="elder-address">居住地址</label>
+                <textarea
+                  id="elder-address"
+                  value={form.address}
+                  onChange={(event) => setForm((current) => ({ ...current, address: event.target.value }))}
+                  rows={2}
+                  className={`min-h-20 resize-y py-2 ${FORM_CONTROL_CLASS}`}
+                  placeholder="请输入居住地址"
+                />
+              </div>
+            </div>
+          </section>
+
+          <section aria-labelledby="elder-health-heading" className="border-t border-border pt-6">
+            <div className="mb-4 flex items-center gap-3">
+              <h4 id="elder-health-heading" className="shrink-0 text-sm font-semibold text-fg-emphasis">健康信息</h4>
+              <span aria-hidden="true" className="h-px flex-1 bg-border" />
+            </div>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-3 lg:grid-cols-4">
+              <div className="flex flex-col gap-1.5">
+                <label className="text-sm font-medium text-fg-muted" htmlFor="elder-medical-insurance">医保类型</label>
+                <select
+                  id="elder-medical-insurance"
+                  value={form.medicalInsurance}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    // 无医保时医保号码自相矛盾，直接清空，避免留下不可编辑的残留值
+                    setForm((current) => ({
+                      ...current,
+                      medicalInsurance: value,
+                      ...(value === "无医保" ? { medicalInsuranceNo: "" } : {}),
+                    }));
+                  }}
+                  className={FORM_CONTROL_CLASS}
+                >
+                  <option value="">请选择</option>
+                  {insuranceOptions(form.medicalInsurance).map((option) => (
+                    <option key={option} value={option}>{option}</option>
+                  ))}
+                </select>
+              </div>
+              <Input
+                label="医保号码"
+                value={form.medicalInsuranceNo}
+                onChange={(event) => setForm((current) => ({ ...current, medicalInsuranceNo: event.target.value }))}
+                placeholder="请输入社保卡号 / 医保编号"
+                autoComplete="off"
+                disabled={form.medicalInsurance === "无医保"}
+              />
+              <div className="md:col-span-1 lg:col-span-2">
+                <Input
+                  label="过敏史"
+                  value={form.allergies}
+                  onChange={(event) => setForm((current) => ({ ...current, allergies: event.target.value }))}
+                  placeholder="多个过敏项用逗号分隔"
+                />
+              </div>
+              <div className="flex flex-col gap-1.5 md:col-span-3 lg:col-span-4">
+                <label className="text-sm font-medium text-fg-muted" htmlFor="elder-past-history">既往病史</label>
+                <textarea
+                  id="elder-past-history"
+                  value={form.pastHistory}
+                  onChange={(event) => setForm((current) => ({ ...current, pastHistory: event.target.value }))}
+                  rows={4}
+                  className={`min-h-28 resize-y py-2 ${FORM_CONTROL_CLASS}`}
+                  placeholder="请输入既往病史、手术史等信息"
+                />
+              </div>
+            </div>
+          </section>
 
           <div className="flex justify-end gap-3 pt-1">
             <Button type="button" variant="ghost" onClick={() => setEditorOpen(false)} disabled={saving}>取消</Button>

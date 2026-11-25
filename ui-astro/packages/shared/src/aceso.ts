@@ -143,7 +143,10 @@ export interface Patient {
   phone: string | null;
   address: string | null;
   emergency_contact: Record<string, string> | null;
+  /** 医保类型（下拉标准值；历史文本原样返回） */
   medical_insurance: string | null;
+  /** 医保号码（社保卡号 / 医保编号） */
+  medical_insurance_no: string | null;
   allergies: string[] | null;
   past_history: string | null;
   metadata: Record<string, unknown> | null;
@@ -167,7 +170,10 @@ export interface PatientInput {
   phone?: string | null;
   address?: string | null;
   emergency_contact?: Record<string, string> | null;
+  /** 医保类型（下拉标准值；服务端按自由文本存储，不硬校验） */
   medical_insurance?: string | null;
+  /** 医保号码（社保卡号 / 医保编号） */
+  medical_insurance_no?: string | null;
   allergies?: string[] | null;
   past_history?: string | null;
   metadata?: Record<string, unknown>;

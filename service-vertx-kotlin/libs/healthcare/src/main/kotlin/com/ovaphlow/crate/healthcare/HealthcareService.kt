@@ -55,7 +55,8 @@ class HealthcareService(
     /** patients 显式列清单（表别名 `p`）。 */
     private val patientColumns =
         "healthcare.patients.id, healthcare.patients.name, healthcare.patients.gender, healthcare.patients.birth_date, healthcare.patients.id_card_no, healthcare.patients.phone, healthcare.patients.address, " +
-            "healthcare.patients.emergency_contact, healthcare.patients.medical_insurance, healthcare.patients.allergies, healthcare.patients.past_history, healthcare.patients.metadata, " +
+            "healthcare.patients.emergency_contact, healthcare.patients.medical_insurance, healthcare.patients.medical_insurance_no, healthcare.patients.allergies, " +
+            "healthcare.patients.past_history, healthcare.patients.metadata, " +
             "healthcare.patients.status, healthcare.patients.person_type, healthcare.patients.created_at, healthcare.patients.updated_at"
 
     /** encounters 显式列清单（表别名 `e`，含 V517/V524/V525 新增列）。 */
@@ -136,6 +137,7 @@ class HealthcareService(
                 .put("address", row.getString("address"))
                 .put("emergency_contact", row.getValue("emergency_contact"))
                 .put("medical_insurance", row.getString("medical_insurance"))
+                .put("medical_insurance_no", row.getString("medical_insurance_no"))
                 .put("allergies", row.getValue("allergies"))
                 .put("past_history", row.getString("past_history"))
                 .put("metadata", row.getValue("metadata"))
@@ -1513,6 +1515,7 @@ class HealthcareService(
         body.getString("address")?.let { add("address", it) }
         jsonObject(body, "emergency_contact")?.let { add("emergency_contact", it) }
         body.getString("medical_insurance")?.let { add("medical_insurance", it) }
+        body.getString("medical_insurance_no")?.let { add("medical_insurance_no", it) }
         jsonArray(body, "allergies")?.let { add("allergies", it) }
         body.getString("past_history")?.let { add("past_history", it) }
         jsonObject(body, "metadata")?.let { add("metadata", it) }
@@ -1538,6 +1541,7 @@ class HealthcareService(
             set("emergency_contact", requireNotNull(jsonObject(body, "emergency_contact", true)))
         }
         if (body.containsKey("medical_insurance")) set("medical_insurance", body.getString("medical_insurance"))
+        if (body.containsKey("medical_insurance_no")) set("medical_insurance_no", body.getString("medical_insurance_no"))
         if (body.containsKey("allergies")) set("allergies", requireNotNull(jsonArray(body, "allergies", true)))
         if (body.containsKey("past_history")) set("past_history", body.getString("past_history"))
         if (body.containsKey("metadata")) set("metadata", requireNotNull(jsonObject(body, "metadata", true)))
@@ -1616,6 +1620,7 @@ class HealthcareService(
             .put("address", body.getString("address"))
             .put("emergency_contact", body.getJsonObject("emergency_contact"))
             .put("medical_insurance", body.getString("medical_insurance", ""))
+            .put("medical_insurance_no", body.getString("medical_insurance_no", ""))
             .put("allergies", body.getJsonArray("allergies"))
             .put("past_history", body.getString("past_history"))
             .put("metadata", body.getJsonObject("metadata"))
